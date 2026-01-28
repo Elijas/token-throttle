@@ -125,6 +125,10 @@ class RedisBackend(RateLimiterBackend):
         # Execute the pipeline to get all results
         results = await pipeline.execute()
 
+        # Refresh max_capacity cache for all buckets (uses 1-second TTL caching)
+        for bucket in self.sorted_buckets:
+            await bucket.get_max_capacity()
+
         # We're using dict instead of Usage because two different application
         # versions might use the same Redis backend that's not cleaned up
         # between deployments, and the new version might have a different
