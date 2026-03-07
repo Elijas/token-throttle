@@ -6,6 +6,10 @@ Source: token_throttle/_factories/_openai/_openai_rate_limiter.py
 
 from unittest.mock import MagicMock
 
+import pytest
+
+pytest.importorskip("redis", reason="redis package not installed")
+
 from token_throttle._factories._openai._openai_rate_limiter import (
     create_openai_redis_rate_limiter,
     openai_model_family_getter,

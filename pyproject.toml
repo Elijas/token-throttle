@@ -196,6 +196,9 @@ target-version = "py312"
     "C901",    # Function is too complex
     "PLR0912", # Too many branches
 ]
+"token_throttle/_interfaces/_interfaces.py" = [
+    "TC001",   # Pydantic models need these imports at runtime
+]
 "tests/**/*.py" = [
     "PT006",   # Wrong type passed to first argument of `pytest.mark.parametrize`; expected `tuple`
     "ANN201",  # Missing return type annotation for public function
