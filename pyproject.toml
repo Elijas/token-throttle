@@ -18,8 +18,10 @@ tiktoken = ["tiktoken>=0.4.0"]
 [dependency-groups]
 dev = [
     "bump-my-version>=1.1.2",
+    "hypothesis>=6.100.0",
     "loguru>=0.7.3",
     "pytest>=8.3.5",
+    "pytest-asyncio>=0.24.0",
     "pytest-cov>=6.1.1",
     "pytest-watch>=4.2.0",
     "ruff>=0.11.7",
@@ -74,6 +76,12 @@ packages = ["token_throttle"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "--import-mode=importlib"
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+markers = [
+    "redis: requires a running Redis instance",
+    "slow: long-running tests",
+]
 
 [tool.coverage.run]
 source = ["token_throttle"]
@@ -86,7 +94,7 @@ exclude_also = [
     "if TYPE_CHECKING:",
     "raise NotImplementedError",
 ]
-# fail_under = 80 # Optional: Fail if coverage drops below a threshold
+fail_under = 85
 
 
 ##############################
@@ -191,7 +199,10 @@ target-version = "py312"
 "tests/**/*.py" = [
     "PT006",   # Wrong type passed to first argument of `pytest.mark.parametrize`; expected `tuple`
     "ANN201",  # Missing return type annotation for public function
+    "ARG002",  # Unused method argument (fixtures injected by pytest)
+    "D213",    # Multi-line docstring summary should start at the second line
     "S101",    # Use of `assert` detected
+    "SLF001",  # Private member accessed (expected in tests)
     "PLR2004", # Magic value used in comparison
     "T201",    # print() statement found
     "G004",    # Checks for uses of f-strings to format logging messages.

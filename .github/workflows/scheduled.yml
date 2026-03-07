@@ -1,0 +1,10 @@
+name: Scheduled Dependency Health
+
+on:
+  schedule:
+    - cron: "0 8 * * 1"  # Monday 8 AM UTC
+  workflow_dispatch:
+
+jobs:
+  test:
+    uses: ./.github/workflows/ci.yml

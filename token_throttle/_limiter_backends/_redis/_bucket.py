@@ -86,7 +86,10 @@ class RedisBucket:
         cache_age = current_time - self._max_capacity_cache_time
 
         # Return cached value if fresh
-        if self._max_capacity_cached is not None and cache_age < self.MAX_CAPACITY_CACHE_TTL:
+        if (
+            self._max_capacity_cached is not None
+            and cache_age < self.MAX_CAPACITY_CACHE_TTL
+        ):
             return self._max_capacity_cached
 
         # Fetch from Redis
@@ -207,6 +210,17 @@ class RedisBucket:
 
         # Calculate new capacity with refill over time
         time_passed = current_time - last_checked
+        if time_passed < 0:
+            import warnings
+
+            warnings.warn(
+                f"Negative time_passed ({time_passed:.4f}s) detected in bucket "
+                f"'{self.full_redis_key}' — likely NTP clock correction. "
+                f"Clamping to 0.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            time_passed = 0.0
         current_preconsumption_capacity = min(
             self.max_capacity,
             outdated_capacity + time_passed * self._rate_per_sec,

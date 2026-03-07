@@ -6,12 +6,12 @@ enabling adaptive rate limiting scenarios where limits change dynamically.
 
 import asyncio
 import time
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock
 
 import pytest
 
-from token_throttle._interfaces._models import Quota, UsageQuotas
 from token_throttle._interfaces._interfaces import PerModelConfig
+from token_throttle._interfaces._models import Quota, UsageQuotas
 from token_throttle._limiter_backends._redis._bucket import RedisBucket
 
 
