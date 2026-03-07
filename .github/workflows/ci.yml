@@ -103,9 +103,13 @@ jobs:
         with:
           python-version: "3.13"
       - run: uv sync --all-extras --group dev
-      - run: uv run pytest --cov --cov-report=xml --redis-url redis://localhost:6379
+      - run: uv run pytest --cov --cov-report=xml --junitxml=junit.xml -o junit_family=legacy --redis-url redis://localhost:6379
       - uses: codecov/codecov-action@v5
         with:
           files: coverage.xml
           fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}
+      - uses: codecov/test-results-action@v1
+        if: ${{ !cancelled() }}
+        with:
           token: ${{ secrets.CODECOV_TOKEN }}
