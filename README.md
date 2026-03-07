@@ -162,8 +162,6 @@ limiter.refund_capacity(actual_usage={"requests": 1, "tokens": 320}, reservation
 ## Links
 
 - [API stability note](#): Alpha — pin to `>=0.4.2,<0.5.0`
-- [Discord](https://discord.gg/hCppPqm6) — questions and discussion
 - Originally a rewrite of [openlimit](https://github.com/shobrook/openlimit)
 
 ![GitHub Repo stars](https://img.shields.io/github/stars/elijas/token-throttle?style=flat&color=fcfcfc&labelColor=white&logo=github&logoColor=black&label=stars)
-&nbsp;<a href="https://discord.gg/hCppPqm6"><img alt="Discord server invite" src="https://img.shields.io/discord/1119368998161752075?logo=discord&logoColor=white&style=flat&color=fcfcfc&labelColor=7289da" height="20"></a>
