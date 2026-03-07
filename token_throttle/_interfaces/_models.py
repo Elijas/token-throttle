@@ -34,7 +34,6 @@ class UsageQuotas:
         *,
         _allow_empty_quotas: bool = False,
     ) -> None:
-
         self._metrics: defaultdict[str, dict[float, Quota]] = defaultdict(dict)
         if not _allow_empty_quotas and not quotas:
             logger.warning(
