@@ -18,7 +18,7 @@ uv run pytest tests/ -v --redis-url redis://localhost:6379
 
 ## CI structure
 
-CI runs four jobs (see `.github/workflows/ci.yml`):
+CI runs five jobs (see `.github/workflows/ci.yml`):
 
 | Job | What it does | Extras installed |
 |-----|-------------|-----------------|
