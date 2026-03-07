@@ -265,13 +265,19 @@ class TestGetEncoding:
         expected = tiktoken.get_encoding("cl100k_base")
         assert enc.name == expected.name
 
-    def test_without_openai_prefix_falls_through_to_tiktoken(self):
-        """Without openai/ prefix, partition yields empty string, falling to tiktoken."""
-        pytest.importorskip("tiktoken")
-        # "gpt-4".partition("openai/") -> ("gpt-4", "", ""), [2] -> ""
-        # empty string is not in the mapping, so falls to tiktoken.encoding_for_model("")
-        with pytest.raises(KeyError):
-            get_encoding("gpt-4")
+    def test_without_openai_prefix_works(self):
+        """Bare model names (without openai/ prefix) resolve correctly."""
+        tiktoken = pytest.importorskip("tiktoken")
+        enc = get_encoding("gpt-4")
+        expected = tiktoken.get_encoding("cl100k_base")
+        assert enc.name == expected.name
+
+    def test_bare_gpt4o_works(self):
+        """Bare gpt-4o resolves to o200k_base."""
+        tiktoken = pytest.importorskip("tiktoken")
+        enc = get_encoding("gpt-4o")
+        expected = tiktoken.get_encoding("o200k_base")
+        assert enc.name == expected.name
 
 
 class TestOpenAIUsageCounterWithRealTiktoken:
@@ -307,3 +313,22 @@ class TestOpenAIUsageCounterWithRealTiktoken:
         result = counter("openai/gpt-4", messages=messages)
         assert result["tokens"] > 0
         assert result["requests"] == 1
+
+
+class TestMalformedMessages:
+    """Non-dict messages must raise ValueError, not AttributeError."""
+
+    def test_string_messages_raise_value_error(self):
+        counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
+        with pytest.raises(ValueError, match="All messages must be dicts"):
+            counter("gpt-4", messages=["not a dict"])
+
+    def test_int_messages_raise_value_error(self):
+        counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
+        with pytest.raises(ValueError, match="All messages must be dicts"):
+            counter("gpt-4", messages=[42])
+
+    def test_mixed_dict_and_non_dict_raises(self):
+        counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
+        with pytest.raises(ValueError, match="All messages must be dicts"):
+            counter("gpt-4", messages=[{"role": "user", "content": "hi"}, "bad"])

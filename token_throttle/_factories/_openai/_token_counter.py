@@ -34,6 +34,8 @@ class OpenAIUsageCounter:
             return frozendict({"tokens": tokens, "requests": 1})
 
         if "messages" in request:
+            if not all(isinstance(m, dict) for m in request["messages"]):
+                raise ValueError("All messages must be dicts")
             if not all(
                 isinstance(k, str) and isinstance(v, str)
                 for message in request["messages"]
@@ -59,7 +61,7 @@ def get_encoding(model_name: str) -> "Encoding":
             'Install it with: pip install "token-throttle[tiktoken]"'
         ) from exc
 
-    model_name = model_name.partition("openai/")[2]
+    model_name = model_name.removeprefix("openai/")
     substring_to_encoding = {
         "gpt-4o-mini": "o200k_base",
         "gpt-4o": "o200k_base",

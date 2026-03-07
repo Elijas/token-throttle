@@ -12,7 +12,7 @@ class MemoryBucket:
     def __init__(
         self,
         metric: str,
-        per_seconds: float,
+        per_seconds: int,
         limit: float,
         model_family: str,
     ) -> None:
@@ -21,7 +21,7 @@ class MemoryBucket:
         self.max_capacity = float(limit)
         self._rate_per_sec = float(limit) / float(per_seconds)
         self.usage_metric = metric
-        self.per_seconds = float(per_seconds)
+        self.per_seconds = per_seconds
         self._bucket_id = f"memory:{model_family}:{metric}:{int(per_seconds)}"
 
     def get_capacity(self, current_time: float) -> CalculatedCapacity:

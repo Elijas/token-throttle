@@ -9,12 +9,16 @@ calculate_capacity() function, plus MemoryBucket-specific state management
 import pytest
 
 from token_throttle._capacity import CalculatedCapacity
+from token_throttle._interfaces._interfaces import PerModelConfig
+from token_throttle._interfaces._models import Quota, UsageQuotas
+from token_throttle._limiter_backends._memory._backend import MemoryBackend
 from token_throttle._limiter_backends._memory._bucket import MemoryBucket
+from token_throttle._limiter_backends._memory._sync_backend import SyncMemoryBackend
 
 
 def make_bucket(
     limit: float = 100,
-    per_seconds: float = 60,
+    per_seconds: int = 60,
     metric: str = "requests",
     model_family: str = "test-model",
 ) -> MemoryBucket:
@@ -143,15 +147,6 @@ class TestEdgeCases:
         expected = 50.0 + time_passed * (100.0 / 60.0)
         assert result.amount == pytest.approx(expected)
 
-    def test_very_small_per_seconds_high_rate(self):
-        """per_seconds=0.001 -> rate = 100/0.001 = 100,000/s."""
-        bucket = make_bucket(limit=100, per_seconds=0.001)
-        assert bucket._rate_per_sec == pytest.approx(100_000.0)
-        bucket.set_capacity(0.0, current_time=1000.0)
-        result = bucket.get_capacity(current_time=1000.0005)
-        # 0 + 0.0005 * 100000 = 50.0
-        assert result.amount == pytest.approx(50.0)
-
     def test_very_large_per_seconds_low_rate(self):
         """per_seconds=86400 (1 day) -> rate = 100/86400 ~ 0.001157/s."""
         bucket = make_bucket(limit=100, per_seconds=86400)
@@ -229,3 +224,29 @@ class TestSetMaxCapacity:
         bucket = make_bucket(limit=100, per_seconds=60)
         bucket.set_max_capacity(50.0)
         assert bucket.max_capacity == 50.0
+
+
+class TestSleepIntervalZero:
+    """sleep_interval=0 must be respected, not treated as falsy."""
+
+    def test_memory_backend_sleep_interval_zero(self):
+        quota = Quota(metric="requests", limit=100, per_seconds=60)
+        config = PerModelConfig(model_family="test", quotas=UsageQuotas([quota]))
+        bucket = make_bucket(limit=100, per_seconds=60)
+        backend = MemoryBackend(
+            buckets=[bucket],
+            limit_config=config,
+            sleep_interval=0,
+        )
+        assert backend._sleep_interval == 0
+
+    def test_sync_memory_backend_sleep_interval_zero(self):
+        quota = Quota(metric="requests", limit=100, per_seconds=60)
+        config = PerModelConfig(model_family="test", quotas=UsageQuotas([quota]))
+        bucket = make_bucket(limit=100, per_seconds=60)
+        backend = SyncMemoryBackend(
+            buckets=[bucket],
+            limit_config=config,
+            sleep_interval=0,
+        )
+        assert backend._sleep_interval == 0

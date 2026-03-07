@@ -20,7 +20,9 @@ from token_throttle._rate_limiter import RateLimiter
 
 
 def openai_model_family_getter(model: str, /) -> str:
-    # E.g. gpt-4-0314 and gpt-4-0613 count against the same gpt-4 quota
+    # Strip provider prefix if present, then collapse date suffixes.
+    # E.g. "openai/gpt-4-0314" -> "gpt-4-0314" -> "gpt-4"
+    model = model.removeprefix("openai/")
     return re.sub(r"-\d+$", "", model)
 
 

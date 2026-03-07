@@ -21,7 +21,7 @@ from token_throttle._limiter_backends._redis._bucket import (
 
 def make_bucket(
     limit: float = 100,
-    per_seconds: float = 60,
+    per_seconds: int = 60,
     metric: str = "requests",
     model_family: str = "test-model",
 ) -> RedisBucket:
@@ -198,16 +198,6 @@ class TestEdgeCases:
         )
         expected = 50.0 + time_passed * (100.0 / 60.0)
         assert result.amount == pytest.approx(expected)
-
-    def test_very_small_per_seconds_high_rate(self):
-        """per_seconds=0.001 → rate = 100/0.001 = 100,000/s."""
-        bucket = make_bucket(limit=100, per_seconds=0.001)
-        assert bucket._rate_per_sec == pytest.approx(100_000.0)
-        result = bucket.calculate_capacity(
-            last_checked=1000.0, outdated_capacity=0.0, current_time=1000.0005
-        )
-        # 0 + 0.0005 * 100000 = 50.0
-        assert result.amount == pytest.approx(50.0)
 
     def test_very_large_per_seconds_low_rate(self):
         """per_seconds=86400 (1 day) → rate = 100/86400 ≈ 0.001157/s."""

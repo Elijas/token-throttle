@@ -86,7 +86,9 @@ class RedisBackend(RateLimiterBackend):
         super().__init__()
         self.sorted_buckets = sorted(buckets, key=lambda b: b.full_redis_key)
         self._redis = redis
-        self._sleep_interval: float = sleep_interval or self.DEFAULT_SLEEP_INTERVAL
+        self._sleep_interval: float = (
+            self.DEFAULT_SLEEP_INTERVAL if sleep_interval is None else sleep_interval
+        )
         self._callbacks = callbacks
         self._limit_config = limit_config
 

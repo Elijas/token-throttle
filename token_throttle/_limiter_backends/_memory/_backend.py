@@ -35,7 +35,7 @@ class MemoryBackendBuilder(RateLimiterBackendBuilderInterface):
         for quota in limit_config.quotas:
             b = MemoryBucket(
                 metric=quota.metric,
-                per_seconds=float(quota.per_seconds),
+                per_seconds=quota.per_seconds,
                 limit=float(quota.limit),
                 model_family=limit_config.get_model_family(),
             )
@@ -62,7 +62,9 @@ class MemoryBackend(RateLimiterBackend):
         super().__init__()
         self._buckets = buckets
         self._lock = asyncio.Lock()
-        self._sleep_interval: float = sleep_interval or self.DEFAULT_SLEEP_INTERVAL
+        self._sleep_interval: float = (
+            self.DEFAULT_SLEEP_INTERVAL if sleep_interval is None else sleep_interval
+        )
         self._callbacks = callbacks
         self._limit_config = limit_config
 

@@ -20,9 +20,7 @@ from token_throttle._limiter_backends._redis._bucket import RedisBucket
 # ---------------------------------------------------------------------------
 
 limits = st.floats(min_value=0.1, max_value=1e6, allow_nan=False, allow_infinity=False)
-per_seconds = st.floats(
-    min_value=0.1, max_value=86400, allow_nan=False, allow_infinity=False
-)
+per_seconds = st.integers(min_value=1, max_value=86400)
 capacities = st.floats(
     min_value=0.0, max_value=1e6, allow_nan=False, allow_infinity=False
 )
@@ -34,7 +32,7 @@ times = st.floats(min_value=0.0, max_value=1e6, allow_nan=False, allow_infinity=
 # ---------------------------------------------------------------------------
 
 
-def make_bucket(limit: float = 100.0, per_seconds_val: float = 60.0) -> RedisBucket:
+def make_bucket(limit: float = 100.0, per_seconds_val: int = 60) -> RedisBucket:
     """Create a RedisBucket with a mock Redis client for pure-math testing."""
     quota = Quota(metric="requests", limit=limit, per_seconds=per_seconds_val)
     config = PerModelConfig(model_family="test", quotas=UsageQuotas([quota]))

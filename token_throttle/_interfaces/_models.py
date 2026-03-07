@@ -18,7 +18,7 @@ class Quota(BaseModel):
     DEFAULT_SECONDS: ClassVar[int] = SecondsIn.MINUTE
     metric: str
     limit: float
-    per_seconds: float = Field(
+    per_seconds: int = Field(
         default=DEFAULT_SECONDS,
         gt=0,  # Greater than 0
         description="Time window in seconds. Default: 60 (1 minute). E.g. For requests per minute, set to 60. For requests per hour, set to 3600.",
@@ -34,7 +34,7 @@ class UsageQuotas:
         *,
         _allow_empty_quotas: bool = False,
     ) -> None:
-        self._metrics: defaultdict[str, dict[float, Quota]] = defaultdict(dict)
+        self._metrics: defaultdict[str, dict[int, Quota]] = defaultdict(dict)
         if not _allow_empty_quotas and not quotas:
             logger.warning(
                 "Empty quota list provided. No rate limiting will be applied. "
@@ -77,7 +77,7 @@ MetricName = str
 Usage = Mapping[MetricName, float]
 FrozenUsage = frozendict[MetricName, float]
 
-PerSeconds = float
+PerSeconds = int
 BucketId = tuple[MetricName, PerSeconds]
 Capacities = frozendict[BucketId, float]
 

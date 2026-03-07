@@ -47,6 +47,15 @@ class TestQuota:
         with pytest.raises(ValidationError, match="per_seconds"):
             Quota(metric="requests", limit=100.0, per_seconds=-10)
 
+    def test_rejects_fractional_per_seconds(self):
+        with pytest.raises(ValidationError):
+            Quota(metric="requests", limit=100.0, per_seconds=0.5)
+
+    def test_coerces_whole_float_to_int(self):
+        q = Quota(metric="requests", limit=100.0, per_seconds=60.0)
+        assert q.per_seconds == 60
+        assert isinstance(q.per_seconds, int)
+
     def test_frozen_immutability(self):
         q = Quota(metric="requests", limit=100.0, per_seconds=60)
         with pytest.raises(ValidationError):

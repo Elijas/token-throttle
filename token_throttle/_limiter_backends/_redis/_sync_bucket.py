@@ -38,7 +38,7 @@ class SyncRedisBucket:
         redis_client: redis.Redis,
     ):
         self.usage_metric = quota.metric
-        self.per_seconds = float(quota.per_seconds)
+        self.per_seconds = quota.per_seconds
         self.full_redis_key = f"rate_limiting:{limit_config.model_family}:{self.usage_metric}:{int(self.per_seconds)}"
         self.model_family = limit_config.get_model_family()
 
