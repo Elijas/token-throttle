@@ -7,12 +7,21 @@ from token_throttle._interfaces._callbacks import (
     OnWaitEndCallback,
     OnWaitStartCallback,
     RateLimiterCallbacks,
+    SyncOnCapacityConsumedCallback,
+    SyncOnCapacityRefundedCallback,
+    SyncOnMissingConsumptionDataCallback,
+    SyncOnWaitEndCallback,
+    SyncOnWaitStartCallback,
+    SyncRateLimiterCallbacks,
     create_loguru_callbacks,
+    create_sync_loguru_callbacks,
 )
 from token_throttle._interfaces._interfaces import (
     PerModelConfig,
     PerModelConfigGetter,
     RateLimiterBackendBuilderInterface,
+    SyncRateLimiterBackend,
+    SyncRateLimiterBackendBuilderInterface,
     UsageCounter,
 )
 from token_throttle._interfaces._models import (
@@ -29,19 +38,31 @@ from token_throttle._interfaces._models import (
     frozen_usage,
 )
 from token_throttle._rate_limiter import RateLimiter
+from token_throttle._sync_rate_limiter import SyncRateLimiter
 
 __version__ = "0.4.2"
 
 # Lazy imports: these pull in redis or tiktoken at import time.
 # Deferred via __getattr__ so `import token_throttle` works without optional deps.
 _LAZY_IMPORTS: dict[str, str] = {
+    # shared capacity math (canonical location)
+    "CalculatedCapacity": "token_throttle._capacity",
+    # memory backend
+    "MemoryBackend": "token_throttle._limiter_backends._memory._backend",
+    "MemoryBackendBuilder": "token_throttle._limiter_backends._memory._backend",
+    "MemoryBucket": "token_throttle._limiter_backends._memory._bucket",
+    # sync memory backend
+    "SyncMemoryBackend": "token_throttle._limiter_backends._memory._sync_backend",
+    "SyncMemoryBackendBuilder": "token_throttle._limiter_backends._memory._sync_backend",
+    # sync redis backend
+    "SyncRedisBackend": "token_throttle._limiter_backends._redis._sync_backend",
+    "SyncRedisBackendBuilder": "token_throttle._limiter_backends._redis._sync_backend",
+    "SyncRedisBucket": "token_throttle._limiter_backends._redis._sync_bucket",
     # redis backend
     "LOCK_TIMEOUT_SECONDS": "token_throttle._limiter_backends._redis._backend",
     "CapacitiesGetterResult": "token_throttle._limiter_backends._redis._backend",
     "RedisBackend": "token_throttle._limiter_backends._redis._backend",
     "RedisBackendBuilder": "token_throttle._limiter_backends._redis._backend",
-    # redis bucket
-    "CalculatedCapacity": "token_throttle._limiter_backends._redis._bucket",
     # openai factory (imports redis at module level)
     "create_openai_redis_rate_limiter": "token_throttle._factories._openai._openai_rate_limiter",
     "openai_model_family_getter": "token_throttle._factories._openai._openai_rate_limiter",
@@ -69,6 +90,9 @@ __all__ = [
     "CapacityReservation",
     "EncodingGetter",
     "FrozenUsage",
+    "MemoryBackend",
+    "MemoryBackendBuilder",
+    "MemoryBucket",
     "MetricName",
     "OnCapacityConsumedCallback",
     "OnCapacityRefundedCallback",
@@ -86,12 +110,27 @@ __all__ = [
     "RedisBackend",
     "RedisBackendBuilder",
     "SecondsIn",
+    "SyncMemoryBackend",
+    "SyncMemoryBackendBuilder",
+    "SyncRedisBackend",
+    "SyncRedisBackendBuilder",
+    "SyncRedisBucket",
+    "SyncOnCapacityConsumedCallback",
+    "SyncOnCapacityRefundedCallback",
+    "SyncOnMissingConsumptionDataCallback",
+    "SyncOnWaitEndCallback",
+    "SyncOnWaitStartCallback",
+    "SyncRateLimiter",
+    "SyncRateLimiterBackend",
+    "SyncRateLimiterBackendBuilderInterface",
+    "SyncRateLimiterCallbacks",
     "Usage",
     "UsageCounter",
     "UsageQuotas",
     "count_chat_input_tokens",
     "create_loguru_callbacks",
     "create_openai_redis_rate_limiter",
+    "create_sync_loguru_callbacks",
     "frozen_usage",
     "get_encoding",
     "openai_model_family_getter",

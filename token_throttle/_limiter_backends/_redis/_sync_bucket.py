@@ -1,9 +1,9 @@
 import time
 
 try:
-    import redis.asyncio
-    import redis.asyncio.client
-    import redis.asyncio.lock
+    import redis
+    import redis.client
+    import redis.lock
 except ImportError as exc:
     raise ImportError(
         'The "redis" package is required for the Redis backend. '
@@ -14,20 +14,18 @@ from token_throttle._capacity import CalculatedCapacity, calculate_capacity
 from token_throttle._interfaces._interfaces import PerModelConfig
 from token_throttle._interfaces._models import Quota
 
-# Re-export for backwards compatibility
-__all__ = ["CalculatedCapacity", "RedisBucket"]
+__all__ = ["CalculatedCapacity", "SyncRedisBucket"]
 
 
-class RedisBucket:
+class SyncRedisBucket:
     """
-    Token bucket implementation backed by Redis for distributed rate limiting.
+    Token bucket implementation backed by Redis for distributed rate limiting (sync).
 
     Redis Key Format:
         rate_limiting:{model_family}:{metric}:{per_seconds}:max_capacity
-        Example: rate_limiting:gemini/gemini-2.0-flash:requests:1:max_capacity
 
-    The max_capacity can be updated at runtime via set_max_capacity() to support
-    adaptive rate limiting scenarios where limits need to change dynamically.
+    Uses the same key format as the async RedisBucket, so sync and async
+    backends can share the same Redis state.
     """
 
     # Cache TTL for max_capacity reads (in seconds)
@@ -37,7 +35,7 @@ class RedisBucket:
         self,
         quota: Quota,
         limit_config: PerModelConfig,
-        redis_client: redis.asyncio.Redis,
+        redis_client: redis.Redis,
     ):
         self.usage_metric = quota.metric
         self.per_seconds = float(quota.per_seconds)
@@ -60,26 +58,13 @@ class RedisBucket:
 
     @property
     def max_capacity(self) -> float:
-        """
-        Returns the current max_capacity value.
-
-        Returns the cached value if it has been fetched, otherwise returns
-        the default from quota.limit. The cached value persists until
-        explicitly refreshed via get_max_capacity().
-        """
+        """Returns the current max_capacity value (cached or default)."""
         if self._max_capacity_cached is not None:
             return self._max_capacity_cached
         return self._max_capacity_default
 
-    async def get_max_capacity(self) -> float:
-        """
-        Fetch max_capacity from Redis (if cache is stale) and return it.
-
-        Uses a 1-second cache TTL to avoid excessive Redis calls. Returns
-        the cached value immediately if it's fresh, otherwise fetches from
-        Redis. If the Redis key doesn't exist, caches and returns the
-        default value from quota.limit.
-        """
+    def get_max_capacity(self) -> float:
+        """Fetch max_capacity from Redis (if cache is stale) and return it."""
         current_time = time.time()
         cache_age = current_time - self._max_capacity_cache_time
 
@@ -91,7 +76,7 @@ class RedisBucket:
             return self._max_capacity_cached
 
         # Fetch from Redis
-        stored_value = await self._redis.get(self._max_capacity_key)
+        stored_value = self._redis.get(self._max_capacity_key)
 
         if stored_value is not None:
             try:
@@ -106,27 +91,18 @@ class RedisBucket:
         self._max_capacity_cache_time = current_time
         return self._max_capacity_cached
 
-    async def set_max_capacity(self, value: float) -> None:
-        """
-        Set the max_capacity in Redis for dynamic rate limit adjustment.
-
-        This allows runtime modification of the bucket's max capacity without
-        rebuilding backends, useful for adaptive rate limiting scenarios.
-
-        Args:
-            value: The new max capacity value (must be > 0).
-
-        """
+    def set_max_capacity(self, value: float) -> None:
+        """Set the max_capacity in Redis for dynamic rate limit adjustment."""
         if value <= 0:
             raise ValueError("max_capacity must be greater than 0")
 
-        await self._redis.set(self._max_capacity_key, value)
+        self._redis.set(self._max_capacity_key, value)
         # Update cache immediately
         self._max_capacity_cached = value
         self._max_capacity_cache_time = time.time()
 
     def __eq__(self, other: object) -> bool:
-        if not isinstance(other, RedisBucket):
+        if not isinstance(other, SyncRedisBucket):
             return False
         return (
             self.usage_metric == other.usage_metric
@@ -140,12 +116,12 @@ class RedisBucket:
             and self._max_capacity_key == other._max_capacity_key
         )
 
-    def lock(self, **kwargs) -> redis.asyncio.lock.Lock:
-        return redis.asyncio.lock.Lock(self._redis, self._lock_key, **kwargs)
+    def lock(self, **kwargs) -> redis.lock.Lock:
+        return redis.lock.Lock(self._redis, self._lock_key, **kwargs)
 
-    async def get_capacity(
+    def get_capacity(
         self,
-        pipeline: redis.asyncio.client.Pipeline | None = None,
+        pipeline: redis.client.Pipeline | None = None,
         current_time: float | None = None,
     ) -> CalculatedCapacity | None:
         """Get the current capacity of the bucket."""
@@ -161,16 +137,16 @@ class RedisBucket:
 
         if own_pipeline:
             # Refresh max_capacity cache before calculating
-            await self.get_max_capacity()
-            results = await pipeline.execute()
+            self.get_max_capacity()
+            results = pipeline.execute()
             last_checked, capacity = results
             return self.calculate_capacity(last_checked, capacity, current_time)
         return None
 
-    async def set_capacity(
+    def set_capacity(
         self,
         new_capacity: float,
-        pipeline: redis.asyncio.client.Pipeline | None = None,
+        pipeline: redis.client.Pipeline | None = None,
         current_time: float | None = None,
         *,
         execute: bool = True,
@@ -188,7 +164,7 @@ class RedisBucket:
         pipeline.set(self._capacity_key, new_capacity)
 
         if execute and own_pipeline:
-            await pipeline.execute()
+            pipeline.execute()
 
     def calculate_capacity(
         self,

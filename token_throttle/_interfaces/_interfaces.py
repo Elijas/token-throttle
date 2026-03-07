@@ -1,5 +1,7 @@
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -64,7 +66,7 @@ class RateLimiterBackendBuilderInterface(ABC):
         cfg: PerModelConfig,
         *,
         callbacks: RateLimiterCallbacks | None = None,
-    ) -> "RateLimiterBackend": ...
+    ) -> RateLimiterBackend: ...
 
 
 class RateLimiterBackend(ABC):
@@ -72,11 +74,21 @@ class RateLimiterBackend(ABC):
     async def await_for_capacity(self, usage: FrozenUsage) -> None: ...
 
     @abstractmethod
+    async def consume_capacity(self, usage: FrozenUsage) -> None:
+        """Consume capacity unconditionally. Capacity may go negative."""
+
+    @abstractmethod
     async def refund_capacity(
         self,
         reserved_usage: FrozenUsage,
         actual_usage: FrozenUsage,
     ) -> None: ...
+
+    @abstractmethod
+    async def set_max_capacity(
+        self, metric: str, per_seconds: int, value: float,
+    ) -> None:
+        """Dynamically change the max capacity for a specific bucket."""
 
 
 class BaseRateLimiter(ABC):
@@ -96,3 +108,43 @@ class BaseRateLimiter(ABC):
         actual_usage: Usage,
         reservation: CapacityReservation,
     ) -> None: ...
+
+
+# ---------------------------------------------------------------------------
+# Sync counterparts
+# ---------------------------------------------------------------------------
+
+if TYPE_CHECKING:
+    from token_throttle._interfaces._callbacks import SyncRateLimiterCallbacks
+
+
+class SyncRateLimiterBackend(ABC):
+    @abstractmethod
+    def wait_for_capacity(self, usage: FrozenUsage) -> None: ...
+
+    @abstractmethod
+    def consume_capacity(self, usage: FrozenUsage) -> None:
+        """Consume capacity unconditionally. Capacity may go negative."""
+
+    @abstractmethod
+    def refund_capacity(
+        self,
+        reserved_usage: FrozenUsage,
+        actual_usage: FrozenUsage,
+    ) -> None: ...
+
+    @abstractmethod
+    def set_max_capacity(
+        self, metric: str, per_seconds: int, value: float,
+    ) -> None:
+        """Dynamically change the max capacity for a specific bucket."""
+
+
+class SyncRateLimiterBackendBuilderInterface(ABC):
+    @abstractmethod
+    def build(
+        self,
+        cfg: PerModelConfig,
+        *,
+        callbacks: SyncRateLimiterCallbacks | None = None,
+    ) -> SyncRateLimiterBackend: ...

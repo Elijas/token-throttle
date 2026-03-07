@@ -1,0 +1,64 @@
+"""Shared token-bucket capacity math — used by all backends (Redis, in-memory, sync, async)."""
+
+import warnings
+
+from pydantic import BaseModel
+
+
+class CalculatedCapacity(BaseModel):
+    amount: float
+    is_fresh_start: bool
+
+
+def calculate_capacity(  # noqa: PLR0913
+    last_checked: float | None,
+    outdated_capacity: float | None,
+    current_time: float,
+    max_capacity: float,
+    rate_per_sec: float,
+    bucket_id: str,
+) -> CalculatedCapacity:
+    """
+    Calculate current bucket capacity based on time elapsed since last check.
+
+    Pure function — no I/O, no locks. Shared by Redis and in-memory backends.
+
+    Args:
+        last_checked: Timestamp of last capacity update (None = fresh start).
+        outdated_capacity: Capacity value at last_checked (None = fresh start).
+        current_time: Current timestamp.
+        max_capacity: Maximum capacity for the bucket.
+        rate_per_sec: Refill rate in units per second.
+        bucket_id: Identifier for the bucket (used in warning messages).
+
+    """
+    if last_checked is None or outdated_capacity is None:
+        return CalculatedCapacity(amount=max_capacity, is_fresh_start=True)
+
+    try:
+        last_checked = float(last_checked)
+        outdated_capacity = float(outdated_capacity)
+    except (TypeError, ValueError) as e:
+        raise ValueError(
+            f"Invalid last_checked or capacity values: last_checked={last_checked}, capacity={outdated_capacity}",
+        ) from e
+
+    time_passed = current_time - last_checked
+    if time_passed < 0:
+        warnings.warn(
+            f"Negative time_passed ({time_passed:.4f}s) detected in bucket "
+            f"'{bucket_id}' — likely NTP clock correction. "
+            f"Clamping to 0.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        time_passed = 0.0
+
+    current_preconsumption_capacity = min(
+        max_capacity,
+        outdated_capacity + time_passed * rate_per_sec,
+    )
+    return CalculatedCapacity(
+        amount=current_preconsumption_capacity,
+        is_fresh_start=False,
+    )

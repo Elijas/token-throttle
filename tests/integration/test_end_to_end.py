@@ -2,11 +2,13 @@
 End-to-end integration tests using the high-level RateLimiter API.
 
 These tests exercise the full lifecycle (acquire -> use -> refund) against
-a real Redis instance, using the parameterized `backend_builder` fixture.
+a real backend, using the parameterized `backend_builder` fixture.
 """
 
 import asyncio
 import time
+
+import pytest
 
 from token_throttle._interfaces._interfaces import PerModelConfig
 from token_throttle._interfaces._models import (
@@ -202,13 +204,15 @@ async def test_sequential_requests_exhaust_then_block(backend_builder):
 # ---------------------------------------------------------------------------
 
 
-async def test_dynamic_max_capacity_change(backend_builder, redis_client):
+async def test_dynamic_max_capacity_change(request, backend_builder, redis_client):
     """
     Changing max_capacity via Redis should take effect after cache TTL.
 
     We reduce the max_capacity mid-session and verify that the refill is
     capped at the new (lower) value, causing a subsequent request to block.
     """
+    if request.node.callspec.params.get("backend_builder") != "redis":
+        pytest.skip("Dynamic max_capacity via Redis keys is Redis-specific")
     config = _make_config(
         model_family="dynamic",
         requests_limit=10,

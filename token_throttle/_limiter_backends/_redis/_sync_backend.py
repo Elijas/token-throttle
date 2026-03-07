@@ -1,13 +1,12 @@
-import asyncio
 import time
 import typing
 import warnings
-from contextlib import AsyncExitStack
+from contextlib import ExitStack
 from typing import TYPE_CHECKING, ClassVar
 
 try:
-    import redis.asyncio
-    import redis.asyncio.client
+    import redis
+    import redis.client
 except ImportError as exc:
     raise ImportError(
         'The "redis" package is required for the Redis backend. '
@@ -15,20 +14,20 @@ except ImportError as exc:
     ) from exc
 from frozendict import frozendict
 
-from token_throttle._interfaces._callbacks import RateLimiterCallbacks
+from token_throttle._interfaces._callbacks import SyncRateLimiterCallbacks
 from token_throttle._interfaces._interfaces import (
     PerModelConfig,
-    RateLimiterBackend,
-    RateLimiterBackendBuilderInterface,
+    SyncRateLimiterBackend,
+    SyncRateLimiterBackendBuilderInterface,
 )
 from token_throttle._interfaces._models import Capacities, FrozenUsage
 
-from ._bucket import RedisBucket
+from ._sync_bucket import SyncRedisBucket
 
 
-class CapacitiesGetterResult(typing.NamedTuple):
+class SyncCapacitiesGetterResult(typing.NamedTuple):
     capacities: Capacities
-    fresh_start_buckets: list[RedisBucket]
+    fresh_start_buckets: list[SyncRedisBucket]
 
 
 if TYPE_CHECKING:
@@ -37,10 +36,10 @@ if TYPE_CHECKING:
 LOCK_TIMEOUT_SECONDS = 30
 
 
-class RedisBackendBuilder(RateLimiterBackendBuilderInterface):
+class SyncRedisBackendBuilder(SyncRateLimiterBackendBuilderInterface):
     def __init__(
         self,
-        redis_client: redis.asyncio.Redis,
+        redis_client: redis.Redis,
         *,
         sleep_interval: float | None = None,
     ) -> None:
@@ -52,17 +51,17 @@ class RedisBackendBuilder(RateLimiterBackendBuilderInterface):
         self,
         limit_config: PerModelConfig,
         *,
-        callbacks: RateLimiterCallbacks | None = None,
-    ) -> "RateLimiterBackend":
+        callbacks: SyncRateLimiterCallbacks | None = None,
+    ) -> "SyncRedisBackend":
         redis_buckets = []
         for quota in limit_config.quotas:
-            b = RedisBucket(
+            b = SyncRedisBucket(
                 quota=quota,
                 limit_config=limit_config,
                 redis_client=self._redis,
             )
             redis_buckets.append(b)
-        return RedisBackend(
+        return SyncRedisBackend(
             buckets=redis_buckets,
             redis=self._redis,
             sleep_interval=self._sleep_interval,
@@ -71,17 +70,17 @@ class RedisBackendBuilder(RateLimiterBackendBuilderInterface):
         )
 
 
-class RedisBackend(RateLimiterBackend):
+class SyncRedisBackend(SyncRateLimiterBackend):
     DEFAULT_SLEEP_INTERVAL: ClassVar[float] = 0.1
 
     def __init__(
         self,
-        buckets: list[RedisBucket],
-        redis: redis.asyncio.Redis,
+        buckets: list[SyncRedisBucket],
+        redis: redis.Redis,
         limit_config: PerModelConfig,
         *,
         sleep_interval: float | None = None,
-        callbacks: RateLimiterCallbacks | None = None,
+        callbacks: SyncRateLimiterCallbacks | None = None,
     ) -> None:
         super().__init__()
         self.sorted_buckets = sorted(buckets, key=lambda b: b.full_redis_key)
@@ -90,22 +89,22 @@ class RedisBackend(RateLimiterBackend):
         self._callbacks = callbacks
         self._limit_config = limit_config
 
-    async def _lock(self, **kwargs) -> AsyncExitStack:
+    def _lock(self, **kwargs) -> ExitStack:
         """Acquire locks for all buckets in a consistent order."""
-        stack = AsyncExitStack()
+        stack = ExitStack()
 
         # Sorted buckets to ensure consistent locking order
         key_sorted_buckets = sorted(self.sorted_buckets, key=lambda b: b.full_redis_key)
         for bucket in key_sorted_buckets:
-            await stack.enter_async_context(bucket.lock(**kwargs))
+            stack.enter_context(bucket.lock(**kwargs))
 
         return stack
 
-    async def _get_capacities_unsafe(
+    def _get_capacities_unsafe(
         self,
-        pipeline: redis.asyncio.client.Pipeline | None = None,
+        pipeline: redis.client.Pipeline | None = None,
         current_time: float | None = None,
-    ) -> CapacitiesGetterResult:
+    ) -> SyncCapacitiesGetterResult:
         """Get capacities for all buckets."""
         if pipeline is None:
             pipeline = self._redis.pipeline()
@@ -120,24 +119,19 @@ class RedisBackend(RateLimiterBackend):
         ):
             raise RuntimeError("Buckets must be sorted by key to prevent deadlocks")
         for bucket in self.sorted_buckets:
-            await bucket.get_capacity(pipeline=pipeline, current_time=current_time)
+            bucket.get_capacity(pipeline=pipeline, current_time=current_time)
 
         # Execute the pipeline to get all results
-        results = await pipeline.execute()
+        results = pipeline.execute()
 
         # Refresh max_capacity cache for all buckets (uses 1-second TTL caching)
         for bucket in self.sorted_buckets:
-            await bucket.get_max_capacity()
+            bucket.get_max_capacity()
 
-        # We're using dict instead of Usage because two different application
-        # versions might use the same Redis backend that's not cleaned up
-        # between deployments, and the new version might have a different
-        # Usage class.
         new_capacities: Mapping[tuple[str, int], float] = {}
-        fresh_start_buckets: list[RedisBucket] = []
+        fresh_start_buckets: list[SyncRedisBucket] = []
         for i, bucket in enumerate(self.sorted_buckets):
             idx = i * 2  # Each bucket adds 2 commands
-            # Process results in pairs (last_checked, capacity) for each bucket
             last_checked = results[idx]
             capacity = results[idx + 1]
             result = bucket.calculate_capacity(
@@ -151,15 +145,15 @@ class RedisBackend(RateLimiterBackend):
                 result.amount
             )
 
-        return CapacitiesGetterResult(
+        return SyncCapacitiesGetterResult(
             capacities=frozendict(new_capacities),
             fresh_start_buckets=fresh_start_buckets,
         )
 
-    async def _set_capacities_unsafe(
+    def _set_capacities_unsafe(
         self,
         new_capacities: Capacities,
-        pipeline: redis.asyncio.client.Pipeline | None = None,
+        pipeline: redis.client.Pipeline | None = None,
         current_time: float | None = None,
         *,
         allow_negative: bool = False,
@@ -182,16 +176,16 @@ class RedisBackend(RateLimiterBackend):
             )
             if bucket is None:
                 raise ValueError(f"Bucket '{usage_metric}/{per_seconds}s' not found")
-            await bucket.set_capacity(
+            bucket.set_capacity(
                 amount,
                 pipeline=pipeline,
                 current_time=current_time,
                 execute=False,
                 allow_negative=allow_negative,
             )
-        await pipeline.execute()
+        pipeline.execute()
 
-    async def _check_and_consume_capacity(
+    def _check_and_consume_capacity(
         self,
         usage_: FrozenUsage,
     ) -> tuple[bool, Capacities, Capacities]:
@@ -203,13 +197,13 @@ class RedisBackend(RateLimiterBackend):
         preconsumption_capacities: Capacities = frozendict()
         postconsumption_capacities: Capacities = frozendict()
         current_time: float = 0.0
-        fresh_start_buckets: list[RedisBucket] = []
-        async with await self._lock(timeout=LOCK_TIMEOUT_SECONDS):
+        fresh_start_buckets: list[SyncRedisBucket] = []
+        with self._lock(timeout=LOCK_TIMEOUT_SECONDS):
             pipeline = self._redis.pipeline()
             current_time = time.time()
 
             preconsumption_capacities, fresh_start_buckets = (
-                await self._get_capacities_unsafe(
+                self._get_capacities_unsafe(
                     pipeline=pipeline,
                     current_time=current_time,
                 )
@@ -241,7 +235,7 @@ class RedisBackend(RateLimiterBackend):
                         capacity_amount - usage_amount
                     )
             postconsumption_capacities = frozendict(postconsumption_dict)
-            await self._set_capacities_unsafe(
+            self._set_capacities_unsafe(
                 postconsumption_capacities,
                 pipeline=pipeline,
                 current_time=current_time,
@@ -249,7 +243,7 @@ class RedisBackend(RateLimiterBackend):
             completed = True  # Release the lock before the callback
         if not completed:
             raise RuntimeError("Unexpected fallthrough in _check_and_consume_capacity")
-        await self._fresh_start_buckets_callback(fresh_start_buckets)
+        self._fresh_start_buckets_callback(fresh_start_buckets)
         if self._callbacks and self._callbacks.on_capacity_consumed:
             if not all(
                 [
@@ -260,7 +254,7 @@ class RedisBackend(RateLimiterBackend):
                 ],
             ):
                 raise ValueError("One or more arguments are empty")
-            await self._callbacks.on_capacity_consumed(
+            self._callbacks.on_capacity_consumed(
                 model_family=self._limit_config.get_model_family(),
                 preconsumption_capacities=preconsumption_capacities,
                 postconsumption_capacities=postconsumption_capacities,
@@ -269,7 +263,7 @@ class RedisBackend(RateLimiterBackend):
             )
         return True, preconsumption_capacities, postconsumption_capacities
 
-    async def consume_capacity(self, usage: FrozenUsage) -> None:
+    def consume_capacity(self, usage: FrozenUsage) -> None:
         """Consume capacity unconditionally. Capacity may go negative."""
         usage = frozendict(
             {metric: float(amount) for metric, amount in usage.items()},
@@ -277,13 +271,13 @@ class RedisBackend(RateLimiterBackend):
         preconsumption_capacities: Capacities = frozendict()
         postconsumption_capacities: Capacities = frozendict()
         current_time: float = 0.0
-        fresh_start_buckets: list[RedisBucket] = []
-        async with await self._lock(timeout=LOCK_TIMEOUT_SECONDS):
+        fresh_start_buckets: list[SyncRedisBucket] = []
+        with self._lock(timeout=LOCK_TIMEOUT_SECONDS):
             pipeline = self._redis.pipeline()
             current_time = time.time()
 
             preconsumption_capacities, fresh_start_buckets = (
-                await self._get_capacities_unsafe(
+                self._get_capacities_unsafe(
                     pipeline=pipeline,
                     current_time=current_time,
                 )
@@ -301,13 +295,13 @@ class RedisBackend(RateLimiterBackend):
                         capacity_amount - usage_amount
                     )
             postconsumption_capacities = frozendict(postconsumption_dict)
-            await self._set_capacities_unsafe(
+            self._set_capacities_unsafe(
                 postconsumption_capacities,
                 pipeline=pipeline,
                 current_time=current_time,
                 allow_negative=True,
             )
-        await self._fresh_start_buckets_callback(fresh_start_buckets)
+        self._fresh_start_buckets_callback(fresh_start_buckets)
         if self._callbacks and self._callbacks.on_capacity_consumed:
             if not all(
                 [
@@ -318,7 +312,7 @@ class RedisBackend(RateLimiterBackend):
                 ],
             ):
                 raise ValueError("One or more arguments are empty")
-            await self._callbacks.on_capacity_consumed(
+            self._callbacks.on_capacity_consumed(
                 model_family=self._limit_config.get_model_family(),
                 preconsumption_capacities=preconsumption_capacities,
                 postconsumption_capacities=postconsumption_capacities,
@@ -326,7 +320,7 @@ class RedisBackend(RateLimiterBackend):
                 current_time=current_time,
             )
 
-    async def await_for_capacity(
+    def wait_for_capacity(
         self,
         usage: FrozenUsage,
     ) -> None:
@@ -335,13 +329,13 @@ class RedisBackend(RateLimiterBackend):
         start_time = time.time()
         while True:
             available, preconsumption, postconsumption = (
-                await self._check_and_consume_capacity(usage)
+                self._check_and_consume_capacity(usage)
             )
             if available:
                 if has_waited:
                     wait_time_s = time.time() - start_time
                     if self._callbacks and self._callbacks.after_wait_end_consumption:
-                        await self._callbacks.after_wait_end_consumption(
+                        self._callbacks.after_wait_end_consumption(
                             model_family=self._limit_config.get_model_family(),
                             preconsumption_capacities=preconsumption,
                             postconsumption_capacities=postconsumption,
@@ -353,75 +347,21 @@ class RedisBackend(RateLimiterBackend):
             if not has_waited:
                 has_waited = True
                 if self._callbacks and self._callbacks.on_wait_start:
-                    await self._callbacks.on_wait_start(
+                    self._callbacks.on_wait_start(
                         model_family=self._limit_config.get_model_family(),
                         preconsumption_capacities=preconsumption,
                         usage=usage,
                     )
 
             # Wait before trying again
-            await asyncio.sleep(self._sleep_interval)
+            time.sleep(self._sleep_interval)
 
-    async def refund_capacity(
+    def refund_capacity(
         self,
         reserved_usage: FrozenUsage,
         actual_usage: FrozenUsage,
     ) -> None:
-        """
-        Refund unused capacity back to the rate limiter based on actual usage.
-
-        The refund mechanism handles two distinct adjustments:
-
-        1. Token Usage Adjustment:
-        - If fewer tokens were actually used than initially reserved
-            (e.g., reserved 100 tokens but used only 80), the difference (20)
-            is refunded.
-        - If more tokens were used than initially reserved
-            (e.g., reserved 100 tokens but used 120), the excess (-20)
-            is treated as a negative refund, further reducing available capacity.
-
-        2. Consumption Time Adjustment:
-        - When capacity is initially acquired, we conservatively assume all
-            consumption happens at the START time of the operation.
-        - When refunding, we update to assume all consumption happened at the
-            END time of the operation.
-        - This adjustment occurs EVEN IF no token refund is needed, ensuring
-            the system always records the actual end time of consumption.
-
-        This approach provides tight adherence to rate limits without requiring
-        knowledge of how resources were consumed between start and end times.
-        We don't assume linear consumption or any specific pattern of usage
-        during processing.
-
-        Overuse Handling:
-        If actual usage exceeds reserved usage for any metric (e.g., reserved 100
-        tokens but used 120), this method will:
-        1. Log a warning
-        2. Apply a negative refund (-20 tokens), reducing available capacity further
-
-        Args:
-            reserved_usage: The usage that was originally reserved at the start
-                            of the operation
-            actual_usage: The actual usage consumed by the end of the operation
-                        (may be more or less than reserved_usage)
-
-        Example:
-            TIME N=0: Reserve 100 tokens (assumes all consumed immediately)
-            TIME N=10: Operation completes, but only used 80 tokens
-
-            The refund will:
-            1. Return 20 unused tokens (100-80)
-            2. Update the timestamp to N=10, giving full credit for the elapsed time
-
-            Alternative scenario:
-            TIME N=0: Reserve 100 tokens
-            TIME N=10: Operation completes, but used 120 tokens
-
-            The refund will:
-            1. Apply a negative refund of -20 tokens (100-120)
-            2. Update the timestamp to N=10
-
-        """
+        """Refund unused capacity back to the rate limiter based on actual usage."""
         # Calculate how much to refund for each metric
         refund_usage_: dict[str, float] = {}
         for metric, reserved_amount in reserved_usage.items():
@@ -440,15 +380,15 @@ class RedisBackend(RateLimiterBackend):
             refund_usage_[metric] = refund_amount
         refund_usage: frozendict[str, float] = frozendict(refund_usage_)
 
-        fresh_start_buckets: list[RedisBucket] = []
+        fresh_start_buckets: list[SyncRedisBucket] = []
         completed = False
-        async with await self._lock(timeout=LOCK_TIMEOUT_SECONDS):
+        with self._lock(timeout=LOCK_TIMEOUT_SECONDS):
             pipeline = self._redis.pipeline()
             current_time = time.time()
 
             # Get current capacities (which already account for time-based refill)
             prerefund_capacities, fresh_start_buckets = (
-                await self._get_capacities_unsafe(
+                self._get_capacities_unsafe(
                     pipeline=pipeline,
                     current_time=current_time,
                 )
@@ -491,7 +431,7 @@ class RedisBackend(RateLimiterBackend):
                 updated_capacities = frozendict(updated_capacities_)
 
             # Always update capacities in Redis with the current time
-            await self._set_capacities_unsafe(
+            self._set_capacities_unsafe(
                 frozendict(updated_capacities),
                 pipeline=pipeline,
                 current_time=current_time,
@@ -499,9 +439,9 @@ class RedisBackend(RateLimiterBackend):
             completed = True
         if not completed:
             raise RuntimeError("Unexpected fallthrough in refund_capacity")
-        await self._fresh_start_buckets_callback(fresh_start_buckets)
+        self._fresh_start_buckets_callback(fresh_start_buckets)
         if self._callbacks and self._callbacks.on_capacity_refunded:
-            await self._callbacks.on_capacity_refunded(
+            self._callbacks.on_capacity_refunded(
                 model_family=self._limit_config.get_model_family(),
                 reserved_usage=reserved_usage,
                 actual_usage=actual_usage,
@@ -510,7 +450,7 @@ class RedisBackend(RateLimiterBackend):
                 postrefund_capacities=updated_capacities,
             )
 
-    async def set_max_capacity(
+    def set_max_capacity(
         self, metric: str, per_seconds: int, value: float,
     ) -> None:
         bucket = next(
@@ -523,11 +463,11 @@ class RedisBackend(RateLimiterBackend):
         )
         if bucket is None:
             raise ValueError(f"Bucket '{metric}/{per_seconds}s' not found")
-        await bucket.set_max_capacity(value)
+        bucket.set_max_capacity(value)
 
-    async def _fresh_start_buckets_callback(
+    def _fresh_start_buckets_callback(
         self,
-        fresh_start_buckets: list[RedisBucket],
+        fresh_start_buckets: list[SyncRedisBucket],
     ) -> None:
         if (
             fresh_start_buckets
@@ -535,7 +475,7 @@ class RedisBackend(RateLimiterBackend):
             and self._callbacks.on_missing_consumption_data
         ):
             for bucket in fresh_start_buckets:
-                await self._callbacks.on_missing_consumption_data(
+                self._callbacks.on_missing_consumption_data(
                     model_family=self._limit_config.get_model_family(),
                     usage_metric=bucket.usage_metric,
                     per_seconds=bucket.per_seconds,

@@ -1,0 +1,342 @@
+import asyncio
+import time
+import warnings
+from typing import ClassVar
+
+from frozendict import frozendict
+
+from token_throttle._interfaces._callbacks import RateLimiterCallbacks
+from token_throttle._interfaces._interfaces import (
+    PerModelConfig,
+    RateLimiterBackend,
+    RateLimiterBackendBuilderInterface,
+)
+from token_throttle._interfaces._models import Capacities, FrozenUsage
+
+from ._bucket import MemoryBucket
+
+
+class MemoryBackendBuilder(RateLimiterBackendBuilderInterface):
+    def __init__(
+        self,
+        *,
+        sleep_interval: float | None = None,
+    ) -> None:
+        super().__init__()
+        self._sleep_interval = sleep_interval
+
+    def build(
+        self,
+        limit_config: PerModelConfig,
+        *,
+        callbacks: RateLimiterCallbacks | None = None,
+    ) -> "RateLimiterBackend":
+        buckets = []
+        for quota in limit_config.quotas:
+            b = MemoryBucket(
+                metric=quota.metric,
+                per_seconds=float(quota.per_seconds),
+                limit=float(quota.limit),
+                model_family=limit_config.get_model_family(),
+            )
+            buckets.append(b)
+        return MemoryBackend(
+            buckets=buckets,
+            sleep_interval=self._sleep_interval,
+            callbacks=callbacks,
+            limit_config=limit_config,
+        )
+
+
+class MemoryBackend(RateLimiterBackend):
+    DEFAULT_SLEEP_INTERVAL: ClassVar[float] = 0.1
+
+    def __init__(
+        self,
+        buckets: list[MemoryBucket],
+        limit_config: PerModelConfig,
+        *,
+        sleep_interval: float | None = None,
+        callbacks: RateLimiterCallbacks | None = None,
+    ) -> None:
+        super().__init__()
+        self._buckets = buckets
+        self._lock = asyncio.Lock()
+        self._sleep_interval: float = sleep_interval or self.DEFAULT_SLEEP_INTERVAL
+        self._callbacks = callbacks
+        self._limit_config = limit_config
+
+    def _get_capacities(
+        self,
+        current_time: float,
+    ) -> tuple[Capacities, list[MemoryBucket]]:
+        """Get capacities for all buckets. Must be called under lock."""
+        caps: dict[tuple[str, int], float] = {}
+        fresh_start_buckets: list[MemoryBucket] = []
+        for bucket in self._buckets:
+            result = bucket.get_capacity(current_time)
+            if result.is_fresh_start:
+                fresh_start_buckets.append(bucket)
+            caps[(bucket.usage_metric, int(bucket.per_seconds))] = result.amount
+        return frozendict(caps), fresh_start_buckets
+
+    def _set_capacities(
+        self,
+        new_capacities: Capacities,
+        current_time: float,
+        *,
+        allow_negative: bool = False,
+    ) -> None:
+        """Set capacities for all buckets. Must be called under lock."""
+        for (usage_metric, per_seconds), amount in new_capacities.items():
+            bucket = next(
+                (
+                    b
+                    for b in self._buckets
+                    if b.usage_metric == usage_metric and b.per_seconds == per_seconds
+                ),
+                None,
+            )
+            if bucket is None:
+                raise ValueError(f"Bucket '{usage_metric}/{per_seconds}s' not found")
+            bucket.set_capacity(amount, current_time, allow_negative=allow_negative)
+
+    async def _check_and_consume_capacity(
+        self,
+        usage: FrozenUsage,
+    ) -> tuple[bool, Capacities, Capacities]:
+        """Check if there's enough capacity and consume it if available."""
+        postconsumption_capacities: Capacities = frozendict()
+        fresh_start_buckets: list[MemoryBucket] = []
+
+        async with self._lock:
+            current_time = time.time()
+            preconsumption_capacities, fresh_start_buckets = self._get_capacities(
+                current_time,
+            )
+
+            # All-or-nothing: check every bucket for the relevant metric
+            for usage_metric, usage_amount in usage.items():
+                for (cap_metric, _), cap_amount in preconsumption_capacities.items():
+                    if usage_metric != cap_metric:
+                        continue
+                    if usage_amount > cap_amount:
+                        return (
+                            False,
+                            preconsumption_capacities,
+                            postconsumption_capacities,
+                        )
+
+            # Sufficient capacity — subtract usage from each matching bucket
+            postconsumption_dict: dict[tuple[str, int], float] = {}
+            for (
+                cap_metric,
+                per_seconds,
+            ), cap_amount in preconsumption_capacities.items():
+                for usage_metric, usage_amount in usage.items():
+                    if cap_metric != usage_metric:
+                        continue
+                    postconsumption_dict[(cap_metric, per_seconds)] = (
+                        cap_amount - usage_amount
+                    )
+            postconsumption_capacities = frozendict(postconsumption_dict)
+            self._set_capacities(postconsumption_capacities, current_time)
+
+        # Callbacks fired outside the lock
+        await self._fresh_start_buckets_callback(fresh_start_buckets)
+        if self._callbacks and self._callbacks.on_capacity_consumed:
+            await self._callbacks.on_capacity_consumed(
+                model_family=self._limit_config.get_model_family(),
+                preconsumption_capacities=preconsumption_capacities,
+                postconsumption_capacities=postconsumption_capacities,
+                usage=usage,
+                current_time=current_time,
+            )
+        return True, preconsumption_capacities, postconsumption_capacities
+
+    async def consume_capacity(self, usage: FrozenUsage) -> None:
+        """Consume capacity unconditionally. Capacity may go negative."""
+        fresh_start_buckets: list[MemoryBucket] = []
+
+        async with self._lock:
+            current_time = time.time()
+            preconsumption_capacities, fresh_start_buckets = self._get_capacities(
+                current_time,
+            )
+
+            postconsumption_dict: dict[tuple[str, int], float] = {}
+            for (
+                cap_metric,
+                per_seconds,
+            ), cap_amount in preconsumption_capacities.items():
+                for usage_metric, usage_amount in usage.items():
+                    if cap_metric != usage_metric:
+                        continue
+                    postconsumption_dict[(cap_metric, per_seconds)] = (
+                        cap_amount - usage_amount
+                    )
+            postconsumption_capacities = frozendict(postconsumption_dict)
+            self._set_capacities(
+                postconsumption_capacities, current_time, allow_negative=True,
+            )
+
+        # Callbacks fired outside the lock
+        await self._fresh_start_buckets_callback(fresh_start_buckets)
+        if self._callbacks and self._callbacks.on_capacity_consumed:
+            await self._callbacks.on_capacity_consumed(
+                model_family=self._limit_config.get_model_family(),
+                preconsumption_capacities=preconsumption_capacities,
+                postconsumption_capacities=postconsumption_capacities,
+                usage=usage,
+                current_time=current_time,
+            )
+
+    async def await_for_capacity(
+        self,
+        usage: FrozenUsage,
+    ) -> None:
+        """Wait until all buckets have the required capacity."""
+        has_waited = False
+        start_time = time.time()
+        while True:
+            (
+                available,
+                preconsumption,
+                postconsumption,
+            ) = await self._check_and_consume_capacity(usage)
+            if available:
+                if (
+                    has_waited
+                    and self._callbacks
+                    and self._callbacks.after_wait_end_consumption
+                ):
+                    wait_time_s = time.time() - start_time
+                    await self._callbacks.after_wait_end_consumption(
+                        model_family=self._limit_config.get_model_family(),
+                        preconsumption_capacities=preconsumption,
+                        postconsumption_capacities=postconsumption,
+                        usage=frozendict(usage),
+                        wait_time_s=wait_time_s,
+                    )
+                return
+
+            if not has_waited:
+                has_waited = True
+                if self._callbacks and self._callbacks.on_wait_start:
+                    await self._callbacks.on_wait_start(
+                        model_family=self._limit_config.get_model_family(),
+                        preconsumption_capacities=preconsumption,
+                        usage=usage,
+                    )
+
+            await asyncio.sleep(self._sleep_interval)
+
+    async def refund_capacity(
+        self,
+        reserved_usage: FrozenUsage,
+        actual_usage: FrozenUsage,
+    ) -> None:
+        """
+        Refund unused capacity back to the rate limiter based on actual usage.
+
+        Handles both positive refunds (used less than reserved) and negative
+        refunds (used more than reserved, i.e. overuse).
+        """
+        # Calculate refund amounts per metric
+        refund_usage_: dict[str, float] = {}
+        for metric, reserved_amount in reserved_usage.items():
+            actual_amount = actual_usage.get(metric, 0)
+            refund_amount = float(reserved_amount) - float(actual_amount)
+
+            if refund_amount < 0:
+                warnings.warn(
+                    f"Actual usage ({actual_amount}) for {metric} exceeds "
+                    f"reserved usage ({reserved_amount}). Applying negative refund.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+
+            refund_usage_[metric] = refund_amount
+        refund_usage: frozendict[str, float] = frozendict(refund_usage_)
+
+        async with self._lock:
+            current_time = time.time()
+            prerefund_capacities, fresh_start_buckets = self._get_capacities(
+                current_time,
+            )
+
+            # Apply refund amounts to current capacity
+            updated_capacities_: dict[tuple[str, float], float] = dict(
+                prerefund_capacities,
+            )
+            for cap_metric, per_seconds in prerefund_capacities:
+                for usage_metric, refund_amount in refund_usage.items():
+                    if cap_metric != usage_metric:
+                        continue
+                    bucket = next(
+                        (
+                            b
+                            for b in self._buckets
+                            if b.usage_metric == usage_metric
+                            and b.per_seconds == per_seconds
+                        ),
+                        None,
+                    )
+                    if bucket is None:
+                        raise ValueError(
+                            f"Bucket '{usage_metric}/{per_seconds}s' not found",
+                        )
+                    updated_capacities_[(usage_metric, int(per_seconds))] = min(
+                        max(
+                            updated_capacities_[(usage_metric, int(per_seconds))]
+                            + refund_amount,
+                            0,
+                        ),
+                        bucket.max_capacity,
+                    )
+            updated_capacities = frozendict(updated_capacities_)
+
+            self._set_capacities(updated_capacities, current_time)
+
+        # Callbacks fired outside the lock
+        await self._fresh_start_buckets_callback(fresh_start_buckets)
+        if self._callbacks and self._callbacks.on_capacity_refunded:
+            await self._callbacks.on_capacity_refunded(
+                model_family=self._limit_config.get_model_family(),
+                reserved_usage=reserved_usage,
+                actual_usage=actual_usage,
+                refunded_usage=refund_usage,
+                prerefund_capacities=prerefund_capacities,
+                postrefund_capacities=updated_capacities,
+            )
+
+    async def set_max_capacity(
+        self, metric: str, per_seconds: int, value: float,
+    ) -> None:
+        bucket = next(
+            (
+                b
+                for b in self._buckets
+                if b.usage_metric == metric and int(b.per_seconds) == per_seconds
+            ),
+            None,
+        )
+        if bucket is None:
+            raise ValueError(f"Bucket '{metric}/{per_seconds}s' not found")
+        bucket.set_max_capacity(value)
+
+    async def _fresh_start_buckets_callback(
+        self,
+        fresh_start_buckets: list[MemoryBucket],
+    ) -> None:
+        if (
+            fresh_start_buckets
+            and self._callbacks
+            and self._callbacks.on_missing_consumption_data
+        ):
+            for bucket in fresh_start_buckets:
+                await self._callbacks.on_missing_consumption_data(
+                    model_family=self._limit_config.get_model_family(),
+                    usage_metric=bucket.usage_metric,
+                    per_seconds=bucket.per_seconds,
+                )
