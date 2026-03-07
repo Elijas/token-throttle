@@ -45,7 +45,11 @@ class SyncRateLimiter:
         return self._acquire_or_record(usage, model, _block=False)
 
     def _acquire_or_record(
-        self, usage: Usage, model: str, *, _block: bool,
+        self,
+        usage: Usage,
+        model: str,
+        *,
+        _block: bool,
     ) -> CapacityReservation:
         usage = frozen_usage(usage)
         limit_config = self._config_getter(model)

@@ -1,6 +1,7 @@
 """Tests for interfaces in token_throttle._interfaces._interfaces."""
 
 import pytest
+from frozendict import frozendict
 
 from token_throttle._interfaces._interfaces import PerModelConfig
 from token_throttle._interfaces._models import Quota, UsageQuotas
@@ -51,8 +52,6 @@ class TestPerModelConfig:
         assert config.usage_counter is None
 
     def test_usage_counter_accepts_callable(self):
-        from frozendict import frozendict
-
         def my_counter(**_request) -> frozendict:
             return frozendict({"requests": 1.0})
 

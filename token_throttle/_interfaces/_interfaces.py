@@ -86,7 +86,10 @@ class RateLimiterBackend(ABC):
 
     @abstractmethod
     async def set_max_capacity(
-        self, metric: str, per_seconds: int, value: float,
+        self,
+        metric: str,
+        per_seconds: int,
+        value: float,
     ) -> None:
         """Dynamically change the max capacity for a specific bucket."""
 
@@ -135,7 +138,10 @@ class SyncRateLimiterBackend(ABC):
 
     @abstractmethod
     def set_max_capacity(
-        self, metric: str, per_seconds: int, value: float,
+        self,
+        metric: str,
+        per_seconds: int,
+        value: float,
     ) -> None:
         """Dynamically change the max capacity for a specific bucket."""
 

@@ -51,7 +51,8 @@ class TestRecordUsageCallsConsumeCapacity:
         limiter = SyncRateLimiter(make_limited_config(), backend=builder)
 
         reservation = limiter.record_usage(
-            {"tokens": 100, "requests": 1}, model="gpt-4",
+            {"tokens": 100, "requests": 1},
+            model="gpt-4",
         )
 
         mock_backend.consume_capacity.assert_called_once()
@@ -63,7 +64,8 @@ class TestRecordUsageCallsConsumeCapacity:
         limiter = SyncRateLimiter(make_limited_config(), backend=builder)
 
         reservation = limiter.record_usage(
-            {"tokens": 500, "requests": 3}, model="gpt-4",
+            {"tokens": 500, "requests": 3},
+            model="gpt-4",
         )
 
         assert float(reservation.usage["tokens"]) == 500.0
@@ -119,6 +121,7 @@ class TestRecordUsageUnlimited:
         limiter = SyncRateLimiter(make_unlimited_config(), backend=builder)
 
         with pytest.raises(
-            ValueError, match="Usage must be empty for unlimited capacity",
+            ValueError,
+            match="Usage must be empty for unlimited capacity",
         ):
             limiter.record_usage({"tokens": 5}, model="gpt-4")

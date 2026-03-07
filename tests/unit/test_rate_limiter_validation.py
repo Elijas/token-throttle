@@ -161,7 +161,7 @@ class TestRefundCapacityValidation:
         assert result is None
 
     async def test_mismatched_usage_keys_raises(self):
-        builder, mock_backend = make_mock_backend_builder()
+        builder, _mock_backend = make_mock_backend_builder()
         limiter = RateLimiter(make_limited_config(), backend=builder)
 
         # First acquire to populate the backend cache

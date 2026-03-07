@@ -14,6 +14,7 @@ from token_throttle._factories._openai._openai_rate_limiter import (
     create_openai_redis_rate_limiter,
     openai_model_family_getter,
 )
+from token_throttle._interfaces._callbacks import RateLimiterCallbacks
 from token_throttle._rate_limiter import RateLimiter
 
 
@@ -110,8 +111,6 @@ class TestCreateOpenAIRedisRateLimiter:
         assert config.usage_counter is not None
 
     def test_custom_callbacks_are_passed(self):
-        from token_throttle._interfaces._callbacks import RateLimiterCallbacks
-
         mock_redis = MagicMock()
         custom_callbacks = RateLimiterCallbacks()
         limiter = create_openai_redis_rate_limiter(

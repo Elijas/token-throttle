@@ -170,7 +170,9 @@ async def test_mixed_acquire_and_record_same_model(backend_builder):
     await backend.await_for_capacity(frozen_usage({"requests": 1}))
     elapsed = time.monotonic() - start
 
-    assert elapsed >= 0.1, "acquire should block after capacity was consumed to negative"
+    assert elapsed >= 0.1, (
+        "acquire should block after capacity was consumed to negative"
+    )
 
 
 # ---------------------------------------------------------------------------

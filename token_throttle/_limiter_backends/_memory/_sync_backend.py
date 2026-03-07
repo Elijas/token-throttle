@@ -177,7 +177,9 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
                     )
             postconsumption_capacities = frozendict(postconsumption_dict)
             self._set_capacities(
-                postconsumption_capacities, current_time, allow_negative=True,
+                postconsumption_capacities,
+                current_time,
+                allow_negative=True,
             )
 
         # Callbacks fired outside the lock
@@ -311,7 +313,10 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
             )
 
     def set_max_capacity(
-        self, metric: str, per_seconds: int, value: float,
+        self,
+        metric: str,
+        per_seconds: int,
+        value: float,
     ) -> None:
         bucket = next(
             (

@@ -7,7 +7,7 @@ from pathlib import Path
 
 def _replace_install_line(content: str, version: str) -> str:
     major, minor, *_ = version.split(".")
-    next_minor = f"{major}.{int(minor)+1}.0"
+    next_minor = f"{major}.{int(minor) + 1}.0"
     new_line = f'pip install "token-throttle[redis,tiktoken]>={version},<{next_minor}"'
     new_content, n = re.subn(
         r'pip install "[^">]*>=\d+\.\d+\.\d+,<\d+\.\d+\.\d+"',

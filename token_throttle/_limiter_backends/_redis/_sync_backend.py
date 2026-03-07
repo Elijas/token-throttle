@@ -387,11 +387,9 @@ class SyncRedisBackend(SyncRateLimiterBackend):
             current_time = time.time()
 
             # Get current capacities (which already account for time-based refill)
-            prerefund_capacities, fresh_start_buckets = (
-                self._get_capacities_unsafe(
-                    pipeline=pipeline,
-                    current_time=current_time,
-                )
+            prerefund_capacities, fresh_start_buckets = self._get_capacities_unsafe(
+                pipeline=pipeline,
+                current_time=current_time,
             )
 
             # Apply refund amounts to current capacity
@@ -451,7 +449,10 @@ class SyncRedisBackend(SyncRateLimiterBackend):
             )
 
     def set_max_capacity(
-        self, metric: str, per_seconds: int, value: float,
+        self,
+        metric: str,
+        per_seconds: int,
+        value: float,
     ) -> None:
         bucket = next(
             (

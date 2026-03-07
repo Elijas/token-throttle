@@ -208,11 +208,12 @@ class RedisBackend(RateLimiterBackend):
             pipeline = self._redis.pipeline()
             current_time = time.time()
 
-            preconsumption_capacities, fresh_start_buckets = (
-                await self._get_capacities_unsafe(
-                    pipeline=pipeline,
-                    current_time=current_time,
-                )
+            (
+                preconsumption_capacities,
+                fresh_start_buckets,
+            ) = await self._get_capacities_unsafe(
+                pipeline=pipeline,
+                current_time=current_time,
             )
 
             for usage_metric_name, usage_amount in usage.items():
@@ -282,11 +283,12 @@ class RedisBackend(RateLimiterBackend):
             pipeline = self._redis.pipeline()
             current_time = time.time()
 
-            preconsumption_capacities, fresh_start_buckets = (
-                await self._get_capacities_unsafe(
-                    pipeline=pipeline,
-                    current_time=current_time,
-                )
+            (
+                preconsumption_capacities,
+                fresh_start_buckets,
+            ) = await self._get_capacities_unsafe(
+                pipeline=pipeline,
+                current_time=current_time,
             )
 
             postconsumption_dict = {}
@@ -334,9 +336,11 @@ class RedisBackend(RateLimiterBackend):
         has_waited = False
         start_time = time.time()
         while True:
-            available, preconsumption, postconsumption = (
-                await self._check_and_consume_capacity(usage)
-            )
+            (
+                available,
+                preconsumption,
+                postconsumption,
+            ) = await self._check_and_consume_capacity(usage)
             if available:
                 if has_waited:
                     wait_time_s = time.time() - start_time
@@ -447,11 +451,12 @@ class RedisBackend(RateLimiterBackend):
             current_time = time.time()
 
             # Get current capacities (which already account for time-based refill)
-            prerefund_capacities, fresh_start_buckets = (
-                await self._get_capacities_unsafe(
-                    pipeline=pipeline,
-                    current_time=current_time,
-                )
+            (
+                prerefund_capacities,
+                fresh_start_buckets,
+            ) = await self._get_capacities_unsafe(
+                pipeline=pipeline,
+                current_time=current_time,
             )
 
             # Apply refund amounts to current capacity
@@ -511,7 +516,10 @@ class RedisBackend(RateLimiterBackend):
             )
 
     async def set_max_capacity(
-        self, metric: str, per_seconds: int, value: float,
+        self,
+        metric: str,
+        per_seconds: int,
+        value: float,
     ) -> None:
         bucket = next(
             (

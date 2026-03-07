@@ -18,7 +18,9 @@ from token_throttle._interfaces._interfaces import PerModelConfig
 from token_throttle._interfaces._models import Quota, UsageQuotas, frozen_usage
 
 
-def _build_backend(builder, *, limit: float, per_seconds: float, metric: str = "requests"):
+def _build_backend(
+    builder, *, limit: float, per_seconds: float, metric: str = "requests"
+):
     config = PerModelConfig(
         model_family="test",
         quotas=UsageQuotas(
@@ -108,7 +110,9 @@ class TestConcurrentAcquireAndRefund:
 
         assert len(results) == 5
 
-    def test_interleaved_acquire_refund_no_negative_capacity(self, sync_backend_builder):
+    def test_interleaved_acquire_refund_no_negative_capacity(
+        self, sync_backend_builder
+    ):
         """
         Many interleaved acquires and full refunds.
 
@@ -135,7 +139,9 @@ class TestConcurrentAcquireAndRefund:
 class TestHighParallelismStress:
     """Stress tests with many threads to catch deadlocks and races."""
 
-    def test_fifty_concurrent_acquires_complete_without_deadlock(self, sync_backend_builder):
+    def test_fifty_concurrent_acquires_complete_without_deadlock(
+        self, sync_backend_builder
+    ):
         """
         50 concurrent threads must all complete within a timeout.
 

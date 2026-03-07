@@ -51,7 +51,8 @@ class TestRecordUsageCallsConsumeCapacity:
         limiter = RateLimiter(make_limited_config(), backend=builder)
 
         reservation = await limiter.record_usage(
-            {"tokens": 100, "requests": 1}, model="gpt-4",
+            {"tokens": 100, "requests": 1},
+            model="gpt-4",
         )
 
         mock_backend.consume_capacity.assert_awaited_once()
@@ -63,7 +64,8 @@ class TestRecordUsageCallsConsumeCapacity:
         limiter = RateLimiter(make_limited_config(), backend=builder)
 
         reservation = await limiter.record_usage(
-            {"tokens": 500, "requests": 3}, model="gpt-4",
+            {"tokens": 500, "requests": 3},
+            model="gpt-4",
         )
 
         assert float(reservation.usage["tokens"]) == 500.0
@@ -93,7 +95,8 @@ class TestRecordUsageValidation:
 
         with pytest.raises(ValueError, match="must be non-negative"):
             await limiter.record_usage(
-                {"tokens": -1, "requests": 1}, model="gpt-4",
+                {"tokens": -1, "requests": 1},
+                model="gpt-4",
             )
 
     async def test_usage_exceeding_quota_limit_raises(self):
@@ -102,7 +105,8 @@ class TestRecordUsageValidation:
 
         with pytest.raises(ValueError, match="exceeds the limit"):
             await limiter.record_usage(
-                {"tokens": 9999, "requests": 1}, model="gpt-4",
+                {"tokens": 9999, "requests": 1},
+                model="gpt-4",
             )
 
 
@@ -123,6 +127,7 @@ class TestRecordUsageUnlimited:
         limiter = RateLimiter(make_unlimited_config(), backend=builder)
 
         with pytest.raises(
-            ValueError, match="Usage must be empty for unlimited capacity",
+            ValueError,
+            match="Usage must be empty for unlimited capacity",
         ):
             await limiter.record_usage({"tokens": 5}, model="gpt-4")

@@ -421,4 +421,6 @@ def test_consume_capacity_allows_negative(builder):
     backend.wait_for_capacity(frozen_usage({"requests": 1}))
     elapsed = time.monotonic() - start
 
-    assert elapsed >= 0.08, f"Expected wait due to negative capacity, got {elapsed:.3f} s"
+    assert elapsed >= 0.08, (
+        f"Expected wait due to negative capacity, got {elapsed:.3f} s"
+    )

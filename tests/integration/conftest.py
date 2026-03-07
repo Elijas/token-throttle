@@ -1,4 +1,5 @@
 import pytest
+import redis as sync_redis
 import redis.asyncio as redis
 
 from token_throttle._limiter_backends._memory._backend import MemoryBackendBuilder
@@ -39,8 +40,6 @@ def backend_builder(request: pytest.FixtureRequest):
 
 @pytest.fixture
 def sync_redis_client(redis_url: str):
-    import redis as sync_redis
-
     client = sync_redis.from_url(redis_url)
     try:
         yield client

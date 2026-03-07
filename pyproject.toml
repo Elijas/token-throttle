@@ -199,6 +199,12 @@ target-version = "py312"
 "token_throttle/_interfaces/_interfaces.py" = [
     "TC001",   # Pydantic models need these imports at runtime
 ]
+"token_throttle/_interfaces/_callbacks.py" = [
+    "PLC0415", # Intentional lazy import of optional dep (loguru)
+]
+"token_throttle/_factories/_openai/_token_counter.py" = [
+    "PLC0415", # Intentional lazy import of optional dep (tiktoken)
+]
 "tests/**/*.py" = [
     "PT006",   # Wrong type passed to first argument of `pytest.mark.parametrize`; expected `tuple`
     "ANN201",  # Missing return type annotation for public function

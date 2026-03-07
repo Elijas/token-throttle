@@ -35,7 +35,9 @@ class MemoryBucket:
             bucket_id=self._bucket_id,
         )
 
-    def set_capacity(self, value: float, current_time: float, *, allow_negative: bool = False) -> None:
+    def set_capacity(
+        self, value: float, current_time: float, *, allow_negative: bool = False
+    ) -> None:
         self.capacity = value if allow_negative else max(0.0, value)
         self.last_checked = current_time
 

@@ -116,6 +116,8 @@ class SyncRedisBucket:
             and self._max_capacity_key == other._max_capacity_key
         )
 
+    __hash__ = None  # mutable; defining __eq__ without __hash__
+
     def lock(self, **kwargs) -> redis.lock.Lock:
         return redis.lock.Lock(self._redis, self._lock_key, **kwargs)
 

@@ -41,7 +41,9 @@ def validate_refund_keys(actual_keys: set[str], reservation_keys: set[str]) -> N
         )
 
 
-def resolve_config(cfg: PerModelConfig | PerModelConfigGetter, model_name: str) -> PerModelConfig:
+def resolve_config(
+    cfg: PerModelConfig | PerModelConfigGetter, model_name: str
+) -> PerModelConfig:
     """
     Resolve a config (static or callable) and default model_family to model_name.
 
