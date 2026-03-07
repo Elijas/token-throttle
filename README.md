@@ -149,7 +149,7 @@ Here are the key features of `token-throttle`, explained:
 
 - **Flexible Time Windows:**
 
-  - Define quotas over various time periods (e.g., per second, per minute, per hour, per day, or anything in-between) using the `per_seconds` parameter in `Quota`.
+  - Define quotas over various time periods (e.g., per second, per minute, per hour, per day) using the `per_seconds` parameter in `Quota` (integer seconds).
   - Enforce limits across multiple windows concurrently for the same resource (e.g., limit requests per minute _and_ requests per day).
 
 - **Correctness & Atomicity:**
