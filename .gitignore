@@ -1,4 +1,5 @@
 .DS_Store
+.claude/
 lcov.info
 
 # Byte-compiled / optimized / DLL files
