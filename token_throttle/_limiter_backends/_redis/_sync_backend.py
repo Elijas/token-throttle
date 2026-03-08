@@ -211,6 +211,18 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                 )
             )
 
+            # Fail fast: if usage exceeds any bucket's max_capacity, it can
+            # never be satisfied (capacity is capped at max_capacity).
+            for usage_metric_name, usage_amount in usage.items():
+                for bucket in self.sorted_buckets:
+                    if bucket.usage_metric != usage_metric_name:
+                        continue
+                    if usage_amount > bucket.max_capacity:
+                        raise ValueError(
+                            f"Usage value for {usage_metric_name} ({usage_amount}) "
+                            f"exceeds bucket max capacity ({bucket.max_capacity})",
+                        )
+
             for usage_metric_name, usage_amount in usage.items():
                 for (
                     capacity_metric_name,

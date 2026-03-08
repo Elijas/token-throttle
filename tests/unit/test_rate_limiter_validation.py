@@ -89,16 +89,6 @@ class TestAcquireCapacityValidation:
         with pytest.raises(ValueError, match="must be non-negative"):
             await limiter.acquire_capacity({"tokens": -1, "requests": 1}, model="gpt-4")
 
-    async def test_usage_exceeding_quota_limit_raises(self):
-        builder, _ = make_mock_backend_builder()
-        limiter = RateLimiter(make_limited_config(), backend=builder)
-
-        with pytest.raises(ValueError, match="exceeds the limit"):
-            await limiter.acquire_capacity(
-                {"tokens": 9999, "requests": 1}, model="gpt-4"
-            )
-
-
 class TestAcquireCapacityForRequestValidation:
     """Tests for ValueError paths in acquire_capacity_for_request."""
 

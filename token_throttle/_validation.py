@@ -20,11 +20,6 @@ def validate_acquire_usage(usage: FrozenUsage, quotas: UsageQuotas) -> None:
         amount = float(amount_)
         if amount < 0:
             raise ValueError(f"Usage value for {metric} must be non-negative")
-        for quota in quotas.get_quotas(metric):
-            if amount > float(quota.limit):
-                raise ValueError(
-                    f"Usage value for {metric} ({amount}) exceeds the limit ({quota.limit})",
-                )
 
 
 def validate_refund_keys(actual_keys: set[str], reservation_keys: set[str]) -> None:

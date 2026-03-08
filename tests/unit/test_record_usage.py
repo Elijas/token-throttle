@@ -99,17 +99,6 @@ class TestRecordUsageValidation:
                 model="gpt-4",
             )
 
-    async def test_usage_exceeding_quota_limit_raises(self):
-        builder, _ = make_mock_backend_builder()
-        limiter = RateLimiter(make_limited_config(), backend=builder)
-
-        with pytest.raises(ValueError, match="exceeds the limit"):
-            await limiter.record_usage(
-                {"tokens": 9999, "requests": 1},
-                model="gpt-4",
-            )
-
-
 class TestRecordUsageUnlimited:
     """record_usage with unlimited config."""
 

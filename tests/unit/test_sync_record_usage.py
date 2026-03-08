@@ -96,14 +96,6 @@ class TestRecordUsageValidation:
         with pytest.raises(ValueError, match="must be non-negative"):
             limiter.record_usage({"tokens": -1, "requests": 1}, model="gpt-4")
 
-    def test_usage_exceeding_quota_limit_raises(self):
-        builder, _ = make_mock_backend_builder()
-        limiter = SyncRateLimiter(make_limited_config(), backend=builder)
-
-        with pytest.raises(ValueError, match="exceeds the limit"):
-            limiter.record_usage({"tokens": 9999, "requests": 1}, model="gpt-4")
-
-
 class TestRecordUsageUnlimited:
     """record_usage with unlimited config."""
 

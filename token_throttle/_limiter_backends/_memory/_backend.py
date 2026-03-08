@@ -117,6 +117,18 @@ class MemoryBackend(RateLimiterBackend):
                 current_time,
             )
 
+            # Fail fast: if usage exceeds any bucket's max_capacity, it can
+            # never be satisfied (capacity is capped at max_capacity).
+            for usage_metric, usage_amount in usage.items():
+                for bucket in self._buckets:
+                    if bucket.usage_metric != usage_metric:
+                        continue
+                    if usage_amount > bucket.max_capacity:
+                        raise ValueError(
+                            f"Usage value for {usage_metric} ({usage_amount}) "
+                            f"exceeds bucket max capacity ({bucket.max_capacity})",
+                        )
+
             # All-or-nothing: check every bucket for the relevant metric
             for usage_metric, usage_amount in usage.items():
                 for (cap_metric, _), cap_amount in preconsumption_capacities.items():

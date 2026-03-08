@@ -10,7 +10,7 @@ import pytest
 
 from token_throttle._capacity import CalculatedCapacity
 from token_throttle._interfaces._interfaces import PerModelConfig
-from token_throttle._interfaces._models import Quota, UsageQuotas
+from token_throttle._interfaces._models import Quota, UsageQuotas, frozen_usage
 from token_throttle._limiter_backends._memory._backend import MemoryBackend
 from token_throttle._limiter_backends._memory._bucket import MemoryBucket
 from token_throttle._limiter_backends._memory._sync_backend import SyncMemoryBackend
@@ -291,3 +291,61 @@ class TestSleepIntervalZero:
             sleep_interval=0,
         )
         assert backend._sleep_interval == 0
+
+
+class TestMaxCapacityGuard:
+    """Usage exceeding bucket max_capacity must raise immediately, not loop forever."""
+
+    def _make_async_backend(
+        self, *, limit: float = 10, per_seconds: int = 1
+    ) -> MemoryBackend:
+        quota = Quota(metric="requests", limit=limit, per_seconds=per_seconds)
+        config = PerModelConfig(model_family="test", quotas=UsageQuotas([quota]))
+        bucket = make_bucket(limit=limit, per_seconds=per_seconds)
+        return MemoryBackend(buckets=[bucket], limit_config=config)
+
+    def _make_sync_backend(
+        self, *, limit: float = 10, per_seconds: int = 1
+    ) -> SyncMemoryBackend:
+        quota = Quota(metric="requests", limit=limit, per_seconds=per_seconds)
+        config = PerModelConfig(model_family="test", quotas=UsageQuotas([quota]))
+        bucket = make_bucket(limit=limit, per_seconds=per_seconds)
+        return SyncMemoryBackend(buckets=[bucket], limit_config=config)
+
+    async def test_async_usage_exceeding_max_capacity_raises(self):
+        backend = self._make_async_backend(limit=10)
+        with pytest.raises(ValueError, match="exceeds bucket max capacity"):
+            await backend.await_for_capacity(frozen_usage({"requests": 15}))
+
+    def test_sync_usage_exceeding_max_capacity_raises(self):
+        backend = self._make_sync_backend(limit=10)
+        with pytest.raises(ValueError, match="exceeds bucket max capacity"):
+            backend.wait_for_capacity(frozen_usage({"requests": 15}))
+
+    async def test_async_lowered_max_capacity_raises_instead_of_hanging(self):
+        """Regression: lowering max_capacity then requesting > new max must not loop forever."""
+        backend = self._make_async_backend(limit=10)
+        await backend.set_max_capacity("requests", 1, 3.0)
+        with pytest.raises(ValueError, match="exceeds bucket max capacity"):
+            await backend.await_for_capacity(frozen_usage({"requests": 5}))
+
+    def test_sync_lowered_max_capacity_raises_instead_of_hanging(self):
+        """Regression: lowering max_capacity then requesting > new max must not loop forever."""
+        backend = self._make_sync_backend(limit=10)
+        backend.set_max_capacity("requests", 1, 3.0)
+        with pytest.raises(ValueError, match="exceeds bucket max capacity"):
+            backend.wait_for_capacity(frozen_usage({"requests": 5}))
+
+    async def test_async_raised_max_capacity_allows_larger_usage(self):
+        """Regression: raising max_capacity must allow usage up to the new max."""
+        backend = self._make_async_backend(limit=10)
+        await backend.set_max_capacity("requests", 1, 20.0)
+        # Should succeed — 15 is within the new max of 20
+        await backend.await_for_capacity(frozen_usage({"requests": 15}))
+
+    def test_sync_raised_max_capacity_allows_larger_usage(self):
+        """Regression: raising max_capacity must allow usage up to the new max."""
+        backend = self._make_sync_backend(limit=10)
+        backend.set_max_capacity("requests", 1, 20.0)
+        # Should succeed — 15 is within the new max of 20
+        backend.wait_for_capacity(frozen_usage({"requests": 15}))
