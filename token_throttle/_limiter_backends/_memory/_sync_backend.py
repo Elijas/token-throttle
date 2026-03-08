@@ -342,7 +342,8 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
         )
         if bucket is None:
             raise ValueError(f"Bucket '{metric}/{per_seconds}s' not found")
-        bucket.set_max_capacity(value)
+        with self._lock:
+            bucket.set_max_capacity(value)
 
     def _fresh_start_buckets_callback(
         self,

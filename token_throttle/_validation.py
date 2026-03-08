@@ -1,5 +1,7 @@
 """Shared validation logic — used by both async RateLimiter and SyncRateLimiter."""
 
+import math
+
 from token_throttle._interfaces._interfaces import PerModelConfig, PerModelConfigGetter
 from token_throttle._interfaces._models import FrozenUsage, UsageQuotas
 
@@ -18,6 +20,10 @@ def validate_acquire_usage(usage: FrozenUsage, quotas: UsageQuotas) -> None:
         )
     for metric, amount_ in usage.items():
         amount = float(amount_)
+        if not math.isfinite(amount):
+            raise ValueError(
+                f"Usage value for {metric} must be finite (got {amount_!r})"
+            )
         if amount < 0:
             raise ValueError(f"Usage value for {metric} must be non-negative")
 

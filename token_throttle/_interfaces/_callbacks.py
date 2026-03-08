@@ -67,7 +67,7 @@ class OnMissingConsumptionDataCallback(Protocol):
         *,
         model_family: str,
         usage_metric: str,
-        per_seconds: float,
+        per_seconds: int,
     ) -> None:
         """Called when no previous consumption data is detected, assuming full quota"""
 
@@ -197,7 +197,7 @@ def create_loguru_callbacks(
         *,
         model_family: str,
         usage_metric: str,
-        per_seconds: float,
+        per_seconds: int,
     ) -> None:
         logger = _get_loguru_logger()
         logger.log(
@@ -284,7 +284,7 @@ class SyncOnMissingConsumptionDataCallback(Protocol):
         *,
         model_family: str,
         usage_metric: str,
-        per_seconds: float,
+        per_seconds: int,
     ) -> None: ...
 
 
@@ -401,7 +401,7 @@ def create_sync_loguru_callbacks(
         *,
         model_family: str,
         usage_metric: str,
-        per_seconds: float,
+        per_seconds: int,
     ) -> None:
         logger = _get_loguru_logger()
         logger.log(

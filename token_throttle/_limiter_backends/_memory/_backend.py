@@ -342,7 +342,8 @@ class MemoryBackend(RateLimiterBackend):
         )
         if bucket is None:
             raise ValueError(f"Bucket '{metric}/{per_seconds}s' not found")
-        bucket.set_max_capacity(value)
+        async with self._lock:
+            bucket.set_max_capacity(value)
 
     async def _fresh_start_buckets_callback(
         self,
