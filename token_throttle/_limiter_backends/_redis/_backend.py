@@ -201,7 +201,6 @@ class RedisBackend(RateLimiterBackend):
         usage: FrozenUsage = frozendict(
             {metric: float(amount) for metric, amount in usage_.items()},
         )
-        completed = False
         preconsumption_capacities: Capacities = frozendict()
         postconsumption_capacities: Capacities = frozendict()
         current_time: float = 0.0
@@ -261,20 +260,8 @@ class RedisBackend(RateLimiterBackend):
                 pipeline=pipeline,
                 current_time=current_time,
             )
-            completed = True  # Release the lock before the callback
-        if not completed:
-            raise RuntimeError("Unexpected fallthrough in _check_and_consume_capacity")
         await self._fresh_start_buckets_callback(fresh_start_buckets)
         if self._callbacks and self._callbacks.on_capacity_consumed:
-            if not all(
-                [
-                    preconsumption_capacities,
-                    postconsumption_capacities,
-                    usage,
-                    current_time,
-                ],
-            ):
-                raise ValueError("One or more arguments are empty")
             await self._callbacks.on_capacity_consumed(
                 model_family=self._limit_config.get_model_family(),
                 preconsumption_capacities=preconsumption_capacities,
@@ -325,15 +312,6 @@ class RedisBackend(RateLimiterBackend):
             )
         await self._fresh_start_buckets_callback(fresh_start_buckets)
         if self._callbacks and self._callbacks.on_capacity_consumed:
-            if not all(
-                [
-                    preconsumption_capacities,
-                    postconsumption_capacities,
-                    usage,
-                    current_time,
-                ],
-            ):
-                raise ValueError("One or more arguments are empty")
             await self._callbacks.on_capacity_consumed(
                 model_family=self._limit_config.get_model_family(),
                 preconsumption_capacities=preconsumption_capacities,
@@ -459,7 +437,6 @@ class RedisBackend(RateLimiterBackend):
         refund_usage: frozendict[str, float] = frozendict(refund_usage_)
 
         fresh_start_buckets: list[RedisBucket] = []
-        completed = False
         async with await self._lock(timeout=LOCK_TIMEOUT_SECONDS):
             pipeline = self._redis.pipeline()
             current_time = time.time()
@@ -515,9 +492,6 @@ class RedisBackend(RateLimiterBackend):
                 pipeline=pipeline,
                 current_time=current_time,
             )
-            completed = True
-        if not completed:
-            raise RuntimeError("Unexpected fallthrough in refund_capacity")
         await self._fresh_start_buckets_callback(fresh_start_buckets)
         if self._callbacks and self._callbacks.on_capacity_refunded:
             await self._callbacks.on_capacity_refunded(
@@ -545,7 +519,8 @@ class RedisBackend(RateLimiterBackend):
         )
         if bucket is None:
             raise ValueError(f"Bucket '{metric}/{per_seconds}s' not found")
-        await bucket.set_max_capacity(value)
+        async with await self._lock(timeout=LOCK_TIMEOUT_SECONDS):
+            await bucket.set_max_capacity(value)
 
     async def _fresh_start_buckets_callback(
         self,
