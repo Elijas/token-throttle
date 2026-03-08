@@ -270,7 +270,7 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
             )
 
             # Apply refund amounts to current capacity
-            updated_capacities_: dict[tuple[str, float], float] = dict(
+            updated_capacities_: dict[tuple[str, int], float] = dict(
                 prerefund_capacities,
             )
             for cap_metric, per_seconds in prerefund_capacities:

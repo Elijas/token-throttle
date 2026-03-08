@@ -1,3 +1,5 @@
+import math
+
 from token_throttle._capacity import CalculatedCapacity, calculate_capacity
 
 
@@ -42,6 +44,7 @@ class MemoryBucket:
         self.last_checked = current_time
 
     def set_max_capacity(self, value: float) -> None:
-        if value <= 0:
-            raise ValueError("max_capacity must be greater than 0")
+        if not (math.isfinite(value) and value > 0):
+            raise ValueError("max_capacity must be finite and greater than 0")
         self.max_capacity = value
+        self._rate_per_sec = value / float(self.per_seconds)

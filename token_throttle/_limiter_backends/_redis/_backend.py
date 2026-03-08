@@ -462,7 +462,7 @@ class RedisBackend(RateLimiterBackend):
             )
 
             # Apply refund amounts to current capacity
-            updated_capacities_: dict[tuple[str, float], float] = dict(
+            updated_capacities_: dict[tuple[str, int], float] = dict(
                 prerefund_capacities,
             )
             for (
@@ -495,7 +495,7 @@ class RedisBackend(RateLimiterBackend):
                         ),
                         bucket.max_capacity,
                     )
-                updated_capacities = frozendict(updated_capacities_)
+            updated_capacities = frozendict(updated_capacities_)
 
             # Always update capacities in Redis with the current time
             await self._set_capacities_unsafe(

@@ -1,3 +1,4 @@
+import math
 import time
 
 try:
@@ -80,26 +81,38 @@ class SyncRedisBucket:
 
         if stored_value is not None:
             try:
-                self._max_capacity_cached = float(stored_value)
+                parsed = float(stored_value)
+                new_value = (
+                    parsed
+                    if math.isfinite(parsed) and parsed > 0
+                    else self._max_capacity_default
+                )
             except (TypeError, ValueError):
                 # Invalid value in Redis, fall back to default
-                self._max_capacity_cached = self._max_capacity_default
+                new_value = self._max_capacity_default
         else:
             # Key doesn't exist, use default
-            self._max_capacity_cached = self._max_capacity_default
+            new_value = self._max_capacity_default
+
+        if new_value != self._max_capacity_cached:
+            self._max_capacity_cached = new_value
+            self._rate_per_sec = new_value / float(self.per_seconds)
+        else:
+            self._max_capacity_cached = new_value
 
         self._max_capacity_cache_time = current_time
         return self._max_capacity_cached
 
     def set_max_capacity(self, value: float) -> None:
         """Set the max_capacity in Redis for dynamic rate limit adjustment."""
-        if value <= 0:
-            raise ValueError("max_capacity must be greater than 0")
+        if not (math.isfinite(value) and value > 0):
+            raise ValueError("max_capacity must be finite and greater than 0")
 
         self._redis.set(self._max_capacity_key, value)
         # Update cache immediately
         self._max_capacity_cached = value
         self._max_capacity_cache_time = time.time()
+        self._rate_per_sec = value / float(self.per_seconds)
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, SyncRedisBucket):
