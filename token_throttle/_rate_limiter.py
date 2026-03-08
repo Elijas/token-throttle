@@ -17,7 +17,7 @@ from token_throttle._interfaces._models import (
 from token_throttle._validation import (
     resolve_config,
     validate_acquire_usage,
-    validate_refund_keys,
+    validate_refund_usage,
 )
 
 _UNLIMITED_FLAG = "__rate_limiting_disabled__"
@@ -122,7 +122,7 @@ class RateLimiter(BaseRateLimiter):
                     "Usage must be empty for unlimited capacity reservations",
                 )
             return
-        validate_refund_keys(set(actual_usage), set(reservation.usage))
+        validate_refund_usage(actual_usage, set(reservation.usage))
         await self._refund_capacity(
             actual_usage,
             reservation,
@@ -136,7 +136,7 @@ class RateLimiter(BaseRateLimiter):
         if reservation.model_family == _UNLIMITED_FLAG:
             return
         actual_usage = {"tokens": kwargs["usage"]["total_tokens"], "requests": 1}
-        validate_refund_keys(set(actual_usage), set(reservation.usage))
+        validate_refund_usage(actual_usage, set(reservation.usage))
         await self._refund_capacity(
             actual_usage,
             reservation,

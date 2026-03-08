@@ -97,8 +97,12 @@ class SyncRedisBackend(SyncRateLimiterBackend):
 
         # Sorted buckets to ensure consistent locking order
         key_sorted_buckets = sorted(self.sorted_buckets, key=lambda b: b.full_redis_key)
-        for bucket in key_sorted_buckets:
-            stack.enter_context(bucket.lock(**kwargs))
+        try:
+            for bucket in key_sorted_buckets:
+                stack.enter_context(bucket.lock(**kwargs))
+        except BaseException:
+            stack.close()
+            raise
 
         return stack
 

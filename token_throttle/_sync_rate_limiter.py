@@ -16,7 +16,7 @@ from token_throttle._interfaces._models import (
 from token_throttle._validation import (
     resolve_config,
     validate_acquire_usage,
-    validate_refund_keys,
+    validate_refund_usage,
 )
 
 _UNLIMITED_FLAG = "__rate_limiting_disabled__"
@@ -92,7 +92,7 @@ class SyncRateLimiter:
                     "Usage must be empty for unlimited capacity reservations",
                 )
             return
-        validate_refund_keys(set(actual_usage), set(reservation.usage))
+        validate_refund_usage(actual_usage, set(reservation.usage))
         self._refund_capacity(actual_usage, reservation)
 
     def _refund_capacity(

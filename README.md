@@ -19,6 +19,8 @@ pip install "token-throttle[redis]>=0.4.2,<0.5.0"            # Any provider + Re
 pip install "token-throttle>=0.4.2,<0.5.0"                   # Any provider + in-memory
 ```
 
+> **Note:** The sync API, in-memory backend, and several bug fixes listed below are on `main` but not yet released to PyPI. Install from git for the latest: `pip install "token-throttle @ git+https://github.com/Elijas/token-throttle.git@main"`
+
 ## Quickstart
 
 ### OpenAI (built-in helpers)
@@ -87,13 +89,13 @@ await limiter.refund_capacity(
 | **Multiple time windows** | e.g., 1,000 req/min AND 10,000 req/day on the same resource |
 | **Reserve & refund** | Reserve max expected usage upfront, refund the difference after the call completes |
 | **Distributed** | Redis backend with atomic locks — safe across workers and processes |
-| **Per-model quotas** | Different limits per model; date-suffixed variants (gpt-4o-20241203) auto-group into families |
+| **Per-model quotas** | Different limits per model via `model_family`; the built-in OpenAI helper auto-groups date-suffixed variants (e.g. gpt-4o-20241203 → gpt-4o) |
 | **Pluggable** | Bring your own backend (ships with Redis and in-memory). Sync and async APIs |
 | **Observability** | Callbacks for wait-start, wait-end, consume, refund, and missing-state events |
 
 ## How it works
 
-token-throttle implements the [generic cell rate algorithm](https://en.wikipedia.org/wiki/Generic_cell_rate_algorithm) (a leaky bucket variant) with millisecond precision.
+token-throttle implements a [token bucket](https://en.wikipedia.org/wiki/Token_bucket) algorithm (capacity refills linearly over time, capped at the quota limit).
 
 - **Acquire** — blocks until enough capacity is available, then atomically reserves it
 - **Call** — make your API request with any client

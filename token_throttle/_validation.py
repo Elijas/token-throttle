@@ -3,7 +3,7 @@
 import math
 
 from token_throttle._interfaces._interfaces import PerModelConfig, PerModelConfigGetter
-from token_throttle._interfaces._models import FrozenUsage, UsageQuotas
+from token_throttle._interfaces._models import FrozenUsage, Usage, UsageQuotas
 
 
 def validate_acquire_usage(usage: FrozenUsage, quotas: UsageQuotas) -> None:
@@ -28,18 +28,28 @@ def validate_acquire_usage(usage: FrozenUsage, quotas: UsageQuotas) -> None:
             raise ValueError(f"Usage value for {metric} must be non-negative")
 
 
-def validate_refund_keys(actual_keys: set[str], reservation_keys: set[str]) -> None:
+def validate_refund_usage(
+    actual_usage: Usage, reservation_keys: set[str]
+) -> None:
     """
-    Check that refund usage keys match the reservation keys.
+    Check that refund usage keys match the reservation and values are finite/non-negative.
 
     Raises:
-        ValueError: If keys don't match.
+        ValueError: If keys don't match, or values are NaN/Inf/negative.
 
     """
-    if actual_keys != reservation_keys:
+    if set(actual_usage) != reservation_keys:
         raise ValueError(
-            f"Usage keys {actual_keys} do not match reservation usage keys {reservation_keys}",
+            f"Usage keys {set(actual_usage)} do not match reservation usage keys {reservation_keys}",
         )
+    for metric, amount_ in actual_usage.items():
+        amount = float(amount_)
+        if not math.isfinite(amount):
+            raise ValueError(
+                f"Refund value for {metric} must be finite (got {amount_!r})"
+            )
+        if amount < 0:
+            raise ValueError(f"Refund value for {metric} must be non-negative")
 
 
 def resolve_config(
