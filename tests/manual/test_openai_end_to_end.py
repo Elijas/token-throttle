@@ -18,12 +18,12 @@ from openai.types.chat.chat_completion_message import ChatCompletionMessage
 _env_file = Path(__file__).parent / ".env"
 if _env_file.exists():
     for line in _env_file.read_text().splitlines():
-        line = line.strip()
-        if line and not line.startswith("#") and "=" in line:
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#") and "=" in stripped:
             key, _, value = line.partition("=")
             os.environ.setdefault(key.strip(), value.strip())
 
-from token_throttle import (
+from token_throttle import (  # noqa: E402
     MemoryBackendBuilder,
     PerModelConfig,
     Quota,
@@ -35,7 +35,7 @@ from token_throttle import (
 
 def _make_limiter() -> RateLimiter:
     return RateLimiter(
-        lambda model: PerModelConfig(
+        lambda model: PerModelConfig(  # noqa: ARG005
             quotas=UsageQuotas([
                 Quota(metric="requests", limit=100, per_seconds=60),
                 Quota(metric="tokens", limit=100_000, per_seconds=60),
@@ -124,7 +124,7 @@ _needs_api_key = pytest.mark.skipif(
 @pytest.mark.asyncio
 async def test_live_manual_acquire_and_refund():
     """The 'any provider' README pattern: acquire_capacity + refund_capacity."""
-    from openai import AsyncOpenAI
+    from openai import AsyncOpenAI  # noqa: PLC0415
 
     client = AsyncOpenAI()
     limiter = _make_limiter()
@@ -156,7 +156,7 @@ async def test_live_manual_acquire_and_refund():
 @pytest.mark.asyncio
 async def test_live_refund_capacity_from_response():
     """The OpenAI quickstart README pattern: response object passed directly."""
-    from openai import AsyncOpenAI
+    from openai import AsyncOpenAI  # noqa: PLC0415
 
     client = AsyncOpenAI()
     limiter = _make_limiter()

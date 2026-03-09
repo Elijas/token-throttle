@@ -84,6 +84,12 @@ standard level strings (DEBUG, INFO, WARNING, ERROR, CRITICAL) plus the
 loguru extensions (TRACE, SUCCESS). Adding a `.get()` fallback would silently
 mask typos in level names.
 
+### Over-limit validation lives in the backend, not `validate_acquire_usage`
+
+`validate_acquire_usage` checks key-match, finiteness, and non-negativity — but does **not** check `usage > quota.limit`. That check was removed intentionally because `set_max_capacity` can change a bucket's limit at runtime, making the static `quota.limit` stale.
+
+Instead, each backend performs the over-limit check inside its lock against the live `bucket.max_capacity`. This means over-limit requests acquire the lock (and, for Redis, a pipeline round-trip) before failing. That cost is acceptable because over-limit requests are programming errors, not normal traffic, and checking outside the lock would require reading a potentially-stale cached value then re-checking under the lock anyway.
+
 ### `on_missing_consumption_data` callback is delayed until first successful acquire
 
 When `_check_and_consume_capacity` returns `False` (insufficient capacity), it exits before calling `_fresh_start_buckets_callback`. The `on_missing_consumption_data` callback won't fire until the first *successful* capacity acquisition. This is by design — firing it on every 100ms poll iteration would be noisy. Since `last_checked` is never written on the insufficient-capacity path, the fresh-start condition persists and the callback fires exactly once when capacity is first successfully consumed.

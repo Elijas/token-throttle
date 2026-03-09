@@ -7,10 +7,8 @@ preserves negative debt and doesn't introduce regressions.
 
 import asyncio
 import time
-from unittest.mock import patch
 
 import pytest
-from frozendict import frozendict
 
 from token_throttle._capacity import calculate_capacity
 from token_throttle._interfaces._interfaces import PerModelConfig
@@ -18,7 +16,6 @@ from token_throttle._interfaces._models import Quota, UsageQuotas, frozen_usage
 from token_throttle._limiter_backends._memory._backend import MemoryBackend
 from token_throttle._limiter_backends._memory._bucket import MemoryBucket
 from token_throttle._limiter_backends._memory._sync_backend import SyncMemoryBackend
-
 
 # ---------------------------------------------------------------------------
 # Helpers

@@ -52,6 +52,8 @@ class RedisBucket:
         self._max_capacity_cache_time: float = 0.0
 
         self._redis = redis_client
+        # Initialised from quota.limit; corrected on first _get_capacities_unsafe()
+        # call via update_max_capacity_from_result() before any calculate_capacity().
         self._rate_per_sec = float(quota.limit) / float(quota.per_seconds)
         # Keys for Redis
         self._last_checked_key = f"{self.full_redis_key}:last_checked"
