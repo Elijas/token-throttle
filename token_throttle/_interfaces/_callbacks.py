@@ -1,8 +1,50 @@
+import logging
 from typing import Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from token_throttle._interfaces._models import Capacities, FrozenUsage
+
+# ---------------------------------------------------------------------------
+# Auto-detect loguru vs stdlib logging
+# ---------------------------------------------------------------------------
+
+try:
+    from loguru import logger as _loguru_logger
+
+    _HAS_LOGURU = True
+except ImportError:
+    _HAS_LOGURU = False
+
+_stdlib_logger = logging.getLogger("token_throttle")
+
+_STDLIB_LEVEL_MAP: dict[str, int] = {
+    "TRACE": logging.DEBUG,
+    "DEBUG": logging.DEBUG,
+    "INFO": logging.INFO,
+    "SUCCESS": logging.INFO,
+    "WARNING": logging.WARNING,
+    "ERROR": logging.ERROR,
+    "CRITICAL": logging.CRITICAL,
+}
+
+
+def _log(level: str, message: str, **kwargs) -> None:
+    """Log using loguru if available, otherwise stdlib logging."""
+    if _HAS_LOGURU:
+        _loguru_logger.log(level, message, **kwargs)
+    else:
+        stdlib_level = _STDLIB_LEVEL_MAP.get(level.upper(), logging.DEBUG)
+        if kwargs:
+            extra = " ".join(f"{k}={v!r}" for k, v in kwargs.items())
+            _stdlib_logger.log(stdlib_level, "%s | %s", message, extra)
+        else:
+            _stdlib_logger.log(stdlib_level, message)
+
+
+# ---------------------------------------------------------------------------
+# Async callback protocols
+# ---------------------------------------------------------------------------
 
 
 @runtime_checkable
@@ -97,16 +139,325 @@ class RateLimiterCallbacks(BaseModel):
     )
 
 
-def _get_loguru_logger():
-    try:
-        from loguru import logger
+# ---------------------------------------------------------------------------
+# Sync callback protocols
+# ---------------------------------------------------------------------------
 
-        return logger
-    except ImportError as exc:
+
+@runtime_checkable
+class SyncOnWaitStartCallback(Protocol):
+    def __call__(
+        self,
+        *,
+        model_family: str,
+        usage: FrozenUsage,
+        preconsumption_capacities: Capacities,
+    ) -> None: ...
+
+
+@runtime_checkable
+class SyncOnWaitEndCallback(Protocol):
+    def __call__(
+        self,
+        *,
+        model_family: str,
+        usage: FrozenUsage,
+        preconsumption_capacities: Capacities,
+        postconsumption_capacities: Capacities,
+        wait_time_s: float,
+    ) -> None: ...
+
+
+@runtime_checkable
+class SyncOnCapacityConsumedCallback(Protocol):
+    def __call__(
+        self,
+        *,
+        model_family: str,
+        preconsumption_capacities: Capacities,
+        postconsumption_capacities: Capacities,
+        usage: FrozenUsage,
+        current_time: float,
+    ) -> None: ...
+
+
+@runtime_checkable
+class SyncOnCapacityRefundedCallback(Protocol):
+    def __call__(  # noqa: PLR0913
+        self,
+        *,
+        model_family: str,
+        reserved_usage: FrozenUsage,
+        actual_usage: FrozenUsage,
+        refunded_usage: FrozenUsage,
+        prerefund_capacities: Capacities,
+        postrefund_capacities: Capacities,
+    ) -> None: ...
+
+
+@runtime_checkable
+class SyncOnMissingConsumptionDataCallback(Protocol):
+    def __call__(
+        self,
+        *,
+        model_family: str,
+        usage_metric: str,
+        per_seconds: int,
+    ) -> None: ...
+
+
+class SyncRateLimiterCallbacks(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    on_wait_start: SyncOnWaitStartCallback | None = Field(
+        default=None,
+        description="Called before waiting for capacity",
+    )
+    after_wait_end_consumption: SyncOnWaitEndCallback | None = Field(
+        default=None,
+        description="Called after successfully acquiring capacity",
+    )
+    on_capacity_consumed: SyncOnCapacityConsumedCallback | None = Field(
+        default=None,
+        description="Called when capacity is consumed",
+    )
+    on_capacity_refunded: SyncOnCapacityRefundedCallback | None = Field(
+        default=None,
+        description="Called when capacity is refunded (e.g., unused tokens, errors)",
+    )
+    on_missing_consumption_data: SyncOnMissingConsumptionDataCallback | None = Field(
+        default=None,
+        description="Called when no previous consumption data is detected, assuming full quota",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Auto-detect callback factories (loguru if available, else stdlib logging)
+# ---------------------------------------------------------------------------
+
+
+def create_logging_callbacks(
+    *,
+    wait_start: str | None = "DEBUG",
+    wait_end_consumption: str | None = "DEBUG",
+    capacity_consumed: str | None = "DEBUG",
+    capacity_refunded: str | None = "DEBUG",
+    missing_consumption_data: str | None = "DEBUG",
+) -> RateLimiterCallbacks:
+    async def on_wait_start(
+        *,
+        model_family: str,
+        usage: FrozenUsage,
+        preconsumption_capacities: Capacities,
+    ) -> None:
+        _log(
+            wait_start,
+            "Rate limiter wait starting",
+            model_family=model_family,
+            usage=usage,
+            preconsumption_capacities=preconsumption_capacities,
+        )
+
+    async def after_wait_end_consumption(
+        *,
+        model_family: str,
+        usage: FrozenUsage,
+        preconsumption_capacities: Capacities,
+        postconsumption_capacities: Capacities,
+        wait_time_s: float,
+    ) -> None:
+        _log(
+            wait_end_consumption,
+            "Rate limiter wait complete",
+            model_family=model_family,
+            usage=usage,
+            preconsumption_capacities=preconsumption_capacities,
+            postconsumption_capacities=postconsumption_capacities,
+            wait_time_s=wait_time_s,
+        )
+
+    async def on_capacity_consumed(
+        *,
+        model_family: str,
+        usage: FrozenUsage,
+        preconsumption_capacities: Capacities,
+        postconsumption_capacities: Capacities,
+        current_time: float,
+    ) -> None:
+        _log(
+            capacity_consumed,
+            "Rate limiter capacity consumed",
+            model_family=model_family,
+            usage=usage,
+            preconsumption_capacities=preconsumption_capacities,
+            postconsumption_capacities=postconsumption_capacities,
+            current_time=current_time,
+        )
+
+    async def on_capacity_refunded(  # noqa: PLR0913
+        *,
+        model_family: str,
+        reserved_usage: FrozenUsage,
+        actual_usage: FrozenUsage,
+        refunded_usage: FrozenUsage,
+        prerefund_capacities: Capacities,
+        postrefund_capacities: Capacities,
+    ) -> None:
+        _log(
+            capacity_refunded,
+            "Rate limiter capacity refunded",
+            model_family=model_family,
+            reserved_usage=reserved_usage,
+            actual_usage=actual_usage,
+            refunded_usage=refunded_usage,
+            prerefund_capacities=prerefund_capacities,
+            postrefund_capacities=postrefund_capacities,
+        )
+
+    async def on_missing_consumption_data(
+        *,
+        model_family: str,
+        usage_metric: str,
+        per_seconds: int,
+    ) -> None:
+        _log(
+            missing_consumption_data,
+            "Rate limiter missing consumption data",
+            model_family=model_family,
+            usage_metric=usage_metric,
+            per_seconds=per_seconds,
+        )
+
+    return RateLimiterCallbacks(
+        on_wait_start=on_wait_start if wait_start else None,
+        after_wait_end_consumption=(
+            after_wait_end_consumption if wait_end_consumption else None
+        ),
+        on_capacity_consumed=on_capacity_consumed if capacity_consumed else None,
+        on_capacity_refunded=on_capacity_refunded if capacity_refunded else None,
+        on_missing_consumption_data=(
+            on_missing_consumption_data if missing_consumption_data else None
+        ),
+    )
+
+
+def create_sync_logging_callbacks(
+    *,
+    wait_start: str | None = "DEBUG",
+    wait_end_consumption: str | None = "DEBUG",
+    capacity_consumed: str | None = "DEBUG",
+    capacity_refunded: str | None = "DEBUG",
+    missing_consumption_data: str | None = "DEBUG",
+) -> SyncRateLimiterCallbacks:
+    def on_wait_start(
+        *,
+        model_family: str,
+        usage: FrozenUsage,
+        preconsumption_capacities: Capacities,
+    ) -> None:
+        _log(
+            wait_start,
+            "Rate limiter wait starting",
+            model_family=model_family,
+            usage=usage,
+            preconsumption_capacities=preconsumption_capacities,
+        )
+
+    def after_wait_end_consumption(
+        *,
+        model_family: str,
+        usage: FrozenUsage,
+        preconsumption_capacities: Capacities,
+        postconsumption_capacities: Capacities,
+        wait_time_s: float,
+    ) -> None:
+        _log(
+            wait_end_consumption,
+            "Rate limiter wait complete",
+            model_family=model_family,
+            usage=usage,
+            preconsumption_capacities=preconsumption_capacities,
+            postconsumption_capacities=postconsumption_capacities,
+            wait_time_s=wait_time_s,
+        )
+
+    def on_capacity_consumed(
+        *,
+        model_family: str,
+        usage: FrozenUsage,
+        preconsumption_capacities: Capacities,
+        postconsumption_capacities: Capacities,
+        current_time: float,
+    ) -> None:
+        _log(
+            capacity_consumed,
+            "Rate limiter capacity consumed",
+            model_family=model_family,
+            usage=usage,
+            preconsumption_capacities=preconsumption_capacities,
+            postconsumption_capacities=postconsumption_capacities,
+            current_time=current_time,
+        )
+
+    def on_capacity_refunded(  # noqa: PLR0913
+        *,
+        model_family: str,
+        reserved_usage: FrozenUsage,
+        actual_usage: FrozenUsage,
+        refunded_usage: FrozenUsage,
+        prerefund_capacities: Capacities,
+        postrefund_capacities: Capacities,
+    ) -> None:
+        _log(
+            capacity_refunded,
+            "Rate limiter capacity refunded",
+            model_family=model_family,
+            reserved_usage=reserved_usage,
+            actual_usage=actual_usage,
+            refunded_usage=refunded_usage,
+            prerefund_capacities=prerefund_capacities,
+            postrefund_capacities=postrefund_capacities,
+        )
+
+    def on_missing_consumption_data(
+        *,
+        model_family: str,
+        usage_metric: str,
+        per_seconds: int,
+    ) -> None:
+        _log(
+            missing_consumption_data,
+            "Rate limiter missing consumption data",
+            model_family=model_family,
+            usage_metric=usage_metric,
+            per_seconds=per_seconds,
+        )
+
+    return SyncRateLimiterCallbacks(
+        on_wait_start=on_wait_start if wait_start else None,
+        after_wait_end_consumption=(
+            after_wait_end_consumption if wait_end_consumption else None
+        ),
+        on_capacity_consumed=on_capacity_consumed if capacity_consumed else None,
+        on_capacity_refunded=on_capacity_refunded if capacity_refunded else None,
+        on_missing_consumption_data=(
+            on_missing_consumption_data if missing_consumption_data else None
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Loguru-only callback factories (backward compatibility)
+# ---------------------------------------------------------------------------
+
+
+def _get_loguru_logger():
+    if not _HAS_LOGURU:
         raise ImportError(
-            'The "loguru" package is required for logging callbacks. '
-            "Install it with: pip install loguru"
-        ) from exc
+            'The "loguru" package is required for loguru callbacks. '
+            'Install it with: pip install "token-throttle[loguru]"'
+        )
+    return _loguru_logger
 
 
 def create_loguru_callbacks(
@@ -218,98 +569,6 @@ def create_loguru_callbacks(
         on_missing_consumption_data=(
             on_missing_consumption_data if missing_consumption_data else None
         ),
-    )
-
-
-# ---------------------------------------------------------------------------
-# Sync counterparts
-# ---------------------------------------------------------------------------
-
-
-@runtime_checkable
-class SyncOnWaitStartCallback(Protocol):
-    def __call__(
-        self,
-        *,
-        model_family: str,
-        usage: FrozenUsage,
-        preconsumption_capacities: Capacities,
-    ) -> None: ...
-
-
-@runtime_checkable
-class SyncOnWaitEndCallback(Protocol):
-    def __call__(
-        self,
-        *,
-        model_family: str,
-        usage: FrozenUsage,
-        preconsumption_capacities: Capacities,
-        postconsumption_capacities: Capacities,
-        wait_time_s: float,
-    ) -> None: ...
-
-
-@runtime_checkable
-class SyncOnCapacityConsumedCallback(Protocol):
-    def __call__(
-        self,
-        *,
-        model_family: str,
-        preconsumption_capacities: Capacities,
-        postconsumption_capacities: Capacities,
-        usage: FrozenUsage,
-        current_time: float,
-    ) -> None: ...
-
-
-@runtime_checkable
-class SyncOnCapacityRefundedCallback(Protocol):
-    def __call__(  # noqa: PLR0913
-        self,
-        *,
-        model_family: str,
-        reserved_usage: FrozenUsage,
-        actual_usage: FrozenUsage,
-        refunded_usage: FrozenUsage,
-        prerefund_capacities: Capacities,
-        postrefund_capacities: Capacities,
-    ) -> None: ...
-
-
-@runtime_checkable
-class SyncOnMissingConsumptionDataCallback(Protocol):
-    def __call__(
-        self,
-        *,
-        model_family: str,
-        usage_metric: str,
-        per_seconds: int,
-    ) -> None: ...
-
-
-class SyncRateLimiterCallbacks(BaseModel):
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-
-    on_wait_start: SyncOnWaitStartCallback | None = Field(
-        default=None,
-        description="Called before waiting for capacity",
-    )
-    after_wait_end_consumption: SyncOnWaitEndCallback | None = Field(
-        default=None,
-        description="Called after successfully acquiring capacity",
-    )
-    on_capacity_consumed: SyncOnCapacityConsumedCallback | None = Field(
-        default=None,
-        description="Called when capacity is consumed",
-    )
-    on_capacity_refunded: SyncOnCapacityRefundedCallback | None = Field(
-        default=None,
-        description="Called when capacity is refunded (e.g., unused tokens, errors)",
-    )
-    on_missing_consumption_data: SyncOnMissingConsumptionDataCallback | None = Field(
-        default=None,
-        description="Called when no previous consumption data is detected, assuming full quota",
     )
 
 

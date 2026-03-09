@@ -89,7 +89,12 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
         *,
         allow_negative: bool = False,
     ) -> None:
-        """Set capacities for all buckets. Must be called under lock."""
+        """
+        Set capacities for all buckets. Must be called under lock.
+
+        allow_negative=True is required for consume_capacity (speedometer)
+        and refund_capacity (preserves negative debt for natural refill).
+        """
         for (usage_metric, per_seconds), amount in new_capacities.items():
             bucket = next(
                 (
@@ -308,16 +313,15 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
                             f"Bucket '{usage_metric}/{per_seconds}s' not found",
                         )
                     updated_capacities_[(usage_metric, int(per_seconds))] = min(
-                        max(
-                            updated_capacities_[(usage_metric, int(per_seconds))]
-                            + refund_amount,
-                            0,
-                        ),
+                        updated_capacities_[(usage_metric, int(per_seconds))]
+                        + refund_amount,
                         bucket.max_capacity,
                     )
             updated_capacities = frozendict(updated_capacities_)
 
-            self._set_capacities(updated_capacities, current_time)
+            self._set_capacities(
+                updated_capacities, current_time, allow_negative=True
+            )
 
         # Callbacks fired outside the lock
         self._fresh_start_buckets_callback(fresh_start_buckets)

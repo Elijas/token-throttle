@@ -170,7 +170,12 @@ class RedisBackend(RateLimiterBackend):
         *,
         allow_negative: bool = False,
     ) -> None:
-        """Set capacities for all buckets."""
+        """
+        Set capacities for all buckets. Caller must hold the distributed lock.
+
+        allow_negative=True is required for consume_capacity (speedometer)
+        and refund_capacity (preserves negative debt for natural refill).
+        """
         if pipeline is None:
             pipeline = self._redis.pipeline()
 
@@ -485,13 +490,13 @@ class RedisBackend(RateLimiterBackend):
                             f"Bucket '{usage_metric}/{per_seconds}s' not found",
                         )
 
-                    # Apply refund (positive or negative) and ensure minimum of 0
+                    # Apply refund (positive or negative), cap at max_capacity.
+                    # Negative capacity is preserved so the token-bucket refill
+                    # handles recovery — clamping to 0 here would erase debt
+                    # from the record_usage (speedometer) path.
                     updated_capacities_[(usage_metric, int(per_seconds))] = min(
-                        max(
-                            updated_capacities_[(usage_metric, int(per_seconds))]
-                            + refund_amount,
-                            0,
-                        ),
+                        updated_capacities_[(usage_metric, int(per_seconds))]
+                        + refund_amount,
                         bucket.max_capacity,  # cached — refreshed by get_max_capacity() in _refresh_capacity
                     )
             updated_capacities = frozendict(updated_capacities_)
@@ -501,6 +506,7 @@ class RedisBackend(RateLimiterBackend):
                 frozendict(updated_capacities),
                 pipeline=pipeline,
                 current_time=current_time,
+                allow_negative=True,
             )
         await self._fresh_start_buckets_callback(fresh_start_buckets)
         if self._callbacks and self._callbacks.on_capacity_refunded:

@@ -11,7 +11,7 @@ except ImportError as exc:
 from token_throttle._factories._openai._token_counter import OpenAIUsageCounter
 from token_throttle._interfaces._callbacks import (
     RateLimiterCallbacks,
-    create_loguru_callbacks,
+    create_logging_callbacks,
 )
 from token_throttle._interfaces._interfaces import PerModelConfig
 from token_throttle._interfaces._models import Quota, SecondsIn, UsageQuotas
@@ -46,7 +46,7 @@ def create_openai_redis_rate_limiter(
         ),
         backend=RedisBackendBuilder(redis_client),
         callbacks=callbacks
-        or create_loguru_callbacks(
+        or create_logging_callbacks(
             missing_consumption_data="INFO",
         ),
     )

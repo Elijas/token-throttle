@@ -40,6 +40,18 @@ class MemoryBucket:
     def set_capacity(
         self, value: float, current_time: float, *, allow_negative: bool = False
     ) -> None:
+        """
+        Set bucket capacity and update the timestamp.
+
+        allow_negative controls whether capacity can go below zero:
+        - False (default): used by acquire_capacity — the blocking path
+          guarantees capacity >= usage before consuming, so negatives
+          indicate a logic error.
+        - True: used by consume_capacity (speedometer / record_usage) and
+          refund_capacity. Speedometer intentionally overshoots; refund
+          must preserve negative debt so the token-bucket refill handles
+          recovery naturally.
+        """
         self.capacity = value if allow_negative else max(0.0, value)
         self.last_checked = current_time
 

@@ -165,6 +165,13 @@ class SyncRedisBucket:
         execute: bool = True,
         allow_negative: bool = False,
     ) -> None:
+        """
+        Set bucket capacity in Redis and update the timestamp.
+
+        allow_negative: False for acquire (blocking guarantees non-negative),
+        True for consume_capacity (speedometer overshoot) and refund_capacity
+        (must preserve negative debt for natural refill recovery).
+        """
         if current_time is None:
             current_time = time.time()
 

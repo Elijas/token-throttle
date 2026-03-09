@@ -1,10 +1,10 @@
+import warnings
 from collections import defaultdict
 from collections.abc import Iterator, Mapping
 from enum import Enum
 from typing import ClassVar, Self
 
 from frozendict import frozendict
-from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -36,9 +36,11 @@ class UsageQuotas:
     ) -> None:
         self._metrics: defaultdict[str, dict[int, Quota]] = defaultdict(dict)
         if not _allow_empty_quotas and not quotas:
-            logger.warning(
+            warnings.warn(
                 "Empty quota list provided. No rate limiting will be applied. "
                 "If this is intentional, use UsageQuotas.unlimited() instead.",
+                UserWarning,
+                stacklevel=2,
             )
         for quota in quotas:
             self.add_metric(quota)

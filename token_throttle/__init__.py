@@ -13,7 +13,9 @@ from token_throttle._interfaces._callbacks import (
     SyncOnWaitEndCallback,
     SyncOnWaitStartCallback,
     SyncRateLimiterCallbacks,
+    create_logging_callbacks,
     create_loguru_callbacks,
+    create_sync_logging_callbacks,
     create_sync_loguru_callbacks,
 )
 from token_throttle._interfaces._interfaces import (
@@ -128,8 +130,10 @@ __all__ = [
     "UsageCounter",
     "UsageQuotas",
     "count_chat_input_tokens",
+    "create_logging_callbacks",
     "create_loguru_callbacks",
     "create_openai_redis_rate_limiter",
+    "create_sync_logging_callbacks",
     "create_sync_loguru_callbacks",
     "frozen_usage",
     "get_encoding",
