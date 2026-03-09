@@ -1,6 +1,6 @@
 # token-throttle
 
-[![PyPI Version](https://img.shields.io/badge/v0.4.2-version?color=43cd0f&style=flat&label=pypi)](https://pypi.org/project/token-throttle)
+[![PyPI Version](https://img.shields.io/badge/v0.6.0-version?color=43cd0f&style=flat&label=pypi)](https://pypi.org/project/token-throttle)
 [![PyPI Downloads](https://img.shields.io/pypi/dm/token-throttle?color=43cd0f&style=flat&label=downloads)](https://pypistats.org/packages/token-throttle)
 [![stability-alpha](https://img.shields.io/badge/stability-alpha-f4d03f.svg)](https://github.com/mkenney/software-guides/blob/master/STABILITY-BADGES.md#alpha)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-43cd0f.svg?style=flat&label=license)](LICENSE)
@@ -14,12 +14,10 @@
 Works with any LLM provider and any client library — token-throttle limits the _rate_, not the _client_.
 
 ```bash
-pip install "token-throttle[redis,tiktoken]>=0.4.2,<0.5.0"   # OpenAI + Redis (recommended)
-pip install "token-throttle[redis]>=0.4.2,<0.5.0"            # Any provider + Redis
-pip install "token-throttle>=0.4.2,<0.5.0"                   # Any provider + in-memory
+pip install "token-throttle[redis,tiktoken]>=0.6.0,<0.7.0"   # OpenAI + Redis (recommended)
+pip install "token-throttle[redis]>=0.6.0,<0.7.0"            # Any provider + Redis
+pip install "token-throttle>=0.6.0,<0.7.0"                   # Any provider + in-memory
 ```
-
-> **Note:** The sync API, in-memory backend, and several bug fixes listed below are on `main` but not yet released to PyPI. Install from git for the latest: `pip install "token-throttle @ git+https://github.com/Elijas/token-throttle.git@main"`
 
 ## Quickstart
 
