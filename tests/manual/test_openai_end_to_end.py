@@ -52,7 +52,7 @@ def _make_synthetic_response(total_tokens: int = 15) -> ChatCompletion:
         id="chatcmpl-synthetic",
         object="chat.completion",
         created=1234567890,
-        model="gpt-4.1-nano",
+        model="gpt-5-nano",
         choices=[
             Choice(
                 index=0,
@@ -79,7 +79,7 @@ async def test_refund_from_response_synthetic():
     limiter = _make_limiter()
     reservation = await limiter.acquire_capacity(
         frozendict({"requests": 1, "tokens": 50}),
-        model="gpt-4.1-nano",
+        model="gpt-5-nano",
     )
 
     response = _make_synthetic_response(total_tokens=15)
@@ -101,7 +101,7 @@ async def test_refund_from_response_legacy_dict():
     limiter = _make_limiter()
     reservation = await limiter.acquire_capacity(
         frozendict({"requests": 1, "tokens": 50}),
-        model="gpt-4.1-nano",
+        model="gpt-5-nano",
     )
 
     await limiter.refund_capacity_from_response(
@@ -130,12 +130,12 @@ async def test_live_manual_acquire_and_refund():
     limiter = _make_limiter()
 
     usage = frozendict({"requests": 1, "tokens": 50})
-    reservation = await limiter.acquire_capacity(usage, model="gpt-4.1-nano")
+    reservation = await limiter.acquire_capacity(usage, model="gpt-5-nano")
 
     response = await client.chat.completions.create(
-        model="gpt-4.1-nano",
+        model="gpt-5-nano",
         messages=[{"role": "user", "content": "Say 'hello' and nothing else."}],
-        max_tokens=10,
+        max_completion_tokens=10,
     )
 
     actual_tokens = response.usage.total_tokens
@@ -162,12 +162,12 @@ async def test_live_refund_capacity_from_response():
     limiter = _make_limiter()
 
     usage = frozendict({"requests": 1, "tokens": 50})
-    reservation = await limiter.acquire_capacity(usage, model="gpt-4.1-nano")
+    reservation = await limiter.acquire_capacity(usage, model="gpt-5-nano")
 
     response = await client.chat.completions.create(
-        model="gpt-4.1-nano",
+        model="gpt-5-nano",
         messages=[{"role": "user", "content": "Say 'hi' and nothing else."}],
-        max_tokens=10,
+        max_completion_tokens=10,
     )
 
     assert response.usage is not None, "Expected usage in response"
