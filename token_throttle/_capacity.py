@@ -46,11 +46,12 @@ def calculate_capacity(  # noqa: PLR0913
         return CalculatedCapacity(amount=max_capacity, is_fresh_start=True)
 
     try:
+        raw_last_checked, raw_outdated_capacity = last_checked, outdated_capacity
         last_checked = float(last_checked)
         outdated_capacity = float(outdated_capacity)
     except (TypeError, ValueError) as e:
         raise ValueError(
-            f"Invalid last_checked or capacity values: last_checked={last_checked}, capacity={outdated_capacity}",
+            f"Invalid last_checked or capacity values: last_checked={raw_last_checked}, capacity={raw_outdated_capacity}",
         ) from e
 
     time_passed = current_time - last_checked

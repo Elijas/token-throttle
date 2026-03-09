@@ -50,7 +50,6 @@ class RateLimiter(BaseRateLimiter):
         self._backend = backend
         self._lock = asyncio.Lock()
         self._callbacks = callbacks
-        self._cfg = cfg
         self._config_getter = lambda model_name: resolve_config(cfg, model_name)
         self._model_family_to_backend: dict[str, RateLimiterBackend] = {}
 

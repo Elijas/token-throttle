@@ -2,7 +2,7 @@ import time
 import typing
 import warnings
 from contextlib import ExitStack
-from typing import TYPE_CHECKING, ClassVar
+from typing import ClassVar
 
 try:
     import redis
@@ -29,9 +29,6 @@ class SyncCapacitiesGetterResult(typing.NamedTuple):
     capacities: Capacities
     fresh_start_buckets: list[SyncRedisBucket]
 
-
-if TYPE_CHECKING:
-    from collections.abc import Mapping
 
 LOCK_TIMEOUT_SECONDS = 30
 
@@ -134,7 +131,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         for bucket in self.sorted_buckets:
             bucket.get_max_capacity()
 
-        new_capacities: Mapping[tuple[str, int], float] = {}
+        new_capacities: dict[tuple[str, int], float] = {}
         fresh_start_buckets: list[SyncRedisBucket] = []
         for i, bucket in enumerate(self.sorted_buckets):
             idx = i * 2  # Each bucket adds 2 commands
@@ -298,6 +295,19 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                     current_time=current_time,
                 )
             )
+
+            for usage_metric_name, usage_amount in usage.items():
+                for bucket in self.sorted_buckets:
+                    if bucket.usage_metric != usage_metric_name:
+                        continue
+                    if usage_amount > bucket.max_capacity:
+                        warnings.warn(
+                            f"record_usage value for {usage_metric_name} ({usage_amount}) exceeds "
+                            f"bucket max capacity ({bucket.max_capacity}). "
+                            f"Capacity will go deeply negative.",
+                            RuntimeWarning,
+                            stacklevel=2,
+                        )
 
             postconsumption_dict = {}
             for (
