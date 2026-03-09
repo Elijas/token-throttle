@@ -33,10 +33,15 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Bump version
+      - name: Bump version, update README, push
         run: |
           uv sync --group dev
           uv run bump-my-version bump ${{ inputs.bump }}
+          NEW_VERSION=$(python -c "import re; print(re.search(r'current_version = \"(.+?)\"', open('pyproject.toml').read()).group(1))")
+          uv run python devtools/bump_readme_version.py "$NEW_VERSION"
+          git add README.md
+          git commit --amend --no-edit
+          git push
       - name: Build package
         run: uv build
       - name: Publish to PyPI (OIDC)

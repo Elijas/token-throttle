@@ -5,26 +5,23 @@ import re
 from pathlib import Path
 
 
-def _replace_install_line(content: str, version: str) -> str:
+def _replace_install_lines(content: str, version: str) -> str:
+    """Replace version bounds in pip install lines, preserving extras."""
     major, minor, *_ = version.split(".")
     next_minor = f"{major}.{int(minor) + 1}.0"
-    new_line = f'pip install "token-throttle[redis,tiktoken]>={version},<{next_minor}"'
     new_content, n = re.subn(
-        r'pip install "[^">]*>=\d+\.\d+\.\d+,<\d+\.\d+\.\d+"',
-        new_line,
+        r'(pip install "token-throttle(?:\[[^\]]*\])?)>=\d+\.\d+\.\d+,<\d+\.\d+\.\d+"',
+        rf'\1>={version},<{next_minor}"',
         content,
     )
     if n == 0:
         raise RuntimeError(
-            "No matching pip install line found in README.md for pip install"
+            "No matching pip install line found in README.md"
         )
     return new_content
 
 
 def _replace_version_badge(content: str, version: str) -> str:
-    # Replace the shields.io badge version in the URL and label
-    # Example: https://img.shields.io/badge/0.0.1-version?color=active&style=flat&label=version
-    # Should become: https://img.shields.io/badge/0.16.12-version?...
     badge_pattern = re.compile(
         r"(https://img\.shields\.io/badge/v)(\d+\.\d+\.\d+)(-version\?)"
     )
@@ -39,7 +36,7 @@ def _replace_version_badge(content: str, version: str) -> str:
 
 def update_readme(readme_path: Path, version: str) -> None:
     content = readme_path.read_text(encoding="utf-8")
-    content = _replace_install_line(content, version)
+    content = _replace_install_lines(content, version)
     content = _replace_version_badge(content, version)
     readme_path.write_text(content, encoding="utf-8")
 
@@ -49,7 +46,7 @@ def main():
         description="Update pip install line and version badge in README.md"
     )
     parser.add_argument(
-        "version", type=str, help="The version string to use (e.g., 0.16.0)"
+        "version", type=str, help="The version string to use (e.g., 0.6.0)"
     )
     args = parser.parse_args()
     readme_path = Path("README.md")
