@@ -317,6 +317,19 @@ class RedisBackend(RateLimiterBackend):
                 current_time=current_time,
             )
 
+            for usage_metric_name, usage_amount in usage.items():
+                for bucket in self.sorted_buckets:
+                    if bucket.usage_metric != usage_metric_name:
+                        continue
+                    if usage_amount > bucket.max_capacity:
+                        warnings.warn(
+                            f"record_usage value for {usage_metric_name} ({usage_amount}) exceeds "
+                            f"bucket max capacity ({bucket.max_capacity}). "
+                            f"Capacity will go deeply negative.",
+                            RuntimeWarning,
+                            stacklevel=2,
+                        )
+
             postconsumption_dict = {}
             for (
                 capacity_metric_name,

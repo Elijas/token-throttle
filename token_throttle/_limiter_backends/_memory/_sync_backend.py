@@ -188,6 +188,19 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
                 current_time,
             )
 
+            for usage_metric, usage_amount in usage.items():
+                for bucket in self._buckets:
+                    if bucket.usage_metric != usage_metric:
+                        continue
+                    if usage_amount > bucket.max_capacity:
+                        warnings.warn(
+                            f"record_usage value for {usage_metric} ({usage_amount}) exceeds "
+                            f"bucket max capacity ({bucket.max_capacity}). "
+                            f"Capacity will go deeply negative.",
+                            RuntimeWarning,
+                            stacklevel=2,
+                        )
+
             postconsumption_dict: dict[tuple[str, int], float] = {}
             for (
                 cap_metric,
