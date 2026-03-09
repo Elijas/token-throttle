@@ -60,6 +60,8 @@ _LAZY_IMPORTS: dict[str, str] = {
     "SyncRedisBackend": "token_throttle._limiter_backends._redis._sync_backend",
     "SyncRedisBackendBuilder": "token_throttle._limiter_backends._redis._sync_backend",
     "SyncRedisBucket": "token_throttle._limiter_backends._redis._sync_bucket",
+    # redis bucket
+    "RedisBucket": "token_throttle._limiter_backends._redis._bucket",
     # redis backend
     "LOCK_TIMEOUT_SECONDS": "token_throttle._limiter_backends._redis._backend",
     "CapacitiesGetterResult": "token_throttle._limiter_backends._redis._backend",
@@ -113,6 +115,7 @@ __all__ = [
     "RateLimiterCallbacks",
     "RedisBackend",
     "RedisBackendBuilder",
+    "RedisBucket",
     "SecondsIn",
     "SyncMemoryBackend",
     "SyncMemoryBackendBuilder",

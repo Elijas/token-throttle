@@ -205,10 +205,14 @@ class SyncRedisBackend(SyncRateLimiterBackend):
             {metric: float(amount) for metric, amount in usage_.items()},
         )
         preconsumption_capacities: Capacities = frozendict()
+        # Empty on the failure path; callers only read postconsumption on success.
         postconsumption_capacities: Capacities = frozendict()
         current_time: float = 0.0
         fresh_start_buckets: list[SyncRedisBucket] = []
         with self._lock(timeout=LOCK_TIMEOUT_SECONDS):
+            # Pipeline is reused: _get_capacities_unsafe executes it (clearing
+            # the command buffer), then _set_capacities_unsafe adds new commands
+            # and executes again.  Safe because redis-py clears the buffer on execute().
             pipeline = self._redis.pipeline()
             current_time = time.time()
 

@@ -197,6 +197,8 @@ class SyncRateLimiter:
     def _get_backend(self, cfg: PerModelConfig) -> SyncRateLimiterBackend:
         if not cfg.model_family:
             raise ValueError("cfg.model_family cannot be empty")
+        # Lock-free read is safe: GIL protects dict lookups, and the value
+        # is set once (never mutated/removed after insertion).
         if cfg.model_family in self._model_family_to_backend:
             return self._model_family_to_backend[cfg.model_family]
 

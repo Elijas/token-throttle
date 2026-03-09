@@ -3,7 +3,7 @@ import time
 import typing
 import warnings
 from contextlib import AsyncExitStack
-from typing import TYPE_CHECKING, ClassVar
+from typing import ClassVar
 
 try:
     import redis.asyncio
@@ -30,9 +30,6 @@ class CapacitiesGetterResult(typing.NamedTuple):
     capacities: Capacities
     fresh_start_buckets: list[RedisBucket]
 
-
-if TYPE_CHECKING:
-    from collections.abc import Mapping
 
 LOCK_TIMEOUT_SECONDS = 30
 
@@ -149,7 +146,7 @@ class RedisBackend(RateLimiterBackend):
         # versions might use the same Redis backend that's not cleaned up
         # between deployments, and the new version might have a different
         # Usage class.
-        new_capacities: Mapping[tuple[str, int], float] = {}
+        new_capacities: dict[tuple[str, int], float] = {}
         fresh_start_buckets: list[RedisBucket] = []
         num_buckets = len(self.sorted_buckets)
         for i, bucket in enumerate(self.sorted_buckets):
@@ -224,10 +221,14 @@ class RedisBackend(RateLimiterBackend):
             {metric: float(amount) for metric, amount in usage_.items()},
         )
         preconsumption_capacities: Capacities = frozendict()
+        # Empty on the failure path; callers only read postconsumption on success.
         postconsumption_capacities: Capacities = frozendict()
         current_time: float = 0.0
         fresh_start_buckets: list[RedisBucket] = []
         async with await self._lock(timeout=LOCK_TIMEOUT_SECONDS):
+            # Pipeline is reused: _get_capacities_unsafe executes it (clearing
+            # the command buffer), then _set_capacities_unsafe adds new commands
+            # and executes again.  Safe because redis-py clears the buffer on execute().
             pipeline = self._redis.pipeline()
             current_time = time.time()
 

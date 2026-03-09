@@ -113,6 +113,7 @@ class MemoryBackend(RateLimiterBackend):
         usage: FrozenUsage,
     ) -> tuple[bool, Capacities, Capacities]:
         """Check if there's enough capacity and consume it if available."""
+        # Empty on the failure path; callers only read postconsumption on success.
         postconsumption_capacities: Capacities = frozendict()
         fresh_start_buckets: list[MemoryBucket] = []
 
@@ -188,6 +189,9 @@ class MemoryBackend(RateLimiterBackend):
                 current_time,
             )
 
+            # stacklevel=2 points to the backend caller, not the user's code.
+            # The correct user-facing level varies by call path (3-5 frames up)
+            # and isn't worth computing dynamically for a non-fatal warning.
             for usage_metric, usage_amount in usage.items():
                 for bucket in self._buckets:
                     if bucket.usage_metric != usage_metric:

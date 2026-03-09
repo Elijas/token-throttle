@@ -113,6 +113,7 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
         usage: FrozenUsage,
     ) -> tuple[bool, Capacities, Capacities]:
         """Check if there's enough capacity and consume it if available."""
+        # Empty on the failure path; callers only read postconsumption on success.
         postconsumption_capacities: Capacities = frozendict()
         fresh_start_buckets: list[MemoryBucket] = []
 

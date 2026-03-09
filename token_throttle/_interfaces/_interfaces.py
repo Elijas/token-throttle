@@ -25,8 +25,8 @@ class PerModelConfig(BaseModel):
     quotas: UsageQuotas = Field(
         ...,
         description=(
-            "Defines the maximum usage per minute. "
-            "Allows tracking of resources like requests and tokens per minute."
+            "Defines the maximum usage per time window. "
+            "Allows tracking of resources like requests and tokens per minute, hour, etc."
         ),
     )
     usage_counter: UsageCounter | None = Field(

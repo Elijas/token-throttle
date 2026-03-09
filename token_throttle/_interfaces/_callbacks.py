@@ -473,6 +473,9 @@ def _get_loguru_logger():
 
 def create_loguru_callbacks(
     *,
+    # Defaults are None (opt-in), unlike create_logging_callbacks which defaults
+    # to "DEBUG" (opt-out).  This is intentional: the loguru factories predate
+    # create_logging_callbacks and changing their defaults would break callers.
     wait_start: str | None = None,
     wait_end_consumption: str | None = None,
     capacity_consumed: str | None = None,
