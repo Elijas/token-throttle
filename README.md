@@ -40,7 +40,7 @@ reservation = await limiter.acquire_capacity_for_request(**request, extra_usage=
 response = await client.chat.completions.create(**request)
 
 # 3. Refund unused tokens
-await limiter.refund_capacity_from_response(reservation, **response)
+await limiter.refund_capacity_from_response(reservation, response)
 ```
 
 ### Any provider (manual usage)

@@ -137,11 +137,23 @@ class RateLimiter(BaseRateLimiter):
     async def refund_capacity_from_response(
         self,
         reservation: CapacityReservation,
+        response=None,
         **kwargs,
     ) -> None:
         if reservation.model_family == _UNLIMITED_FLAG:
             return
-        actual_usage = {"tokens": kwargs["usage"]["total_tokens"], "requests": 1}
+        if response is not None:
+            # Pydantic model (OpenAI SDK v1+) or any object with .usage
+            usage = response.usage
+            total_tokens = (
+                usage.total_tokens
+                if hasattr(usage, "total_tokens")
+                else usage["total_tokens"]
+            )
+        else:
+            # Dict-based kwargs (legacy or manual)
+            total_tokens = kwargs["usage"]["total_tokens"]
+        actual_usage = {"tokens": total_tokens, "requests": 1}
         validate_refund_usage(actual_usage, set(reservation.usage))
         await self._refund_capacity(
             actual_usage,
