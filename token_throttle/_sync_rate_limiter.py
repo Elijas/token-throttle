@@ -42,6 +42,12 @@ class SyncRateLimiter:
         return self._acquire_or_record(usage, model, _block=True)
 
     def record_usage(self, usage: Usage, model: str) -> CapacityReservation:
+        """
+        Record usage without blocking.
+
+        Capacity may go negative by design (speedometer pattern); this tracks
+        overshoot rather than blocking.
+        """
         return self._acquire_or_record(usage, model, _block=False)
 
     def _acquire_or_record(

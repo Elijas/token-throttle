@@ -130,7 +130,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         # Execute the pipeline to get all results
         results = pipeline.execute()
 
-        # Refresh max_capacity cache for all buckets (uses 1-second TTL caching)
+        # Refreshes bucket.max_capacity cache — read by consume_capacity and refund_capacity
         for bucket in self.sorted_buckets:
             bucket.get_max_capacity()
 
@@ -220,6 +220,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                 for bucket in self.sorted_buckets:
                     if bucket.usage_metric != usage_metric_name:
                         continue
+                    # Uses cached max_capacity — refreshed by get_max_capacity() in _refresh_capacity
                     if usage_amount > bucket.max_capacity:
                         raise ValueError(
                             f"Usage value for {usage_metric_name} ({usage_amount}) "
@@ -269,7 +270,12 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         return True, preconsumption_capacities, postconsumption_capacities
 
     def consume_capacity(self, usage: FrozenUsage) -> None:
-        """Consume capacity unconditionally. Capacity may go negative."""
+        """
+        Consume capacity unconditionally.
+
+        Capacity may go negative by design (speedometer pattern); this tracks
+        overshoot rather than blocking.
+        """
         usage = frozendict(
             {metric: float(amount) for metric, amount in usage.items()},
         )
@@ -419,7 +425,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                             + refund_amount,
                             0,
                         ),
-                        bucket.max_capacity,
+                        bucket.max_capacity,  # cached — refreshed by get_max_capacity() in _refresh_capacity
                     )
             updated_capacities = frozendict(updated_capacities_)
 

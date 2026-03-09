@@ -112,8 +112,6 @@ class RedisBucket:
         if new_value != self._max_capacity_cached:
             self._max_capacity_cached = new_value
             self._rate_per_sec = new_value / float(self.per_seconds)
-        else:
-            self._max_capacity_cached = new_value
 
         self._max_capacity_cache_time = current_time
         return self._max_capacity_cached

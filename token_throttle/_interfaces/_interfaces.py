@@ -75,7 +75,12 @@ class RateLimiterBackend(ABC):
 
     @abstractmethod
     async def consume_capacity(self, usage: FrozenUsage) -> None:
-        """Consume capacity unconditionally. Capacity may go negative."""
+        """
+        Consume capacity unconditionally.
+
+        Capacity may go negative by design (speedometer pattern); this tracks
+        overshoot rather than blocking.
+        """
 
     @abstractmethod
     async def refund_capacity(
@@ -127,7 +132,12 @@ class SyncRateLimiterBackend(ABC):
 
     @abstractmethod
     def consume_capacity(self, usage: FrozenUsage) -> None:
-        """Consume capacity unconditionally. Capacity may go negative."""
+        """
+        Consume capacity unconditionally.
+
+        Capacity may go negative by design (speedometer pattern); this tracks
+        overshoot rather than blocking.
+        """
 
     @abstractmethod
     def refund_capacity(

@@ -43,6 +43,12 @@ class RateLimiter(BaseRateLimiter):
         return await self._acquire_or_record(usage, model, _block=True)
 
     async def record_usage(self, usage: Usage, model: str) -> CapacityReservation:
+        """
+        Record usage without blocking.
+
+        Capacity may go negative by design (speedometer pattern); this tracks
+        overshoot rather than blocking.
+        """
         return await self._acquire_or_record(usage, model, _block=False)
 
     async def _acquire_or_record(

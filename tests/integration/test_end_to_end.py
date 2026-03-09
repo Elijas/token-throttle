@@ -300,7 +300,9 @@ async def test_openai_style_acquire_and_refund(backend_builder):
     assert reservation.usage["tokens"] > 0
 
     # Simulate an OpenAI response with usage data.
-    await limiter.refund_capacity_from_response(
-        reservation,
-        usage={"total_tokens": 25},
-    )
+    # Actual tokens (25) > reserved (13), so a negative-refund warning is expected.
+    with pytest.warns(RuntimeWarning, match="exceeds reserved usage"):
+        await limiter.refund_capacity_from_response(
+            reservation,
+            usage={"total_tokens": 25},
+        )

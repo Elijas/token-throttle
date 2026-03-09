@@ -169,7 +169,12 @@ class MemoryBackend(RateLimiterBackend):
         return True, preconsumption_capacities, postconsumption_capacities
 
     async def consume_capacity(self, usage: FrozenUsage) -> None:
-        """Consume capacity unconditionally. Capacity may go negative."""
+        """
+        Consume capacity unconditionally.
+
+        Capacity may go negative by design (speedometer pattern); this tracks
+        overshoot rather than blocking.
+        """
         fresh_start_buckets: list[MemoryBucket] = []
 
         async with self._lock:
