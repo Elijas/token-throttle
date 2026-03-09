@@ -37,7 +37,14 @@ _STDLIB_LEVEL_MAP: dict[str, int] = {
 
 
 def _log(level: str, message: str, **kwargs) -> None:
-    """Log using loguru if available, otherwise stdlib logging."""
+    """
+    Log using loguru if available, otherwise stdlib logging.
+
+    ``level`` must be a non-None string.  Callers are closures inside the
+    ``create_*_callbacks`` factories; those closures are only registered when
+    their level parameter is truthy (see e.g. ``on_wait_start if wait_start
+    else None`` guards), so ``_log`` is never reachable with ``level=None``.
+    """
     loguru = _probe_loguru()
     if loguru is not None:
         loguru.log(level, message, **kwargs)

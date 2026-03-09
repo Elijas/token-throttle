@@ -32,6 +32,10 @@ class SyncCapacitiesGetterResult(typing.NamedTuple):
 
 LOCK_TIMEOUT_SECONDS = 30
 
+# Each bucket enqueues exactly 2 pipeline commands in get_capacity()
+# (GET last_checked, GET capacity).  Used to index pipeline results.
+_PIPELINE_CMDS_PER_BUCKET = 2
+
 
 class SyncRedisBackendBuilder(SyncRateLimiterBackendBuilderInterface):
     def __init__(
@@ -135,11 +139,13 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         fresh_start_buckets: list[SyncRedisBucket] = []
         num_buckets = len(self.sorted_buckets)
         for i, bucket in enumerate(self.sorted_buckets):
-            idx = i * 2  # Each bucket adds 2 commands (last_checked, capacity)
+            idx = i * _PIPELINE_CMDS_PER_BUCKET
             last_checked = results[idx]
             capacity = results[idx + 1]
-            # max_capacity results come after all the last_checked/capacity pairs
-            bucket.update_max_capacity_from_result(results[num_buckets * 2 + i])
+            # max_capacity GETs come after all the per-bucket command pairs
+            bucket.update_max_capacity_from_result(
+                results[num_buckets * _PIPELINE_CMDS_PER_BUCKET + i]
+            )
             result = bucket.calculate_capacity(
                 last_checked,
                 capacity,
@@ -389,6 +395,8 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         # Calculate how much to refund for each metric
         refund_usage_: dict[str, float] = {}
         for metric, reserved_amount in reserved_usage.items():
+            # Key guaranteed to exist: SyncRateLimiter.refund_capacity() calls
+            # validate_refund_usage() before reaching the backend.
             actual_amount = actual_usage[metric]
             refund_amount = float(reserved_amount) - float(actual_amount)
 

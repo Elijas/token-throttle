@@ -154,6 +154,13 @@ class RateLimiter(BaseRateLimiter):
         response=None,
         **kwargs,
     ) -> None:
+        """
+        Convenience for OpenAI-style responses with ``total_tokens``.
+
+        Requires metric names ``"tokens"`` and ``"requests"`` (as configured by
+        ``create_openai_*`` factories).  For custom metric names, use
+        :meth:`refund_capacity` directly.
+        """
         if reservation.model_family == _UNLIMITED_FLAG:
             return
         if response is not None:
@@ -171,7 +178,10 @@ class RateLimiter(BaseRateLimiter):
                 else usage["total_tokens"]
             )
         else:
-            # Dict-based kwargs (legacy or manual)
+            if "usage" not in kwargs:
+                raise ValueError(
+                    "Either 'response' or 'usage' keyword argument is required"
+                )
             total_tokens = kwargs["usage"]["total_tokens"]
         actual_usage = {"tokens": total_tokens, "requests": 1}
         validate_refund_usage(actual_usage, set(reservation.usage))
@@ -204,8 +214,8 @@ class RateLimiter(BaseRateLimiter):
         reservation: CapacityReservation,
     ) -> None:
         actual_usage = frozen_usage(actual_usage)
-        # No need to call _config_getter since we already have the model_family
-        # Just get the backend directly
+        # Lock-free read is safe: same reasoning as _get_backend (asyncio is
+        # single-threaded; values are set once and never mutated/removed).
         backend = self._model_family_to_backend.get(reservation.model_family)
         if backend is None:
             raise ValueError(

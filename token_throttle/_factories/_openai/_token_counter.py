@@ -18,7 +18,7 @@ class OpenAIUsageCounter:
     def __init__(self, get_encoding_func: EncodingGetter | None = None):
         self._get_encoding = get_encoding_func or get_encoding
 
-    def __call__(self, model: str, **request: dict) -> FrozenUsage:
+    def __call__(self, model: str, **request) -> FrozenUsage:
         encoding = self._get_encoding(model)
 
         if "input" in request:

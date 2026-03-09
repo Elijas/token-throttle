@@ -147,7 +147,10 @@ class MemoryBackend(RateLimiterBackend):
                             postconsumption_capacities,
                         )
 
-            # Sufficient capacity — subtract usage from each matching bucket
+            # Sufficient capacity — subtract usage from each matching bucket.
+            # postconsumption_dict covers all buckets because validate_acquire_usage()
+            # (called upstream) enforces usage keys == quota keys, so every
+            # capacity metric is matched.
             postconsumption_dict: dict[tuple[str, int], float] = {}
             for (
                 cap_metric,
@@ -288,6 +291,8 @@ class MemoryBackend(RateLimiterBackend):
         # Calculate refund amounts per metric
         refund_usage_: dict[str, float] = {}
         for metric, reserved_amount in reserved_usage.items():
+            # Key guaranteed to exist: RateLimiter.refund_capacity() calls
+            # validate_refund_usage() before reaching the backend.
             actual_amount = actual_usage[metric]
             refund_amount = float(reserved_amount) - float(actual_amount)
 
