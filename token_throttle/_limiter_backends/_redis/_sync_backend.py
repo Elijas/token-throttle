@@ -381,6 +381,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                     f"Actual usage ({actual_amount}) for {metric} exceeds "
                     f"reserved usage ({reserved_amount}). Applying negative refund.",
                     RuntimeWarning,
+                    stacklevel=2,
                 )
 
             # Include both positive and negative refunds

@@ -8,10 +8,14 @@ from token_throttle._interfaces._models import FrozenUsage, Usage, UsageQuotas
 
 def validate_acquire_usage(usage: FrozenUsage, quotas: UsageQuotas) -> None:
     """
-    Check usage keys match quota keys, no negatives, no over-limit.
+    Check usage keys match quota keys, values are finite and non-negative.
+
+    Over-limit checks are performed by the backend against the live
+    bucket max_capacity (which may differ from the static quota.limit
+    after a set_max_capacity call).
 
     Raises:
-        ValueError: If keys mismatch, negative values, or exceeds limit.
+        ValueError: If keys mismatch, or values are NaN/Inf/negative.
 
     """
     if set(usage) != set(quotas.names):
