@@ -21,6 +21,7 @@ dev = [
     "bump-my-version>=1.1.2",
     "hypothesis>=6.100.0",
     "loguru>=0.7.3",
+    "openai>=1.0.0",
     "pytest>=8.3.5",
     "pytest-asyncio>=0.24.0",
     "pytest-cov>=6.1.1",
