@@ -75,6 +75,15 @@ When `set_max_capacity` changes a bucket's limit, `_rate_per_sec` is recalculate
 
 If the last capacity check was 5 seconds ago and the rate doubles, the refill is `5 × new_rate` instead of `4 × old_rate + 1 × new_rate`. The error is bounded by `|rate_diff| × sleep_interval` (~0.1s typically), so it's negligible in practice. Tracking rate-change timestamps would add significant complexity for minimal benefit.
 
+### `_log()` fails fast on unrecognized level strings
+
+`_STDLIB_LEVEL_MAP` uses `[]` lookup (not `.get()`). Unknown levels raise
+`KeyError` immediately. This is intentional — `_log()` is a private function
+only called from the `create_*_callbacks()` factories, which only pass
+standard level strings (DEBUG, INFO, WARNING, ERROR, CRITICAL) plus the
+loguru extensions (TRACE, SUCCESS). Adding a `.get()` fallback would silently
+mask typos in level names.
+
 ### `on_missing_consumption_data` callback is delayed until first successful acquire
 
 When `_check_and_consume_capacity` returns `False` (insufficient capacity), it exits before calling `_fresh_start_buckets_callback`. The `on_missing_consumption_data` callback won't fire until the first *successful* capacity acquisition. This is by design — firing it on every 100ms poll iteration would be noisy. Since `last_checked` is never written on the insufficient-capacity path, the fresh-start condition persists and the callback fires exactly once when capacity is first successfully consumed.

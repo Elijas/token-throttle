@@ -42,6 +42,8 @@ def _log(level: str, message: str, **kwargs) -> None:
     if loguru is not None:
         loguru.log(level, message, **kwargs)
     else:
+        # Intentional KeyError on unknown levels — _log() is private and only
+        # called from create_*_callbacks() factories with known level strings.
         stdlib_level = _STDLIB_LEVEL_MAP[level.upper()]
         if kwargs:
             extra = " ".join(f"{k}={v!r}" for k, v in kwargs.items())

@@ -142,6 +142,12 @@ class SyncRateLimiter:
         if response is not None:
             # Pydantic model (OpenAI SDK v1+) or any object with .usage
             usage = response.usage
+            if usage is None:
+                raise ValueError(
+                    "response.usage is None — cannot extract token counts. "
+                    "Streaming responses may not include usage data; "
+                    "pass actual usage via refund_capacity() instead."
+                )
             total_tokens = (
                 usage.total_tokens
                 if hasattr(usage, "total_tokens")

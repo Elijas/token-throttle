@@ -259,6 +259,75 @@ class TestSetMaxCapacityUpdatesRate:
         assert bucket._rate_per_sec == pytest.approx(50.0)
 
 
+class TestUpdateMaxCapacityFromResult:
+    """Tests for update_max_capacity_from_result() — pipeline-based cache update."""
+
+    def test_valid_bytes_updates_cache_and_rate(self, bucket):
+        """Valid bytes input updates cached max_capacity and rate."""
+        bucket.update_max_capacity_from_result(b"15.0")
+
+        assert bucket._max_capacity_cached == 15.0
+        assert bucket._rate_per_sec == pytest.approx(15.0)  # 15.0 / per_seconds=1
+        assert bucket._max_capacity_cache_time > 0
+
+    def test_none_falls_back_to_default(self, bucket, quota):
+        """None input falls back to default max_capacity."""
+        bucket.update_max_capacity_from_result(None)
+
+        assert bucket._max_capacity_cached == quota.limit
+        assert bucket._rate_per_sec == pytest.approx(float(quota.limit))
+
+    def test_invalid_bytes_falls_back_to_default(self, bucket, quota):
+        """Non-numeric bytes input falls back to default."""
+        bucket.update_max_capacity_from_result(b"not-a-number")
+
+        assert bucket._max_capacity_cached == quota.limit
+
+    def test_nan_falls_back_to_default(self, bucket, quota):
+        """NaN bytes input falls back to default."""
+        bucket.update_max_capacity_from_result(b"nan")
+
+        assert bucket._max_capacity_cached == quota.limit
+
+    def test_inf_falls_back_to_default(self, bucket, quota):
+        """Inf bytes input falls back to default."""
+        bucket.update_max_capacity_from_result(b"inf")
+
+        assert bucket._max_capacity_cached == quota.limit
+
+    def test_negative_falls_back_to_default(self, bucket, quota):
+        """Negative value falls back to default."""
+        bucket.update_max_capacity_from_result(b"-5.0")
+
+        assert bucket._max_capacity_cached == quota.limit
+
+    def test_zero_falls_back_to_default(self, bucket, quota):
+        """Zero value falls back to default (must be > 0)."""
+        bucket.update_max_capacity_from_result(b"0")
+
+        assert bucket._max_capacity_cached == quota.limit
+
+    def test_rate_recalculation(self, bucket):
+        """Rate is recalculated as new_value / per_seconds."""
+        bucket.update_max_capacity_from_result(b"50.0")
+
+        # per_seconds=1, so rate = 50.0 / 1 = 50.0
+        assert bucket._rate_per_sec == pytest.approx(50.0)
+
+    def test_cache_time_always_updated(self, bucket):
+        """Cache time is updated even when value doesn't change."""
+        bucket._max_capacity_cache_time = 0.0
+        bucket.update_max_capacity_from_result(None)  # Will use default=20
+
+        assert bucket._max_capacity_cache_time > 0
+
+    def test_no_redis_call(self, bucket, mock_redis):
+        """update_max_capacity_from_result does not call Redis."""
+        bucket.update_max_capacity_from_result(b"15.0")
+
+        mock_redis.get.assert_not_called()
+
+
 class TestRedisKeyFormat:
     """Tests for Redis key format consistency."""
 

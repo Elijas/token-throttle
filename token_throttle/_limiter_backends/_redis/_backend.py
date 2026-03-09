@@ -138,12 +138,12 @@ class RedisBackend(RateLimiterBackend):
         for bucket in self.sorted_buckets:
             await bucket.get_capacity(pipeline=pipeline, current_time=current_time)
 
+        # Include max_capacity in the pipeline to avoid extra round-trips
+        for bucket in self.sorted_buckets:
+            pipeline.get(bucket._max_capacity_key)  # noqa: SLF001
+
         # Execute the pipeline to get all results
         results = await pipeline.execute()
-
-        # Refreshes bucket.max_capacity cache — read by consume_capacity and refund_capacity
-        for bucket in self.sorted_buckets:
-            await bucket.get_max_capacity()
 
         # We're using dict instead of Usage because two different application
         # versions might use the same Redis backend that's not cleaned up
@@ -151,11 +151,14 @@ class RedisBackend(RateLimiterBackend):
         # Usage class.
         new_capacities: Mapping[tuple[str, int], float] = {}
         fresh_start_buckets: list[RedisBucket] = []
+        num_buckets = len(self.sorted_buckets)
         for i, bucket in enumerate(self.sorted_buckets):
-            idx = i * 2  # Each bucket adds 2 commands
+            idx = i * 2  # Each bucket adds 2 commands (last_checked, capacity)
             # Process results in pairs (last_checked, capacity) for each bucket
             last_checked = results[idx]
             capacity = results[idx + 1]
+            # max_capacity results come after all the last_checked/capacity pairs
+            bucket.update_max_capacity_from_result(results[num_buckets * 2 + i])
             result = bucket.calculate_capacity(
                 last_checked,
                 capacity,

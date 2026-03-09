@@ -89,6 +89,7 @@ class TestAcquireCapacityValidation:
         with pytest.raises(ValueError, match="must be non-negative"):
             await limiter.acquire_capacity({"tokens": -1, "requests": 1}, model="gpt-4")
 
+
 class TestAcquireCapacityForRequestValidation:
     """Tests for ValueError paths in acquire_capacity_for_request."""
 
@@ -181,4 +182,25 @@ class TestRefundCapacityValidation:
             await limiter.refund_capacity(
                 {"tokens": 50, "requests": 1},
                 reservation,
+            )
+
+
+class TestRefundCapacityFromResponseValidation:
+    """Tests for refund_capacity_from_response value paths."""
+
+    async def test_response_with_none_usage_raises(self):
+        builder, _ = make_mock_backend_builder()
+        limiter = RateLimiter(make_limited_config(), backend=builder)
+
+        reservation = CapacityReservation(
+            usage={"tokens": 100.0, "requests": 1.0},
+            model_family="gpt-4",
+        )
+
+        class FakeResponse:
+            usage = None
+
+        with pytest.raises(ValueError, match=r"response\.usage is None"):
+            await limiter.refund_capacity_from_response(
+                reservation, response=FakeResponse()
             )

@@ -101,6 +101,27 @@ class SyncRedisBucket:
         self._max_capacity_cache_time = current_time
         return self._max_capacity_cached
 
+    def update_max_capacity_from_result(self, raw_value: bytes | None) -> None:
+        """Update max_capacity cache from a pre-fetched pipeline result (no I/O)."""
+        if raw_value is not None:
+            try:
+                parsed = float(raw_value)
+                new_value = (
+                    parsed
+                    if math.isfinite(parsed) and parsed > 0
+                    else self._max_capacity_default
+                )
+            except (TypeError, ValueError):
+                new_value = self._max_capacity_default
+        else:
+            new_value = self._max_capacity_default
+
+        if new_value != self._max_capacity_cached:
+            self._max_capacity_cached = new_value
+            self._rate_per_sec = new_value / float(self.per_seconds)
+
+        self._max_capacity_cache_time = time.time()
+
     def set_max_capacity(self, value: float) -> None:
         """Set the max_capacity in Redis for dynamic rate limit adjustment."""
         if not (math.isfinite(value) and value > 0):

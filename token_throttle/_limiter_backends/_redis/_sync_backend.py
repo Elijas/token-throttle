@@ -124,19 +124,22 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         for bucket in self.sorted_buckets:
             bucket.get_capacity(pipeline=pipeline, current_time=current_time)
 
+        # Include max_capacity in the pipeline to avoid extra round-trips
+        for bucket in self.sorted_buckets:
+            pipeline.get(bucket._max_capacity_key)  # noqa: SLF001
+
         # Execute the pipeline to get all results
         results = pipeline.execute()
 
-        # Refreshes bucket.max_capacity cache — read by consume_capacity and refund_capacity
-        for bucket in self.sorted_buckets:
-            bucket.get_max_capacity()
-
         new_capacities: dict[tuple[str, int], float] = {}
         fresh_start_buckets: list[SyncRedisBucket] = []
+        num_buckets = len(self.sorted_buckets)
         for i, bucket in enumerate(self.sorted_buckets):
-            idx = i * 2  # Each bucket adds 2 commands
+            idx = i * 2  # Each bucket adds 2 commands (last_checked, capacity)
             last_checked = results[idx]
             capacity = results[idx + 1]
+            # max_capacity results come after all the last_checked/capacity pairs
+            bucket.update_max_capacity_from_result(results[num_buckets * 2 + i])
             result = bucket.calculate_capacity(
                 last_checked,
                 capacity,

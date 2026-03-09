@@ -222,6 +222,21 @@ class TestRefundCapacityFromResponseValidation:
 
         mock_backend.refund_capacity.assert_called_once()
 
+    def test_response_with_none_usage_raises(self):
+        builder, _ = make_mock_backend_builder()
+        limiter = SyncRateLimiter(make_limited_config(), backend=builder)
+
+        reservation = CapacityReservation(
+            usage={"tokens": 100.0, "requests": 1.0},
+            model_family="gpt-4",
+        )
+
+        class FakeResponse:
+            usage = None
+
+        with pytest.raises(ValueError, match=r"response\.usage is None"):
+            limiter.refund_capacity_from_response(reservation, response=FakeResponse())
+
     def test_dict_kwargs_usage(self):
         builder, mock_backend = make_mock_backend_builder()
         limiter = SyncRateLimiter(make_limited_config(), backend=builder)
