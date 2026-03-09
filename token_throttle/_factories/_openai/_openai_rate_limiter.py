@@ -48,6 +48,10 @@ def create_openai_redis_rate_limiter(
         backend=RedisBackendBuilder(redis_client),
         callbacks=callbacks
         or create_logging_callbacks(
+            wait_start=None,
+            wait_end_consumption=None,
+            capacity_consumed=None,
+            capacity_refunded=None,
             missing_consumption_data="INFO",
         ),
     )

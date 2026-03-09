@@ -21,6 +21,7 @@ from token_throttle._interfaces._callbacks import (
 from token_throttle._interfaces._interfaces import (
     PerModelConfig,
     PerModelConfigGetter,
+    RateLimiterBackend,
     RateLimiterBackendBuilderInterface,
     SyncRateLimiterBackend,
     SyncRateLimiterBackendBuilderInterface,
@@ -111,6 +112,7 @@ __all__ = [
     "PerSeconds",
     "Quota",
     "RateLimiter",
+    "RateLimiterBackend",
     "RateLimiterBackendBuilderInterface",
     "RateLimiterCallbacks",
     "RedisBackend",
