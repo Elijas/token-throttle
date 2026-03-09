@@ -93,7 +93,17 @@ class RedisBackend(RateLimiterBackend):
         self._limit_config = limit_config
 
     async def _lock(self, **kwargs) -> AsyncExitStack:
-        """Acquire locks for all buckets in a consistent order."""
+        """
+        Acquire distributed Redis locks for all buckets in key-sorted order.
+
+        Returns an ``AsyncExitStack`` that holds the acquired locks.  Use as::
+
+            async with await self._lock(timeout=LOCK_TIMEOUT_SECONDS):
+                ...  # all bucket locks held here
+
+        If acquiring lock N fails, locks 0..N-1 are released immediately
+        (via ``stack.aclose()``) so we never leak partially-acquired locks.
+        """
         stack = AsyncExitStack()
 
         # Sorted buckets to ensure consistent locking order

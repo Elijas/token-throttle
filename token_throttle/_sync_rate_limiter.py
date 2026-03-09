@@ -23,6 +23,8 @@ _UNLIMITED_FLAG = "__rate_limiting_disabled__"
 
 
 class SyncRateLimiter:
+    """Synchronous counterpart of ``RateLimiter`` — same architecture and contract."""
+
     def __init__(
         self,
         cfg: PerModelConfig | PerModelConfigGetter,

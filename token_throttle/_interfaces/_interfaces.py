@@ -70,8 +70,32 @@ class RateLimiterBackendBuilderInterface(ABC):
 
 
 class RateLimiterBackend(ABC):
+    """
+    Per-model-family backend that owns a set of token buckets.
+
+    Consumption is all-or-nothing: either every bucket for the requested
+    metrics has sufficient capacity and they are all decremented atomically,
+    or nothing is consumed.
+
+    Capacity is checked against the live bucket ``max_capacity`` (which may
+    differ from the static ``quota.limit`` after a ``set_max_capacity`` call),
+    not the original quota value.
+
+    Implementation note — callbacks are fired *outside* the lock so that
+    user callback code cannot deadlock the backend.  This means callback
+    data is a point-in-time snapshot; other requests may have changed
+    capacity between lock release and callback invocation.
+    """
+
     @abstractmethod
-    async def await_for_capacity(self, usage: FrozenUsage) -> None: ...
+    async def await_for_capacity(self, usage: FrozenUsage) -> None:
+        """
+        Poll until all buckets can satisfy *usage*, then consume atomically.
+
+        Raises ``ValueError`` immediately (fail-fast) if any single metric
+        in *usage* exceeds that bucket's ``max_capacity``, because waiting
+        would be infinite.
+        """
 
     @abstractmethod
     async def consume_capacity(self, usage: FrozenUsage) -> None:
@@ -87,7 +111,20 @@ class RateLimiterBackend(ABC):
         self,
         reserved_usage: FrozenUsage,
         actual_usage: FrozenUsage,
-    ) -> None: ...
+    ) -> None:
+        """
+        Return unused capacity after a request completes.
+
+        *reserved_usage* is what ``acquire_capacity`` originally reserved.
+        *actual_usage* is what the request actually consumed (e.g. from the
+        API response).  The difference is added back to each bucket, capped
+        at ``max_capacity``.
+
+        If actual > reserved the refund is negative (increases debt).
+        Negative capacity is preserved so the token-bucket refill handles
+        recovery naturally — clamping to zero would silently erase debt
+        created by the speedometer / ``record_usage`` path.
+        """
 
     @abstractmethod
     async def set_max_capacity(
@@ -96,7 +133,12 @@ class RateLimiterBackend(ABC):
         per_seconds: int,
         value: float,
     ) -> None:
-        """Dynamically change the max capacity for a specific bucket."""
+        """
+        Dynamically change the max capacity for a specific bucket.
+
+        Also recalculates the refill rate (``max_capacity / per_seconds``)
+        so that a full refill still takes exactly one time window.
+        """
 
 
 class BaseRateLimiter(ABC):
@@ -127,6 +169,8 @@ if TYPE_CHECKING:
 
 
 class SyncRateLimiterBackend(ABC):
+    """Synchronous counterpart of ``RateLimiterBackend`` — same contract."""
+
     @abstractmethod
     def wait_for_capacity(self, usage: FrozenUsage) -> None: ...
 

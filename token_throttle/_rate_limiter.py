@@ -24,6 +24,21 @@ _UNLIMITED_FLAG = "__rate_limiting_disabled__"
 
 
 class RateLimiter(BaseRateLimiter):
+    """
+    Top-level async rate limiter — the main public entry point.
+
+    Architecture:
+      1. A *config* (static ``PerModelConfig`` or callable ``PerModelConfigGetter``)
+         resolves a model name to quotas, a ``model_family``, and an optional
+         ``usage_counter``.
+      2. Each unique ``model_family`` gets its own ``RateLimiterBackend``,
+         built lazily on first use and cached for the limiter's lifetime.
+      3. ``acquire_capacity`` blocks until capacity is available;
+         ``record_usage`` consumes immediately (capacity may go negative).
+         Both return a ``CapacityReservation`` that must be passed to
+         ``refund_capacity`` after the API call completes.
+    """
+
     def __init__(
         self,
         cfg: PerModelConfig | PerModelConfigGetter,

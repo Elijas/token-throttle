@@ -6,6 +6,16 @@ from pydantic import BaseModel
 
 
 class CalculatedCapacity(BaseModel):
+    """
+    Result of a token-bucket capacity calculation.
+
+    ``is_fresh_start`` is True when no prior capacity data exists
+    (``last_checked`` or ``outdated_capacity`` is None).  Backends use
+    this to fire the ``on_missing_consumption_data`` callback, signalling
+    that the bucket assumed full capacity because there was nothing to
+    refill from.
+    """
+
     amount: float
     is_fresh_start: bool
 
