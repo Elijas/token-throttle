@@ -149,6 +149,24 @@ backend = MemoryBackendBuilder()
 
 Both backends are available in sync (`SyncRedisBackendBuilder`, `SyncMemoryBackendBuilder`) and async variants.
 
+### Dynamic rate limits
+
+Adjust bucket limits at runtime without rebuilding the limiter — useful for
+adaptive rate limiting (e.g., reacting to `x-ratelimit-*` response headers):
+
+```python
+# After at least one acquire/record call for this model:
+await limiter.set_max_capacity(
+    model="gpt-4o",
+    metric="tokens",
+    per_seconds=60,
+    value=5000,
+)
+```
+
+For Redis backends the new limit is written to Redis, so all processes
+sharing the same Redis see the change within ~1 second.
+
 ## Sync API
 
 ```python

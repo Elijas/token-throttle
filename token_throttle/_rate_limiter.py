@@ -175,6 +175,24 @@ class RateLimiter(BaseRateLimiter):
             reservation,
         )
 
+    async def set_max_capacity(
+        self,
+        model: str,
+        metric: str,
+        per_seconds: int,
+        value: float,
+    ) -> None:
+        """Dynamically change the max capacity for a specific bucket."""
+        limit_config = self._config_getter(model)
+        model_family = limit_config.get_model_family()
+        backend = self._model_family_to_backend.get(model_family)
+        if backend is None:
+            raise ValueError(
+                f"No backend for model family '{model_family}'. "
+                "Call acquire_capacity or record_usage first."
+            )
+        await backend.set_max_capacity(metric, per_seconds, value)
+
     async def _refund_capacity(
         self,
         actual_usage: Usage,
