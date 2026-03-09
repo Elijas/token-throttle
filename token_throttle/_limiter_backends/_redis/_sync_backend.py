@@ -372,7 +372,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         # Calculate how much to refund for each metric
         refund_usage_: dict[str, float] = {}
         for metric, reserved_amount in reserved_usage.items():
-            actual_amount = actual_usage.get(metric, 0)
+            actual_amount = actual_usage[metric]
             refund_amount = float(reserved_amount) - float(actual_amount)
 
             # Check for overuse and log a warning

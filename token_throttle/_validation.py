@@ -32,9 +32,7 @@ def validate_acquire_usage(usage: FrozenUsage, quotas: UsageQuotas) -> None:
             raise ValueError(f"Usage value for {metric} must be non-negative")
 
 
-def validate_refund_usage(
-    actual_usage: Usage, reservation_keys: set[str]
-) -> None:
+def validate_refund_usage(actual_usage: Usage, reservation_keys: set[str]) -> None:
     """
     Check that refund usage keys match the reservation and values are finite/non-negative.
 

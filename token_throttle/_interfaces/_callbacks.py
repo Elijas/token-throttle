@@ -9,12 +9,19 @@ from token_throttle._interfaces._models import Capacities, FrozenUsage
 # Auto-detect loguru vs stdlib logging
 # ---------------------------------------------------------------------------
 
-try:
-    from loguru import logger as _loguru_logger
+_loguru_cache: dict[str, object] = {}
 
-    _HAS_LOGURU = True
-except ImportError:
-    _HAS_LOGURU = False
+
+def _probe_loguru():
+    if "logger" not in _loguru_cache:
+        try:
+            from loguru import logger
+
+            _loguru_cache["logger"] = logger
+        except ImportError:
+            _loguru_cache["logger"] = None
+    return _loguru_cache["logger"]
+
 
 _stdlib_logger = logging.getLogger("token_throttle")
 
@@ -31,10 +38,11 @@ _STDLIB_LEVEL_MAP: dict[str, int] = {
 
 def _log(level: str, message: str, **kwargs) -> None:
     """Log using loguru if available, otherwise stdlib logging."""
-    if _HAS_LOGURU:
-        _loguru_logger.log(level, message, **kwargs)
+    loguru = _probe_loguru()
+    if loguru is not None:
+        loguru.log(level, message, **kwargs)
     else:
-        stdlib_level = _STDLIB_LEVEL_MAP.get(level.upper(), logging.DEBUG)
+        stdlib_level = _STDLIB_LEVEL_MAP[level.upper()]
         if kwargs:
             extra = " ".join(f"{k}={v!r}" for k, v in kwargs.items())
             _stdlib_logger.log(stdlib_level, "%s | %s", message, extra)
@@ -452,12 +460,13 @@ def create_sync_logging_callbacks(
 
 
 def _get_loguru_logger():
-    if not _HAS_LOGURU:
+    loguru = _probe_loguru()
+    if loguru is None:
         raise ImportError(
             'The "loguru" package is required for loguru callbacks. '
             'Install it with: pip install "token-throttle[loguru]"'
         )
-    return _loguru_logger
+    return loguru
 
 
 def create_loguru_callbacks(

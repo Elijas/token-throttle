@@ -271,7 +271,7 @@ class MemoryBackend(RateLimiterBackend):
         # Calculate refund amounts per metric
         refund_usage_: dict[str, float] = {}
         for metric, reserved_amount in reserved_usage.items():
-            actual_amount = actual_usage.get(metric, 0)
+            actual_amount = actual_usage[metric]
             refund_amount = float(reserved_amount) - float(actual_amount)
 
             if refund_amount < 0:
@@ -319,9 +319,7 @@ class MemoryBackend(RateLimiterBackend):
                     )
             updated_capacities = frozendict(updated_capacities_)
 
-            self._set_capacities(
-                updated_capacities, current_time, allow_negative=True
-            )
+            self._set_capacities(updated_capacities, current_time, allow_negative=True)
 
         # Callbacks fired outside the lock
         await self._fresh_start_buckets_callback(fresh_start_buckets)

@@ -2,6 +2,8 @@
 
 from unittest.mock import MagicMock
 
+import pytest
+
 from token_throttle._interfaces._interfaces import PerModelConfig
 from token_throttle._interfaces._models import Quota, UsageQuotas
 from token_throttle._sync_rate_limiter import SyncRateLimiter
@@ -21,6 +23,7 @@ def make_mock_backend_builder():
 def make_limited_config(
     *,
     model_family: str | None = None,
+    usage_counter=None,
 ) -> PerModelConfig:
     """Create a PerModelConfig with tokens and requests quotas."""
     quotas = UsageQuotas(
@@ -32,6 +35,7 @@ def make_limited_config(
     return PerModelConfig(
         quotas=quotas,
         model_family=model_family,
+        usage_counter=usage_counter,
     )
 
 
@@ -143,3 +147,27 @@ class TestBackendCaching:
         assert reservation_b.model_family == "claude-3"
         backend_a.wait_for_capacity.assert_called_once()
         backend_b.wait_for_capacity.assert_called_once()
+
+
+class TestAcquireCapacityForRequestMerge:
+    """Tests for acquire_capacity_for_request merging usage_counter + extra_usage."""
+
+    def test_merges_usage_counter_and_extra_usage(self):
+        builder, mock_backend = make_mock_backend_builder()
+
+        def fake_counter(**_kwargs):
+            return {"tokens": 100.0, "requests": 1.0}
+
+        config = make_limited_config(usage_counter=fake_counter)
+        limiter = SyncRateLimiter(config, backend=builder)
+
+        reservation = limiter.acquire_capacity_for_request(
+            extra_usage={"tokens": 50, "requests": 2},
+            model="gpt-4",
+        )
+
+        assert reservation.model_family == "gpt-4"
+        # The merged usage should be tokens=150, requests=3
+        called_usage = mock_backend.wait_for_capacity.call_args[0][0]
+        assert float(called_usage["tokens"]) == pytest.approx(150.0)
+        assert float(called_usage["requests"]) == pytest.approx(3.0)

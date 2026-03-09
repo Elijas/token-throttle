@@ -68,6 +68,35 @@ class SyncRateLimiter:
             )
         return self._acquire_capacity(usage, limit_config, _block=_block)
 
+    def acquire_capacity_for_request(
+        self,
+        *,
+        extra_usage: dict | None,
+        **kwargs,
+    ) -> CapacityReservation:
+        model = kwargs.get("model")
+        if not model:
+            raise ValueError("'model' parameter is required")
+
+        limit_config = self._config_getter(model)
+        if limit_config.is_unlimited:
+            return CapacityReservation(
+                usage={},
+                model_family=_UNLIMITED_FLAG,
+            )
+        if limit_config.usage_counter is None:
+            raise ValueError("limit_config.usage_counter cannot be None")
+
+        usage = dict(limit_config.usage_counter(**kwargs))
+        if extra_usage:
+            for k, v in extra_usage.items():
+                if k not in usage:
+                    raise ValueError(
+                        f"Usage key '{k}' not found in usage counter",
+                    )
+                usage[k] += v
+        return self._acquire_capacity(frozen_usage(usage), limit_config)
+
     def _acquire_capacity(
         self,
         usage: FrozenUsage,
@@ -100,6 +129,32 @@ class SyncRateLimiter:
             return
         validate_refund_usage(actual_usage, set(reservation.usage))
         self._refund_capacity(actual_usage, reservation)
+
+    def refund_capacity_from_response(
+        self,
+        reservation: CapacityReservation,
+        response=None,
+        **kwargs,
+    ) -> None:
+        if reservation.model_family == _UNLIMITED_FLAG:
+            return
+        if response is not None:
+            # Pydantic model (OpenAI SDK v1+) or any object with .usage
+            usage = response.usage
+            total_tokens = (
+                usage.total_tokens
+                if hasattr(usage, "total_tokens")
+                else usage["total_tokens"]
+            )
+        else:
+            # Dict-based kwargs (legacy or manual)
+            total_tokens = kwargs["usage"]["total_tokens"]
+        actual_usage = {"tokens": total_tokens, "requests": 1}
+        validate_refund_usage(actual_usage, set(reservation.usage))
+        self._refund_capacity(
+            actual_usage,
+            reservation,
+        )
 
     def _refund_capacity(
         self,
