@@ -108,6 +108,17 @@ class TestModelFamilyGetter:
     def test_no_suffix_16k(self):
         assert openai_model_family_getter("gpt-3.5-turbo-16k") == "gpt-3.5-turbo-16k"
 
+    # --- Date + text suffixes (e.g. -preview) are stripped ---
+
+    def test_strips_mmdd_preview_suffix(self):
+        assert openai_model_family_getter("gpt-4-0125-preview") == "gpt-4"
+
+    def test_strips_mmdd_preview_suffix_turbo(self):
+        assert openai_model_family_getter("gpt-4-1106-preview") == "gpt-4"
+
+    def test_strips_iso_date_preview_suffix(self):
+        assert openai_model_family_getter("gpt-4-turbo-2024-04-09-preview") == "gpt-4-turbo"
+
     # --- Provider prefix stripping ---
 
     def test_strips_openai_prefix(self):

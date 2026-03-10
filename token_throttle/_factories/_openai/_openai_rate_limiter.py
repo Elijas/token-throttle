@@ -24,7 +24,7 @@ def openai_model_family_getter(model: str, /) -> str:
     # Matches -MMDD (e.g. -0613) and -YYYY-MM-DD (e.g. -2024-04-09).
     # Single/triple-digit version numbers (-1, -002) are preserved.
     model = model.removeprefix("openai/")
-    return re.sub(r"-\d{4}(-\d{2}){0,2}$", "", model)
+    return re.sub(r"-\d{4}(-\d{2}){0,2}(-preview)?$", "", model)
 
 
 def create_openai_redis_rate_limiter(

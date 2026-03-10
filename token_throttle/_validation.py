@@ -34,7 +34,7 @@ def validate_acquire_usage(usage: FrozenUsage, quotas: UsageQuotas) -> None:
 
 def validate_refund_usage(actual_usage: Usage, reservation_keys: set[str]) -> None:
     """
-    Check that refund usage keys match the reservation and values are finite/non-negative.
+    Check that actual usage keys match the reservation and values are finite/non-negative.
 
     Raises:
         ValueError: If keys don't match, or values are NaN/Inf/negative.
@@ -48,10 +48,10 @@ def validate_refund_usage(actual_usage: Usage, reservation_keys: set[str]) -> No
         amount = float(amount_)
         if not math.isfinite(amount):
             raise ValueError(
-                f"Refund value for {metric} must be finite (got {amount_!r})"
+                f"Actual usage value for {metric} must be finite (got {amount_!r})"
             )
         if amount < 0:
-            raise ValueError(f"Refund value for {metric} must be non-negative")
+            raise ValueError(f"Actual usage value for {metric} must be non-negative")
 
 
 def resolve_config(
