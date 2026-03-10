@@ -177,6 +177,11 @@ class RateLimiter(BaseRateLimiter):
                 if hasattr(usage, "total_tokens")
                 else usage["total_tokens"]
             )
+            if total_tokens is None:
+                raise ValueError(
+                    "total_tokens is None — cannot compute refund. "
+                    "Pass actual usage via refund_capacity() instead."
+                )
         else:
             if "usage" not in kwargs:
                 raise ValueError(
