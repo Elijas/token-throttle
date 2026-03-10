@@ -79,7 +79,9 @@ def get_encoding(model_name: str) -> "Encoding":
     for model_name_substring, encoding_name in substring_to_encoding.items():
         if model_name_substring == model_name:
             return tiktoken.get_encoding(encoding_name)
-    for model_name_substring, encoding_name in substring_to_encoding.items():
+    for model_name_substring, encoding_name in sorted(
+        substring_to_encoding.items(), key=lambda item: len(item[0]), reverse=True
+    ):
         if model_name_substring in model_name:
             return tiktoken.get_encoding(encoding_name)
     return tiktoken.encoding_for_model(model_name)

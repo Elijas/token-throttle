@@ -119,6 +119,14 @@ class TestModelFamilyGetter:
     def test_strips_iso_date_preview_suffix(self):
         assert openai_model_family_getter("gpt-4-turbo-2024-04-09-preview") == "gpt-4-turbo"
 
+    # --- Standalone -preview suffix is stripped ---
+
+    def test_strips_standalone_preview_o1(self):
+        assert openai_model_family_getter("o1-preview") == "o1"
+
+    def test_strips_standalone_preview_gpt4_turbo(self):
+        assert openai_model_family_getter("gpt-4-turbo-preview") == "gpt-4-turbo"
+
     # --- Provider prefix stripping ---
 
     def test_strips_openai_prefix(self):
