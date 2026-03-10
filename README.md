@@ -33,7 +33,7 @@ limiter = create_openai_redis_rate_limiter(
 )
 
 # 1. Reserve capacity (blocks until available)
-request = dict(model="openai/gpt-4.1", messages=[{"role": "user", "content": "Hi"}])
+request = dict(model="gpt-4.1", messages=[{"role": "user", "content": "Hi"}])
 reservation = await limiter.acquire_capacity_for_request(**request, extra_usage=None)
 
 # 2. Make the API call
