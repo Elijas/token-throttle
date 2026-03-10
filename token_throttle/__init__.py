@@ -1,4 +1,5 @@
 import importlib
+import importlib.util
 
 from token_throttle._interfaces._callbacks import (
     OnCapacityConsumedCallback,
@@ -78,6 +79,8 @@ _LAZY_IMPORTS: dict[str, str] = {
     "get_encoding": "token_throttle._factories._openai._token_counter",
 }
 
+_HAS_REDIS = importlib.util.find_spec("redis") is not None
+
 
 def __getattr__(name: str):
     if name in _LAZY_IMPORTS:
@@ -88,12 +91,23 @@ def __getattr__(name: str):
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
-__all__ = [
+_REDIS_ALL = [
     "LOCK_TIMEOUT_SECONDS",
+    "CapacitiesGetterResult",
+    "RedisBackend",
+    "RedisBackendBuilder",
+    "RedisBucket",
+    "SyncRedisBackend",
+    "SyncRedisBackendBuilder",
+    "SyncRedisBucket",
+    "create_openai_redis_rate_limiter",
+    "openai_model_family_getter",
+]
+
+__all__ = [
     "BucketId",
     "CalculatedCapacity",
     "Capacities",
-    "CapacitiesGetterResult",
     "CapacityReservation",
     "EncodingGetter",
     "FrozenUsage",
@@ -115,9 +129,6 @@ __all__ = [
     "RateLimiterBackend",
     "RateLimiterBackendBuilderInterface",
     "RateLimiterCallbacks",
-    "RedisBackend",
-    "RedisBackendBuilder",
-    "RedisBucket",
     "SecondsIn",
     "SyncMemoryBackend",
     "SyncMemoryBackendBuilder",
@@ -130,19 +141,17 @@ __all__ = [
     "SyncRateLimiterBackend",
     "SyncRateLimiterBackendBuilderInterface",
     "SyncRateLimiterCallbacks",
-    "SyncRedisBackend",
-    "SyncRedisBackendBuilder",
-    "SyncRedisBucket",
     "Usage",
     "UsageCounter",
     "UsageQuotas",
     "count_chat_input_tokens",
     "create_logging_callbacks",
     "create_loguru_callbacks",
-    "create_openai_redis_rate_limiter",
     "create_sync_logging_callbacks",
     "create_sync_loguru_callbacks",
     "frozen_usage",
     "get_encoding",
-    "openai_model_family_getter",
 ]
+
+if _HAS_REDIS:
+    __all__ += _REDIS_ALL  # noqa: PLE0605 - dynamic __all__ to avoid ImportError without redis
