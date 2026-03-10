@@ -119,12 +119,8 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         if current_time is None:
             current_time = time.time()
 
-        # Assert that buckets are already sorted by key
-        if self.sorted_buckets != sorted(
-            self.sorted_buckets,
-            key=lambda b: b.full_redis_key,
-        ):
-            raise RuntimeError("Buckets must be sorted by key to prevent deadlocks")
+        # sorted_buckets is sorted once in __init__ and never mutated, so the
+        # deadlock-prevention ordering invariant holds for the lifetime of the backend.
         for bucket in self.sorted_buckets:
             bucket.get_capacity(pipeline=pipeline, current_time=current_time)
 

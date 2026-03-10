@@ -489,8 +489,6 @@ def create_loguru_callbacks(
     capacity_refunded: str | None = None,
     missing_consumption_data: str | None = None,
 ) -> RateLimiterCallbacks:
-    default = "DEBUG"
-
     async def on_wait_start(
         *,
         model_family: str,
@@ -499,7 +497,7 @@ def create_loguru_callbacks(
     ) -> None:
         logger = _get_loguru_logger()
         logger.log(
-            wait_start or default,
+            wait_start,
             "Rate limiter wait starting",
             model_family=model_family,
             usage=usage,
@@ -516,7 +514,7 @@ def create_loguru_callbacks(
     ) -> None:
         logger = _get_loguru_logger()
         logger.log(
-            wait_end_consumption or default,
+            wait_end_consumption,
             "Rate limiter wait complete",
             model_family=model_family,
             usage=usage,
@@ -535,7 +533,7 @@ def create_loguru_callbacks(
     ) -> None:
         logger = _get_loguru_logger()
         logger.log(
-            capacity_consumed or default,
+            capacity_consumed,
             "Rate limiter capacity consumed",
             model_family=model_family,
             usage=usage,
@@ -555,7 +553,7 @@ def create_loguru_callbacks(
     ) -> None:
         logger = _get_loguru_logger()
         logger.log(
-            capacity_refunded or default,
+            capacity_refunded,
             "Rate limiter capacity refunded",
             model_family=model_family,
             reserved_usage=reserved_usage,
@@ -573,7 +571,7 @@ def create_loguru_callbacks(
     ) -> None:
         logger = _get_loguru_logger()
         logger.log(
-            missing_consumption_data or default,
+            missing_consumption_data,
             "Rate limiter missing consumption data",
             model_family=model_family,
             usage_metric=usage_metric,
@@ -601,8 +599,6 @@ def create_sync_loguru_callbacks(
     capacity_refunded: str | None = None,
     missing_consumption_data: str | None = None,
 ) -> SyncRateLimiterCallbacks:
-    default = "DEBUG"
-
     def on_wait_start(
         *,
         model_family: str,
@@ -611,7 +607,7 @@ def create_sync_loguru_callbacks(
     ) -> None:
         logger = _get_loguru_logger()
         logger.log(
-            wait_start or default,
+            wait_start,
             "Rate limiter wait starting",
             model_family=model_family,
             usage=usage,
@@ -628,7 +624,7 @@ def create_sync_loguru_callbacks(
     ) -> None:
         logger = _get_loguru_logger()
         logger.log(
-            wait_end_consumption or default,
+            wait_end_consumption,
             "Rate limiter wait complete",
             model_family=model_family,
             usage=usage,
@@ -647,7 +643,7 @@ def create_sync_loguru_callbacks(
     ) -> None:
         logger = _get_loguru_logger()
         logger.log(
-            capacity_consumed or default,
+            capacity_consumed,
             "Rate limiter capacity consumed",
             model_family=model_family,
             usage=usage,
@@ -667,7 +663,7 @@ def create_sync_loguru_callbacks(
     ) -> None:
         logger = _get_loguru_logger()
         logger.log(
-            capacity_refunded or default,
+            capacity_refunded,
             "Rate limiter capacity refunded",
             model_family=model_family,
             reserved_usage=reserved_usage,
@@ -685,7 +681,7 @@ def create_sync_loguru_callbacks(
     ) -> None:
         logger = _get_loguru_logger()
         logger.log(
-            missing_consumption_data or default,
+            missing_consumption_data,
             "Rate limiter missing consumption data",
             model_family=model_family,
             usage_metric=usage_metric,
