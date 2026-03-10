@@ -86,7 +86,7 @@ class RateLimiter(BaseRateLimiter):
     async def acquire_capacity_for_request(
         self,
         *,
-        extra_usage: dict | None,
+        extra_usage: dict | None = None,
         **kwargs,
     ) -> CapacityReservation:
         model = kwargs.get("model")
@@ -188,6 +188,11 @@ class RateLimiter(BaseRateLimiter):
                     "Either 'response' or 'usage' keyword argument is required"
                 )
             total_tokens = kwargs["usage"]["total_tokens"]
+            if total_tokens is None:
+                raise ValueError(
+                    "total_tokens is None — cannot compute refund. "
+                    "Pass actual usage via refund_capacity() instead."
+                )
         actual_usage = {"tokens": total_tokens, "requests": 1}
         validate_refund_usage(actual_usage, set(reservation.usage))
         await self._refund_capacity(
