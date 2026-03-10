@@ -91,6 +91,10 @@ def __getattr__(name: str):
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
+def __dir__():
+    return sorted(set(__all__) | set(globals()))
+
+
 _REDIS_ALL = [
     "LOCK_TIMEOUT_SECONDS",
     "CapacitiesGetterResult",
