@@ -84,6 +84,18 @@ standard level strings (DEBUG, INFO, WARNING, ERROR, CRITICAL) plus the
 loguru extensions (TRACE, SUCCESS). Adding a `.get()` fallback would silently
 mask typos in level names.
 
+### Capacity matching loop and the postconsumption invariant
+
+`_check_and_consume_capacity` and `consume_capacity` build a `postconsumption_dict` via a nested loop that matches capacity entries against usage entries by metric name. This O(n×m) pattern appears in all four backends (async/sync × memory/Redis).
+
+**Invariant:** `postconsumption_dict` must cover ALL entries in `preconsumption_capacities`. If any bucket is missed, `_set_capacities` won't update its timestamp, causing incorrect refill calculations on the next read. This is guaranteed by `validate_acquire_usage()` (called in `_acquire_capacity`) which enforces `set(usage.keys()) == set(quotas.names)`. Each backend asserts this post-hoc with `assert len(postconsumption_dict) == len(preconsumption_capacities)`.
+
+The O(n×m) cost is irrelevant in practice — n (buckets) and m (usage metrics) are typically 2–5.
+
+### `_PIPELINE_CMDS_PER_BUCKET` in Redis backends
+
+Redis `_get_capacities_unsafe` batches pipeline commands in a fixed layout: each bucket enqueues exactly 2 GETs (`last_checked`, `capacity`), followed by 1 `max_capacity` GET per bucket. The constant `_PIPELINE_CMDS_PER_BUCKET = 2` and an assertion on result count enforce this layout. If `get_capacity()` or the pipeline structure changes, the assertion catches the mismatch immediately rather than silently reading wrong values.
+
 ### Over-limit validation lives in the backend, not `validate_acquire_usage`
 
 `validate_acquire_usage` checks key-match, finiteness, and non-negativity — but does **not** check `usage > quota.limit`. That check was removed intentionally because `set_max_capacity` can change a bucket's limit at runtime, making the static `quota.limit` stale.
