@@ -51,15 +51,15 @@ class RedisBackendBuilder(RateLimiterBackendBuilderInterface):
 
     def build(
         self,
-        limit_config: PerModelConfig,
+        cfg: PerModelConfig,
         *,
         callbacks: RateLimiterCallbacks | None = None,
     ) -> "RateLimiterBackend":
         redis_buckets = []
-        for quota in limit_config.quotas:
+        for quota in cfg.quotas:
             b = RedisBucket(
                 quota=quota,
-                limit_config=limit_config,
+                limit_config=cfg,
                 redis_client=self._redis,
             )
             redis_buckets.append(b)
@@ -68,7 +68,7 @@ class RedisBackendBuilder(RateLimiterBackendBuilderInterface):
             redis=self._redis,
             sleep_interval=self._sleep_interval,
             callbacks=callbacks,
-            limit_config=limit_config,
+            limit_config=cfg,
         )
 
 
@@ -107,10 +107,9 @@ class RedisBackend(RateLimiterBackend):
         """
         stack = AsyncExitStack()
 
-        # Sorted buckets to ensure consistent locking order
-        key_sorted_buckets = sorted(self.sorted_buckets, key=lambda b: b.full_redis_key)
+        # sorted_buckets is sorted once in __init__ and never mutated.
         try:
-            for bucket in key_sorted_buckets:
+            for bucket in self.sorted_buckets:
                 await stack.enter_async_context(bucket.lock(**kwargs))
         except BaseException:
             await stack.aclose()
@@ -142,13 +141,21 @@ class RedisBackend(RateLimiterBackend):
         # Execute the pipeline to get all results
         results = await pipeline.execute()
 
+        num_buckets = len(self.sorted_buckets)
+        expected_results = num_buckets * _PIPELINE_CMDS_PER_BUCKET + num_buckets
+        if len(results) != expected_results:
+            raise RuntimeError(
+                f"Pipeline returned {len(results)} results, expected {expected_results} "
+                f"({num_buckets} buckets x {_PIPELINE_CMDS_PER_BUCKET} cmds + "
+                f"{num_buckets} max_capacity GETs)"
+            )
+
         # We're using dict instead of Usage because two different application
         # versions might use the same Redis backend that's not cleaned up
         # between deployments, and the new version might have a different
         # Usage class.
         new_capacities: dict[tuple[str, int], float] = {}
         fresh_start_buckets: list[RedisBucket] = []
-        num_buckets = len(self.sorted_buckets)
         for i, bucket in enumerate(self.sorted_buckets):
             idx = i * _PIPELINE_CMDS_PER_BUCKET
             last_checked = results[idx]
@@ -279,6 +286,14 @@ class RedisBackend(RateLimiterBackend):
                     postconsumption_dict[(capacity_metric_name, per_seconds)] = (
                         capacity_amount - usage_amount
                     )
+            # Invariant: validate_acquire_usage() guarantees usage keys == quota
+            # keys, so every capacity bucket must have a matching usage entry.
+            if len(postconsumption_dict) != len(preconsumption_capacities):
+                raise RuntimeError(
+                    f"postconsumption covers {len(postconsumption_dict)} buckets but "
+                    f"preconsumption has {len(preconsumption_capacities)} — "
+                    f"validate_acquire_usage() should prevent this"
+                )
             postconsumption_capacities = frozendict(postconsumption_dict)
             await self._set_capacities_unsafe(
                 postconsumption_capacities,
@@ -346,6 +361,12 @@ class RedisBackend(RateLimiterBackend):
                     postconsumption_dict[(capacity_metric_name, per_seconds)] = (
                         capacity_amount - usage_amount
                     )
+            if len(postconsumption_dict) != len(preconsumption_capacities):
+                raise RuntimeError(
+                    f"postconsumption covers {len(postconsumption_dict)} buckets but "
+                    f"preconsumption has {len(preconsumption_capacities)} — "
+                    f"validate_acquire_usage() should prevent this"
+                )
             postconsumption_capacities = frozendict(postconsumption_dict)
             await self._set_capacities_unsafe(
                 postconsumption_capacities,

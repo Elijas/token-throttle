@@ -50,15 +50,15 @@ class SyncRedisBackendBuilder(SyncRateLimiterBackendBuilderInterface):
 
     def build(
         self,
-        limit_config: PerModelConfig,
+        cfg: PerModelConfig,
         *,
         callbacks: SyncRateLimiterCallbacks | None = None,
     ) -> "SyncRedisBackend":
         redis_buckets = []
-        for quota in limit_config.quotas:
+        for quota in cfg.quotas:
             b = SyncRedisBucket(
                 quota=quota,
-                limit_config=limit_config,
+                limit_config=cfg,
                 redis_client=self._redis,
             )
             redis_buckets.append(b)
@@ -67,7 +67,7 @@ class SyncRedisBackendBuilder(SyncRateLimiterBackendBuilderInterface):
             redis=self._redis,
             sleep_interval=self._sleep_interval,
             callbacks=callbacks,
-            limit_config=limit_config,
+            limit_config=cfg,
         )
 
 
@@ -96,10 +96,9 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         """Acquire locks for all buckets in a consistent order."""
         stack = ExitStack()
 
-        # Sorted buckets to ensure consistent locking order
-        key_sorted_buckets = sorted(self.sorted_buckets, key=lambda b: b.full_redis_key)
+        # sorted_buckets is sorted once in __init__ and never mutated.
         try:
-            for bucket in key_sorted_buckets:
+            for bucket in self.sorted_buckets:
                 stack.enter_context(bucket.lock(**kwargs))
         except BaseException:
             stack.close()
@@ -131,9 +130,17 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         # Execute the pipeline to get all results
         results = pipeline.execute()
 
+        num_buckets = len(self.sorted_buckets)
+        expected_results = num_buckets * _PIPELINE_CMDS_PER_BUCKET + num_buckets
+        if len(results) != expected_results:
+            raise RuntimeError(
+                f"Pipeline returned {len(results)} results, expected {expected_results} "
+                f"({num_buckets} buckets x {_PIPELINE_CMDS_PER_BUCKET} cmds + "
+                f"{num_buckets} max_capacity GETs)"
+            )
+
         new_capacities: dict[tuple[str, int], float] = {}
         fresh_start_buckets: list[SyncRedisBucket] = []
-        num_buckets = len(self.sorted_buckets)
         for i, bucket in enumerate(self.sorted_buckets):
             idx = i * _PIPELINE_CMDS_PER_BUCKET
             last_checked = results[idx]
@@ -263,6 +270,14 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                     postconsumption_dict[(capacity_metric_name, per_seconds)] = (
                         capacity_amount - usage_amount
                     )
+            # Invariant: validate_acquire_usage() guarantees usage keys == quota
+            # keys, so every capacity bucket must have a matching usage entry.
+            if len(postconsumption_dict) != len(preconsumption_capacities):
+                raise RuntimeError(
+                    f"postconsumption covers {len(postconsumption_dict)} buckets but "
+                    f"preconsumption has {len(preconsumption_capacities)} — "
+                    f"validate_acquire_usage() should prevent this"
+                )
             postconsumption_capacities = frozendict(postconsumption_dict)
             self._set_capacities_unsafe(
                 postconsumption_capacities,
@@ -329,6 +344,12 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                     postconsumption_dict[(capacity_metric_name, per_seconds)] = (
                         capacity_amount - usage_amount
                     )
+            if len(postconsumption_dict) != len(preconsumption_capacities):
+                raise RuntimeError(
+                    f"postconsumption covers {len(postconsumption_dict)} buckets but "
+                    f"preconsumption has {len(preconsumption_capacities)} — "
+                    f"validate_acquire_usage() should prevent this"
+                )
             postconsumption_capacities = frozendict(postconsumption_dict)
             self._set_capacities_unsafe(
                 postconsumption_capacities,

@@ -27,24 +27,24 @@ class MemoryBackendBuilder(RateLimiterBackendBuilderInterface):
 
     def build(
         self,
-        limit_config: PerModelConfig,
+        cfg: PerModelConfig,
         *,
         callbacks: RateLimiterCallbacks | None = None,
     ) -> "RateLimiterBackend":
         buckets = []
-        for quota in limit_config.quotas:
+        for quota in cfg.quotas:
             b = MemoryBucket(
                 metric=quota.metric,
                 per_seconds=quota.per_seconds,
                 limit=float(quota.limit),
-                model_family=limit_config.get_model_family(),
+                model_family=cfg.get_model_family(),
             )
             buckets.append(b)
         return MemoryBackend(
             buckets=buckets,
             sleep_interval=self._sleep_interval,
             callbacks=callbacks,
-            limit_config=limit_config,
+            limit_config=cfg,
         )
 
 
@@ -148,9 +148,6 @@ class MemoryBackend(RateLimiterBackend):
                         )
 
             # Sufficient capacity — subtract usage from each matching bucket.
-            # postconsumption_dict covers all buckets because validate_acquire_usage()
-            # (called upstream) enforces usage keys == quota keys, so every
-            # capacity metric is matched.
             postconsumption_dict: dict[tuple[str, int], float] = {}
             for (
                 cap_metric,
@@ -162,6 +159,14 @@ class MemoryBackend(RateLimiterBackend):
                     postconsumption_dict[(cap_metric, per_seconds)] = (
                         cap_amount - usage_amount
                     )
+            # Invariant: validate_acquire_usage() guarantees usage keys == quota
+            # keys, so every capacity bucket must have a matching usage entry.
+            if len(postconsumption_dict) != len(preconsumption_capacities):
+                raise RuntimeError(
+                    f"postconsumption covers {len(postconsumption_dict)} buckets but "
+                    f"preconsumption has {len(preconsumption_capacities)} — "
+                    f"validate_acquire_usage() should prevent this"
+                )
             postconsumption_capacities = frozendict(postconsumption_dict)
             self._set_capacities(postconsumption_capacities, current_time)
 
@@ -219,6 +224,12 @@ class MemoryBackend(RateLimiterBackend):
                     postconsumption_dict[(cap_metric, per_seconds)] = (
                         cap_amount - usage_amount
                     )
+            if len(postconsumption_dict) != len(preconsumption_capacities):
+                raise RuntimeError(
+                    f"postconsumption covers {len(postconsumption_dict)} buckets but "
+                    f"preconsumption has {len(preconsumption_capacities)} — "
+                    f"validate_acquire_usage() should prevent this"
+                )
             postconsumption_capacities = frozendict(postconsumption_dict)
             self._set_capacities(
                 postconsumption_capacities,
