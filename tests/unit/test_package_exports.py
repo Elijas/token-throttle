@@ -32,3 +32,20 @@ def test_redis_exports_match_installed_dependency():
 
     for export_name in _REDIS_EXPORTS:
         assert (export_name in token_throttle.__all__) is has_redis
+
+
+def test_dir_contains_public_names():
+    """Cover __dir__() in __init__.py."""
+    d = dir(token_throttle)
+    assert "RateLimiter" in d
+    assert "SyncRateLimiter" in d
+    assert "MemoryBackendBuilder" in d
+    assert "Quota" in d
+
+
+def test_getattr_raises_for_unknown_name():
+    """Cover the AttributeError branch in __getattr__."""
+    import pytest
+
+    with pytest.raises(AttributeError, match="has no attribute"):
+        token_throttle.this_does_not_exist_at_all

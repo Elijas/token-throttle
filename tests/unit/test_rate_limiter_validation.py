@@ -204,3 +204,163 @@ class TestRefundCapacityFromResponseValidation:
             await limiter.refund_capacity_from_response(
                 reservation, response=FakeResponse()
             )
+
+    async def test_unlimited_reservation_is_noop(self):
+        builder, _ = make_mock_backend_builder()
+        limiter = RateLimiter(make_unlimited_config(), backend=builder)
+        reservation = CapacityReservation(usage={}, model_family=_UNLIMITED_FLAG)
+        result = await limiter.refund_capacity_from_response(reservation)
+        assert result is None
+
+    async def test_pydantic_response_object(self):
+        builder, mock_backend = make_mock_backend_builder()
+        limiter = RateLimiter(make_limited_config(), backend=builder)
+        await limiter.acquire_capacity(
+            {"tokens": 100, "requests": 1}, model="gpt-4"
+        )
+        reservation = CapacityReservation(
+            usage={"tokens": 100.0, "requests": 1.0},
+            model_family="gpt-4",
+        )
+
+        class FakeUsage:
+            total_tokens = 80
+
+        class FakeResponse:
+            usage = FakeUsage()
+
+        await limiter.refund_capacity_from_response(
+            reservation, response=FakeResponse()
+        )
+        mock_backend.refund_capacity.assert_awaited_once()
+
+    async def test_dict_response_object(self):
+        """Response.usage is a dict (not object with attributes)."""
+        builder, mock_backend = make_mock_backend_builder()
+        limiter = RateLimiter(make_limited_config(), backend=builder)
+        await limiter.acquire_capacity(
+            {"tokens": 100, "requests": 1}, model="gpt-4"
+        )
+        reservation = CapacityReservation(
+            usage={"tokens": 100.0, "requests": 1.0},
+            model_family="gpt-4",
+        )
+
+        class FakeResponse:
+            usage = {"total_tokens": 80}
+
+        await limiter.refund_capacity_from_response(
+            reservation, response=FakeResponse()
+        )
+        mock_backend.refund_capacity.assert_awaited_once()
+
+    async def test_kwargs_usage_path(self):
+        builder, mock_backend = make_mock_backend_builder()
+        limiter = RateLimiter(make_limited_config(), backend=builder)
+        await limiter.acquire_capacity(
+            {"tokens": 100, "requests": 1}, model="gpt-4"
+        )
+        reservation = CapacityReservation(
+            usage={"tokens": 100.0, "requests": 1.0},
+            model_family="gpt-4",
+        )
+        await limiter.refund_capacity_from_response(
+            reservation, usage={"total_tokens": 80}
+        )
+        mock_backend.refund_capacity.assert_awaited_once()
+
+    async def test_no_response_no_usage_raises(self):
+        builder, _ = make_mock_backend_builder()
+        limiter = RateLimiter(make_limited_config(), backend=builder)
+        reservation = CapacityReservation(
+            usage={"tokens": 100.0, "requests": 1.0},
+            model_family="gpt-4",
+        )
+        with pytest.raises(
+            ValueError, match="Either 'response' or 'usage' keyword argument"
+        ):
+            await limiter.refund_capacity_from_response(reservation)
+
+    async def test_response_with_none_total_tokens_raises(self):
+        builder, _ = make_mock_backend_builder()
+        limiter = RateLimiter(make_limited_config(), backend=builder)
+        reservation = CapacityReservation(
+            usage={"tokens": 100.0, "requests": 1.0},
+            model_family="gpt-4",
+        )
+
+        class FakeUsage:
+            total_tokens = None
+
+        class FakeResponse:
+            usage = FakeUsage()
+
+        with pytest.raises(ValueError, match="total_tokens is None"):
+            await limiter.refund_capacity_from_response(
+                reservation, response=FakeResponse()
+            )
+
+    async def test_kwargs_with_none_total_tokens_raises(self):
+        builder, _ = make_mock_backend_builder()
+        limiter = RateLimiter(make_limited_config(), backend=builder)
+        reservation = CapacityReservation(
+            usage={"tokens": 100.0, "requests": 1.0},
+            model_family="gpt-4",
+        )
+        with pytest.raises(ValueError, match="total_tokens is None"):
+            await limiter.refund_capacity_from_response(
+                reservation, usage={"total_tokens": None}
+            )
+
+
+class TestSetMaxCapacityValidation:
+    async def test_set_max_capacity_without_prior_backend_raises(self):
+        builder, _ = make_mock_backend_builder()
+        limiter = RateLimiter(make_limited_config(), backend=builder)
+        with pytest.raises(ValueError, match="No backend for model family"):
+            await limiter.set_max_capacity("gpt-4", "tokens", 60, 500.0)
+
+    async def test_set_max_capacity_delegates_to_backend(self):
+        builder, mock_backend = make_mock_backend_builder()
+        limiter = RateLimiter(make_limited_config(), backend=builder)
+        await limiter.acquire_capacity(
+            {"tokens": 100, "requests": 1}, model="gpt-4"
+        )
+        await limiter.set_max_capacity("gpt-4", "tokens", 60, 500.0)
+        mock_backend.set_max_capacity.assert_awaited_once_with("tokens", 60, 500.0)
+
+
+class TestGetBackendValidation:
+    async def test_empty_model_family_raises(self):
+        """_get_backend rejects empty model_family (defensive guard)."""
+        builder, _ = make_mock_backend_builder()
+        limiter = RateLimiter(make_limited_config(), backend=builder)
+        # Construct a config with empty model_family directly to bypass resolve_config
+        cfg = PerModelConfig(
+            quotas=UsageQuotas(
+                [
+                    Quota(metric="tokens", limit=1000),
+                    Quota(metric="requests", limit=10),
+                ]
+            ),
+            model_family="",
+        )
+        with pytest.raises(ValueError, match="cfg.model_family cannot be empty"):
+            await limiter._get_backend(cfg)
+
+
+class TestRecordUsage:
+    async def test_record_usage_calls_consume_capacity(self):
+        builder, mock_backend = make_mock_backend_builder()
+        limiter = RateLimiter(make_limited_config(), backend=builder)
+        reservation = await limiter.record_usage(
+            {"tokens": 100, "requests": 1}, model="gpt-4"
+        )
+        mock_backend.consume_capacity.assert_awaited_once()
+        assert reservation.model_family == "gpt-4"
+
+    async def test_record_usage_unlimited_is_noop(self):
+        builder, _ = make_mock_backend_builder()
+        limiter = RateLimiter(make_unlimited_config(), backend=builder)
+        reservation = await limiter.record_usage({}, model="gpt-4")
+        assert reservation.model_family == _UNLIMITED_FLAG

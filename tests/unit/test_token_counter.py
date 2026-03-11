@@ -210,6 +210,20 @@ class TestCustomGetEncodingFunc:
         assert counter._get_encoding is get_encoding
 
 
+class TestGetEncodingImportError:
+    """Cover lines 58-59: ImportError when tiktoken is missing."""
+
+    def test_raises_import_error_without_tiktoken(self):
+        import sys
+        from unittest.mock import patch
+
+        # get_encoding() does `import tiktoken` lazily; setting the module
+        # to None in sys.modules causes Python to raise ImportError.
+        with patch.dict(sys.modules, {"tiktoken": None}):
+            with pytest.raises(ImportError, match="tiktoken"):
+                get_encoding("gpt-4")
+
+
 class TestGetEncoding:
     """Tests for the get_encoding function (model name mapping + prefix stripping)."""
 
@@ -277,6 +291,16 @@ class TestGetEncoding:
         tiktoken = pytest.importorskip("tiktoken")
         enc = get_encoding("gpt-4o")
         expected = tiktoken.get_encoding("o200k_base")
+        assert enc.name == expected.name
+
+    def test_fallback_to_encoding_for_model(self):
+        """Cover line 87: unknown model falls through to tiktoken.encoding_for_model."""
+        tiktoken = pytest.importorskip("tiktoken")
+        # "cl100k_base" is a known encoding name but not a model name in our map
+        # Use a model name tiktoken knows about but our substring map doesn't
+        enc = get_encoding("gpt-4-32k")
+        # tiktoken.encoding_for_model should handle this
+        expected = tiktoken.encoding_for_model("gpt-4-32k")
         assert enc.name == expected.name
 
 
