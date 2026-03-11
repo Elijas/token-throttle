@@ -4,7 +4,8 @@ Tests for OpenAI token counting logic.
 Source: token_throttle/_factories/_openai/_token_counter.py
 """
 
-from unittest.mock import MagicMock
+import sys
+from unittest.mock import MagicMock, patch
 
 import pytest
 from frozendict import frozendict
@@ -214,14 +215,12 @@ class TestGetEncodingImportError:
     """Cover lines 58-59: ImportError when tiktoken is missing."""
 
     def test_raises_import_error_without_tiktoken(self):
-        import sys
-        from unittest.mock import patch
-
         # get_encoding() does `import tiktoken` lazily; setting the module
         # to None in sys.modules causes Python to raise ImportError.
-        with patch.dict(sys.modules, {"tiktoken": None}):
-            with pytest.raises(ImportError, match="tiktoken"):
-                get_encoding("gpt-4")
+        with patch.dict(sys.modules, {"tiktoken": None}), pytest.raises(
+            ImportError, match="tiktoken"
+        ):
+            get_encoding("gpt-4")
 
 
 class TestGetEncoding:
@@ -294,13 +293,17 @@ class TestGetEncoding:
         assert enc.name == expected.name
 
     def test_fallback_to_encoding_for_model(self):
-        """Cover line 87: unknown model falls through to tiktoken.encoding_for_model."""
+        """Cover line 87: unknown model falls through to tiktoken.encoding_for_model.
+
+        We need a model name that: (1) has no exact match in the substring map,
+        (2) does NOT contain any map key as a substring, (3) tiktoken recognizes.
+        'o1' and 'ada' both satisfy these — neither contains 'gpt-4', 'davinci', etc.
+        """
         tiktoken = pytest.importorskip("tiktoken")
-        # "cl100k_base" is a known encoding name but not a model name in our map
-        # Use a model name tiktoken knows about but our substring map doesn't
-        enc = get_encoding("gpt-4-32k")
-        # tiktoken.encoding_for_model should handle this
-        expected = tiktoken.encoding_for_model("gpt-4-32k")
+        # 'ada' is known by tiktoken (maps to r50k_base) but is NOT a substring
+        # of any key in our map, and no map key appears in 'ada'.
+        enc = get_encoding("ada")
+        expected = tiktoken.encoding_for_model("ada")
         assert enc.name == expected.name
 
 
