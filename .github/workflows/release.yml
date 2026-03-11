@@ -46,10 +46,14 @@ jobs:
           uv lock
           uv run ruff check --fix
           uv run ruff format
+          if ! uv run ruff check; then
+            echo "::error::ruff check found issues that --fix could not resolve"
+            exit 1
+          fi
           git add -A
           git diff --cached --quiet || git commit -m "chore(release): update lockfile and formatting for v${NEW_VERSION}"
           if [ -n "$(git status --porcelain)" ]; then
-            echo "::error::Working tree is dirty after release prep:"
+            echo "::error::Working tree is dirty after release commit:"
             git status --short
             exit 1
           fi
