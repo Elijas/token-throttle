@@ -341,7 +341,7 @@ class MemoryBackend(RateLimiterBackend):
                         ),
                         None,
                     )
-                    if bucket is None:
+                    if bucket is None:  # pragma: no cover
                         raise ValueError(
                             f"Bucket '{usage_metric}/{per_seconds}s' not found",
                         )
