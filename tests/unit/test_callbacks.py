@@ -9,7 +9,6 @@ from frozendict import frozendict
 
 from token_throttle._interfaces._callbacks import (
     RateLimiterCallbacks,
-    SyncRateLimiterCallbacks,
     _get_loguru_logger,
     _log,
     _loguru_cache,

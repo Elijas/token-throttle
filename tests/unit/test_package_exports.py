@@ -2,6 +2,8 @@
 
 import importlib.util
 
+import pytest
+
 import token_throttle
 
 _REDIS_EXPORTS = {
@@ -45,7 +47,5 @@ def test_dir_contains_public_names():
 
 def test_getattr_raises_for_unknown_name():
     """Cover the AttributeError branch in __getattr__."""
-    import pytest
-
     with pytest.raises(AttributeError, match="has no attribute"):
-        token_throttle.this_does_not_exist_at_all
+        token_throttle.__getattr__("this_does_not_exist_at_all")

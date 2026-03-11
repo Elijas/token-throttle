@@ -1,7 +1,5 @@
 """Tests for validation logic in token_throttle._validation."""
 
-import math
-
 import pytest
 from frozendict import frozendict
 

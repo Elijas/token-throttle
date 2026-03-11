@@ -103,8 +103,6 @@ class TestUsageQuotas:
 
     def test_empty_quotas_warns(self):
         """Cover line 39: empty quotas list triggers UserWarning."""
-        import warnings
-
         with pytest.warns(UserWarning, match="Empty quota list"):
             UsageQuotas([])
 
