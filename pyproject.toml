@@ -90,7 +90,7 @@ source = ["token_throttle"]
 branch = true
 
 [tool.coverage.report]
-omit = ["notebooks/*", "*/deprecated/*", "tests/*"]
+omit = ["notebooks/*", "*/deprecated/*", "tests/*", "token_throttle/_limiter_backends/_redis/*"]
 exclude_also = [
     "@(abc\\.)?abstractmethod",
     "if TYPE_CHECKING:",

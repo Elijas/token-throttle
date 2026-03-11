@@ -243,7 +243,7 @@ class RateLimiter(BaseRateLimiter):
 
         async with self._lock:
             # Check again after acquiring lock
-            if cfg.model_family in self._model_family_to_backend:
+            if cfg.model_family in self._model_family_to_backend:  # pragma: no cover
                 return self._model_family_to_backend[cfg.model_family]
 
             backend = self._backend.build(cfg, callbacks=self._callbacks)

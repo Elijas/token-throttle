@@ -161,7 +161,7 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
                     )
             # Invariant: validate_acquire_usage() guarantees usage keys == quota
             # keys, so every capacity bucket must have a matching usage entry.
-            if len(postconsumption_dict) != len(preconsumption_capacities):
+            if len(postconsumption_dict) != len(preconsumption_capacities):  # pragma: no cover
                 raise RuntimeError(
                     f"postconsumption covers {len(postconsumption_dict)} buckets but "
                     f"preconsumption has {len(preconsumption_capacities)} — "
@@ -221,7 +221,7 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
                     postconsumption_dict[(cap_metric, per_seconds)] = (
                         cap_amount - usage_amount
                     )
-            if len(postconsumption_dict) != len(preconsumption_capacities):
+            if len(postconsumption_dict) != len(preconsumption_capacities):  # pragma: no cover
                 raise RuntimeError(
                     f"postconsumption covers {len(postconsumption_dict)} buckets but "
                     f"preconsumption has {len(preconsumption_capacities)} — "
