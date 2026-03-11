@@ -18,7 +18,7 @@ gh workflow run release.yml -f bump=patch   # 0.5.0 -> 0.5.1
 3. `devtools/bump_readme_version.py` — updates pip install version bounds and badge in README.md
 4. `uv lock` — syncs `uv.lock` with the new version
 5. `ruff check --fix` + `ruff format` — applies any lint autofixes and formatting
-6. Amends the bump commit with README.md and uv.lock changes
+6. Creates a second commit with lockfile/formatting changes (if any)
 7. Porcelain check — fails the release if the working tree is still dirty after all fixes
 8. Pushes to `main`
 9. Builds with `uv build` and publishes to PyPI via OIDC trusted publishing

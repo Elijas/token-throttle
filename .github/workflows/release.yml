@@ -46,8 +46,8 @@ jobs:
           uv lock
           uv run ruff check --fix
           uv run ruff format
-          git add README.md uv.lock
-          git diff --cached --quiet || git commit --amend --no-edit
+          git add -A
+          git diff --cached --quiet || git commit -m "chore(release): update lockfile and formatting for v${NEW_VERSION}"
           if [ -n "$(git status --porcelain)" ]; then
             echo "::error::Working tree is dirty after release prep:"
             git status --short
