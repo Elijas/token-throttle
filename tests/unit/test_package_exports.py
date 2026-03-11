@@ -4,7 +4,6 @@ import importlib.util
 
 import token_throttle
 
-
 _REDIS_EXPORTS = {
     "LOCK_TIMEOUT_SECONDS",
     "CapacitiesGetterResult",

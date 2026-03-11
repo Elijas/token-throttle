@@ -99,6 +99,7 @@ class TestRecordUsageValidation:
                 model="gpt-4",
             )
 
+
 class TestRecordUsageUnlimited:
     """record_usage with unlimited config."""
 

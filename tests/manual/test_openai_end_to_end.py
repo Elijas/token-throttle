@@ -36,10 +36,12 @@ from token_throttle import (  # noqa: E402
 def _make_limiter() -> RateLimiter:
     return RateLimiter(
         lambda model: PerModelConfig(  # noqa: ARG005
-            quotas=UsageQuotas([
-                Quota(metric="requests", limit=100, per_seconds=60),
-                Quota(metric="tokens", limit=100_000, per_seconds=60),
-            ]),
+            quotas=UsageQuotas(
+                [
+                    Quota(metric="requests", limit=100, per_seconds=60),
+                    Quota(metric="tokens", limit=100_000, per_seconds=60),
+                ]
+            ),
         ),
         backend=MemoryBackendBuilder(sleep_interval=0),
         callbacks=create_logging_callbacks(),

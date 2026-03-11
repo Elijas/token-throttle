@@ -213,6 +213,7 @@ target-version = "py312"
     "ARG002",  # Unused method argument (fixtures injected by pytest)
     "D213",    # Multi-line docstring summary should start at the second line
     "S101",    # Use of `assert` detected
+    "S102",    # Use of `exec` detected (star-import test)
     "SLF001",  # Private member accessed (expected in tests)
     "PLR2004", # Magic value used in comparison
     "T201",    # print() statement found

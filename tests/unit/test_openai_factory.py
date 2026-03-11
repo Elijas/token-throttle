@@ -40,7 +40,10 @@ class TestModelFamilyGetter:
         assert openai_model_family_getter("gpt-3.5-turbo-0125") == "gpt-3.5-turbo"
 
     def test_strips_mmdd_suffix_0914(self):
-        assert openai_model_family_getter("gpt-3.5-turbo-instruct-0914") == "gpt-3.5-turbo-instruct"
+        assert (
+            openai_model_family_getter("gpt-3.5-turbo-instruct-0914")
+            == "gpt-3.5-turbo-instruct"
+        )
 
     def test_strips_mmdd_suffix_1106(self):
         assert openai_model_family_getter("tts-1-1106") == "tts-1"
@@ -63,7 +66,10 @@ class TestModelFamilyGetter:
         assert openai_model_family_getter("o3-mini-2025-01-31") == "o3-mini"
 
     def test_strips_iso_date_deep_research(self):
-        assert openai_model_family_getter("o4-mini-deep-research-2025-06-26") == "o4-mini-deep-research"
+        assert (
+            openai_model_family_getter("o4-mini-deep-research-2025-06-26")
+            == "o4-mini-deep-research"
+        )
 
     def test_strips_iso_date_dotted_version(self):
         assert openai_model_family_getter("gpt-4.1-mini-2025-04-14") == "gpt-4.1-mini"
@@ -89,7 +95,10 @@ class TestModelFamilyGetter:
         assert openai_model_family_getter("babbage-002") == "babbage-002"
 
     def test_preserves_triple_digit_ada(self):
-        assert openai_model_family_getter("text-embedding-ada-002") == "text-embedding-ada-002"
+        assert (
+            openai_model_family_getter("text-embedding-ada-002")
+            == "text-embedding-ada-002"
+        )
 
     # --- Models without date suffixes are unchanged ---
 
@@ -117,7 +126,10 @@ class TestModelFamilyGetter:
         assert openai_model_family_getter("gpt-4-1106-preview") == "gpt-4"
 
     def test_strips_iso_date_preview_suffix(self):
-        assert openai_model_family_getter("gpt-4-turbo-2024-04-09-preview") == "gpt-4-turbo"
+        assert (
+            openai_model_family_getter("gpt-4-turbo-2024-04-09-preview")
+            == "gpt-4-turbo"
+        )
 
     # --- Standalone -preview suffix is stripped ---
 

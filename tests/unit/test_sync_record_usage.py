@@ -96,6 +96,7 @@ class TestRecordUsageValidation:
         with pytest.raises(ValueError, match="must be non-negative"):
             limiter.record_usage({"tokens": -1, "requests": 1}, model="gpt-4")
 
+
 class TestRecordUsageUnlimited:
     """record_usage with unlimited config."""
 

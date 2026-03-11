@@ -15,9 +15,7 @@ def _replace_install_lines(content: str, version: str) -> str:
         content,
     )
     if n == 0:
-        raise RuntimeError(
-            "No matching pip install line found in README.md"
-        )
+        raise RuntimeError("No matching pip install line found in README.md")
     return new_content
 
 

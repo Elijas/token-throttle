@@ -237,14 +237,14 @@ class TestConcurrentConsumeAndRefund:
 
     async def test_concurrent_consume_tasks(self):
         """Multiple async consume_capacity tasks don't lose capacity."""
-        backend = _make_async_backend(limit=10000, per_seconds=3600, sleep_interval=0.01)
+        backend = _make_async_backend(
+            limit=10000, per_seconds=3600, sleep_interval=0.01
+        )
         # rate = 10000/3600 ≈ 2.78/sec, very slow refill → negligible in test
 
         # Run 10 concurrent consume_capacity(100) tasks
         tasks = [
-            asyncio.create_task(
-                backend.consume_capacity(frozen_usage({"tokens": 100}))
-            )
+            asyncio.create_task(backend.consume_capacity(frozen_usage({"tokens": 100})))
             for _ in range(10)
         ]
         await asyncio.gather(*tasks)
