@@ -182,6 +182,15 @@ class TestAcquireCapacityForRequestValidation:
                 model="gpt-4",
             )
 
+    def test_unlimited_config_returns_unlimited_reservation(self):
+        builder, _ = make_mock_backend_builder()
+        limiter = SyncRateLimiter(make_unlimited_config(), backend=builder)
+
+        reservation = limiter.acquire_capacity_for_request(model="gpt-4")
+
+        assert reservation.model_family == _UNLIMITED_FLAG
+        assert dict(reservation.usage) == {}
+
 
 class TestRefundCapacityFromResponseValidation:
     """Tests for refund_capacity_from_response value paths."""
@@ -272,7 +281,7 @@ class TestRefundCapacityFromResponseValidation:
         )
 
         class FakeResponse:
-            usage = {"total_tokens": 80}
+            usage = {"total_tokens": 80}  # noqa: RUF012
 
         limiter.refund_capacity_from_response(
             reservation, response=FakeResponse()
@@ -354,7 +363,7 @@ class TestGetBackendValidation:
             ),
             model_family="",
         )
-        with pytest.raises(ValueError, match="cfg.model_family cannot be empty"):
+        with pytest.raises(ValueError, match=r"cfg\.model_family cannot be empty"):
             limiter._get_backend(cfg)
 
 
