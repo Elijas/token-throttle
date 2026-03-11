@@ -61,7 +61,7 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
     ) -> None:
         super().__init__()
         self._buckets = buckets
-        self._lock = threading.Lock()
+        self._condition = threading.Condition()
         self._sleep_interval: float = (
             self.DEFAULT_SLEEP_INTERVAL if sleep_interval is None else sleep_interval
         )
@@ -117,7 +117,7 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
         postconsumption_capacities: Capacities = frozendict()
         fresh_start_buckets: list[MemoryBucket] = []
 
-        with self._lock:
+        with self._condition:
             current_time = time.time()
             preconsumption_capacities, fresh_start_buckets = self._get_capacities(
                 current_time,
@@ -193,7 +193,7 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
         """
         fresh_start_buckets: list[MemoryBucket] = []
 
-        with self._lock:
+        with self._condition:
             current_time = time.time()
             preconsumption_capacities, fresh_start_buckets = self._get_capacities(
                 current_time,
@@ -252,8 +252,11 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
     def wait_for_capacity(
         self,
         usage: FrozenUsage,
+        *,
+        timeout: float | None = None,
     ) -> None:
         """Wait until all buckets have the required capacity."""
+        deadline = None if timeout is None else time.monotonic() + timeout
         has_waited = False
         start_time = time.time()
         while True:
@@ -278,6 +281,9 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
                     )
                 return
 
+            if deadline is not None and time.monotonic() >= deadline:
+                raise TimeoutError("Timed out waiting for capacity")
+
             if not has_waited:
                 has_waited = True
                 if self._callbacks and self._callbacks.on_wait_start:
@@ -287,7 +293,30 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
                         usage=usage,
                     )
 
-            time.sleep(self._sleep_interval)
+            computed = self._compute_sleep(usage, preconsumption)
+            if deadline is not None:
+                computed = min(computed, max(0, deadline - time.monotonic()))
+            with self._condition:
+                self._condition.wait(timeout=max(0.001, computed))
+
+    def _compute_sleep(self, usage: FrozenUsage, preconsumption: Capacities) -> float:
+        """Compute max wait across all buckets based on deficit / rate."""
+        max_wait = 0.0
+        for (metric, per_seconds), current_cap in preconsumption.items():
+            if metric not in usage:
+                continue
+            needed = usage[metric]
+            deficit = needed - current_cap
+            if deficit <= 0:
+                continue
+            bucket = next(
+                b
+                for b in self._buckets
+                if b.usage_metric == metric and b.per_seconds == per_seconds
+            )
+            wait = deficit / bucket._rate_per_sec  # noqa: SLF001
+            max_wait = max(max_wait, wait)
+        return max_wait if max_wait > 0 else self._sleep_interval
 
     def refund_capacity(
         self,
@@ -319,7 +348,7 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
             refund_usage_[metric] = refund_amount
         refund_usage: frozendict[str, float] = frozendict(refund_usage_)
 
-        with self._lock:
+        with self._condition:
             current_time = time.time()
             prerefund_capacities, fresh_start_buckets = self._get_capacities(
                 current_time,
@@ -354,6 +383,7 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
             updated_capacities = frozendict(updated_capacities_)
 
             self._set_capacities(updated_capacities, current_time, allow_negative=True)
+            self._condition.notify_all()
 
         # Callbacks fired outside the lock
         self._fresh_start_buckets_callback(fresh_start_buckets)
@@ -383,8 +413,9 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
         )
         if bucket is None:
             raise ValueError(f"Bucket '{metric}/{per_seconds}s' not found")
-        with self._lock:
+        with self._condition:
             bucket.set_max_capacity(value)
+            self._condition.notify_all()
 
     def _fresh_start_buckets_callback(
         self,

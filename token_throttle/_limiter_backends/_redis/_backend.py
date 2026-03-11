@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import time
 import typing
 import warnings
@@ -74,6 +75,7 @@ class RedisBackendBuilder(RateLimiterBackendBuilderInterface):
 
 class RedisBackend(RateLimiterBackend):
     DEFAULT_SLEEP_INTERVAL: ClassVar[float] = 0.1
+    MAX_CROSS_WORKER_POLL: ClassVar[float] = 1.0
 
     def __init__(
         self,
@@ -92,6 +94,7 @@ class RedisBackend(RateLimiterBackend):
         )
         self._callbacks = callbacks
         self._limit_config = limit_config
+        self._local_condition = asyncio.Condition()
 
     async def _lock(self, **kwargs) -> AsyncExitStack:
         """
@@ -387,8 +390,11 @@ class RedisBackend(RateLimiterBackend):
     async def await_for_capacity(
         self,
         usage: FrozenUsage,
+        *,
+        timeout: float | None = None,
     ) -> None:
         """Wait until all buckets have the required capacity."""
+        deadline = None if timeout is None else time.monotonic() + timeout
         has_waited = False
         start_time = time.time()
         while True:
@@ -410,6 +416,9 @@ class RedisBackend(RateLimiterBackend):
                         )
                 return
 
+            if deadline is not None and time.monotonic() >= deadline:
+                raise TimeoutError("Timed out waiting for capacity")
+
             if not has_waited:
                 has_waited = True
                 if self._callbacks and self._callbacks.on_wait_start:
@@ -419,8 +428,35 @@ class RedisBackend(RateLimiterBackend):
                         usage=usage,
                     )
 
-            # Wait before trying again
-            await asyncio.sleep(self._sleep_interval)
+            computed = self._compute_sleep(usage, preconsumption)
+            effective = min(computed, self.MAX_CROSS_WORKER_POLL)
+            if deadline is not None:
+                effective = min(effective, max(0, deadline - time.monotonic()))
+            async with self._local_condition:
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(
+                        self._local_condition.wait(),
+                        timeout=max(0.001, effective),
+                    )
+
+    def _compute_sleep(self, usage: FrozenUsage, preconsumption: Capacities) -> float:
+        """Compute max wait across all buckets based on deficit / rate."""
+        max_wait = 0.0
+        for (metric, per_seconds), current_cap in preconsumption.items():
+            if metric not in usage:
+                continue
+            needed = float(usage[metric])
+            deficit = needed - current_cap
+            if deficit <= 0:
+                continue
+            bucket = next(
+                b
+                for b in self.sorted_buckets
+                if b.usage_metric == metric and b.per_seconds == per_seconds
+            )
+            wait = deficit / bucket._rate_per_sec  # noqa: SLF001
+            max_wait = max(max_wait, wait)
+        return max_wait if max_wait > 0 else self._sleep_interval
 
     async def refund_capacity(
         self,
@@ -560,6 +596,8 @@ class RedisBackend(RateLimiterBackend):
                 current_time=current_time,
                 allow_negative=True,
             )
+        async with self._local_condition:
+            self._local_condition.notify_all()
         await self._fresh_start_buckets_callback(fresh_start_buckets)
         if self._callbacks and self._callbacks.on_capacity_refunded:
             await self._callbacks.on_capacity_refunded(
@@ -589,6 +627,8 @@ class RedisBackend(RateLimiterBackend):
             raise ValueError(f"Bucket '{metric}/{per_seconds}s' not found")
         async with await self._lock(timeout=LOCK_TIMEOUT_SECONDS):
             await bucket.set_max_capacity(value)
+        async with self._local_condition:
+            self._local_condition.notify_all()
 
     async def _fresh_start_buckets_callback(
         self,

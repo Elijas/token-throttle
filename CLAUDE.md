@@ -7,14 +7,15 @@ Releases are fully automated via GitHub Actions. Do NOT bump versions or publish
 ### Trigger a release
 
 ```bash
-gh workflow run release.yml -f bump=minor   # 0.5.0 -> 0.6.0
 gh workflow run release.yml -f bump=patch   # 0.5.0 -> 0.5.1
+gh workflow run release.yml -f bump=minor   # 0.5.0 -> 0.6.0
+gh workflow run release.yml -f bump=major   # 0.6.0 -> 1.0.0
 ```
 
 ### What the workflow does
 
 1. Runs full CI test suite (`.github/workflows/ci.yml`)
-2. `bump-my-version bump <minor|patch>` — updates version in `pyproject.toml` and `token_throttle/__init__.py`, creates a commit
+2. `bump-my-version bump <patch|minor|major>` — updates version in `pyproject.toml` and `token_throttle/__init__.py`, creates a commit
 3. `devtools/bump_readme_version.py` — updates pip install version bounds and badge in README.md
 4. `uv lock` — syncs `uv.lock` with the new version
 5. `ruff check --fix` + `ruff format` — applies any lint autofixes and formatting

@@ -39,8 +39,10 @@ class SyncRateLimiter:
         self._config_getter = lambda model_name: resolve_config(cfg, model_name)
         self._model_family_to_backend: dict[str, SyncRateLimiterBackend] = {}
 
-    def acquire_capacity(self, usage: Usage, model: str) -> CapacityReservation:
-        return self._acquire_or_record(usage, model, _block=True)
+    def acquire_capacity(
+        self, usage: Usage, model: str, *, timeout: float | None = None
+    ) -> CapacityReservation:
+        return self._acquire_or_record(usage, model, _block=True, timeout=timeout)
 
     def record_usage(self, usage: Usage, model: str) -> CapacityReservation:
         """
@@ -57,6 +59,7 @@ class SyncRateLimiter:
         model: str,
         *,
         _block: bool,
+        timeout: float | None = None,
     ) -> CapacityReservation:
         usage = frozen_usage(usage)
         limit_config = self._config_getter(model)
@@ -67,12 +70,15 @@ class SyncRateLimiter:
                 usage={},
                 model_family=_UNLIMITED_FLAG,
             )
-        return self._acquire_capacity(usage, limit_config, _block=_block)
+        return self._acquire_capacity(
+            usage, limit_config, _block=_block, timeout=timeout
+        )
 
     def acquire_capacity_for_request(
         self,
         *,
         extra_usage: dict | None = None,
+        timeout: float | None = None,
         **kwargs,
     ) -> CapacityReservation:
         model = kwargs.get("model")
@@ -96,7 +102,9 @@ class SyncRateLimiter:
                         f"Usage key '{k}' not found in usage counter",
                     )
                 usage[k] += v
-        return self._acquire_capacity(frozen_usage(usage), limit_config)
+        return self._acquire_capacity(
+            frozen_usage(usage), limit_config, timeout=timeout
+        )
 
     def _acquire_capacity(
         self,
@@ -104,12 +112,13 @@ class SyncRateLimiter:
         limit_config: PerModelConfig,
         *,
         _block: bool = True,
+        timeout: float | None = None,
     ) -> CapacityReservation:
         validate_acquire_usage(usage, limit_config.quotas)
 
         backend = self._get_backend(limit_config)
         if _block:
-            backend.wait_for_capacity(usage)
+            backend.wait_for_capacity(usage, timeout=timeout)
         else:
             backend.consume_capacity(usage)
         return CapacityReservation(

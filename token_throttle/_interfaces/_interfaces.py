@@ -88,9 +88,16 @@ class RateLimiterBackend(ABC):
     """
 
     @abstractmethod
-    async def await_for_capacity(self, usage: FrozenUsage) -> None:
+    async def await_for_capacity(
+        self, usage: FrozenUsage, *, timeout: float | None = None
+    ) -> None:
         """
-        Poll until all buckets can satisfy *usage*, then consume atomically.
+        Wait until all buckets can satisfy *usage*, then consume atomically.
+
+        *timeout* controls how long to wait:
+        - ``None`` (default): block indefinitely (current behaviour).
+        - ``0``: try-acquire — return immediately or raise ``TimeoutError``.
+        - ``N > 0``: wait up to *N* seconds, then raise ``TimeoutError``.
 
         Raises ``ValueError`` immediately (fail-fast) if any single metric
         in *usage* exceeds that bucket's ``max_capacity``, because waiting
@@ -147,10 +154,14 @@ class BaseRateLimiter(ABC):
         self,
         usage: Usage,
         model: str,
+        *,
+        timeout: float | None = None,
     ) -> CapacityReservation: ...
 
     @abstractmethod
-    async def acquire_capacity_for_request(self, **kwargs) -> CapacityReservation: ...
+    async def acquire_capacity_for_request(
+        self, *, timeout: float | None = None, **kwargs
+    ) -> CapacityReservation: ...
 
     @abstractmethod
     async def refund_capacity(
@@ -172,7 +183,9 @@ class SyncRateLimiterBackend(ABC):
     """Synchronous counterpart of ``RateLimiterBackend`` — same contract."""
 
     @abstractmethod
-    def wait_for_capacity(self, usage: FrozenUsage) -> None: ...
+    def wait_for_capacity(
+        self, usage: FrozenUsage, *, timeout: float | None = None
+    ) -> None: ...
 
     @abstractmethod
     def consume_capacity(self, usage: FrozenUsage) -> None:

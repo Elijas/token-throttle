@@ -2,7 +2,7 @@
 
 [![PyPI Version](https://img.shields.io/badge/v0.6.0-version?color=43cd0f&style=flat&label=pypi)](https://pypi.org/project/token-throttle)
 [![PyPI Downloads](https://img.shields.io/pypi/dm/token-throttle?color=43cd0f&style=flat&label=downloads)](https://pypistats.org/packages/token-throttle)
-[![stability-alpha](https://img.shields.io/badge/stability-alpha-f4d03f.svg)](https://github.com/mkenney/software-guides/blob/master/STABILITY-BADGES.md#alpha)
+[![stability-beta](https://img.shields.io/badge/stability-beta-33bbff.svg)](https://github.com/mkenney/software-guides/blob/master/STABILITY-BADGES.md#beta)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-43cd0f.svg?style=flat&label=license)](LICENSE)
 [![Maintained: yes](https://img.shields.io/badge/yes-43cd0f.svg?style=flat&label=maintained)](https://github.com/Elijas/token-throttle/issues)
 [![CI](https://github.com/Elijas/token-throttle/actions/workflows/ci.yml/badge.svg)](https://github.com/Elijas/token-throttle/actions/workflows/ci.yml)
@@ -166,6 +166,31 @@ await limiter.set_max_capacity(
 
 For Redis backends the new limit is written to Redis, so all processes
 sharing the same Redis see the change within ~1 second.
+
+### Timeout
+
+By default, `acquire_capacity` blocks until enough capacity is available.
+Use `timeout` to fail fast or cap the wait:
+
+```python
+# Non-blocking: check if capacity is available without waiting
+try:
+    reservation = await limiter.acquire_capacity(
+        model="gpt-4o",
+        usage={"requests": 1, "tokens": 500},
+        timeout=0,  # Fail immediately if no capacity
+    )
+except TimeoutError:
+    # Handle: retry later, use cheaper model, skip, etc.
+    pass
+
+# Bounded wait: wait up to 5 seconds
+reservation = await limiter.acquire_capacity(
+    model="gpt-4o",
+    usage={"requests": 1, "tokens": 500},
+    timeout=5.0,  # Raise TimeoutError after 5s
+)
+```
 
 ## Sync API
 

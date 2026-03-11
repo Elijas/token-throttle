@@ -199,13 +199,23 @@ target-version = "py312"
     "PLR0912", # Too many branches
 ]
 "token_throttle/_interfaces/_interfaces.py" = [
-    "TC001",   # Pydantic models need these imports at runtime
+    "TC001",     # Pydantic models need these imports at runtime
+    "ASYNC109",  # timeout is part of the public API, not an asyncio.timeout() replacement
 ]
 "token_throttle/_interfaces/_callbacks.py" = [
     "PLC0415", # Intentional lazy import of optional dep (loguru)
 ]
 "token_throttle/_factories/_openai/_token_counter.py" = [
     "PLC0415", # Intentional lazy import of optional dep (tiktoken)
+]
+"token_throttle/_limiter_backends/_memory/_backend.py" = [
+    "ASYNC109",  # timeout is a public API parameter, not asyncio.timeout()
+]
+"token_throttle/_limiter_backends/_redis/_backend.py" = [
+    "ASYNC109",  # timeout is a public API parameter, not asyncio.timeout()
+]
+"token_throttle/_rate_limiter.py" = [
+    "ASYNC109",  # timeout is a public API parameter, not asyncio.timeout()
 ]
 "tests/**/*.py" = [
     "PT006",   # Wrong type passed to first argument of `pytest.mark.parametrize`; expected `tuple`

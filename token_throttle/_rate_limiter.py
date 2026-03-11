@@ -53,8 +53,10 @@ class RateLimiter(BaseRateLimiter):
         self._config_getter = lambda model_name: resolve_config(cfg, model_name)
         self._model_family_to_backend: dict[str, RateLimiterBackend] = {}
 
-    async def acquire_capacity(self, usage: Usage, model: str) -> CapacityReservation:
-        return await self._acquire_or_record(usage, model, _block=True)
+    async def acquire_capacity(
+        self, usage: Usage, model: str, *, timeout: float | None = None
+    ) -> CapacityReservation:
+        return await self._acquire_or_record(usage, model, _block=True, timeout=timeout)
 
     async def record_usage(self, usage: Usage, model: str) -> CapacityReservation:
         """
@@ -71,6 +73,7 @@ class RateLimiter(BaseRateLimiter):
         model: str,
         *,
         _block: bool,
+        timeout: float | None = None,
     ) -> CapacityReservation:
         usage = frozen_usage(usage)
         limit_config = self._config_getter(model)
@@ -81,12 +84,15 @@ class RateLimiter(BaseRateLimiter):
                 usage={},
                 model_family=_UNLIMITED_FLAG,
             )
-        return await self._acquire_capacity(usage, limit_config, _block=_block)
+        return await self._acquire_capacity(
+            usage, limit_config, _block=_block, timeout=timeout
+        )
 
     async def acquire_capacity_for_request(
         self,
         *,
         extra_usage: dict | None = None,
+        timeout: float | None = None,
         **kwargs,
     ) -> CapacityReservation:
         model = kwargs.get("model")
@@ -110,7 +116,9 @@ class RateLimiter(BaseRateLimiter):
                         f"Usage key '{k}' not found in usage counter",
                     )
                 usage[k] += v
-        return await self._acquire_capacity(frozen_usage(usage), limit_config)
+        return await self._acquire_capacity(
+            frozen_usage(usage), limit_config, timeout=timeout
+        )
 
     async def _acquire_capacity(
         self,
@@ -118,12 +126,13 @@ class RateLimiter(BaseRateLimiter):
         limit_config: PerModelConfig,
         *,
         _block: bool = True,
+        timeout: float | None = None,
     ) -> CapacityReservation:
         validate_acquire_usage(usage, limit_config.quotas)
 
         backend = await self._get_backend(limit_config)
         if _block:
-            await backend.await_for_capacity(usage)
+            await backend.await_for_capacity(usage, timeout=timeout)
         else:
             await backend.consume_capacity(usage)
         return CapacityReservation(
