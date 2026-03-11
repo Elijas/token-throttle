@@ -171,3 +171,19 @@ class TestAcquireCapacityForRequestMerge:
         called_usage = mock_backend.wait_for_capacity.call_args[0][0]
         assert float(called_usage["tokens"]) == pytest.approx(150.0)
         assert float(called_usage["requests"]) == pytest.approx(3.0)
+
+    def test_no_extra_usage_uses_counter_only(self):
+        builder, mock_backend = make_mock_backend_builder()
+
+        def fake_counter(**_kwargs):
+            return {"tokens": 100.0, "requests": 1.0}
+
+        config = make_limited_config(usage_counter=fake_counter)
+        limiter = SyncRateLimiter(config, backend=builder)
+
+        reservation = limiter.acquire_capacity_for_request(model="gpt-4")
+
+        assert reservation.model_family == "gpt-4"
+        called_usage = mock_backend.wait_for_capacity.call_args[0][0]
+        assert float(called_usage["tokens"]) == pytest.approx(100.0)
+        assert float(called_usage["requests"]) == pytest.approx(1.0)
