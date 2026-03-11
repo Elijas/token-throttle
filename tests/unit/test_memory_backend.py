@@ -4,7 +4,7 @@ Covers: builder init/build, ValueError on bad bucket key, continue branches
 in multi-metric loops, callback invocations, and fresh-start callback.
 """
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 import pytest
 from frozendict import frozendict
@@ -115,27 +115,6 @@ class TestSetCapacitiesBadKey:
 # ---------------------------------------------------------------------------
 
 
-class TestRefundCapacityBadKey:
-    async def test_refund_unknown_bucket_raises(self):
-        builder = MemoryBackendBuilder()
-        cfg = _make_config()
-        backend = builder.build(cfg)
-        # First consume to have something to refund
-        usage = frozendict({"tokens": 100.0, "requests": 1.0})
-        await backend.await_for_capacity(usage)
-
-        # Manually corrupt the backend to have a capacity key with no bucket
-        import time
-
-        async with backend._lock:
-            t = time.time()
-            caps, _ = backend._get_capacities(t)
-
-        # This test verifies the ValueError in refund_capacity when a bucket
-        # is not found. We use set_max_capacity's error path instead since
-        # refund_capacity's inner loop is harder to trigger without bucket mismatch.
-
-
 class TestSetMaxCapacityBadKey:
     async def test_set_max_capacity_unknown_metric_raises(self):
         builder = MemoryBackendBuilder()
@@ -156,8 +135,10 @@ class TestSetMaxCapacityBadKey:
 
 
 class TestMultiMetricContinueBranches:
-    """Exercise the `if metric != usage_metric: continue` branches by having
-    2+ quotas per metric (different time windows)."""
+    """Exercise the `if metric != usage_metric: continue` branches.
+
+    Uses 2+ quotas per metric (different time windows).
+    """
 
     async def test_check_and_consume_with_multi_window(self):
         builder = MemoryBackendBuilder()
@@ -259,8 +240,10 @@ class TestWaitCallbacks:
         cbs2.on_capacity_consumed.assert_awaited_once()
 
     async def test_wait_callbacks_fire_when_waiting(self):
-        """Test that on_wait_start and after_wait_end_consumption fire when
-        the backend has to poll."""
+        """Test that on_wait_start and after_wait_end_consumption fire.
+
+        Triggers when the backend has to poll.
+        """
         cbs = _make_callbacks()
         builder = MemoryBackendBuilder(sleep_interval=0.01)
         cfg = PerModelConfig(
@@ -314,8 +297,10 @@ class TestRefundCallbacks:
 
 class TestFreshStartCallback:
     async def test_fresh_start_callback_fires_on_first_access(self):
-        """On a brand new backend, the first capacity check is a fresh start
-        (no prior consumption data), so on_missing_consumption_data fires."""
+        """On a brand new backend, the first capacity check is a fresh start.
+
+        No prior consumption data means on_missing_consumption_data fires.
+        """
         cbs = _make_callbacks()
         builder = MemoryBackendBuilder()
         backend = builder.build(_make_config(), callbacks=cbs)
