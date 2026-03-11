@@ -217,8 +217,9 @@ class TestGetEncodingImportError:
     def test_raises_import_error_without_tiktoken(self):
         # get_encoding() does `import tiktoken` lazily; setting the module
         # to None in sys.modules causes Python to raise ImportError.
-        with patch.dict(sys.modules, {"tiktoken": None}), pytest.raises(
-            ImportError, match="tiktoken"
+        with (
+            patch.dict(sys.modules, {"tiktoken": None}),
+            pytest.raises(ImportError, match="tiktoken"),
         ):
             get_encoding("gpt-4")
 

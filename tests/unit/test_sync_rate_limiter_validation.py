@@ -272,9 +272,7 @@ class TestRefundCapacityFromResponseValidation:
         """Response.usage is a dict (not object with attributes)."""
         builder, mock_backend = make_mock_backend_builder()
         limiter = SyncRateLimiter(make_limited_config(), backend=builder)
-        limiter.acquire_capacity(
-            {"tokens": 100, "requests": 1}, model="gpt-4"
-        )
+        limiter.acquire_capacity({"tokens": 100, "requests": 1}, model="gpt-4")
         reservation = CapacityReservation(
             usage={"tokens": 100.0, "requests": 1.0},
             model_family="gpt-4",
@@ -283,9 +281,7 @@ class TestRefundCapacityFromResponseValidation:
         class FakeResponse:
             usage = {"total_tokens": 80}  # noqa: RUF012
 
-        limiter.refund_capacity_from_response(
-            reservation, response=FakeResponse()
-        )
+        limiter.refund_capacity_from_response(reservation, response=FakeResponse())
         mock_backend.refund_capacity.assert_called_once()
 
     def test_no_response_no_usage_raises(self):
@@ -315,9 +311,7 @@ class TestRefundCapacityFromResponseValidation:
             usage = FakeUsage()
 
         with pytest.raises(ValueError, match="total_tokens is None"):
-            limiter.refund_capacity_from_response(
-                reservation, response=FakeResponse()
-            )
+            limiter.refund_capacity_from_response(reservation, response=FakeResponse())
 
     def test_kwargs_with_none_total_tokens_raises(self):
         builder, _ = make_mock_backend_builder()
@@ -342,9 +336,7 @@ class TestSetMaxCapacityValidation:
     def test_set_max_capacity_delegates_to_backend(self):
         builder, mock_backend = make_mock_backend_builder()
         limiter = SyncRateLimiter(make_limited_config(), backend=builder)
-        limiter.acquire_capacity(
-            {"tokens": 100, "requests": 1}, model="gpt-4"
-        )
+        limiter.acquire_capacity({"tokens": 100, "requests": 1}, model="gpt-4")
         limiter.set_max_capacity("gpt-4", "tokens", 60, 500.0)
         mock_backend.set_max_capacity.assert_called_once_with("tokens", 60, 500.0)
 

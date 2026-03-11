@@ -106,7 +106,9 @@ class TestSetCapacitiesBadKey:
         builder = MemoryBackendBuilder()
         backend = builder.build(_make_config())
         bad_caps = frozendict({("nonexistent_metric", 60): 100.0})
-        with pytest.raises(ValueError, match="Bucket 'nonexistent_metric/60s' not found"):
+        with pytest.raises(
+            ValueError, match="Bucket 'nonexistent_metric/60s' not found"
+        ):
             backend._set_capacities(bad_caps, 1000.0)
 
 
@@ -247,9 +249,7 @@ class TestWaitCallbacks:
         cbs = _make_callbacks()
         builder = MemoryBackendBuilder(sleep_interval=0.01)
         cfg = PerModelConfig(
-            quotas=UsageQuotas(
-                [Quota(metric="tokens", limit=100, per_seconds=1)]
-            ),
+            quotas=UsageQuotas([Quota(metric="tokens", limit=100, per_seconds=1)]),
             model_family="test-family",
         )
         backend = builder.build(cfg, callbacks=cbs)

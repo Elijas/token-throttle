@@ -224,9 +224,7 @@ class TestRefundCapacityFromResponseValidation:
     async def test_pydantic_response_object(self):
         builder, mock_backend = make_mock_backend_builder()
         limiter = RateLimiter(make_limited_config(), backend=builder)
-        await limiter.acquire_capacity(
-            {"tokens": 100, "requests": 1}, model="gpt-4"
-        )
+        await limiter.acquire_capacity({"tokens": 100, "requests": 1}, model="gpt-4")
         reservation = CapacityReservation(
             usage={"tokens": 100.0, "requests": 1.0},
             model_family="gpt-4",
@@ -247,9 +245,7 @@ class TestRefundCapacityFromResponseValidation:
         """Response.usage is a dict (not object with attributes)."""
         builder, mock_backend = make_mock_backend_builder()
         limiter = RateLimiter(make_limited_config(), backend=builder)
-        await limiter.acquire_capacity(
-            {"tokens": 100, "requests": 1}, model="gpt-4"
-        )
+        await limiter.acquire_capacity({"tokens": 100, "requests": 1}, model="gpt-4")
         reservation = CapacityReservation(
             usage={"tokens": 100.0, "requests": 1.0},
             model_family="gpt-4",
@@ -266,9 +262,7 @@ class TestRefundCapacityFromResponseValidation:
     async def test_kwargs_usage_path(self):
         builder, mock_backend = make_mock_backend_builder()
         limiter = RateLimiter(make_limited_config(), backend=builder)
-        await limiter.acquire_capacity(
-            {"tokens": 100, "requests": 1}, model="gpt-4"
-        )
+        await limiter.acquire_capacity({"tokens": 100, "requests": 1}, model="gpt-4")
         reservation = CapacityReservation(
             usage={"tokens": 100.0, "requests": 1.0},
             model_family="gpt-4",
@@ -332,9 +326,7 @@ class TestSetMaxCapacityValidation:
     async def test_set_max_capacity_delegates_to_backend(self):
         builder, mock_backend = make_mock_backend_builder()
         limiter = RateLimiter(make_limited_config(), backend=builder)
-        await limiter.acquire_capacity(
-            {"tokens": 100, "requests": 1}, model="gpt-4"
-        )
+        await limiter.acquire_capacity({"tokens": 100, "requests": 1}, model="gpt-4")
         await limiter.set_max_capacity("gpt-4", "tokens", 60, 500.0)
         mock_backend.set_max_capacity.assert_awaited_once_with("tokens", 60, 500.0)
 

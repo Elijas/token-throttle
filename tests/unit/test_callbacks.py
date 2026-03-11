@@ -101,11 +101,11 @@ class TestLogStdlibFallback:
         _loguru_cache.clear()
         _loguru_cache["logger"] = None  # Force stdlib path
         try:
-            with patch("token_throttle._interfaces._callbacks._stdlib_logger") as mock_logger:
+            with patch(
+                "token_throttle._interfaces._callbacks._stdlib_logger"
+            ) as mock_logger:
                 _log("DEBUG", "test message")
-                mock_logger.log.assert_called_once_with(
-                    logging.DEBUG, "test message"
-                )
+                mock_logger.log.assert_called_once_with(logging.DEBUG, "test message")
         finally:
             _loguru_cache.clear()
 
@@ -113,7 +113,9 @@ class TestLogStdlibFallback:
         _loguru_cache.clear()
         _loguru_cache["logger"] = None
         try:
-            with patch("token_throttle._interfaces._callbacks._stdlib_logger") as mock_logger:
+            with patch(
+                "token_throttle._interfaces._callbacks._stdlib_logger"
+            ) as mock_logger:
                 _log("INFO", "test message", model="gpt-4", count=5)
                 mock_logger.log.assert_called_once()
                 args = mock_logger.log.call_args[0]
@@ -129,7 +131,9 @@ class TestLogStdlibFallback:
         _loguru_cache.clear()
         _loguru_cache["logger"] = None
         try:
-            with patch("token_throttle._interfaces._callbacks._stdlib_logger") as mock_logger:
+            with patch(
+                "token_throttle._interfaces._callbacks._stdlib_logger"
+            ) as mock_logger:
                 _log("WARNING", "warn msg")
                 assert mock_logger.log.call_args[0][0] == logging.WARNING
         finally:
