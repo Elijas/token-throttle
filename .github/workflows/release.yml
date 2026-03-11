@@ -43,8 +43,16 @@ jobs:
           uv run bump-my-version bump ${{ inputs.bump }}
           NEW_VERSION=$(python -c "import re; print(re.search(r'current_version = \"(.+?)\"', open('pyproject.toml').read()).group(1))")
           uv run python devtools/bump_readme_version.py "$NEW_VERSION"
-          git add README.md
-          git commit --amend --no-edit
+          uv lock
+          uv run ruff check --fix
+          uv run ruff format
+          git add README.md uv.lock
+          git diff --cached --quiet || git commit --amend --no-edit
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "::error::Working tree is dirty after release prep:"
+            git status --short
+            exit 1
+          fi
           git push
       - name: Build package
         run: uv build
