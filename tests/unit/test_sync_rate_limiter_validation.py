@@ -133,6 +133,25 @@ class TestRefundCapacityValidation:
 
         assert result is None
 
+    def test_model_family_matching_unlimited_flag_still_refunds(self):
+        builder, mock_backend = make_mock_backend_builder()
+        limiter = SyncRateLimiter(
+            make_limited_config(model_family=_UNLIMITED_FLAG),
+            backend=builder,
+        )
+
+        reservation = limiter.acquire_capacity(
+            {"tokens": 100, "requests": 1},
+            model="gpt-4",
+        )
+
+        limiter.refund_capacity({"tokens": 80, "requests": 1}, reservation)
+
+        mock_backend.refund_capacity.assert_called_once_with(
+            reservation.get_usage(),
+            {"tokens": 80, "requests": 1},
+        )
+
     def test_mismatched_usage_keys_raises(self):
         builder, _mock_backend = make_mock_backend_builder()
         limiter = SyncRateLimiter(make_limited_config(), backend=builder)
@@ -329,6 +348,34 @@ class TestRefundCapacityFromResponseValidation:
         result = limiter.refund_capacity_from_response(reservation)
 
         assert result is None
+
+    def test_model_family_matching_unlimited_flag_still_refunds_response(self):
+        builder, mock_backend = make_mock_backend_builder()
+        limiter = SyncRateLimiter(
+            make_limited_config(model_family=_UNLIMITED_FLAG),
+            backend=builder,
+        )
+
+        reservation = limiter.acquire_capacity(
+            {"tokens": 100, "requests": 1},
+            model="gpt-4",
+        )
+
+        class FakeUsage:
+            total_tokens = 80
+
+        class FakeResponse:
+            usage = FakeUsage()
+
+        limiter.refund_capacity_from_response(
+            reservation,
+            response=FakeResponse(),
+        )
+
+        mock_backend.refund_capacity.assert_called_once_with(
+            reservation.get_usage(),
+            {"tokens": 80, "requests": 1},
+        )
 
     def test_pydantic_response_object(self):
         builder, mock_backend = make_mock_backend_builder()

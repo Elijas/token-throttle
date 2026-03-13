@@ -247,6 +247,25 @@ class TestRefundCapacityValidation:
 
         assert result is None
 
+    async def test_model_family_matching_unlimited_flag_still_refunds(self):
+        builder, mock_backend = make_mock_backend_builder()
+        limiter = RateLimiter(
+            make_limited_config(model_family=_UNLIMITED_FLAG),
+            backend=builder,
+        )
+
+        reservation = await limiter.acquire_capacity(
+            {"tokens": 100, "requests": 1},
+            model="gpt-4",
+        )
+
+        await limiter.refund_capacity({"tokens": 80, "requests": 1}, reservation)
+
+        mock_backend.refund_capacity.assert_awaited_once_with(
+            reservation.get_usage(),
+            {"tokens": 80, "requests": 1},
+        )
+
     async def test_mismatched_usage_keys_raises(self):
         builder, _mock_backend = make_mock_backend_builder()
         limiter = RateLimiter(make_limited_config(), backend=builder)
@@ -345,6 +364,33 @@ class TestRefundCapacityFromResponseValidation:
         reservation = CapacityReservation(usage={}, model_family=_UNLIMITED_FLAG)
         result = await limiter.refund_capacity_from_response(reservation)
         assert result is None
+
+    async def test_model_family_matching_unlimited_flag_still_refunds_response(self):
+        builder, mock_backend = make_mock_backend_builder()
+        limiter = RateLimiter(
+            make_limited_config(model_family=_UNLIMITED_FLAG),
+            backend=builder,
+        )
+        reservation = await limiter.acquire_capacity(
+            {"tokens": 100, "requests": 1},
+            model="gpt-4",
+        )
+
+        class FakeUsage:
+            total_tokens = 80
+
+        class FakeResponse:
+            usage = FakeUsage()
+
+        await limiter.refund_capacity_from_response(
+            reservation,
+            response=FakeResponse(),
+        )
+
+        mock_backend.refund_capacity.assert_awaited_once_with(
+            reservation.get_usage(),
+            {"tokens": 80, "requests": 1},
+        )
 
     async def test_pydantic_response_object(self):
         builder, mock_backend = make_mock_backend_builder()

@@ -24,6 +24,10 @@ from token_throttle._validation import (
 _UNLIMITED_FLAG = "__rate_limiting_disabled__"
 
 
+def _is_unlimited_reservation(reservation: CapacityReservation) -> bool:
+    return reservation.model_family == _UNLIMITED_FLAG and not reservation.usage
+
+
 class RateLimiter(BaseRateLimiter):
     """
     Top-level async rate limiter — the main public entry point.
@@ -142,7 +146,7 @@ class RateLimiter(BaseRateLimiter):
         actual_usage: Usage,
         reservation: CapacityReservation,
     ) -> None:
-        if reservation.model_family == _UNLIMITED_FLAG:
+        if _is_unlimited_reservation(reservation):
             if actual_usage:
                 raise ValueError(
                     "Usage must be empty for unlimited capacity reservations",
@@ -167,7 +171,7 @@ class RateLimiter(BaseRateLimiter):
         ``create_openai_*`` factories).  For custom metric names, use
         :meth:`refund_capacity` directly.
         """
-        if reservation.model_family == _UNLIMITED_FLAG:
+        if _is_unlimited_reservation(reservation):
             return
         if response is not None:
             # Pydantic model (OpenAI SDK v1+) or any object with .usage
