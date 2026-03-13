@@ -133,12 +133,19 @@ class TestOpenAIUsageCounterWithMessages:
         assert result["requests"] == 1
         assert isinstance(result["tokens"], int)
 
-    def test_messages_non_string_value_raises(self):
+    def test_messages_numeric_content_counted_as_string(self):
+        """Numeric content values are converted to string for token counting."""
+        counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
+        result = counter("gpt-4", messages=[{"role": "user", "content": 123}])
+        assert result["requests"] == 1
+        assert result["tokens"] > 0
+
+    def test_messages_unsupported_type_value_raises(self):
         counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
         with pytest.raises(
             ValueError, match="All keys and values in messages must be of type str"
         ):
-            counter("gpt-4", messages=[{"role": "user", "content": 123}])
+            counter("gpt-4", messages=[{"role": "user", "content": object()}])
 
     def test_messages_non_string_key_raises(self):
         counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
@@ -497,3 +504,52 @@ class TestMalformedMessages:
         counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
         with pytest.raises(ValueError, match="All messages must be dicts"):
             counter("gpt-4", messages=[{"role": "user", "content": "hi"}, "bad"])
+
+
+class TestNumericValuesInMessages:
+    """Numeric metadata in message dicts should not crash the token counter."""
+
+    def test_tool_call_with_int_index_does_not_crash(self):
+        """tool_calls with index (int) field should not raise ValueError."""
+        counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
+        result = counter(
+            "gpt-4",
+            messages=[
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "index": 0,
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {
+                                "name": "lookup",
+                                "arguments": '{"x":1}',
+                            },
+                        }
+                    ],
+                }
+            ],
+        )
+        assert result["requests"] == 1
+        assert result["tokens"] > 0
+
+    def test_message_with_float_value_does_not_crash(self):
+        """Float values in message dicts should be handled gracefully."""
+        counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
+        result = counter(
+            "gpt-4",
+            messages=[{"role": "user", "content": "hi", "score": 0.95}],
+        )
+        assert result["requests"] == 1
+        assert result["tokens"] > 0
+
+    def test_message_with_bool_value_does_not_crash(self):
+        """Bool values in message dicts should be handled gracefully."""
+        counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
+        result = counter(
+            "gpt-4",
+            messages=[{"role": "user", "content": "hi", "refusal": False}],
+        )
+        assert result["requests"] == 1
+        assert result["tokens"] > 0

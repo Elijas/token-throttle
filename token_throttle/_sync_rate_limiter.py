@@ -27,6 +27,30 @@ def _is_unlimited_reservation(reservation: CapacityReservation) -> bool:
     return reservation.model_family == _UNLIMITED_FLAG and not reservation.usage
 
 
+def _extract_total_tokens(usage: object) -> int | float:
+    """Extract total_tokens from a usage object (attribute or dict access)."""
+    if hasattr(usage, "total_tokens"):
+        total_tokens = usage.total_tokens
+    elif isinstance(usage, dict):
+        try:
+            total_tokens = usage["total_tokens"]
+        except KeyError:
+            raise ValueError(
+                "'total_tokens' key not found in usage data — "
+                "pass actual usage via refund_capacity() instead."
+            ) from None
+    else:
+        raise ValueError(
+            "usage must be an object with total_tokens attribute or a dict"
+        )
+    if total_tokens is None:
+        raise ValueError(
+            "total_tokens is None — cannot compute refund. "
+            "Pass actual usage via refund_capacity() instead."
+        )
+    return total_tokens
+
+
 class SyncRateLimiter:
     """Synchronous counterpart of ``RateLimiter`` — same architecture and contract."""
 
@@ -165,27 +189,13 @@ class SyncRateLimiter:
                     "Streaming responses may not include usage data; "
                     "pass actual usage via refund_capacity() instead."
                 )
-            total_tokens = (
-                usage.total_tokens
-                if hasattr(usage, "total_tokens")
-                else usage["total_tokens"]
-            )
-            if total_tokens is None:
-                raise ValueError(
-                    "total_tokens is None — cannot compute refund. "
-                    "Pass actual usage via refund_capacity() instead."
-                )
+            total_tokens = _extract_total_tokens(usage)
         else:
             if "usage" not in kwargs:
                 raise ValueError(
                     "Either 'response' or 'usage' keyword argument is required"
                 )
-            total_tokens = kwargs["usage"]["total_tokens"]
-            if total_tokens is None:
-                raise ValueError(
-                    "total_tokens is None — cannot compute refund. "
-                    "Pass actual usage via refund_capacity() instead."
-                )
+            total_tokens = _extract_total_tokens(kwargs["usage"])
         actual_usage = {"tokens": total_tokens, "requests": 1}
         validate_refund_usage(actual_usage, set(reservation.usage))
         self._refund_capacity(

@@ -208,8 +208,14 @@ def _count_text_fragments(
 ) -> int:
     if value is None:
         return 0
+    if isinstance(value, bool):
+        # bool before int: isinstance(True, int) is True in Python.
+        # Serialize as JSON would ("true"/"false") and count tokens.
+        return len(encoding.encode(str(value).lower()))
     if isinstance(value, str):
         return len(encoding.encode(value))
+    if isinstance(value, (int, float)):
+        return len(encoding.encode(str(value)))
     if isinstance(value, list):
         return sum(
             _count_text_fragments(

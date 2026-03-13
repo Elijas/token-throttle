@@ -486,6 +486,36 @@ class TestRefundCapacityFromResponseValidation:
                 reservation, usage={"total_tokens": None}
             )
 
+    async def test_kwargs_usage_missing_total_tokens_raises_value_error(self):
+        """Missing total_tokens in usage kwarg should raise ValueError, not KeyError."""
+        builder, _ = make_mock_backend_builder()
+        limiter = RateLimiter(make_limited_config(), backend=builder)
+        reservation = CapacityReservation(
+            usage={"tokens": 100.0, "requests": 1.0},
+            model_family="gpt-4",
+        )
+        with pytest.raises(ValueError, match="total_tokens"):
+            await limiter.refund_capacity_from_response(
+                reservation, usage={"prompt_tokens": 50}
+            )
+
+    async def test_response_dict_usage_missing_total_tokens_raises_value_error(self):
+        """response.usage dict missing total_tokens should raise ValueError, not KeyError."""
+        builder, _ = make_mock_backend_builder()
+        limiter = RateLimiter(make_limited_config(), backend=builder)
+        reservation = CapacityReservation(
+            usage={"tokens": 100.0, "requests": 1.0},
+            model_family="gpt-4",
+        )
+
+        class FakeResponse:
+            usage = {"prompt_tokens": 50, "completion_tokens": 30}  # noqa: RUF012
+
+        with pytest.raises(ValueError, match="total_tokens"):
+            await limiter.refund_capacity_from_response(
+                reservation, response=FakeResponse()
+            )
+
 
 class TestSetMaxCapacityValidation:
     async def test_set_max_capacity_without_prior_backend_raises(self):
