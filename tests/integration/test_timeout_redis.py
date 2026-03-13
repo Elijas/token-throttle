@@ -8,12 +8,21 @@ timeout=None (default).  These tests will fail until timeout is implemented
 (TDD red phase).
 """
 
+import contextlib
 import time
 
 import pytest
+import redis as sync_redis
+import redis.asyncio as redis
 
 from token_throttle._interfaces._interfaces import PerModelConfig
 from token_throttle._interfaces._models import Quota, UsageQuotas, frozen_usage
+from token_throttle._limiter_backends._redis._backend import RedisBackendBuilder
+from token_throttle._limiter_backends._redis._bucket import RedisBucket
+from token_throttle._limiter_backends._redis._sync_backend import (
+    SyncRedisBackendBuilder,
+)
+from token_throttle._limiter_backends._redis._sync_bucket import SyncRedisBucket
 
 
 def _make_config(
@@ -186,3 +195,76 @@ def test_sync_timeout_none_blocks_until_available(sync_backend_builder):
     elapsed = time.monotonic() - start
 
     assert elapsed < 2.0, f"timeout=None should eventually succeed, took {elapsed:.2f}s"
+
+
+# ---------------------------------------------------------------------------
+# Redis lock acquisition must also respect caller timeout
+# ---------------------------------------------------------------------------
+
+
+async def test_async_timeout_zero_includes_redis_lock_wait(
+    redis_url: str,
+    redis_client,
+):
+    """timeout=0 must fail fast even if another worker holds the Redis lock."""
+    config = _make_config(limit=10, per_seconds=60)
+    backend = RedisBackendBuilder(redis_client).build(config)
+
+    lock_client = redis.from_url(redis_url)
+    lock = None
+    try:
+        bucket = RedisBucket(
+            quota=Quota(metric="requests", limit=10, per_seconds=60),
+            limit_config=config,
+            redis_client=lock_client,
+        )
+        lock = bucket.lock(timeout=1.2)
+        assert await lock.acquire() is True
+
+        start = time.monotonic()
+        with pytest.raises(TimeoutError):
+            await backend.await_for_capacity(frozen_usage({"requests": 1}), timeout=0)
+        elapsed = time.monotonic() - start
+
+        assert elapsed < 0.5, (
+            f"timeout=0 should not wait on Redis lock contention, took {elapsed:.2f}s"
+        )
+    finally:
+        if lock is not None:
+            with contextlib.suppress(Exception):
+                await lock.release()
+        await lock_client.aclose()
+
+
+def test_sync_timeout_zero_includes_redis_lock_wait(
+    redis_url: str,
+    sync_redis_client,
+):
+    """sync timeout=0 must fail fast even if another worker holds the Redis lock."""
+    config = _make_config(limit=10, per_seconds=60)
+    backend = SyncRedisBackendBuilder(sync_redis_client).build(config)
+
+    lock_client = sync_redis.from_url(redis_url)
+    lock = None
+    try:
+        bucket = SyncRedisBucket(
+            quota=Quota(metric="requests", limit=10, per_seconds=60),
+            limit_config=config,
+            redis_client=lock_client,
+        )
+        lock = bucket.lock(timeout=1.2)
+        assert lock.acquire() is True
+
+        start = time.monotonic()
+        with pytest.raises(TimeoutError):
+            backend.wait_for_capacity(frozen_usage({"requests": 1}), timeout=0)
+        elapsed = time.monotonic() - start
+
+        assert elapsed < 0.5, (
+            f"timeout=0 should not wait on Redis lock contention, took {elapsed:.2f}s"
+        )
+    finally:
+        if lock is not None:
+            with contextlib.suppress(Exception):
+                lock.release()
+        lock_client.close()

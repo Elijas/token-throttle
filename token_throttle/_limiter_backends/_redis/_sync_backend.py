@@ -8,6 +8,7 @@ from typing import ClassVar
 try:
     import redis
     import redis.client
+    import redis.exceptions
 except ImportError as exc:
     raise ImportError(
         'The "redis" package is required for the Redis backend. '
@@ -95,14 +96,33 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         self._limit_config = limit_config
         self._local_condition = threading.Condition()
 
-    def _lock(self, **kwargs) -> ExitStack:
+    def _lock(
+        self,
+        *,
+        timeout: float,
+        blocking_timeout: float | None = None,
+    ) -> ExitStack:
         """Acquire locks for all buckets in a consistent order."""
         stack = ExitStack()
+        stop_trying_at = (
+            None if blocking_timeout is None else time.monotonic() + blocking_timeout
+        )
 
         # sorted_buckets is sorted once in __init__ and never mutated.
         try:
             for bucket in self.sorted_buckets:
-                stack.enter_context(bucket.lock(**kwargs))
+                remaining = (
+                    None
+                    if stop_trying_at is None
+                    else max(0.0, stop_trying_at - time.monotonic())
+                )
+                lock = bucket.lock(timeout=timeout)
+                acquired = lock.acquire(blocking_timeout=remaining)
+                if not acquired:
+                    raise redis.exceptions.LockError(
+                        "Unable to acquire lock within the time specified",
+                    )
+                stack.callback(lock.release)
         except BaseException:
             stack.close()
             raise
@@ -211,6 +231,8 @@ class SyncRedisBackend(SyncRateLimiterBackend):
     def _check_and_consume_capacity(
         self,
         usage_: FrozenUsage,
+        *,
+        lock_blocking_timeout: float | None = None,
     ) -> tuple[bool, Capacities, Capacities]:
         """Check if there's enough capacity and consume it if available."""
         usage: FrozenUsage = frozendict(
@@ -221,7 +243,10 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         postconsumption_capacities: Capacities = frozendict()
         current_time: float = 0.0
         fresh_start_buckets: list[SyncRedisBucket] = []
-        with self._lock(timeout=LOCK_TIMEOUT_SECONDS):
+        with self._lock(
+            timeout=LOCK_TIMEOUT_SECONDS,
+            blocking_timeout=lock_blocking_timeout,
+        ):
             # Pipeline is reused: _get_capacities_unsafe executes it (clearing
             # the command buffer), then _set_capacities_unsafe adds new commands
             # and executes again.  Safe because redis-py clears the buffer on execute().
@@ -381,9 +406,20 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         has_waited = False
         start_time = time.time()
         while True:
-            available, preconsumption, postconsumption = (
-                self._check_and_consume_capacity(usage)
+            remaining = (
+                None if deadline is None else max(0.0, deadline - time.monotonic())
             )
+            try:
+                available, preconsumption, postconsumption = (
+                    self._check_and_consume_capacity(
+                        usage,
+                        lock_blocking_timeout=remaining,
+                    )
+                )
+            except redis.exceptions.LockError as exc:
+                if deadline is None:  # pragma: no cover
+                    raise
+                raise TimeoutError("Timed out waiting for capacity") from exc
             if available:
                 if has_waited:
                     wait_time_s = time.time() - start_time

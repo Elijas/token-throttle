@@ -9,6 +9,7 @@ from typing import ClassVar
 try:
     import redis.asyncio
     import redis.asyncio.client
+    import redis.exceptions
 except ImportError as exc:
     raise ImportError(
         'The "redis" package is required for the Redis backend. '
@@ -96,7 +97,12 @@ class RedisBackend(RateLimiterBackend):
         self._limit_config = limit_config
         self._local_condition = asyncio.Condition()
 
-    async def _lock(self, **kwargs) -> AsyncExitStack:
+    async def _lock(
+        self,
+        *,
+        timeout: float,
+        blocking_timeout: float | None = None,
+    ) -> AsyncExitStack:
         """
         Acquire distributed Redis locks for all buckets in key-sorted order.
 
@@ -109,11 +115,26 @@ class RedisBackend(RateLimiterBackend):
         (via ``stack.aclose()``) so we never leak partially-acquired locks.
         """
         stack = AsyncExitStack()
+        loop = asyncio.get_running_loop()
+        stop_trying_at = (
+            None if blocking_timeout is None else loop.time() + blocking_timeout
+        )
 
         # sorted_buckets is sorted once in __init__ and never mutated.
         try:
             for bucket in self.sorted_buckets:
-                await stack.enter_async_context(bucket.lock(**kwargs))
+                remaining = (
+                    None
+                    if stop_trying_at is None
+                    else max(0.0, stop_trying_at - loop.time())
+                )
+                lock = bucket.lock(timeout=timeout)
+                acquired = await lock.acquire(blocking_timeout=remaining)
+                if not acquired:
+                    raise redis.exceptions.LockError(
+                        "Unable to acquire lock within the time specified",
+                    )
+                stack.push_async_callback(lock.release)
         except BaseException:
             await stack.aclose()
             raise
@@ -226,6 +247,8 @@ class RedisBackend(RateLimiterBackend):
     async def _check_and_consume_capacity(
         self,
         usage_: FrozenUsage,
+        *,
+        lock_blocking_timeout: float | None = None,
     ) -> tuple[bool, Capacities, Capacities]:
         """Check if there's enough capacity and consume it if available."""
         usage: FrozenUsage = frozendict(
@@ -236,7 +259,10 @@ class RedisBackend(RateLimiterBackend):
         postconsumption_capacities: Capacities = frozendict()
         current_time: float = 0.0
         fresh_start_buckets: list[RedisBucket] = []
-        async with await self._lock(timeout=LOCK_TIMEOUT_SECONDS):
+        async with await self._lock(
+            timeout=LOCK_TIMEOUT_SECONDS,
+            blocking_timeout=lock_blocking_timeout,
+        ):
             # Pipeline is reused: _get_capacities_unsafe executes it (clearing
             # the command buffer), then _set_capacities_unsafe adds new commands
             # and executes again.  Safe because redis-py clears the buffer on execute().
@@ -398,11 +424,22 @@ class RedisBackend(RateLimiterBackend):
         has_waited = False
         start_time = time.time()
         while True:
-            (
-                available,
-                preconsumption,
-                postconsumption,
-            ) = await self._check_and_consume_capacity(usage)
+            remaining = (
+                None if deadline is None else max(0.0, deadline - time.monotonic())
+            )
+            try:
+                (
+                    available,
+                    preconsumption,
+                    postconsumption,
+                ) = await self._check_and_consume_capacity(
+                    usage,
+                    lock_blocking_timeout=remaining,
+                )
+            except redis.exceptions.LockError as exc:
+                if deadline is None:  # pragma: no cover
+                    raise
+                raise TimeoutError("Timed out waiting for capacity") from exc
             if available:
                 if has_waited:
                     wait_time_s = time.time() - start_time
