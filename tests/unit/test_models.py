@@ -189,6 +189,21 @@ class TestCapacityReservation:
                 model_family="gpt-4o",
             )
 
+    @pytest.mark.parametrize(
+        ("raw_value", "message"),
+        [
+            pytest.param(-1.0, "must be non-negative", id="negative"),
+            pytest.param(float("nan"), "must be finite", id="nan"),
+            pytest.param(float("inf"), "must be finite", id="infinity"),
+        ],
+    )
+    def test_rejects_invalid_usage_values(self, raw_value, message):
+        with pytest.raises(ValidationError, match=message):
+            CapacityReservation(
+                usage={"requests": 1.0, "tokens": raw_value},
+                model_family="gpt-4o",
+            )
+
     def test_get_usage_returns_frozendict(self):
         reservation = CapacityReservation(
             usage={"requests": 1.0, "tokens": 100.0},

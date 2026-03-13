@@ -1,3 +1,4 @@
+import math
 import warnings
 from collections import defaultdict
 from collections.abc import Iterator, Mapping
@@ -122,7 +123,17 @@ class CapacityReservation(BaseModel):
     @classmethod
     def _normalize_usage(cls, value: object) -> object:
         if isinstance(value, Mapping):
-            return dict(frozen_usage(value))
+            normalized_usage = dict(frozen_usage(value))
+            for metric, amount in normalized_usage.items():
+                if not math.isfinite(amount):
+                    raise ValueError(
+                        f"Reserved usage value for {metric} must be finite (got {amount!r})"
+                    )
+                if amount < 0:
+                    raise ValueError(
+                        f"Reserved usage value for {metric} must be non-negative"
+                    )
+            return normalized_usage
         return value
 
     def get_usage(self) -> FrozenUsage:
