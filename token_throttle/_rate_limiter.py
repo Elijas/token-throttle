@@ -15,6 +15,7 @@ from token_throttle._interfaces._models import (
     frozen_usage,
 )
 from token_throttle._validation import (
+    merge_extra_usage,
     resolve_config,
     validate_acquire_usage,
     validate_refund_usage,
@@ -108,20 +109,12 @@ class RateLimiter(BaseRateLimiter):
         if limit_config.usage_counter is None:
             raise ValueError("limit_config.usage_counter cannot be None")
 
-        usage = dict(frozen_usage(limit_config.usage_counter(**kwargs)))
-        if extra_usage:
-            for k, v in extra_usage.items():
-                if k not in usage:
-                    raise ValueError(
-                        f"Usage key '{k}' not found in usage counter",
-                    )
-                if isinstance(v, bool):
-                    raise ValueError(  # noqa: TRY004
-                        f"Usage value for {k} must not be a boolean"
-                    )
-                usage[k] += v
+        usage = merge_extra_usage(
+            frozen_usage(limit_config.usage_counter(**kwargs)),
+            extra_usage,
+        )
         return await self._acquire_capacity(
-            frozen_usage(usage), limit_config, timeout=timeout
+            usage, limit_config, timeout=timeout
         )
 
     async def _acquire_capacity(

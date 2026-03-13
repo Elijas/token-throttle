@@ -225,6 +225,20 @@ class TestAcquireCapacityForRequestValidation:
                 model="gpt-4",
             )
 
+    def test_extra_usage_with_non_numeric_value_raises(self):
+        def fake_counter(**_kwargs):
+            return {"tokens": 100.0, "requests": 1.0}
+
+        builder, _ = make_mock_backend_builder()
+        config = make_limited_config(usage_counter=fake_counter)
+        limiter = SyncRateLimiter(config, backend=builder)
+
+        with pytest.raises(ValueError, match="must be a finite number"):
+            limiter.acquire_capacity_for_request(
+                extra_usage={"tokens": object()},
+                model="gpt-4",
+            )
+
     def test_usage_counter_boolean_value_is_not_masked_by_extra_usage(self):
         def fake_counter(**_kwargs):
             return {"tokens": True, "requests": 1.0}
