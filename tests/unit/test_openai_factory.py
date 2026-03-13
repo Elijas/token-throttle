@@ -131,6 +131,26 @@ class TestModelFamilyGetter:
             == "gpt-4-turbo"
         )
 
+    # --- -preview before date suffix (e.g. o1-preview-2024-09-12) ---
+
+    def test_strips_preview_before_iso_date_o1(self):
+        assert openai_model_family_getter("o1-preview-2024-09-12") == "o1"
+
+    def test_strips_preview_before_iso_date_realtime(self):
+        assert (
+            openai_model_family_getter("gpt-4o-realtime-preview-2024-10-01")
+            == "gpt-4o-realtime"
+        )
+
+    def test_strips_preview_before_iso_date_audio(self):
+        assert (
+            openai_model_family_getter("gpt-4o-audio-preview-2024-10-01")
+            == "gpt-4o-audio"
+        )
+
+    def test_strips_preview_before_mmdd_suffix(self):
+        assert openai_model_family_getter("gpt-4o-mini-preview-0125") == "gpt-4o-mini"
+
     # --- Standalone -preview suffix is stripped ---
 
     def test_strips_standalone_preview_o1(self):

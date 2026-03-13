@@ -21,10 +21,11 @@ from token_throttle._rate_limiter import RateLimiter
 
 def openai_model_family_getter(model: str, /) -> str:
     # Strip provider prefix if present, then collapse date/snapshot suffixes.
-    # Matches -MMDD (e.g. -0613) and -YYYY-MM-DD (e.g. -2024-04-09).
+    # Matches -MMDD (e.g. -0613) and -YYYY-MM-DD (e.g. -2024-04-09),
+    # with optional -preview before and/or after the date component.
     # Single/triple-digit version numbers (-1, -002) are preserved.
     model = model.removeprefix("openai/")
-    return re.sub(r"(-\d{4}(-\d{2}){0,2}(-preview)?|-preview)$", "", model)
+    return re.sub(r"((-preview)?-\d{4}(-\d{2}){0,2}(-preview)?|-preview)$", "", model)
 
 
 def create_openai_redis_rate_limiter(
