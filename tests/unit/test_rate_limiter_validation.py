@@ -173,6 +173,20 @@ class TestAcquireCapacityForRequestValidation:
                 model="gpt-4",
             )
 
+    async def test_extra_usage_with_negative_value_raises(self):
+        def fake_counter(**_kwargs):
+            return {"tokens": 100.0, "requests": 1.0}
+
+        builder, _ = make_mock_backend_builder()
+        config = make_limited_config(usage_counter=fake_counter)
+        limiter = RateLimiter(config, backend=builder)
+
+        with pytest.raises(ValueError, match="must be non-negative"):
+            await limiter.acquire_capacity_for_request(
+                extra_usage={"tokens": -1},
+                model="gpt-4",
+            )
+
     async def test_usage_counter_with_non_numeric_value_raises(self):
         def fake_counter(**_kwargs):
             return {"tokens": object(), "requests": 1.0}

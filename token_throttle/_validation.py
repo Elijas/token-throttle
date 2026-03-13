@@ -93,6 +93,8 @@ def merge_extra_usage(
             raise ValueError(
                 f"Usage value for {metric} must be a finite number (got {raw_amount!r})"
             )
+        if amount < 0:
+            raise ValueError(f"Usage value for {metric} must be non-negative")
         merged_usage[metric] += amount
     return frozen_usage(merged_usage)
 
