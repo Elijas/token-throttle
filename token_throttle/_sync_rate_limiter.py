@@ -185,7 +185,7 @@ class SyncRateLimiter:
         value: float,
     ) -> None:
         """Dynamically change the max capacity for a specific bucket."""
-        validate_max_capacity_value(value)
+        value = validate_max_capacity_value(value)
         limit_config = self._config_getter(model)
         model_family = limit_config.get_model_family()
         backend = self._model_family_to_backend.get(model_family)

@@ -1,11 +1,15 @@
 """Tests for SyncRateLimiter.set_max_capacity."""
 
+from decimal import Decimal
 from unittest.mock import MagicMock
 
 import pytest
 
 from token_throttle._interfaces._interfaces import PerModelConfig
 from token_throttle._interfaces._models import Quota, UsageQuotas
+from token_throttle._limiter_backends._memory._sync_backend import (
+    SyncMemoryBackendBuilder,
+)
 from token_throttle._sync_rate_limiter import SyncRateLimiter
 
 
@@ -153,3 +157,35 @@ class TestSyncSetMaxCapacityValidation:
         limiter = self._make_limiter_with_backend()
         with pytest.raises(ValueError, match="max_capacity must be finite and greater than 0"):
             limiter.set_max_capacity("gpt-4o", "tokens", 60, 0.0)
+
+
+class TestSyncSetMaxCapacityCoercion:
+    """Coerce validated values to float before passing to backend."""
+
+    def test_decimal_value_is_coerced_to_float(self):
+        """Decimal causes TypeError in bucket code if not coerced to float."""
+        config = make_limited_config(model_family="test-model")
+        limiter = SyncRateLimiter(config, backend=SyncMemoryBackendBuilder())
+
+        limiter.acquire_capacity(
+            {"tokens": 100, "requests": 1}, model="test-model"
+        )
+
+        # Should not raise — Decimal must be coerced to float
+        limiter.set_max_capacity("test-model", "tokens", 60, Decimal(5000))
+
+    def test_int_value_is_coerced_to_float(self):
+        """Backend receives a float, not the raw int."""
+        builder, mock_backend = make_mock_backend_builder()
+        config = make_limited_config(model_family="gpt-4o")
+        limiter = SyncRateLimiter(config, backend=builder)
+
+        limiter.acquire_capacity(
+            {"tokens": 100, "requests": 1}, model="gpt-4o"
+        )
+
+        limiter.set_max_capacity("gpt-4o", "tokens", 60, 5000)
+
+        # The backend should receive a float, not an int
+        args = mock_backend.set_max_capacity.call_args[0]
+        assert isinstance(args[2], float)

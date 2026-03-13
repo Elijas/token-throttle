@@ -240,7 +240,7 @@ def test_sync_timeout_zero_includes_redis_lock_wait(
     redis_url: str,
     sync_redis_client,
 ):
-    """sync timeout=0 must fail fast even if another worker holds the Redis lock."""
+    """Sync timeout=0 must fail fast even if another worker holds the Redis lock."""
     config = _make_config(limit=10, per_seconds=60)
     backend = SyncRedisBackendBuilder(sync_redis_client).build(config)
 

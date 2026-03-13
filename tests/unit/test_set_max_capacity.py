@@ -1,11 +1,13 @@
 """Tests for RateLimiter.set_max_capacity."""
 
+from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from token_throttle._interfaces._interfaces import PerModelConfig
 from token_throttle._interfaces._models import Quota, UsageQuotas
+from token_throttle._limiter_backends._memory._backend import MemoryBackendBuilder
 from token_throttle._rate_limiter import RateLimiter
 
 
@@ -153,3 +155,35 @@ class TestSetMaxCapacityValidation:
         limiter = await self._make_limiter_with_backend()
         with pytest.raises(ValueError, match="max_capacity must be finite and greater than 0"):
             await limiter.set_max_capacity("gpt-4o", "tokens", 60, 0.0)
+
+
+class TestSetMaxCapacityCoercion:
+    """Coerce validated values to float before passing to backend."""
+
+    async def test_decimal_value_is_coerced_to_float(self):
+        """Decimal causes TypeError in bucket code if not coerced to float."""
+        config = make_limited_config(model_family="test-model")
+        limiter = RateLimiter(config, backend=MemoryBackendBuilder())
+
+        await limiter.acquire_capacity(
+            {"tokens": 100, "requests": 1}, model="test-model"
+        )
+
+        # Should not raise — Decimal must be coerced to float
+        await limiter.set_max_capacity("test-model", "tokens", 60, Decimal(5000))
+
+    async def test_int_value_is_coerced_to_float(self):
+        """Backend receives a float, not the raw int."""
+        builder, mock_backend = make_mock_backend_builder()
+        config = make_limited_config(model_family="gpt-4o")
+        limiter = RateLimiter(config, backend=builder)
+
+        await limiter.acquire_capacity(
+            {"tokens": 100, "requests": 1}, model="gpt-4o"
+        )
+
+        await limiter.set_max_capacity("gpt-4o", "tokens", 60, 5000)
+
+        # The backend should receive a float, not an int
+        args = mock_backend.set_max_capacity.call_args[0]
+        assert isinstance(args[2], float)
