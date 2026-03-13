@@ -1,3 +1,4 @@
+import math
 import threading
 
 from token_throttle._interfaces._callbacks import SyncRateLimiterCallbacks
@@ -48,7 +49,25 @@ def _extract_total_tokens(usage: object) -> int | float:
             "total_tokens is None — cannot compute refund. "
             "Pass actual usage via refund_capacity() instead."
         )
-    return total_tokens
+    if isinstance(total_tokens, bool):
+        raise ValueError(  # noqa: TRY004
+            "total_tokens must not be a boolean"
+        )
+    try:
+        value = float(total_tokens)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"total_tokens must be a finite non-negative number (got {total_tokens!r})"
+        ) from exc
+    if not math.isfinite(value):
+        raise ValueError(
+            f"total_tokens must be a finite non-negative number (got {total_tokens!r})"
+        )
+    if value < 0:
+        raise ValueError(
+            f"total_tokens must be a finite non-negative number (got {total_tokens!r})"
+        )
+    return value
 
 
 class SyncRateLimiter:

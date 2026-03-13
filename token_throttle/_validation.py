@@ -31,10 +31,6 @@ def _validate_usage_mapping(
             amount_,
             label=value_label,
         )
-        if not math.isfinite(amount):
-            raise ValueError(
-                f"{value_label} for {metric} must be finite (got {amount_!r})"
-            )
         if amount < 0:
             raise ValueError(f"{value_label} for {metric} must be non-negative")
 

@@ -528,6 +528,118 @@ class TestRefundCapacityFromResponseValidation:
             )
 
 
+class TestExtractTotalTokensValidation:
+    """_extract_total_tokens should fail-fast with clear errors, not defer to downstream."""
+
+    def test_boolean_total_tokens_from_response_raises(self):
+        """Bool is an int subclass — must be rejected as total_tokens."""
+        builder, _ = make_mock_backend_builder()
+        limiter = SyncRateLimiter(make_limited_config(), backend=builder)
+        limiter.acquire_capacity({"tokens": 100, "requests": 1}, model="gpt-4")
+        reservation = CapacityReservation(
+            usage={"tokens": 100.0, "requests": 1.0},
+            model_family="gpt-4",
+        )
+
+        class FakeUsage:
+            total_tokens = True
+
+        class FakeResponse:
+            usage = FakeUsage()
+
+        with pytest.raises(ValueError, match="total_tokens"):
+            limiter.refund_capacity_from_response(
+                reservation, response=FakeResponse()
+            )
+
+    def test_boolean_total_tokens_from_kwargs_raises(self):
+        builder, _ = make_mock_backend_builder()
+        limiter = SyncRateLimiter(make_limited_config(), backend=builder)
+        reservation = CapacityReservation(
+            usage={"tokens": 100.0, "requests": 1.0},
+            model_family="gpt-4",
+        )
+        with pytest.raises(ValueError, match="total_tokens"):
+            limiter.refund_capacity_from_response(
+                reservation, usage={"total_tokens": True}
+            )
+
+    def test_nan_total_tokens_raises(self):
+        builder, _ = make_mock_backend_builder()
+        limiter = SyncRateLimiter(make_limited_config(), backend=builder)
+        reservation = CapacityReservation(
+            usage={"tokens": 100.0, "requests": 1.0},
+            model_family="gpt-4",
+        )
+        with pytest.raises(ValueError, match="total_tokens"):
+            limiter.refund_capacity_from_response(
+                reservation, usage={"total_tokens": float("nan")}
+            )
+
+    def test_inf_total_tokens_raises(self):
+        builder, _ = make_mock_backend_builder()
+        limiter = SyncRateLimiter(make_limited_config(), backend=builder)
+        reservation = CapacityReservation(
+            usage={"tokens": 100.0, "requests": 1.0},
+            model_family="gpt-4",
+        )
+        with pytest.raises(ValueError, match="total_tokens"):
+            limiter.refund_capacity_from_response(
+                reservation, usage={"total_tokens": float("inf")}
+            )
+
+    def test_negative_total_tokens_raises(self):
+        builder, _ = make_mock_backend_builder()
+        limiter = SyncRateLimiter(make_limited_config(), backend=builder)
+        reservation = CapacityReservation(
+            usage={"tokens": 100.0, "requests": 1.0},
+            model_family="gpt-4",
+        )
+        with pytest.raises(ValueError, match="total_tokens"):
+            limiter.refund_capacity_from_response(
+                reservation, usage={"total_tokens": -5}
+            )
+
+    def test_non_numeric_string_total_tokens_raises(self):
+        builder, _ = make_mock_backend_builder()
+        limiter = SyncRateLimiter(make_limited_config(), backend=builder)
+        reservation = CapacityReservation(
+            usage={"tokens": 100.0, "requests": 1.0},
+            model_family="gpt-4",
+        )
+        with pytest.raises(ValueError, match="total_tokens"):
+            limiter.refund_capacity_from_response(
+                reservation, usage={"total_tokens": "abc"}
+            )
+
+    def test_numeric_string_total_tokens_is_coerced(self):
+        """Numeric strings (e.g. from JSON) should be coerced to float."""
+        builder, mock_backend = make_mock_backend_builder()
+        limiter = SyncRateLimiter(make_limited_config(), backend=builder)
+        limiter.acquire_capacity({"tokens": 100, "requests": 1}, model="gpt-4")
+        reservation = CapacityReservation(
+            usage={"tokens": 100.0, "requests": 1.0},
+            model_family="gpt-4",
+        )
+        limiter.refund_capacity_from_response(
+            reservation, usage={"total_tokens": "80"}
+        )
+        mock_backend.refund_capacity.assert_called_once()
+
+    def test_zero_total_tokens_is_valid(self):
+        builder, mock_backend = make_mock_backend_builder()
+        limiter = SyncRateLimiter(make_limited_config(), backend=builder)
+        limiter.acquire_capacity({"tokens": 100, "requests": 1}, model="gpt-4")
+        reservation = CapacityReservation(
+            usage={"tokens": 100.0, "requests": 1.0},
+            model_family="gpt-4",
+        )
+        limiter.refund_capacity_from_response(
+            reservation, usage={"total_tokens": 0}
+        )
+        mock_backend.refund_capacity.assert_called_once()
+
+
 class TestSetMaxCapacityValidation:
     def test_set_max_capacity_without_prior_backend_raises(self):
         builder, _ = make_mock_backend_builder()
