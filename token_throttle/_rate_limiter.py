@@ -1,5 +1,4 @@
 import asyncio
-import math
 
 from token_throttle._interfaces._callbacks import RateLimiterCallbacks
 from token_throttle._interfaces._interfaces import (
@@ -16,59 +15,15 @@ from token_throttle._interfaces._models import (
     frozen_usage,
 )
 from token_throttle._validation import (
+    _UNLIMITED_FLAG,
+    extract_total_tokens,
+    is_unlimited_reservation,
     merge_extra_usage,
     resolve_config,
     validate_acquire_usage,
+    validate_max_capacity_value,
     validate_refund_usage,
 )
-
-_UNLIMITED_FLAG = "__rate_limiting_disabled__"
-
-
-def _is_unlimited_reservation(reservation: CapacityReservation) -> bool:
-    return reservation.model_family == _UNLIMITED_FLAG and not reservation.usage
-
-
-def _extract_total_tokens(usage: object) -> int | float:
-    """Extract total_tokens from a usage object (attribute or dict access)."""
-    if hasattr(usage, "total_tokens"):
-        total_tokens = usage.total_tokens
-    elif isinstance(usage, dict):
-        try:
-            total_tokens = usage["total_tokens"]
-        except KeyError:
-            raise ValueError(
-                "'total_tokens' key not found in usage data — "
-                "pass actual usage via refund_capacity() instead."
-            ) from None
-    else:
-        raise ValueError(
-            "usage must be an object with total_tokens attribute or a dict"
-        )
-    if total_tokens is None:
-        raise ValueError(
-            "total_tokens is None — cannot compute refund. "
-            "Pass actual usage via refund_capacity() instead."
-        )
-    if isinstance(total_tokens, bool):
-        raise ValueError(  # noqa: TRY004
-            "total_tokens must not be a boolean"
-        )
-    try:
-        value = float(total_tokens)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(
-            f"total_tokens must be a finite non-negative number (got {total_tokens!r})"
-        ) from exc
-    if not math.isfinite(value):
-        raise ValueError(
-            f"total_tokens must be a finite non-negative number (got {total_tokens!r})"
-        )
-    if value < 0:
-        raise ValueError(
-            f"total_tokens must be a finite non-negative number (got {total_tokens!r})"
-        )
-    return value
 
 
 class RateLimiter(BaseRateLimiter):
@@ -189,7 +144,7 @@ class RateLimiter(BaseRateLimiter):
         actual_usage: Usage,
         reservation: CapacityReservation,
     ) -> None:
-        if _is_unlimited_reservation(reservation):
+        if is_unlimited_reservation(reservation):
             if actual_usage:
                 raise ValueError(
                     "Usage must be empty for unlimited capacity reservations",
@@ -214,7 +169,7 @@ class RateLimiter(BaseRateLimiter):
         ``create_openai_*`` factories).  For custom metric names, use
         :meth:`refund_capacity` directly.
         """
-        if _is_unlimited_reservation(reservation):
+        if is_unlimited_reservation(reservation):
             return
         if response is not None:
             # Pydantic model (OpenAI SDK v1+) or any object with .usage
@@ -225,13 +180,13 @@ class RateLimiter(BaseRateLimiter):
                     "Streaming responses may not include usage data; "
                     "pass actual usage via refund_capacity() instead."
                 )
-            total_tokens = _extract_total_tokens(usage)
+            total_tokens = extract_total_tokens(usage)
         else:
             if "usage" not in kwargs:
                 raise ValueError(
                     "Either 'response' or 'usage' keyword argument is required"
                 )
-            total_tokens = _extract_total_tokens(kwargs["usage"])
+            total_tokens = extract_total_tokens(kwargs["usage"])
         actual_usage = {"tokens": total_tokens, "requests": 1}
         validate_refund_usage(actual_usage, set(reservation.usage))
         await self._refund_capacity(
@@ -247,6 +202,7 @@ class RateLimiter(BaseRateLimiter):
         value: float,
     ) -> None:
         """Dynamically change the max capacity for a specific bucket."""
+        validate_max_capacity_value(value)
         limit_config = self._config_getter(model)
         model_family = limit_config.get_model_family()
         backend = self._model_family_to_backend.get(model_family)

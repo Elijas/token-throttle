@@ -6,12 +6,61 @@ from collections.abc import Set as AbstractSet
 
 from token_throttle._interfaces._interfaces import PerModelConfig, PerModelConfigGetter
 from token_throttle._interfaces._models import (
+    CapacityReservation,
     FrozenUsage,
     Usage,
     UsageQuotas,
     _coerce_usage_value,
     frozen_usage,
 )
+
+_UNLIMITED_FLAG = "__rate_limiting_disabled__"
+
+
+def is_unlimited_reservation(reservation: CapacityReservation) -> bool:
+    return reservation.model_family == _UNLIMITED_FLAG and not reservation.usage
+
+
+def extract_total_tokens(usage: object) -> int | float:
+    """Extract total_tokens from a usage object (attribute or dict access)."""
+    if hasattr(usage, "total_tokens"):
+        total_tokens = usage.total_tokens
+    elif isinstance(usage, dict):
+        try:
+            total_tokens = usage["total_tokens"]
+        except KeyError:
+            raise ValueError(
+                "'total_tokens' key not found in usage data — "
+                "pass actual usage via refund_capacity() instead."
+            ) from None
+    else:
+        raise ValueError(
+            "usage must be an object with total_tokens attribute or a dict"
+        )
+    if total_tokens is None:
+        raise ValueError(
+            "total_tokens is None — cannot compute refund. "
+            "Pass actual usage via refund_capacity() instead."
+        )
+    if isinstance(total_tokens, bool):
+        raise ValueError(  # noqa: TRY004
+            "total_tokens must not be a boolean"
+        )
+    try:
+        value = float(total_tokens)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"total_tokens must be a finite non-negative number (got {total_tokens!r})"
+        ) from exc
+    if not math.isfinite(value):
+        raise ValueError(
+            f"total_tokens must be a finite non-negative number (got {total_tokens!r})"
+        )
+    if value < 0:
+        raise ValueError(
+            f"total_tokens must be a finite non-negative number (got {total_tokens!r})"
+        )
+    return value
 
 
 def _validate_usage_mapping(
@@ -123,6 +172,23 @@ def validate_timeout(timeout: object) -> float | None:
             f"timeout must be non-negative or None (got {timeout!r})"
         )
     return timeout_value
+
+
+def validate_max_capacity_value(value: object) -> float:
+    """Validate the value parameter for set_max_capacity."""
+    if isinstance(value, bool):
+        raise ValueError("max_capacity must not be a boolean")  # noqa: TRY004
+    try:
+        float_value = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"max_capacity must be finite and greater than 0 (got {value!r})"
+        ) from exc
+    if not (math.isfinite(float_value) and float_value > 0):
+        raise ValueError(
+            f"max_capacity must be finite and greater than 0 (got {value!r})"
+        )
+    return float_value
 
 
 def merge_extra_usage(

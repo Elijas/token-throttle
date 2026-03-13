@@ -115,3 +115,41 @@ class TestSetMaxCapacity:
         )
 
         mock_backend.set_max_capacity.assert_awaited_once_with("tokens", 60, 9000)
+
+
+class TestSetMaxCapacityValidation:
+    """set_max_capacity should validate `value` at the public API boundary."""
+
+    async def _make_limiter_with_backend(self):
+        builder, _mock_backend = make_mock_backend_builder()
+        config = make_limited_config(model_family="gpt-4o")
+        limiter = RateLimiter(config, backend=builder)
+        await limiter.acquire_capacity(
+            {"tokens": 100, "requests": 1}, model="gpt-4o"
+        )
+        return limiter
+
+    async def test_boolean_value_raises(self):
+        limiter = await self._make_limiter_with_backend()
+        with pytest.raises(ValueError, match="max_capacity must not be a boolean"):
+            await limiter.set_max_capacity("gpt-4o", "tokens", 60, True)  # noqa: FBT003
+
+    async def test_nan_value_raises(self):
+        limiter = await self._make_limiter_with_backend()
+        with pytest.raises(ValueError, match="max_capacity must be finite and greater than 0"):
+            await limiter.set_max_capacity("gpt-4o", "tokens", 60, float("nan"))
+
+    async def test_inf_value_raises(self):
+        limiter = await self._make_limiter_with_backend()
+        with pytest.raises(ValueError, match="max_capacity must be finite and greater than 0"):
+            await limiter.set_max_capacity("gpt-4o", "tokens", 60, float("inf"))
+
+    async def test_negative_value_raises(self):
+        limiter = await self._make_limiter_with_backend()
+        with pytest.raises(ValueError, match="max_capacity must be finite and greater than 0"):
+            await limiter.set_max_capacity("gpt-4o", "tokens", 60, -5.0)
+
+    async def test_zero_value_raises(self):
+        limiter = await self._make_limiter_with_backend()
+        with pytest.raises(ValueError, match="max_capacity must be finite and greater than 0"):
+            await limiter.set_max_capacity("gpt-4o", "tokens", 60, 0.0)
