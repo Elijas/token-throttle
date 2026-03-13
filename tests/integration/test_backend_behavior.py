@@ -54,6 +54,48 @@ async def test_await_for_capacity_immediate_success(backend_builder):
 
 
 # ---------------------------------------------------------------------------
+# 1b. Direct backend calls must still validate usage
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("method_name", "bad_value", "message"),
+    [
+        ("await_for_capacity", -1.0, "must be non-negative"),
+        ("consume_capacity", float("nan"), "must be finite"),
+    ],
+)
+async def test_direct_backend_methods_reject_invalid_usage(
+    backend_builder,
+    method_name: str,
+    bad_value: float,
+    message: str,
+):
+    """Exported backends must reject invalid usage even without RateLimiter."""
+    config = _make_config(limit=100, per_seconds=60)
+    backend = backend_builder.build(config)
+    method = getattr(backend, method_name)
+
+    with pytest.raises(ValueError, match=message):
+        await method(frozen_usage({"requests": bad_value}))
+
+
+async def test_direct_backend_refund_rejects_invalid_actual_usage(backend_builder):
+    """Direct refund calls must not accept negative actual usage."""
+    config = _make_config(limit=100, per_seconds=60)
+    backend = backend_builder.build(config)
+    reserved_usage = frozen_usage({"requests": 10.0})
+
+    await backend.await_for_capacity(reserved_usage)
+
+    with pytest.raises(ValueError, match="Actual usage value for requests must be non-negative"):
+        await backend.refund_capacity(
+            reserved_usage=reserved_usage,
+            actual_usage=frozen_usage({"requests": -1.0}),
+        )
+
+
+# ---------------------------------------------------------------------------
 # 2. await_for_capacity — with wait
 # ---------------------------------------------------------------------------
 

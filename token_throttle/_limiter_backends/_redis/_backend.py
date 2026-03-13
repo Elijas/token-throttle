@@ -24,6 +24,10 @@ from token_throttle._interfaces._interfaces import (
     RateLimiterBackendBuilderInterface,
 )
 from token_throttle._interfaces._models import Capacities, FrozenUsage
+from token_throttle._validation import (
+    validate_backend_refund_usage,
+    validate_backend_usage,
+)
 
 from ._bucket import RedisBucket
 
@@ -95,6 +99,7 @@ class RedisBackend(RateLimiterBackend):
         )
         self._callbacks = callbacks
         self._limit_config = limit_config
+        self._usage_metric_names: set[str] = {bucket.usage_metric for bucket in buckets}
         self._local_condition = asyncio.Condition()
 
     async def _lock(
@@ -347,6 +352,7 @@ class RedisBackend(RateLimiterBackend):
         Capacity may go negative by design (speedometer pattern); this tracks
         overshoot rather than blocking.
         """
+        validate_backend_usage(usage, self._usage_metric_names)
         usage = frozendict(
             {metric: float(amount) for metric, amount in usage.items()},
         )
@@ -420,6 +426,7 @@ class RedisBackend(RateLimiterBackend):
         timeout: float | None = None,
     ) -> None:
         """Wait until all buckets have the required capacity."""
+        validate_backend_usage(usage, self._usage_metric_names)
         deadline = None if timeout is None else time.monotonic() + timeout
         has_waited = False
         start_time = time.time()
@@ -555,6 +562,11 @@ class RedisBackend(RateLimiterBackend):
             2. Update the timestamp to N=10
 
         """
+        validate_backend_refund_usage(
+            reserved_usage,
+            actual_usage,
+            self._usage_metric_names,
+        )
         # Calculate how much to refund for each metric
         refund_usage_: dict[str, float] = {}
         for metric, reserved_amount in reserved_usage.items():
