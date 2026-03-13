@@ -7,6 +7,8 @@ the timeout parameter is implemented (TDD red phase).
 Covers: async MemoryBackend and sync SyncMemoryBackend.
 """
 
+import asyncio
+import math
 import time
 
 import pytest
@@ -93,6 +95,23 @@ class TestAsyncTimeoutBounded:
         assert elapsed < 2.0, (
             f"Should not wait much longer than timeout, got {elapsed:.2f}s"
         )
+
+
+class TestAsyncTimeoutInvalid:
+    async def test_timeout_nan_raises_instead_of_hanging(self):
+        builder = MemoryBackendBuilder()
+        backend = builder.build(_make_config(limit=10, per_seconds=3600))
+
+        await backend.await_for_capacity(frozendict({"requests": 10.0}))
+
+        with pytest.raises(ValueError, match="timeout must be finite"):
+            await asyncio.wait_for(
+                backend.await_for_capacity(
+                    frozendict({"requests": 1.0}),
+                    timeout=math.nan,
+                ),
+                timeout=0.2,
+            )
 
 
 # ---------------------------------------------------------------------------

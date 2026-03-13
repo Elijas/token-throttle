@@ -233,6 +233,16 @@ class TestCapacityReservation:
         assert result["requests"] == 1.0
         assert result["tokens"] == 100.0
 
+    def test_usage_mapping_is_immutable(self):
+        reservation = CapacityReservation(
+            usage={"requests": 1.0, "tokens": 100.0},
+            model_family="gpt-4o",
+        )
+
+        assert isinstance(reservation.usage, frozendict)
+        with pytest.raises(TypeError):
+            reservation.usage["requests"] = 2.0
+
     def test_frozen_immutability(self):
         reservation = CapacityReservation(
             usage={"requests": 1.0},
