@@ -17,7 +17,11 @@ class SecondsIn(int, Enum):
 class Quota(BaseModel):
     DEFAULT_SECONDS: ClassVar[int] = SecondsIn.MINUTE
     metric: str
-    limit: float
+    limit: float = Field(
+        gt=0,
+        allow_inf_nan=False,
+        description="Maximum capacity available within the time window.",
+    )
     per_seconds: int = Field(
         default=DEFAULT_SECONDS,
         gt=0,  # Greater than 0

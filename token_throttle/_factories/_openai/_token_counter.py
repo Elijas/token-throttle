@@ -1,3 +1,4 @@
+import math
 import typing
 from typing import Protocol, cast, runtime_checkable
 
@@ -7,6 +8,30 @@ if typing.TYPE_CHECKING:
 from frozendict import frozendict
 
 from token_throttle._interfaces._models import FrozenUsage
+
+_OUTPUT_BUDGET_KEYS = (
+    "max_output_tokens",
+    "max_completion_tokens",
+    "max_tokens",
+)
+_UNSUPPORTED_CONTENT_PART_TYPES = frozenset(
+    {
+        "input_audio",
+        "input_file",
+        "input_image",
+    },
+)
+_UNSUPPORTED_CONTENT_FIELDS = frozenset(
+    {
+        "audio",
+        "audio_url",
+        "file",
+        "file_id",
+        "file_url",
+        "image",
+        "image_url",
+    },
+)
 
 
 @runtime_checkable
@@ -20,19 +45,26 @@ class OpenAIUsageCounter:
 
     def __call__(self, model: str, **request) -> FrozenUsage:
         encoding = self._get_encoding(model)
+        reserved_output_tokens = _get_reserved_output_tokens(request)
 
         if "input" in request:
             input_ = request["input"]
             if isinstance(input_, str):
-                tokens = len(encoding.encode(input_))
+                tokens = len(encoding.encode(input_)) + reserved_output_tokens
                 return frozendict({"tokens": tokens, "requests": 1})
-            tokens = count_structured_input_tokens(encoding, input_)
+            tokens = (
+                count_structured_input_tokens(encoding, input_)
+                + reserved_output_tokens
+            )
             return frozendict({"tokens": tokens, "requests": 1})
 
         if "inputs" in request:
             if not all(isinstance(i, str) for i in request["inputs"]):
                 raise ValueError("All values in 'inputs' must be of type str")
-            tokens = sum(len(encoding.encode(i)) for i in request["inputs"])
+            tokens = (
+                sum(len(encoding.encode(i)) for i in request["inputs"])
+                + reserved_output_tokens
+            )
             return frozendict({"tokens": tokens, "requests": 1})
 
         if "messages" in request:
@@ -44,7 +76,7 @@ class OpenAIUsageCounter:
             tokens = count_chat_input_tokens(
                 encoding,
                 messages=cast("list[dict[str, object]]", messages),
-            )
+            ) + reserved_output_tokens
             return frozendict({"tokens": tokens, "requests": 1})
 
         raise ValueError("Request must contain 'input', 'inputs', or 'messages'")
@@ -133,6 +165,33 @@ def _looks_like_message(value: dict[str, object]) -> bool:
     return "role" in value or "content" in value or "name" in value
 
 
+def _get_reserved_output_tokens(request: dict[str, object]) -> int:
+    budgets: list[int] = []
+    for key in _OUTPUT_BUDGET_KEYS:
+        raw_value = request.get(key)
+        if raw_value is None:
+            continue
+        budgets.append(_parse_non_negative_int(raw_value, key))
+    return max(budgets, default=0)
+
+
+def _parse_non_negative_int(value: object, field_name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise TypeError(f"'{field_name}' must be a finite non-negative integer")
+
+    parsed = float(value)
+    if not math.isfinite(parsed) or parsed < 0 or not parsed.is_integer():
+        raise ValueError(f"'{field_name}' must be a finite non-negative integer")
+    return int(parsed)
+
+
+def _unsupported_content_part_error(part_type: str) -> ValueError:
+    return ValueError(
+        f"Structured content part type '{part_type}' is not supported by "
+        "OpenAIUsageCounter; pass usage manually for non-text inputs."
+    )
+
+
 def _count_text_fragments(
     encoding: "Encoding",
     value: object,
@@ -157,6 +216,10 @@ def _count_text_fragments(
             raise ValueError(invalid_error)
         part_type = value.get("type")
         if isinstance(part_type, str):
+            if part_type in _UNSUPPORTED_CONTENT_PART_TYPES or any(
+                field in value for field in _UNSUPPORTED_CONTENT_FIELDS
+            ):
+                raise _unsupported_content_part_error(part_type)
             if "text" in value:
                 text = value["text"]
                 if not isinstance(text, str):
@@ -168,7 +231,6 @@ def _count_text_fragments(
                     value["content"],
                     invalid_error=invalid_error,
                 )
-            return 0
         return sum(
             _count_text_fragments(
                 encoding,
@@ -194,16 +256,11 @@ def count_chat_input_tokens(
         num_tokens += 4  # <im_start>{role/name}\n{content}<im_end>\n
 
         for key, value in message.items():
-            if key == "content":
-                num_tokens += _count_text_fragments(
-                    encoding,
-                    value,
-                    invalid_error="All keys and values in messages must be of type str",
-                )
-                continue
-            if not isinstance(value, str):
-                raise ValueError("All keys and values in messages must be of type str")
-            num_tokens += len(encoding.encode(value))
+            num_tokens += _count_text_fragments(
+                encoding,
+                value,
+                invalid_error="All keys and values in messages must be of type str",
+            )
 
             if key == "name":  # If there's a name, the role is omitted
                 num_tokens -= 1

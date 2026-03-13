@@ -34,6 +34,22 @@ class TestQuota:
         assert q.limit == 100.0
         assert q.per_seconds == 60
 
+    def test_rejects_zero_limit(self):
+        with pytest.raises(ValidationError, match="limit"):
+            Quota(metric="requests", limit=0)
+
+    def test_rejects_negative_limit(self):
+        with pytest.raises(ValidationError, match="limit"):
+            Quota(metric="requests", limit=-1)
+
+    def test_rejects_nan_limit(self):
+        with pytest.raises(ValidationError, match="limit"):
+            Quota(metric="requests", limit=float("nan"))
+
+    def test_rejects_infinite_limit(self):
+        with pytest.raises(ValidationError, match="limit"):
+            Quota(metric="requests", limit=float("inf"))
+
     def test_default_per_seconds_is_minute(self):
         q = Quota(metric="tokens", limit=500.0)
         assert q.per_seconds == 60

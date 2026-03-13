@@ -70,6 +70,19 @@ class TestOpenAIUsageCounterWithInput:
         )
         assert result == frozendict({"tokens": 12, "requests": 1})
 
+    def test_input_reserves_max_output_tokens(self):
+        counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
+        result = counter("gpt-4", input="hi", max_output_tokens=50)
+        assert result == frozendict({"tokens": 52, "requests": 1})
+
+    def test_input_image_part_raises_value_error(self):
+        counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
+        with pytest.raises(ValueError, match="input_image"):
+            counter(
+                "gpt-4",
+                input=[{"type": "input_image", "image_url": "https://example.com/a"}],
+            )
+
 
 class TestOpenAIUsageCounterWithInputs:
     """Tests for OpenAIUsageCounter with the 'inputs' keyword."""
@@ -138,6 +151,66 @@ class TestOpenAIUsageCounterWithMessages:
             ],
         )
         assert result == frozendict({"tokens": 12, "requests": 1})
+
+    def test_messages_reserve_max_tokens(self):
+        counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
+        result = counter(
+            "gpt-4",
+            messages=[{"role": "user", "content": "hi"}],
+            max_tokens=50,
+        )
+        assert result == frozendict({"tokens": 62, "requests": 1})
+
+    def test_messages_reserve_max_completion_tokens(self):
+        counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
+        result = counter(
+            "gpt-4",
+            messages=[{"role": "user", "content": "hi"}],
+            max_completion_tokens=50,
+        )
+        assert result == frozendict({"tokens": 62, "requests": 1})
+
+    def test_messages_with_tool_calls_are_supported(self):
+        counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
+        base = counter("gpt-4", messages=[{"role": "assistant", "content": ""}])
+        result = counter(
+            "gpt-4",
+            messages=[
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {
+                                "name": "lookup",
+                                "arguments": '{"x":1}',
+                            },
+                        }
+                    ],
+                }
+            ],
+        )
+        assert result["requests"] == 1
+        assert result["tokens"] > base["tokens"]
+
+    def test_messages_with_image_content_raise_value_error(self):
+        counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
+        with pytest.raises(ValueError, match="input_image"):
+            counter(
+                "gpt-4",
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_image",
+                                "image_url": "https://example.com/a",
+                            }
+                        ],
+                    }
+                ],
+            )
 
 
 class TestOpenAIUsageCounterMissingKeys:
