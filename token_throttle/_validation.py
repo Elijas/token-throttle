@@ -108,6 +108,23 @@ def validate_backend_refund_usage(
     validate_refund_usage(actual_usage, set(reserved_usage))
 
 
+def validate_timeout(timeout: object) -> float | None:
+    """Validate timeout values used by blocking acquire/wait operations."""
+    if timeout is None:
+        return None
+    if isinstance(timeout, bool):
+        raise ValueError("timeout must not be a boolean")  # noqa: TRY004
+    try:
+        timeout_value = float(timeout)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"timeout must be finite or None (got {timeout!r})"
+        ) from exc
+    if not math.isfinite(timeout_value):
+        raise ValueError(f"timeout must be finite or None (got {timeout!r})")
+    return timeout_value
+
+
 def merge_extra_usage(
     usage: FrozenUsage,
     extra_usage: Mapping[str, object] | None,
