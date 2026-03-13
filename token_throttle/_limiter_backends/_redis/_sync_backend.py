@@ -26,6 +26,7 @@ from token_throttle._interfaces._models import Capacities, FrozenUsage
 from token_throttle._validation import (
     validate_backend_refund_usage,
     validate_backend_usage,
+    validate_timeout,
 )
 
 from ._sync_bucket import SyncRedisBucket
@@ -41,6 +42,10 @@ LOCK_TIMEOUT_SECONDS = 30
 # Each bucket enqueues exactly 2 pipeline commands in get_capacity()
 # (GET last_checked, GET capacity).  Used to index pipeline results.
 _PIPELINE_CMDS_PER_BUCKET = 2
+
+
+def _raise_lock_timeout_error() -> typing.NoReturn:
+    raise redis.exceptions.LockError("Unable to acquire lock within the time specified")
 
 
 class SyncRedisBackendBuilder(SyncRateLimiterBackendBuilderInterface):
@@ -124,9 +129,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                 lock = bucket.lock(timeout=timeout)
                 acquired = lock.acquire(blocking_timeout=remaining)
                 if not acquired:
-                    raise redis.exceptions.LockError(
-                        "Unable to acquire lock within the time specified",
-                    )
+                    _raise_lock_timeout_error()
                 stack.callback(lock.release)
         except BaseException:
             stack.close()
@@ -409,6 +412,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
     ) -> None:
         """Wait until all buckets have the required capacity."""
         validate_backend_usage(usage, self._usage_metric_names)
+        timeout = validate_timeout(timeout)
         deadline = None if timeout is None else time.monotonic() + timeout
         has_waited = False
         start_time = time.time()
