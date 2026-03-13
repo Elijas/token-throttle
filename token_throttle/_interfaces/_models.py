@@ -90,7 +90,7 @@ class UsageQuotas:
         return list(self._metrics.keys())
 
     def get_quotas(self, item: str) -> list[Quota]:
-        return list(self._metrics[item].values())
+        return list(self._metrics.get(item, {}).values())
 
 
 MetricName = str

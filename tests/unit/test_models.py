@@ -148,6 +148,14 @@ class TestUsageQuotas:
         assert q1 in result
         assert q2 in result
 
+    def test_get_quotas_for_missing_metric_is_non_mutating(self):
+        quotas = UsageQuotas([Quota(metric="requests", limit=100.0, per_seconds=60)])
+
+        result = quotas.get_quotas("tokens")
+
+        assert result == []
+        assert quotas.names == ["requests"]
+
     def test_iteration(self):
         q1 = Quota(metric="requests", limit=100.0, per_seconds=60)
         q2 = Quota(metric="tokens", limit=5000.0, per_seconds=60)
