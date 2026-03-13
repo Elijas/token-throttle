@@ -34,6 +34,14 @@ class TestQuota:
         assert q.limit == 100.0
         assert q.per_seconds == 60
 
+    def test_rejects_boolean_limit(self):
+        with pytest.raises(ValidationError, match="must not be a boolean"):
+            Quota(metric="requests", limit=True)
+
+    def test_rejects_boolean_per_seconds(self):
+        with pytest.raises(ValidationError, match="must not be a boolean"):
+            Quota(metric="requests", limit=100.0, per_seconds=True)
+
     def test_rejects_zero_limit(self):
         with pytest.raises(ValidationError, match="limit"):
             Quota(metric="requests", limit=0)
@@ -173,6 +181,13 @@ class TestCapacityReservation:
         )
         assert reservation.model_family == "gpt-4o"
         assert reservation.usage == {"requests": 1.0, "tokens": 100.0}
+
+    def test_rejects_boolean_usage_value(self):
+        with pytest.raises(ValidationError, match="must not be a boolean"):
+            CapacityReservation(
+                usage={"requests": 1.0, "tokens": True},
+                model_family="gpt-4o",
+            )
 
     def test_get_usage_returns_frozendict(self):
         reservation = CapacityReservation(

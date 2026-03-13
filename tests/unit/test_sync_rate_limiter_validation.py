@@ -211,6 +211,34 @@ class TestAcquireCapacityForRequestValidation:
                 model="gpt-4",
             )
 
+    def test_extra_usage_with_boolean_value_raises(self):
+        def fake_counter(**_kwargs):
+            return {"tokens": 100.0, "requests": 1.0}
+
+        builder, _ = make_mock_backend_builder()
+        config = make_limited_config(usage_counter=fake_counter)
+        limiter = SyncRateLimiter(config, backend=builder)
+
+        with pytest.raises(ValueError, match="must not be a boolean"):
+            limiter.acquire_capacity_for_request(
+                extra_usage={"tokens": True},
+                model="gpt-4",
+            )
+
+    def test_usage_counter_boolean_value_is_not_masked_by_extra_usage(self):
+        def fake_counter(**_kwargs):
+            return {"tokens": True, "requests": 1.0}
+
+        builder, _ = make_mock_backend_builder()
+        config = make_limited_config(usage_counter=fake_counter)
+        limiter = SyncRateLimiter(config, backend=builder)
+
+        with pytest.raises(ValueError, match="must not be a boolean"):
+            limiter.acquire_capacity_for_request(
+                extra_usage={"tokens": 1},
+                model="gpt-4",
+            )
+
     def test_unlimited_config_returns_unlimited_reservation(self):
         builder, _ = make_mock_backend_builder()
         limiter = SyncRateLimiter(make_unlimited_config(), backend=builder)

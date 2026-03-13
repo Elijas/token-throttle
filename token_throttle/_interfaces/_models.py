@@ -5,7 +5,7 @@ from enum import Enum
 from typing import ClassVar, Self
 
 from frozendict import frozendict
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 
 
 class SecondsIn(int, Enum):
@@ -28,6 +28,19 @@ class Quota(BaseModel):
         description="Time window in seconds. Default: 60 (1 minute). E.g. For requests per minute, set to 60. For requests per hour, set to 3600.",
     )
     model_config = ConfigDict(arbitrary_types_allowed=True, frozen=True)
+
+    @field_validator("limit", "per_seconds", mode="before")
+    @classmethod
+    def _reject_boolean(
+        cls,
+        value: object,
+        info: ValidationInfo,
+    ) -> object:
+        if isinstance(value, bool):
+            raise ValueError(  # noqa: TRY004
+                f"{info.field_name} must not be a boolean"
+            )
+        return value
 
 
 class UsageQuotas:
@@ -93,7 +106,9 @@ def frozen_usage(usage: Usage) -> FrozenUsage:
     converted: dict[MetricName, float] = {}
     for metric, amount in usage.items():
         if isinstance(amount, bool):
-            raise ValueError(f"Usage value for {metric} must not be a boolean")
+            raise ValueError(  # noqa: TRY004
+                f"Usage value for {metric} must not be a boolean"
+            )
         converted[metric] = float(amount)
     return frozendict(converted)
 
@@ -103,5 +118,12 @@ class CapacityReservation(BaseModel):
     model_family: str
     model_config = ConfigDict(arbitrary_types_allowed=True, frozen=True)
 
+    @field_validator("usage", mode="before")
+    @classmethod
+    def _normalize_usage(cls, value: object) -> object:
+        if isinstance(value, Mapping):
+            return dict(frozen_usage(value))
+        return value
+
     def get_usage(self) -> FrozenUsage:
-        return frozendict(self.usage)
+        return frozen_usage(self.usage)
