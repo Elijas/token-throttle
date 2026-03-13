@@ -122,6 +122,10 @@ def validate_timeout(timeout: object) -> float | None:
         ) from exc
     if not math.isfinite(timeout_value):
         raise ValueError(f"timeout must be finite or None (got {timeout!r})")
+    if timeout_value < 0:
+        raise ValueError(
+            f"timeout must be non-negative or None (got {timeout!r})"
+        )
     return timeout_value
 
 

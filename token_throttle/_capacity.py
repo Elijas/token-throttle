@@ -78,13 +78,3 @@ def calculate_capacity(  # noqa: PLR0913
         amount=current_preconsumption_capacity,
         is_fresh_start=False,
     )
-
-
-def time_until_capacity(
-    current_capacity: float, needed: float, rate_per_sec: float
-) -> float:
-    """Compute seconds until linear refill reaches *needed* from *current_capacity*."""
-    deficit = needed - current_capacity
-    if deficit <= 0:
-        return 0.0
-    return deficit / rate_per_sec

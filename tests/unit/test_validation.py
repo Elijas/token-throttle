@@ -86,7 +86,13 @@ class TestValidateTimeout:
     def test_allows_none(self):
         assert validate_timeout(None) is None
 
-    def test_preserves_non_boolean_numeric_timeout(self):
-        assert validate_timeout(-1) == -1.0
+    def test_rejects_negative_timeout(self):
+        with pytest.raises(ValueError, match="timeout must be non-negative"):
+            validate_timeout(-1)
+        with pytest.raises(ValueError, match="timeout must be non-negative"):
+            validate_timeout(-0.001)
+
+    def test_preserves_valid_numeric_timeout(self):
         assert validate_timeout(0) == 0.0
         assert validate_timeout(1.5) == 1.5
+        assert validate_timeout(0.0) == 0.0
