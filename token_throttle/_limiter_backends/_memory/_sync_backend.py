@@ -15,6 +15,7 @@ from token_throttle._interfaces._models import Capacities, FrozenUsage
 from token_throttle._validation import (
     validate_backend_refund_usage,
     validate_backend_usage,
+    validate_timeout,
 )
 
 from ._bucket import MemoryBucket
@@ -263,6 +264,7 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
     ) -> None:
         """Wait until all buckets have the required capacity."""
         validate_backend_usage(usage, self._usage_metric_names)
+        timeout = validate_timeout(timeout)
         deadline = None if timeout is None else time.monotonic() + timeout
         has_waited = False
         start_time = time.time()
