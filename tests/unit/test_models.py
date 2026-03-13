@@ -180,6 +180,10 @@ class TestFrozenUsage:
         assert result["requests"] == 1.0
         assert result["tokens"] == 500.0
 
+    def test_rejects_non_numeric_value(self):
+        with pytest.raises(ValueError, match="must be finite"):
+            frozen_usage({"requests": 1.0, "tokens": object()})
+
 
 class TestCapacityReservation:
     def test_construction(self):
@@ -194,6 +198,13 @@ class TestCapacityReservation:
         with pytest.raises(ValidationError, match="must not be a boolean"):
             CapacityReservation(
                 usage={"requests": 1.0, "tokens": True},
+                model_family="gpt-4o",
+            )
+
+    def test_rejects_non_numeric_usage_value(self):
+        with pytest.raises(ValidationError, match="must be finite"):
+            CapacityReservation(
+                usage={"requests": 1.0, "tokens": object()},
                 model_family="gpt-4o",
             )
 

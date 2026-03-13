@@ -97,6 +97,16 @@ class TestAcquireCapacityValidation:
                 model="gpt-4",
             )
 
+    def test_non_numeric_usage_value_raises(self):
+        builder, _ = make_mock_backend_builder()
+        limiter = SyncRateLimiter(make_limited_config(), backend=builder)
+
+        with pytest.raises(ValueError, match="must be finite"):
+            limiter.acquire_capacity(
+                {"tokens": object(), "requests": 1},
+                model="gpt-4",
+            )
+
 
 class TestRefundCapacityValidation:
     """Tests for ValueError paths in refund_capacity."""
@@ -175,6 +185,25 @@ class TestRefundCapacityValidation:
                 reservation,
             )
 
+    def test_non_numeric_actual_usage_value_raises(self):
+        builder, _mock_backend = make_mock_backend_builder()
+        limiter = SyncRateLimiter(make_limited_config(), backend=builder)
+
+        limiter.acquire_capacity(
+            {"tokens": 100, "requests": 1},
+            model="gpt-4",
+        )
+        reservation = CapacityReservation(
+            usage={"tokens": 100.0, "requests": 1.0},
+            model_family="gpt-4",
+        )
+
+        with pytest.raises(ValueError, match="must be finite"):
+            limiter.refund_capacity(
+                {"tokens": object(), "requests": 1},
+                reservation,
+            )
+
 
 class TestAcquireCapacityForRequestValidation:
     """Tests for ValueError paths in acquire_capacity_for_request."""
@@ -238,6 +267,17 @@ class TestAcquireCapacityForRequestValidation:
                 extra_usage={"tokens": object()},
                 model="gpt-4",
             )
+
+    def test_usage_counter_with_non_numeric_value_raises(self):
+        def fake_counter(**_kwargs):
+            return {"tokens": object(), "requests": 1.0}
+
+        builder, _ = make_mock_backend_builder()
+        config = make_limited_config(usage_counter=fake_counter)
+        limiter = SyncRateLimiter(config, backend=builder)
+
+        with pytest.raises(ValueError, match="must be finite"):
+            limiter.acquire_capacity_for_request(model="gpt-4")
 
     def test_usage_counter_boolean_value_is_not_masked_by_extra_usage(self):
         def fake_counter(**_kwargs):

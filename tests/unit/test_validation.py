@@ -25,6 +25,11 @@ class TestValidateAcquireUsageNonFinite:
         with pytest.raises(ValueError, match="must be finite"):
             validate_acquire_usage(frozendict({"tokens": float("-inf")}), quotas)
 
+    def test_non_numeric_usage_raises(self):
+        quotas = UsageQuotas([Quota(metric="tokens", limit=1000)])
+        with pytest.raises(ValueError, match="must be finite"):
+            validate_acquire_usage(frozendict({"tokens": object()}), quotas)
+
 
 class TestValidateRefundUsageNonFinite:
     """Cover lines 49-50: NaN/Inf rejection in validate_refund_usage."""
@@ -40,6 +45,10 @@ class TestValidateRefundUsageNonFinite:
     def test_negative_inf_usage_raises(self):
         with pytest.raises(ValueError, match="must be finite"):
             validate_refund_usage({"tokens": float("-inf")}, {"tokens"})
+
+    def test_non_numeric_usage_raises(self):
+        with pytest.raises(ValueError, match="must be finite"):
+            validate_refund_usage({"tokens": object()}, {"tokens"})
 
 
 class TestValidateRefundUsageNegative:

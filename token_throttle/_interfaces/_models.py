@@ -102,15 +102,29 @@ BucketId = tuple[MetricName, PerSeconds]
 Capacities = frozendict[BucketId, float]
 
 
+def _coerce_usage_value(
+    metric: str,
+    amount: object,
+    *,
+    label: str = "Usage value",
+) -> float:
+    if isinstance(amount, bool):
+        raise ValueError(  # noqa: TRY004
+            f"{label} for {metric} must not be a boolean"
+        )
+    try:
+        return float(amount)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"{label} for {metric} must be finite (got {amount!r})"
+        ) from exc
+
+
 def frozen_usage(usage: Usage) -> FrozenUsage:
     """Convert usage to a frozendict."""
     converted: dict[MetricName, float] = {}
     for metric, amount in usage.items():
-        if isinstance(amount, bool):
-            raise ValueError(  # noqa: TRY004
-                f"Usage value for {metric} must not be a boolean"
-            )
-        converted[metric] = float(amount)
+        converted[metric] = _coerce_usage_value(metric, amount)
     return frozendict(converted)
 
 
