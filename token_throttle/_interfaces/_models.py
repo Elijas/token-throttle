@@ -129,7 +129,7 @@ def frozen_usage(usage: Usage) -> FrozenUsage:
 
 
 class CapacityReservation(BaseModel):
-    usage: Usage
+    usage: FrozenUsage
     model_family: str
     model_config = ConfigDict(arbitrary_types_allowed=True, frozen=True)
 
@@ -137,7 +137,7 @@ class CapacityReservation(BaseModel):
     @classmethod
     def _normalize_usage(cls, value: object) -> object:
         if isinstance(value, Mapping):
-            normalized_usage = dict(frozen_usage(value))
+            normalized_usage = frozen_usage(value)
             for metric, amount in normalized_usage.items():
                 if not math.isfinite(amount):
                     raise ValueError(
@@ -151,4 +151,4 @@ class CapacityReservation(BaseModel):
         return value
 
     def get_usage(self) -> FrozenUsage:
-        return frozen_usage(self.usage)
+        return self.usage
