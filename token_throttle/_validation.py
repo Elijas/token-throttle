@@ -23,6 +23,8 @@ def validate_acquire_usage(usage: FrozenUsage, quotas: UsageQuotas) -> None:
             f"Usage keys {set(usage)} do not match quota keys {set(quotas.names)}",
         )
     for metric, amount_ in usage.items():
+        if isinstance(amount_, bool):
+            raise ValueError(f"Usage value for {metric} must not be a boolean")
         amount = float(amount_)
         if not math.isfinite(amount):
             raise ValueError(
@@ -45,6 +47,10 @@ def validate_refund_usage(actual_usage: Usage, reservation_keys: set[str]) -> No
             f"Usage keys {set(actual_usage)} do not match reservation usage keys {reservation_keys}",
         )
     for metric, amount_ in actual_usage.items():
+        if isinstance(amount_, bool):
+            raise ValueError(
+                f"Actual usage value for {metric} must not be a boolean"
+            )
         amount = float(amount_)
         if not math.isfinite(amount):
             raise ValueError(

@@ -126,6 +126,8 @@ class SyncRedisBucket:
 
     def set_max_capacity(self, value: float) -> None:
         """Set the max_capacity in Redis for dynamic rate limit adjustment."""
+        if isinstance(value, bool):
+            raise ValueError("max_capacity must not be a boolean")
         if not (math.isfinite(value) and value > 0):
             raise ValueError("max_capacity must be finite and greater than 0")
 

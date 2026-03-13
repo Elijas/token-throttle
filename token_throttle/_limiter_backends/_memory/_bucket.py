@@ -63,6 +63,8 @@ class MemoryBucket:
         ``min(max_capacity, …)`` on the next read, so any transient overshoot
         is corrected without an extra write here.
         """
+        if isinstance(value, bool):
+            raise ValueError("max_capacity must not be a boolean")
         if not (math.isfinite(value) and value > 0):
             raise ValueError("max_capacity must be finite and greater than 0")
         self.max_capacity = value

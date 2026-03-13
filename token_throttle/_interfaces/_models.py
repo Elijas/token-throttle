@@ -90,7 +90,12 @@ Capacities = frozendict[BucketId, float]
 
 def frozen_usage(usage: Usage) -> FrozenUsage:
     """Convert usage to a frozendict."""
-    return frozendict({k: float(v) for k, v in usage.items()})
+    converted: dict[MetricName, float] = {}
+    for metric, amount in usage.items():
+        if isinstance(amount, bool):
+            raise ValueError(f"Usage value for {metric} must not be a boolean")
+        converted[metric] = float(amount)
+    return frozendict(converted)
 
 
 class CapacityReservation(BaseModel):

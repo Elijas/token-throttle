@@ -89,6 +89,16 @@ class TestAcquireCapacityValidation:
         with pytest.raises(ValueError, match="must be non-negative"):
             await limiter.acquire_capacity({"tokens": -1, "requests": 1}, model="gpt-4")
 
+    async def test_boolean_usage_value_raises(self):
+        builder, _ = make_mock_backend_builder()
+        limiter = RateLimiter(make_limited_config(), backend=builder)
+
+        with pytest.raises(ValueError, match="must not be a boolean"):
+            await limiter.acquire_capacity(
+                {"tokens": True, "requests": 1},
+                model="gpt-4",
+            )
+
 
 class TestAcquireCapacityForRequestValidation:
     """Tests for ValueError paths in acquire_capacity_for_request."""
@@ -190,6 +200,25 @@ class TestRefundCapacityValidation:
         with pytest.raises(ValueError, match="Backend not found for model family"):
             await limiter.refund_capacity(
                 {"tokens": 50, "requests": 1},
+                reservation,
+            )
+
+    async def test_boolean_actual_usage_value_raises(self):
+        builder, _mock_backend = make_mock_backend_builder()
+        limiter = RateLimiter(make_limited_config(), backend=builder)
+
+        await limiter.acquire_capacity(
+            {"tokens": 100, "requests": 1},
+            model="gpt-4",
+        )
+        reservation = CapacityReservation(
+            usage={"tokens": 100.0, "requests": 1.0},
+            model_family="gpt-4",
+        )
+
+        with pytest.raises(ValueError, match="must not be a boolean"):
+            await limiter.refund_capacity(
+                {"tokens": 50, "requests": False},
                 reservation,
             )
 

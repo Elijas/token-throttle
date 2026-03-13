@@ -150,6 +150,8 @@ class RedisBucket:
             value: The new max capacity value (must be > 0).
 
         """
+        if isinstance(value, bool):
+            raise ValueError("max_capacity must not be a boolean")
         if not (math.isfinite(value) and value > 0):
             raise ValueError("max_capacity must be finite and greater than 0")
 

@@ -180,6 +180,11 @@ class TestSetMaxCapacity:
                 bucket.set_max_capacity(float("-inf"))
             )
 
+    def test_rejects_boolean(self, bucket):
+        """set_max_capacity() raises for boolean values."""
+        with pytest.raises(ValueError, match="max_capacity must not be a boolean"):
+            asyncio.get_event_loop().run_until_complete(bucket.set_max_capacity(True))
+
 
 class TestMaxCapacityInCalculations:
     """Tests for max_capacity usage in capacity calculations."""
