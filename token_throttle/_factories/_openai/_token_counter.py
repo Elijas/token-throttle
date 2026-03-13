@@ -21,16 +21,14 @@ _UNSUPPORTED_CONTENT_PART_TYPES = frozenset(
         "input_image",
     },
 )
-_UNSUPPORTED_CONTENT_FIELDS = frozenset(
-    {
-        "audio",
-        "audio_url",
-        "file",
-        "file_id",
-        "file_url",
-        "image",
-        "image_url",
-    },
+_UNSUPPORTED_CONTENT_FIELDS = (
+    "audio",
+    "audio_url",
+    "file",
+    "file_id",
+    "file_url",
+    "image",
+    "image_url",
 )
 
 
@@ -192,6 +190,16 @@ def _unsupported_content_part_error(part_type: str) -> ValueError:
     )
 
 
+def _get_unsupported_content_part_name(value: dict[str, object]) -> str | None:
+    part_type = value.get("type")
+    if isinstance(part_type, str) and part_type in _UNSUPPORTED_CONTENT_PART_TYPES:
+        return part_type
+    for field in _UNSUPPORTED_CONTENT_FIELDS:
+        if field in value:
+            return field
+    return None
+
+
 def _count_text_fragments(
     encoding: "Encoding",
     value: object,
@@ -214,12 +222,11 @@ def _count_text_fragments(
     if isinstance(value, dict):
         if not all(isinstance(key, str) for key in value):
             raise ValueError(invalid_error)
+        unsupported_part_name = _get_unsupported_content_part_name(value)
+        if unsupported_part_name is not None:
+            raise _unsupported_content_part_error(unsupported_part_name)
         part_type = value.get("type")
         if isinstance(part_type, str):
-            if part_type in _UNSUPPORTED_CONTENT_PART_TYPES or any(
-                field in value for field in _UNSUPPORTED_CONTENT_FIELDS
-            ):
-                raise _unsupported_content_part_error(part_type)
             if "text" in value:
                 text = value["text"]
                 if not isinstance(text, str):

@@ -83,6 +83,14 @@ class TestOpenAIUsageCounterWithInput:
                 input=[{"type": "input_image", "image_url": "https://example.com/a"}],
             )
 
+    def test_input_image_field_without_type_raises_value_error(self):
+        counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
+        with pytest.raises(ValueError, match="image_url"):
+            counter(
+                "gpt-4",
+                input=[{"image_url": "https://example.com/a"}],
+            )
+
 
 class TestOpenAIUsageCounterWithInputs:
     """Tests for OpenAIUsageCounter with the 'inputs' keyword."""
@@ -205,6 +213,23 @@ class TestOpenAIUsageCounterWithMessages:
                         "content": [
                             {
                                 "type": "input_image",
+                                "image_url": "https://example.com/a",
+                            }
+                        ],
+                    }
+                ],
+            )
+
+    def test_messages_with_image_field_without_type_raise_value_error(self):
+        counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
+        with pytest.raises(ValueError, match="image_url"):
+            counter(
+                "gpt-4",
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
                                 "image_url": "https://example.com/a",
                             }
                         ],
