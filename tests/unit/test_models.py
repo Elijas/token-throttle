@@ -184,6 +184,26 @@ class TestFrozenUsage:
         with pytest.raises(ValueError, match="must be finite"):
             frozen_usage({"requests": 1.0, "tokens": object()})
 
+    def test_rejects_nan(self):
+        with pytest.raises(ValueError, match="must be finite"):
+            frozen_usage({"tokens": float("nan")})
+
+    def test_rejects_positive_infinity(self):
+        with pytest.raises(ValueError, match="must be finite"):
+            frozen_usage({"tokens": float("inf")})
+
+    def test_rejects_negative_infinity(self):
+        with pytest.raises(ValueError, match="must be finite"):
+            frozen_usage({"tokens": float("-inf")})
+
+    def test_rejects_nan_string(self):
+        with pytest.raises(ValueError, match="must be finite"):
+            frozen_usage({"tokens": "nan"})
+
+    def test_rejects_inf_string(self):
+        with pytest.raises(ValueError, match="must be finite"):
+            frozen_usage({"tokens": "inf"})
+
 
 class TestCapacityReservation:
     def test_construction(self):

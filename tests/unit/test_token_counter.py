@@ -142,10 +142,16 @@ class TestOpenAIUsageCounterWithMessages:
 
     def test_messages_non_string_key_raises(self):
         counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
-        with pytest.raises(
-            ValueError, match="All keys and values in messages must be of type str"
-        ):
+        with pytest.raises(ValueError, match="keys must be strings"):
             counter("gpt-4", messages=[{42: "user"}])
+
+    def test_messages_non_string_key_error_mentions_keys(self):
+        """Error message for non-string keys should mention 'keys', not 'values'."""
+        counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
+        with pytest.raises(ValueError, match="keys") as exc_info:
+            counter("gpt-4", messages=[{42: "user"}])
+        # The error should NOT claim values are the problem
+        assert "values" not in str(exc_info.value).lower()
 
     def test_messages_content_parts_are_supported(self):
         counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())

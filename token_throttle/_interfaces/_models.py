@@ -113,11 +113,16 @@ def _coerce_usage_value(
             f"{label} for {metric} must not be a boolean"
         )
     try:
-        return float(amount)
+        value = float(amount)
     except (TypeError, ValueError) as exc:
         raise ValueError(
             f"{label} for {metric} must be finite (got {amount!r})"
         ) from exc
+    if not math.isfinite(value):
+        raise ValueError(
+            f"{label} for {metric} must be finite (got {amount!r})"
+        )
+    return value
 
 
 def frozen_usage(usage: Usage) -> FrozenUsage:

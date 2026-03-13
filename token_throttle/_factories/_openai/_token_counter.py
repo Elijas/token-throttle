@@ -259,7 +259,7 @@ def count_chat_input_tokens(
 
     for message in messages:
         if not all(isinstance(key, str) for key in message):
-            raise ValueError("All keys and values in messages must be of type str")
+            raise ValueError("All message dict keys must be strings")
         num_tokens += 4  # <im_start>{role/name}\n{content}<im_end>\n
 
         for key, value in message.items():
