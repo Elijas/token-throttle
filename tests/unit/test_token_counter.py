@@ -57,6 +57,19 @@ class TestOpenAIUsageCounterWithInput:
         with pytest.raises(ValueError, match="must be of type str"):
             counter("gpt-4", input=["hello"])
 
+    def test_input_structured_message_list_counts_text(self):
+        counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
+        result = counter(
+            "gpt-4",
+            input=[
+                {
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "hi"}],
+                }
+            ],
+        )
+        assert result == frozendict({"tokens": 12, "requests": 1})
+
 
 class TestOpenAIUsageCounterWithInputs:
     """Tests for OpenAIUsageCounter with the 'inputs' keyword."""
@@ -112,6 +125,19 @@ class TestOpenAIUsageCounterWithMessages:
             ValueError, match="All keys and values in messages must be of type str"
         ):
             counter("gpt-4", messages=[{42: "user"}])
+
+    def test_messages_content_parts_are_supported(self):
+        counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
+        result = counter(
+            "gpt-4",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "hi"}],
+                }
+            ],
+        )
+        assert result == frozendict({"tokens": 12, "requests": 1})
 
 
 class TestOpenAIUsageCounterMissingKeys:
@@ -306,6 +332,13 @@ class TestGetEncoding:
         enc = get_encoding("ada")
         expected = tiktoken.encoding_for_model("ada")
         assert enc.name == expected.name
+
+    def test_prefers_tiktoken_resolution_for_gpt41_models(self):
+        tiktoken = pytest.importorskip("tiktoken")
+        for model_name in ["gpt-4.1", "gpt-4.1-mini", "gpt-4.1-nano"]:
+            enc = get_encoding(model_name)
+            expected = tiktoken.encoding_for_model(model_name)
+            assert enc.name == expected.name
 
 
 class TestOpenAIUsageCounterWithRealTiktoken:

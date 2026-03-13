@@ -22,9 +22,11 @@ class OpenAIUsageCounter:
         encoding = self._get_encoding(model)
 
         if "input" in request:
-            if not isinstance(request["input"], str):
-                raise ValueError("The value of 'input' must be of type str")
-            tokens = len(encoding.encode(request["input"]))
+            input_ = request["input"]
+            if isinstance(input_, str):
+                tokens = len(encoding.encode(input_))
+                return frozendict({"tokens": tokens, "requests": 1})
+            tokens = count_structured_input_tokens(encoding, input_)
             return frozendict({"tokens": tokens, "requests": 1})
 
         if "inputs" in request:
@@ -34,18 +36,14 @@ class OpenAIUsageCounter:
             return frozendict({"tokens": tokens, "requests": 1})
 
         if "messages" in request:
-            if not all(isinstance(m, dict) for m in request["messages"]):
-                raise ValueError("All messages must be dicts")
-            if not all(
-                isinstance(k, str) and isinstance(v, str)
-                for message in request["messages"]
-                for k, v in message.items()
+            messages = request["messages"]
+            if not isinstance(messages, list) or not all(
+                isinstance(m, dict) for m in messages
             ):
-                raise ValueError("All keys and values in messages must be of type str")
-            messages = cast("list[dict[str, str]]", request["messages"])
+                raise ValueError("All messages must be dicts")
             tokens = count_chat_input_tokens(
                 encoding,
-                messages=messages,
+                messages=cast("list[dict[str, object]]", messages),
             )
             return frozendict({"tokens": tokens, "requests": 1})
 
@@ -62,6 +60,11 @@ def get_encoding(model_name: str) -> "Encoding":
         ) from exc
 
     model_name = model_name.removeprefix("openai/")
+    try:
+        return tiktoken.encoding_for_model(model_name)
+    except KeyError:
+        pass
+
     substring_to_encoding = {
         "gpt-4o-mini": "o200k_base",
         "gpt-4o": "o200k_base",
@@ -87,18 +90,119 @@ def get_encoding(model_name: str) -> "Encoding":
     return tiktoken.encoding_for_model(model_name)
 
 
+def count_structured_input_tokens(
+    encoding: "Encoding",
+    input_: object,
+) -> int:
+    """Count tokens for OpenAI Responses-style structured input payloads."""
+    if isinstance(input_, dict):
+        if _looks_like_message(input_):
+            return count_chat_input_tokens(encoding, messages=[input_])
+        return _count_text_fragments(
+            encoding,
+            input_,
+            invalid_error=(
+                "The value of 'input' must be of type str or a list/dict of "
+                "structured input items"
+            ),
+        )
+    if isinstance(input_, list):
+        if not all(isinstance(item, dict) for item in input_):
+            raise ValueError(
+                "The value of 'input' must be of type str or a list/dict of "
+                "structured input items"
+            )
+        items = cast("list[dict[str, object]]", input_)
+        if all(_looks_like_message(item) for item in items):
+            return count_chat_input_tokens(encoding, messages=items)
+        return _count_text_fragments(
+            encoding,
+            items,
+            invalid_error=(
+                "The value of 'input' must be of type str or a list/dict of "
+                "structured input items"
+            ),
+        )
+    raise ValueError(
+        "The value of 'input' must be of type str or a list/dict of "
+        "structured input items"
+    )
+
+
+def _looks_like_message(value: dict[str, object]) -> bool:
+    return "role" in value or "content" in value or "name" in value
+
+
+def _count_text_fragments(
+    encoding: "Encoding",
+    value: object,
+    *,
+    invalid_error: str,
+) -> int:
+    if value is None:
+        return 0
+    if isinstance(value, str):
+        return len(encoding.encode(value))
+    if isinstance(value, list):
+        return sum(
+            _count_text_fragments(
+                encoding,
+                item,
+                invalid_error=invalid_error,
+            )
+            for item in value
+        )
+    if isinstance(value, dict):
+        if not all(isinstance(key, str) for key in value):
+            raise ValueError(invalid_error)
+        part_type = value.get("type")
+        if isinstance(part_type, str):
+            if "text" in value:
+                text = value["text"]
+                if not isinstance(text, str):
+                    raise ValueError(invalid_error)
+                return len(encoding.encode(text))
+            if "content" in value:
+                return _count_text_fragments(
+                    encoding,
+                    value["content"],
+                    invalid_error=invalid_error,
+                )
+            return 0
+        return sum(
+            _count_text_fragments(
+                encoding,
+                nested_value,
+                invalid_error=invalid_error,
+            )
+            for nested_value in value.values()
+        )
+    raise ValueError(invalid_error)
+
+
 def count_chat_input_tokens(
     encoding: "Encoding",
-    messages: list[dict[str, str]],
+    messages: list[dict[str, object]],
     **_,
 ) -> int:
     """Calculate tokens for a chat completion request."""
     num_tokens = 0
 
     for message in messages:
+        if not all(isinstance(key, str) for key in message):
+            raise ValueError("All keys and values in messages must be of type str")
         num_tokens += 4  # <im_start>{role/name}\n{content}<im_end>\n
 
         for key, value in message.items():
+            if key == "content":
+                num_tokens += _count_text_fragments(
+                    encoding,
+                    value,
+                    invalid_error="All keys and values in messages must be of type str",
+                )
+                continue
+            if not isinstance(value, str):
+                raise ValueError("All keys and values in messages must be of type str")
             num_tokens += len(encoding.encode(value))
 
             if key == "name":  # If there's a name, the role is omitted
