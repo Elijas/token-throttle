@@ -2,6 +2,7 @@
 
 import math
 from collections.abc import Mapping
+from collections.abc import Set as AbstractSet
 
 from token_throttle._interfaces._interfaces import PerModelConfig, PerModelConfigGetter
 from token_throttle._interfaces._models import (
@@ -11,6 +12,31 @@ from token_throttle._interfaces._models import (
     _coerce_usage_value,
     frozen_usage,
 )
+
+
+def _validate_usage_mapping(
+    usage: Usage,
+    expected_keys: AbstractSet[str],
+    *,
+    expected_keys_label: str,
+    value_label: str,
+) -> None:
+    if set(usage) != expected_keys:
+        raise ValueError(
+            f"Usage keys {set(usage)} do not match {expected_keys_label} {expected_keys}",
+        )
+    for metric, amount_ in usage.items():
+        amount = _coerce_usage_value(
+            metric,
+            amount_,
+            label=value_label,
+        )
+        if not math.isfinite(amount):
+            raise ValueError(
+                f"{value_label} for {metric} must be finite (got {amount_!r})"
+            )
+        if amount < 0:
+            raise ValueError(f"{value_label} for {metric} must be non-negative")
 
 
 def validate_acquire_usage(usage: FrozenUsage, quotas: UsageQuotas) -> None:
@@ -25,18 +51,12 @@ def validate_acquire_usage(usage: FrozenUsage, quotas: UsageQuotas) -> None:
         ValueError: If keys mismatch, or values are NaN/Inf/negative.
 
     """
-    if set(usage) != set(quotas.names):
-        raise ValueError(
-            f"Usage keys {set(usage)} do not match quota keys {set(quotas.names)}",
-        )
-    for metric, amount_ in usage.items():
-        amount = _coerce_usage_value(metric, amount_)
-        if not math.isfinite(amount):
-            raise ValueError(
-                f"Usage value for {metric} must be finite (got {amount_!r})"
-            )
-        if amount < 0:
-            raise ValueError(f"Usage value for {metric} must be non-negative")
+    _validate_usage_mapping(
+        usage,
+        set(quotas.names),
+        expected_keys_label="quota keys",
+        value_label="Usage value",
+    )
 
 
 def validate_refund_usage(actual_usage: Usage, reservation_keys: set[str]) -> None:
@@ -47,22 +67,45 @@ def validate_refund_usage(actual_usage: Usage, reservation_keys: set[str]) -> No
         ValueError: If keys don't match, or values are NaN/Inf/negative.
 
     """
-    if set(actual_usage) != reservation_keys:
-        raise ValueError(
-            f"Usage keys {set(actual_usage)} do not match reservation usage keys {reservation_keys}",
-        )
-    for metric, amount_ in actual_usage.items():
-        amount = _coerce_usage_value(
-            metric,
-            amount_,
-            label="Actual usage value",
-        )
-        if not math.isfinite(amount):
-            raise ValueError(
-                f"Actual usage value for {metric} must be finite (got {amount_!r})"
-            )
-        if amount < 0:
-            raise ValueError(f"Actual usage value for {metric} must be non-negative")
+    _validate_usage_mapping(
+        actual_usage,
+        reservation_keys,
+        expected_keys_label="reservation usage keys",
+        value_label="Actual usage value",
+    )
+
+
+def validate_backend_usage(
+    usage: Usage,
+    backend_metric_names: AbstractSet[str],
+) -> None:
+    """
+    Validate direct backend usage against the backend's metric set.
+
+    Exported backends are part of the public API, so they must reject
+    impossible input even when callers bypass ``RateLimiter``.
+    """
+    _validate_usage_mapping(
+        usage,
+        backend_metric_names,
+        expected_keys_label="backend metric keys",
+        value_label="Usage value",
+    )
+
+
+def validate_backend_refund_usage(
+    reserved_usage: Usage,
+    actual_usage: Usage,
+    backend_metric_names: AbstractSet[str],
+) -> None:
+    """Validate direct backend refund inputs."""
+    _validate_usage_mapping(
+        reserved_usage,
+        backend_metric_names,
+        expected_keys_label="backend metric keys",
+        value_label="Reserved usage value",
+    )
+    validate_refund_usage(actual_usage, set(reserved_usage))
 
 
 def merge_extra_usage(

@@ -1,5 +1,6 @@
 """Shared token-bucket capacity math — used by all backends (Redis, in-memory, sync, async)."""
 
+import math
 import warnings
 
 from pydantic import BaseModel
@@ -53,6 +54,10 @@ def calculate_capacity(  # noqa: PLR0913
         raise ValueError(
             f"Invalid last_checked or capacity values: last_checked={raw_last_checked}, capacity={raw_outdated_capacity}",
         ) from e
+    if not (math.isfinite(last_checked) and math.isfinite(outdated_capacity)):
+        raise ValueError(
+            f"Invalid last_checked or capacity values: last_checked={raw_last_checked}, capacity={raw_outdated_capacity}",
+        )
 
     time_passed = current_time - last_checked
     if time_passed < 0:
