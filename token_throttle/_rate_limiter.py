@@ -25,6 +25,7 @@ from token_throttle._validation import (
     validate_metric,
     validate_per_seconds,
     validate_refund_usage,
+    validate_timeout,
 )
 
 
@@ -61,6 +62,7 @@ class RateLimiter(BaseRateLimiter):
     async def acquire_capacity(
         self, usage: Usage, model: str, *, timeout: float | None = None
     ) -> CapacityReservation:
+        timeout = validate_timeout(timeout)
         return await self._acquire_or_record(usage, model, _block=True, timeout=timeout)
 
     async def record_usage(self, usage: Usage, model: str) -> CapacityReservation:
@@ -100,6 +102,7 @@ class RateLimiter(BaseRateLimiter):
         timeout: float | None = None,
         **kwargs,
     ) -> CapacityReservation:
+        timeout = validate_timeout(timeout)
         model = kwargs.get("model")
         if not model:
             raise ValueError("'model' parameter is required")

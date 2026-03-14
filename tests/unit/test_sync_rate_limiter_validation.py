@@ -730,6 +730,84 @@ class TestModelNameTypeValidation:
             )
 
 
+class TestTimeoutValidation:
+    """timeout must be validated even for unlimited models (early-return path)."""
+
+    def test_acquire_capacity_boolean_timeout_raises(self):
+        builder, _ = make_mock_backend_builder()
+        limiter = SyncRateLimiter(make_unlimited_config(), backend=builder)
+
+        with pytest.raises(ValueError, match="must not be a boolean"):
+            limiter.acquire_capacity({}, model="gpt-4", timeout=True)
+
+    def test_acquire_capacity_nan_timeout_raises(self):
+        builder, _ = make_mock_backend_builder()
+        limiter = SyncRateLimiter(make_unlimited_config(), backend=builder)
+
+        with pytest.raises(ValueError, match="must be finite"):
+            limiter.acquire_capacity({}, model="gpt-4", timeout=float("nan"))
+
+    def test_acquire_capacity_inf_timeout_raises(self):
+        builder, _ = make_mock_backend_builder()
+        limiter = SyncRateLimiter(make_unlimited_config(), backend=builder)
+
+        with pytest.raises(ValueError, match="must be finite"):
+            limiter.acquire_capacity({}, model="gpt-4", timeout=float("inf"))
+
+    def test_acquire_capacity_negative_timeout_raises(self):
+        builder, _ = make_mock_backend_builder()
+        limiter = SyncRateLimiter(make_unlimited_config(), backend=builder)
+
+        with pytest.raises(ValueError, match="must be non-negative"):
+            limiter.acquire_capacity({}, model="gpt-4", timeout=-1.0)
+
+    def test_acquire_capacity_string_timeout_raises(self):
+        builder, _ = make_mock_backend_builder()
+        limiter = SyncRateLimiter(make_unlimited_config(), backend=builder)
+
+        with pytest.raises(ValueError, match="must be finite"):
+            limiter.acquire_capacity({}, model="gpt-4", timeout="fast")
+
+    def test_acquire_capacity_for_request_boolean_timeout_raises(self):
+        builder, _ = make_mock_backend_builder()
+        limiter = SyncRateLimiter(make_unlimited_config(), backend=builder)
+
+        with pytest.raises(ValueError, match="must not be a boolean"):
+            limiter.acquire_capacity_for_request(model="gpt-4", timeout=True)
+
+    def test_acquire_capacity_for_request_nan_timeout_raises(self):
+        builder, _ = make_mock_backend_builder()
+        limiter = SyncRateLimiter(make_unlimited_config(), backend=builder)
+
+        with pytest.raises(ValueError, match="must be finite"):
+            limiter.acquire_capacity_for_request(
+                model="gpt-4", timeout=float("nan")
+            )
+
+    def test_acquire_capacity_for_request_inf_timeout_raises(self):
+        builder, _ = make_mock_backend_builder()
+        limiter = SyncRateLimiter(make_unlimited_config(), backend=builder)
+
+        with pytest.raises(ValueError, match="must be finite"):
+            limiter.acquire_capacity_for_request(
+                model="gpt-4", timeout=float("inf")
+            )
+
+    def test_acquire_capacity_for_request_negative_timeout_raises(self):
+        builder, _ = make_mock_backend_builder()
+        limiter = SyncRateLimiter(make_unlimited_config(), backend=builder)
+
+        with pytest.raises(ValueError, match="must be non-negative"):
+            limiter.acquire_capacity_for_request(model="gpt-4", timeout=-1.0)
+
+    def test_acquire_capacity_for_request_string_timeout_raises(self):
+        builder, _ = make_mock_backend_builder()
+        limiter = SyncRateLimiter(make_unlimited_config(), backend=builder)
+
+        with pytest.raises(ValueError, match="must be finite"):
+            limiter.acquire_capacity_for_request(model="gpt-4", timeout="fast")
+
+
 class TestRecordUsage:
     def test_record_usage_calls_consume_capacity(self):
         builder, mock_backend = make_mock_backend_builder()
