@@ -57,10 +57,13 @@ class OpenAIUsageCounter:
             return frozendict({"tokens": tokens, "requests": 1})
 
         if "inputs" in request:
-            if not all(isinstance(i, str) for i in request["inputs"]):
-                raise ValueError("All values in 'inputs' must be of type str")
+            inputs = request["inputs"]
+            if not isinstance(inputs, list) or not all(
+                isinstance(i, str) for i in inputs
+            ):
+                raise ValueError("'inputs' must be a list of strings")
             tokens = (
-                sum(len(encoding.encode(i)) for i in request["inputs"])
+                sum(len(encoding.encode(i)) for i in inputs)
                 + reserved_output_tokens
             )
             return frozendict({"tokens": tokens, "requests": 1})
