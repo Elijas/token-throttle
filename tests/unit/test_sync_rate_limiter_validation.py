@@ -335,6 +335,26 @@ class TestAcquireCapacityForRequestValidation:
         assert reservation.model_family == _UNLIMITED_FLAG
         assert dict(reservation.usage) == {}
 
+    def test_unlimited_config_with_extra_usage_raises(self):
+        builder, _ = make_mock_backend_builder()
+        limiter = SyncRateLimiter(make_unlimited_config(), backend=builder)
+
+        with pytest.raises(
+            ValueError, match="extra_usage must be empty for unlimited capacity"
+        ):
+            limiter.acquire_capacity_for_request(
+                model="gpt-4", extra_usage={"tokens": 10}
+            )
+
+    def test_unlimited_config_with_empty_extra_usage_succeeds(self):
+        builder, _ = make_mock_backend_builder()
+        limiter = SyncRateLimiter(make_unlimited_config(), backend=builder)
+
+        reservation = limiter.acquire_capacity_for_request(
+            model="gpt-4", extra_usage={}
+        )
+        assert reservation.model_family == _UNLIMITED_FLAG
+
 
 class TestRefundCapacityFromResponseValidation:
     """Tests for refund_capacity_from_response value paths."""
@@ -645,6 +665,12 @@ class TestSetMaxCapacityValidation:
         builder, _ = make_mock_backend_builder()
         limiter = SyncRateLimiter(make_limited_config(), backend=builder)
         with pytest.raises(ValueError, match="No backend for model family"):
+            limiter.set_max_capacity("gpt-4", "tokens", 60, 500.0)
+
+    def test_set_max_capacity_unlimited_raises(self):
+        builder, _ = make_mock_backend_builder()
+        limiter = SyncRateLimiter(make_unlimited_config(), backend=builder)
+        with pytest.raises(ValueError, match="unlimited quotas"):
             limiter.set_max_capacity("gpt-4", "tokens", 60, 500.0)
 
     def test_set_max_capacity_delegates_to_backend(self):

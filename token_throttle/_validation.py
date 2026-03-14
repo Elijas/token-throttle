@@ -21,7 +21,7 @@ def is_unlimited_reservation(reservation: CapacityReservation) -> bool:
     return reservation.model_family == _UNLIMITED_FLAG and not reservation.usage
 
 
-def extract_total_tokens(usage: object) -> int | float:
+def extract_total_tokens(usage: object) -> float:
     """Extract total_tokens from a usage object (attribute or dict access)."""
     if hasattr(usage, "total_tokens"):
         total_tokens = usage.total_tokens
