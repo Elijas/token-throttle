@@ -308,6 +308,18 @@ class TestUsageValueCoercion:
         usage = frozendict({"tokens": "50", "requests": "1"})
         backend.wait_for_capacity(usage)
 
+    def test_wait_for_capacity_coerces_string_values_when_waiting(self):
+        """Regression: string usage must not TypeError in _compute_sleep."""
+        cfg = _make_config(
+            quotas=[Quota(metric="tokens", limit=100, per_seconds=SecondsIn.MINUTE)],
+        )
+        backend = SyncMemoryBackendBuilder().build(cfg)
+        backend.consume_capacity(frozendict({"tokens": 100.0}))
+        with pytest.raises(TimeoutError):
+            backend.wait_for_capacity(
+                frozendict({"tokens": "50"}), timeout=0.05,
+            )
+
 
 class TestNegativeRefundWarning:
     def test_overuse_warns(self):

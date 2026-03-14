@@ -271,6 +271,7 @@ class MemoryBackend(RateLimiterBackend):
         """Wait until all buckets have the required capacity."""
         validate_backend_usage(usage, self._usage_metric_names)
         timeout = validate_timeout(timeout)
+        usage = frozendict({metric: float(amount) for metric, amount in usage.items()})
         deadline = None if timeout is None else time.monotonic() + timeout
         has_waited = False
         start_time = time.time()
