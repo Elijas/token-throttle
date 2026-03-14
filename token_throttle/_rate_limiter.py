@@ -103,9 +103,9 @@ class RateLimiter(BaseRateLimiter):
         **kwargs,
     ) -> CapacityReservation:
         timeout = validate_timeout(timeout)
-        model = kwargs.get("model")
-        if not model:
+        if "model" not in kwargs:
             raise ValueError("'model' parameter is required")
+        model = kwargs["model"]
 
         limit_config = self._config_getter(model)
         if limit_config.is_unlimited:

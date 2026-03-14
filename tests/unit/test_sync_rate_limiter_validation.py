@@ -234,6 +234,27 @@ class TestAcquireCapacityForRequestValidation:
         with pytest.raises(ValueError, match="'model' parameter is required"):
             limiter.acquire_capacity_for_request(extra_usage=None)
 
+    def test_false_model_in_request_raises(self):
+        builder, _ = make_mock_backend_builder()
+        limiter = SyncRateLimiter(make_limited_config(), backend=builder)
+
+        with pytest.raises(ValueError, match="model_name must be a string"):
+            limiter.acquire_capacity_for_request(model=False)
+
+    def test_empty_string_model_in_request_raises(self):
+        builder, _ = make_mock_backend_builder()
+        limiter = SyncRateLimiter(make_limited_config(), backend=builder)
+
+        with pytest.raises(ValueError, match="model_name cannot be empty"):
+            limiter.acquire_capacity_for_request(model="")
+
+    def test_integer_model_in_request_raises(self):
+        builder, _ = make_mock_backend_builder()
+        limiter = SyncRateLimiter(make_limited_config(), backend=builder)
+
+        with pytest.raises(ValueError, match="model_name must be a string"):
+            limiter.acquire_capacity_for_request(model=0)
+
     def test_none_usage_counter_raises(self):
         builder, _ = make_mock_backend_builder()
         config = make_limited_config(usage_counter=None)
