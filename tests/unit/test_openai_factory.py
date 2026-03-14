@@ -170,6 +170,12 @@ class TestModelFamilyGetter:
     def test_empty_string(self):
         assert openai_model_family_getter("") == ""
 
+    def test_degenerate_preview_returns_original(self):
+        assert openai_model_family_getter("-preview") == "-preview"
+
+    def test_degenerate_date_returns_original(self):
+        assert openai_model_family_getter("-1234") == "-1234"
+
 
 class TestCreateOpenAIRedisRateLimiter:
     """Tests for create_openai_redis_rate_limiter factory."""

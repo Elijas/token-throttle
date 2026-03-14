@@ -286,6 +286,29 @@ class TestFreshStartCallback:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Usage value coercion (string → float)
+# ---------------------------------------------------------------------------
+
+
+class TestUsageValueCoercion:
+    """Sync memory backend must coerce usage values (e.g. strings) to float,
+    matching the Redis backend behavior.
+    """
+
+    def test_consume_capacity_coerces_string_values(self):
+        builder = SyncMemoryBackendBuilder()
+        backend = builder.build(_make_config())
+        usage = frozendict({"tokens": "50", "requests": "1"})
+        backend.consume_capacity(usage)
+
+    def test_wait_for_capacity_coerces_string_values(self):
+        builder = SyncMemoryBackendBuilder()
+        backend = builder.build(_make_config())
+        usage = frozendict({"tokens": "50", "requests": "1"})
+        backend.wait_for_capacity(usage)
+
+
 class TestNegativeRefundWarning:
     def test_overuse_warns(self):
         builder = SyncMemoryBackendBuilder()

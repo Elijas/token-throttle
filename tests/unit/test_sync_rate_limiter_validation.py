@@ -3,6 +3,7 @@
 from unittest.mock import MagicMock
 
 import pytest
+from pydantic import ValidationError
 
 from token_throttle._interfaces._interfaces import PerModelConfig
 from token_throttle._interfaces._models import CapacityReservation, Quota, UsageQuotas
@@ -703,21 +704,18 @@ class TestSetMaxCapacityValidation:
 
 
 class TestGetBackendValidation:
-    def test_empty_model_family_raises(self):
-        """_get_backend rejects empty model_family (defensive guard)."""
-        builder, _ = make_mock_backend_builder()
-        limiter = SyncRateLimiter(make_limited_config(), backend=builder)
-        cfg = PerModelConfig(
-            quotas=UsageQuotas(
-                [
-                    Quota(metric="tokens", limit=1000),
-                    Quota(metric="requests", limit=10),
-                ]
-            ),
-            model_family="",
-        )
-        with pytest.raises(ValueError, match=r"cfg\.model_family cannot be empty"):
-            limiter._get_backend(cfg)
+    def test_empty_model_family_rejected_at_construction(self):
+        """PerModelConfig rejects empty model_family at construction time."""
+        with pytest.raises(ValidationError, match="model_family must not be an empty string"):
+            PerModelConfig(
+                quotas=UsageQuotas(
+                    [
+                        Quota(metric="tokens", limit=1000),
+                        Quota(metric="requests", limit=10),
+                    ]
+                ),
+                model_family="",
+            )
 
 
 class TestModelNameTypeValidation:

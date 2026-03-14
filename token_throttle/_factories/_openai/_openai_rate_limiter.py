@@ -25,7 +25,8 @@ def openai_model_family_getter(model: str, /) -> str:
     # with optional -preview before and/or after the date component.
     # Single/triple-digit version numbers (-1, -002) are preserved.
     model = model.removeprefix("openai/")
-    return re.sub(r"((-preview)?-\d{4}(-\d{2}){0,2}(-preview)?|-preview)$", "", model)
+    result = re.sub(r"((-preview)?-\d{4}(-\d{2}){0,2}(-preview)?|-preview)$", "", model)
+    return result or model
 
 
 def create_openai_redis_rate_limiter(

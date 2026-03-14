@@ -3,7 +3,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from token_throttle._interfaces._callbacks import RateLimiterCallbacks
 from token_throttle._interfaces._models import (
@@ -38,6 +38,13 @@ class PerModelConfig(BaseModel):
         default=None,
         description="Optional identifier for rate limiting purposes. Multiple model versions can share the same model_family to count against the same quota. Defaults to the model name if not specified.",
     )
+
+    @field_validator("model_family", mode="before")
+    @classmethod
+    def _reject_empty_string(cls, value: object) -> object:
+        if isinstance(value, str) and not value:
+            raise ValueError("model_family must not be an empty string")
+        return value
 
     def get_model_family(self) -> str:
         if not self.model_family:

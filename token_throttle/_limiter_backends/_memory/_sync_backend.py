@@ -119,6 +119,7 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
         usage: FrozenUsage,
     ) -> tuple[bool, Capacities, Capacities]:
         """Check if there's enough capacity and consume it if available."""
+        usage = frozendict({metric: float(amount) for metric, amount in usage.items()})
         # Empty on the failure path; callers only read postconsumption on success.
         postconsumption_capacities: Capacities = frozendict()
         fresh_start_buckets: list[MemoryBucket] = []
@@ -198,6 +199,7 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
         overshoot rather than blocking.
         """
         validate_backend_usage(usage, self._usage_metric_names)
+        usage = frozendict({metric: float(amount) for metric, amount in usage.items()})
         fresh_start_buckets: list[MemoryBucket] = []
 
         with self._condition:
