@@ -270,7 +270,7 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
         usage = frozendict({metric: float(amount) for metric, amount in usage.items()})
         deadline = None if timeout is None else time.monotonic() + timeout
         has_waited = False
-        start_time = time.time()
+        start_time = time.monotonic()
         while True:
             (
                 available,
@@ -283,7 +283,7 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
                     and self._callbacks
                     and self._callbacks.after_wait_end_consumption
                 ):
-                    wait_time_s = time.time() - start_time
+                    wait_time_s = time.monotonic() - start_time
                     self._callbacks.after_wait_end_consumption(
                         model_family=self._limit_config.get_model_family(),
                         preconsumption_capacities=preconsumption,
@@ -322,10 +322,17 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
             if deficit <= 0:
                 continue
             bucket = next(
-                b
-                for b in self._buckets
-                if b.usage_metric == metric and b.per_seconds == per_seconds
+                (
+                    b
+                    for b in self._buckets
+                    if b.usage_metric == metric and b.per_seconds == per_seconds
+                ),
+                None,
             )
+            if bucket is None:
+                raise ValueError(
+                    f"No bucket found for metric='{metric}', per_seconds={per_seconds}"
+                )
             wait = deficit / bucket._rate_per_sec  # noqa: SLF001
             max_wait = max(max_wait, wait)
         return max_wait if max_wait > 0 else self._sleep_interval
