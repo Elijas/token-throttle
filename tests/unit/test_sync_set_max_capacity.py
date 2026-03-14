@@ -159,6 +159,72 @@ class TestSyncSetMaxCapacityValidation:
             limiter.set_max_capacity("gpt-4o", "tokens", 60, 0.0)
 
 
+class TestSyncSetMaxCapacityMetricValidation:
+    """set_max_capacity should validate `metric` at the public API boundary."""
+
+    def _make_limiter_with_backend(self):
+        builder, _mock_backend = make_mock_backend_builder()
+        config = make_limited_config(model_family="gpt-4o")
+        limiter = SyncRateLimiter(config, backend=builder)
+        limiter.acquire_capacity(
+            {"tokens": 100, "requests": 1}, model="gpt-4o"
+        )
+        return limiter
+
+    def test_boolean_metric_raises(self):
+        limiter = self._make_limiter_with_backend()
+        with pytest.raises(ValueError, match="metric must be a non-empty string"):
+            limiter.set_max_capacity("gpt-4o", True, 60, 5000)  # noqa: FBT003
+
+    def test_non_string_metric_raises(self):
+        limiter = self._make_limiter_with_backend()
+        with pytest.raises(ValueError, match="metric must be a non-empty string"):
+            limiter.set_max_capacity("gpt-4o", 42, 60, 5000)
+
+    def test_empty_metric_raises(self):
+        limiter = self._make_limiter_with_backend()
+        with pytest.raises(ValueError, match="metric must be a non-empty string"):
+            limiter.set_max_capacity("gpt-4o", "", 60, 5000)
+
+
+class TestSyncSetMaxCapacityPerSecondsValidation:
+    """set_max_capacity should validate `per_seconds` at the public API boundary."""
+
+    def _make_limiter_with_backend(self):
+        builder, _mock_backend = make_mock_backend_builder()
+        config = make_limited_config(model_family="gpt-4o")
+        limiter = SyncRateLimiter(config, backend=builder)
+        limiter.acquire_capacity(
+            {"tokens": 100, "requests": 1}, model="gpt-4o"
+        )
+        return limiter
+
+    def test_boolean_per_seconds_raises(self):
+        limiter = self._make_limiter_with_backend()
+        with pytest.raises(ValueError, match="per_seconds must not be a boolean"):
+            limiter.set_max_capacity("gpt-4o", "tokens", True, 5000)  # noqa: FBT003
+
+    def test_float_per_seconds_raises(self):
+        limiter = self._make_limiter_with_backend()
+        with pytest.raises(ValueError, match="per_seconds must be a positive integer"):
+            limiter.set_max_capacity("gpt-4o", "tokens", 60.5, 5000)
+
+    def test_string_per_seconds_raises(self):
+        limiter = self._make_limiter_with_backend()
+        with pytest.raises(ValueError, match="per_seconds must be a positive integer"):
+            limiter.set_max_capacity("gpt-4o", "tokens", "60", 5000)
+
+    def test_zero_per_seconds_raises(self):
+        limiter = self._make_limiter_with_backend()
+        with pytest.raises(ValueError, match="per_seconds must be a positive integer"):
+            limiter.set_max_capacity("gpt-4o", "tokens", 0, 5000)
+
+    def test_negative_per_seconds_raises(self):
+        limiter = self._make_limiter_with_backend()
+        with pytest.raises(ValueError, match="per_seconds must be a positive integer"):
+            limiter.set_max_capacity("gpt-4o", "tokens", -1, 5000)
+
+
 class TestSyncSetMaxCapacityCoercion:
     """Coerce validated values to float before passing to backend."""
 

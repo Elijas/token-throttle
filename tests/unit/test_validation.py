@@ -8,6 +8,8 @@ from frozendict import frozendict
 from token_throttle._interfaces._models import Quota, UsageQuotas
 from token_throttle._validation import (
     validate_acquire_usage,
+    validate_metric,
+    validate_per_seconds,
     validate_refund_usage,
     validate_timeout,
 )
@@ -96,3 +98,68 @@ class TestValidateTimeout:
         assert validate_timeout(0) == 0.0
         assert validate_timeout(1.5) == 1.5
         assert validate_timeout(0.0) == 0.0
+
+
+class TestValidateMetric:
+    def test_boolean_metric_raises(self):
+        with pytest.raises(ValueError, match="metric must be a non-empty string"):
+            validate_metric(True)  # noqa: FBT003
+
+    def test_non_string_metric_raises(self):
+        with pytest.raises(ValueError, match="metric must be a non-empty string"):
+            validate_metric(42)
+
+    def test_empty_metric_raises(self):
+        with pytest.raises(ValueError, match="metric must be a non-empty string"):
+            validate_metric("")
+
+    def test_none_metric_raises(self):
+        with pytest.raises(ValueError, match="metric must be a non-empty string"):
+            validate_metric(None)
+
+    def test_valid_metric_returns_string(self):
+        assert validate_metric("tokens") == "tokens"
+        assert validate_metric("requests") == "requests"
+
+
+class TestValidatePerSeconds:
+    def test_boolean_per_seconds_raises(self):
+        with pytest.raises(ValueError, match="per_seconds must not be a boolean"):
+            validate_per_seconds(True)  # noqa: FBT003
+
+    def test_float_per_seconds_raises(self):
+        with pytest.raises(ValueError, match="per_seconds must be a positive integer"):
+            validate_per_seconds(60.5)
+
+    def test_string_per_seconds_raises(self):
+        with pytest.raises(ValueError, match="per_seconds must be a positive integer"):
+            validate_per_seconds("60")
+
+    def test_zero_per_seconds_raises(self):
+        with pytest.raises(ValueError, match="per_seconds must be a positive integer"):
+            validate_per_seconds(0)
+
+    def test_negative_per_seconds_raises(self):
+        with pytest.raises(ValueError, match="per_seconds must be a positive integer"):
+            validate_per_seconds(-1)
+
+    def test_none_per_seconds_raises(self):
+        with pytest.raises(ValueError, match="per_seconds must be a positive integer"):
+            validate_per_seconds(None)
+
+    def test_nan_per_seconds_raises(self):
+        with pytest.raises(ValueError, match="per_seconds must be a positive integer"):
+            validate_per_seconds(float("nan"))
+
+    def test_inf_per_seconds_raises(self):
+        with pytest.raises(ValueError, match="per_seconds must be a positive integer"):
+            validate_per_seconds(float("inf"))
+
+    def test_valid_per_seconds_returns_int(self):
+        assert validate_per_seconds(60) == 60
+        assert validate_per_seconds(1) == 1
+
+    def test_whole_float_per_seconds_is_coerced_to_int(self):
+        result = validate_per_seconds(60.0)
+        assert result == 60
+        assert isinstance(result, int)

@@ -699,6 +699,37 @@ class TestGetBackendValidation:
             limiter._get_backend(cfg)
 
 
+class TestModelNameTypeValidation:
+    """model parameter must be a string — non-strings should raise ValueError."""
+
+    def test_boolean_model_raises(self):
+        builder, _ = make_mock_backend_builder()
+        limiter = SyncRateLimiter(make_limited_config(), backend=builder)
+
+        with pytest.raises(ValueError, match="model_name must be a string"):
+            limiter.acquire_capacity(
+                {"tokens": 1, "requests": 1}, model=True
+            )
+
+    def test_integer_model_raises(self):
+        builder, _ = make_mock_backend_builder()
+        limiter = SyncRateLimiter(make_limited_config(), backend=builder)
+
+        with pytest.raises(ValueError, match="model_name must be a string"):
+            limiter.acquire_capacity(
+                {"tokens": 1, "requests": 1}, model=42
+            )
+
+    def test_none_model_raises(self):
+        builder, _ = make_mock_backend_builder()
+        limiter = SyncRateLimiter(make_limited_config(), backend=builder)
+
+        with pytest.raises(ValueError, match="model_name must be a string"):
+            limiter.acquire_capacity(
+                {"tokens": 1, "requests": 1}, model=None
+            )
+
+
 class TestRecordUsage:
     def test_record_usage_calls_consume_capacity(self):
         builder, mock_backend = make_mock_backend_builder()

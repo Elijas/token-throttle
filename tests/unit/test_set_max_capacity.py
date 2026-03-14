@@ -157,6 +157,72 @@ class TestSetMaxCapacityValidation:
             await limiter.set_max_capacity("gpt-4o", "tokens", 60, 0.0)
 
 
+class TestSetMaxCapacityMetricValidation:
+    """set_max_capacity should validate `metric` at the public API boundary."""
+
+    async def _make_limiter_with_backend(self):
+        builder, _mock_backend = make_mock_backend_builder()
+        config = make_limited_config(model_family="gpt-4o")
+        limiter = RateLimiter(config, backend=builder)
+        await limiter.acquire_capacity(
+            {"tokens": 100, "requests": 1}, model="gpt-4o"
+        )
+        return limiter
+
+    async def test_boolean_metric_raises(self):
+        limiter = await self._make_limiter_with_backend()
+        with pytest.raises(ValueError, match="metric must be a non-empty string"):
+            await limiter.set_max_capacity("gpt-4o", True, 60, 5000)  # noqa: FBT003
+
+    async def test_non_string_metric_raises(self):
+        limiter = await self._make_limiter_with_backend()
+        with pytest.raises(ValueError, match="metric must be a non-empty string"):
+            await limiter.set_max_capacity("gpt-4o", 42, 60, 5000)
+
+    async def test_empty_metric_raises(self):
+        limiter = await self._make_limiter_with_backend()
+        with pytest.raises(ValueError, match="metric must be a non-empty string"):
+            await limiter.set_max_capacity("gpt-4o", "", 60, 5000)
+
+
+class TestSetMaxCapacityPerSecondsValidation:
+    """set_max_capacity should validate `per_seconds` at the public API boundary."""
+
+    async def _make_limiter_with_backend(self):
+        builder, _mock_backend = make_mock_backend_builder()
+        config = make_limited_config(model_family="gpt-4o")
+        limiter = RateLimiter(config, backend=builder)
+        await limiter.acquire_capacity(
+            {"tokens": 100, "requests": 1}, model="gpt-4o"
+        )
+        return limiter
+
+    async def test_boolean_per_seconds_raises(self):
+        limiter = await self._make_limiter_with_backend()
+        with pytest.raises(ValueError, match="per_seconds must not be a boolean"):
+            await limiter.set_max_capacity("gpt-4o", "tokens", True, 5000)  # noqa: FBT003
+
+    async def test_float_per_seconds_raises(self):
+        limiter = await self._make_limiter_with_backend()
+        with pytest.raises(ValueError, match="per_seconds must be a positive integer"):
+            await limiter.set_max_capacity("gpt-4o", "tokens", 60.5, 5000)
+
+    async def test_string_per_seconds_raises(self):
+        limiter = await self._make_limiter_with_backend()
+        with pytest.raises(ValueError, match="per_seconds must be a positive integer"):
+            await limiter.set_max_capacity("gpt-4o", "tokens", "60", 5000)
+
+    async def test_zero_per_seconds_raises(self):
+        limiter = await self._make_limiter_with_backend()
+        with pytest.raises(ValueError, match="per_seconds must be a positive integer"):
+            await limiter.set_max_capacity("gpt-4o", "tokens", 0, 5000)
+
+    async def test_negative_per_seconds_raises(self):
+        limiter = await self._make_limiter_with_backend()
+        with pytest.raises(ValueError, match="per_seconds must be a positive integer"):
+            await limiter.set_max_capacity("gpt-4o", "tokens", -1, 5000)
+
+
 class TestSetMaxCapacityCoercion:
     """Coerce validated values to float before passing to backend."""
 
