@@ -87,7 +87,7 @@ class OnWaitEndCallback(Protocol):
         postconsumption_capacities: Capacities,
         wait_time_s: float,
     ) -> None:
-        """Called after successfully acquiring capacit if there is a wait time"""
+        """Called after successfully acquiring capacity if there is a wait time."""
 
 
 @runtime_checkable
