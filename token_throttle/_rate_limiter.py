@@ -22,6 +22,8 @@ from token_throttle._validation import (
     resolve_config,
     validate_acquire_usage,
     validate_max_capacity_value,
+    validate_metric,
+    validate_per_seconds,
     validate_refund_usage,
 )
 
@@ -206,6 +208,8 @@ class RateLimiter(BaseRateLimiter):
         value: float,
     ) -> None:
         """Dynamically change the max capacity for a specific bucket."""
+        metric = validate_metric(metric)
+        per_seconds = validate_per_seconds(per_seconds)
         value = validate_max_capacity_value(value)
         limit_config = self._config_getter(model)
         if limit_config.is_unlimited:

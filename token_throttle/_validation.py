@@ -225,6 +225,33 @@ def merge_extra_usage(
     return frozen_usage(merged_usage)
 
 
+def validate_metric(metric: object) -> str:
+    """Validate the metric parameter for set_max_capacity."""
+    if not isinstance(metric, str):
+        raise ValueError(  # noqa: TRY004
+            f"metric must be a non-empty string (got {type(metric).__name__})"
+        )
+    if not metric:
+        raise ValueError("metric must be a non-empty string")
+    return metric
+
+
+def validate_per_seconds(per_seconds: object) -> int:
+    """Validate the per_seconds parameter for set_max_capacity."""
+    if isinstance(per_seconds, bool):
+        raise ValueError("per_seconds must not be a boolean")  # noqa: TRY004
+    if not isinstance(per_seconds, int | float):
+        raise ValueError(  # noqa: TRY004
+            f"per_seconds must be a positive integer (got {per_seconds!r})"
+        )
+    value = float(per_seconds)
+    if not math.isfinite(value) or value <= 0 or not value.is_integer():
+        raise ValueError(
+            f"per_seconds must be a positive integer (got {per_seconds!r})"
+        )
+    return int(value)
+
+
 def resolve_config(
     cfg: PerModelConfig | PerModelConfigGetter, model_name: str
 ) -> PerModelConfig:
@@ -232,9 +259,13 @@ def resolve_config(
     Resolve a config (static or callable) and default model_family to model_name.
 
     Raises:
-        ValueError: If model_name is empty.
+        ValueError: If model_name is not a non-empty string.
 
     """
+    if not isinstance(model_name, str):
+        raise ValueError(  # noqa: TRY004
+            f"model_name must be a string (got {type(model_name).__name__})"
+        )
     if not model_name:
         raise ValueError("model_name cannot be empty")
     r = cfg(model_name) if callable(cfg) else cfg
