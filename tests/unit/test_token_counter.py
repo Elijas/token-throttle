@@ -297,6 +297,31 @@ class TestOpenAIUsageCounterMissingKeys:
             counter("gpt-4")
 
 
+class TestOpenAIUsageCounterAmbiguousPayloads:
+    """Only one of input / inputs / messages may be supplied per request."""
+
+    @pytest.mark.parametrize(
+        "request_kwargs",
+        [
+            {"input": "hi", "messages": [{"role": "user", "content": "hello"}]},
+            {"input": "hi", "inputs": ["hello"]},
+            {"inputs": ["hello"], "messages": [{"role": "user", "content": "hello"}]},
+            {
+                "input": "hi",
+                "inputs": ["hello"],
+                "messages": [{"role": "user", "content": "hello"}],
+            },
+        ],
+    )
+    def test_multiple_payload_keys_raise_value_error(self, request_kwargs):
+        counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
+        with pytest.raises(
+            ValueError,
+            match="Exactly one of 'input', 'inputs', or 'messages' must be provided",
+        ):
+            counter("gpt-4", **request_kwargs)
+
+
 class TestCountChatInputTokens:
     """Tests for count_chat_input_tokens overhead and name key handling."""
 

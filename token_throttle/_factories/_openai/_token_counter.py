@@ -14,6 +14,7 @@ _OUTPUT_BUDGET_KEYS = (
     "max_completion_tokens",
     "max_tokens",
 )
+_REQUEST_PAYLOAD_KEYS = ("input", "inputs", "messages")
 _UNSUPPORTED_CONTENT_PART_TYPES = frozenset(
     {
         "input_audio",
@@ -44,8 +45,9 @@ class OpenAIUsageCounter:
     def __call__(self, model: str, **request) -> FrozenUsage:
         encoding = self._get_encoding(model)
         reserved_output_tokens = _get_reserved_output_tokens(request)
+        payload_key = _get_request_payload_key(request)
 
-        if "input" in request:
+        if payload_key == "input":
             input_ = request["input"]
             if isinstance(input_, str):
                 tokens = len(encoding.encode(input_)) + reserved_output_tokens
@@ -56,7 +58,7 @@ class OpenAIUsageCounter:
             )
             return frozendict({"tokens": tokens, "requests": 1})
 
-        if "inputs" in request:
+        if payload_key == "inputs":
             inputs = request["inputs"]
             if not isinstance(inputs, list) or not all(
                 isinstance(i, str) for i in inputs
@@ -68,7 +70,7 @@ class OpenAIUsageCounter:
             )
             return frozendict({"tokens": tokens, "requests": 1})
 
-        if "messages" in request:
+        if payload_key == "messages":
             messages = request["messages"]
             if not isinstance(messages, list) or not all(
                 isinstance(m, dict) for m in messages
@@ -81,6 +83,17 @@ class OpenAIUsageCounter:
             return frozendict({"tokens": tokens, "requests": 1})
 
         raise ValueError("Request must contain 'input', 'inputs', or 'messages'")
+
+
+def _get_request_payload_key(request: dict[str, object]) -> str:
+    payload_keys = [key for key in _REQUEST_PAYLOAD_KEYS if key in request]
+    if not payload_keys:
+        raise ValueError("Request must contain 'input', 'inputs', or 'messages'")
+    if len(payload_keys) > 1:
+        raise ValueError(
+            "Exactly one of 'input', 'inputs', or 'messages' must be provided"
+        )
+    return payload_keys[0]
 
 
 def get_encoding(model_name: str) -> "Encoding":
