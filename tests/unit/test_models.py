@@ -34,6 +34,10 @@ class TestQuota:
         assert q.limit == 100.0
         assert q.per_seconds == 60
 
+    def test_rejects_empty_metric(self):
+        with pytest.raises(ValidationError, match="metric must not be empty"):
+            Quota(metric="", limit=100.0, per_seconds=60)
+
     def test_rejects_boolean_limit(self):
         with pytest.raises(ValidationError, match="must not be a boolean"):
             Quota(metric="requests", limit=True)

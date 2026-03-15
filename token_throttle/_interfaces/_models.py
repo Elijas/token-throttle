@@ -43,6 +43,13 @@ class Quota(BaseModel):
             )
         return value
 
+    @field_validator("metric", mode="before")
+    @classmethod
+    def _reject_empty_metric(cls, value: object) -> object:
+        if isinstance(value, str) and not value:
+            raise ValueError("metric must not be empty")
+        return value
+
 
 class UsageQuotas:
     def __init__(
