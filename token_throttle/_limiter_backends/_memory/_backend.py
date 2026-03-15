@@ -242,7 +242,7 @@ class MemoryBackend(RateLimiterBackend):
                 raise RuntimeError(
                     f"postconsumption covers {len(postconsumption_dict)} buckets but "
                     f"preconsumption has {len(preconsumption_capacities)} — "
-                    f"validate_acquire_usage() should prevent this"
+                    f"validate_backend_usage() should prevent this"
                 )
             postconsumption_capacities = frozendict(postconsumption_dict)
             self._set_capacities(

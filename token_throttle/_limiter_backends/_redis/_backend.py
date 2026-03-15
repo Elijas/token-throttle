@@ -325,7 +325,9 @@ class RedisBackend(RateLimiterBackend):
                     )
             # Invariant: validate_acquire_usage() guarantees usage keys == quota
             # keys, so every capacity bucket must have a matching usage entry.
-            if len(postconsumption_dict) != len(preconsumption_capacities):
+            if len(postconsumption_dict) != len(
+                preconsumption_capacities
+            ):  # pragma: no cover
                 raise RuntimeError(
                     f"postconsumption covers {len(postconsumption_dict)} buckets but "
                     f"preconsumption has {len(preconsumption_capacities)} — "
@@ -399,11 +401,13 @@ class RedisBackend(RateLimiterBackend):
                     postconsumption_dict[(capacity_metric_name, per_seconds)] = (
                         capacity_amount - usage_amount
                     )
-            if len(postconsumption_dict) != len(preconsumption_capacities):
+            if len(postconsumption_dict) != len(
+                preconsumption_capacities
+            ):  # pragma: no cover
                 raise RuntimeError(
                     f"postconsumption covers {len(postconsumption_dict)} buckets but "
                     f"preconsumption has {len(preconsumption_capacities)} — "
-                    f"validate_acquire_usage() should prevent this"
+                    f"validate_backend_usage() should prevent this"
                 )
             postconsumption_capacities = frozendict(postconsumption_dict)
             await self._set_capacities_unsafe(
