@@ -54,10 +54,10 @@ def extract_usage_from_response(response: object) -> object:
 
 
 def extract_total_tokens(usage: object) -> float:
-    """Extract total_tokens from a usage object (attribute or dict access)."""
+    """Extract total_tokens from a usage object (attribute or mapping access)."""
     if hasattr(usage, "total_tokens"):
         total_tokens = usage.total_tokens
-    elif isinstance(usage, dict):
+    elif isinstance(usage, Mapping):
         try:
             total_tokens = usage["total_tokens"]
         except KeyError:
@@ -67,7 +67,7 @@ def extract_total_tokens(usage: object) -> float:
             ) from None
     else:
         raise ValueError(
-            "usage must be an object with total_tokens attribute or a dict"
+            "usage must be an object with total_tokens attribute or a mapping"
         )
     if total_tokens is None:
         raise ValueError(

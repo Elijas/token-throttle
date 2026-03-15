@@ -1,5 +1,7 @@
 """Tests for all ValueError paths in RateLimiter.acquire_capacity, acquire_capacity_for_request, and refund_capacity."""
 
+from collections import UserDict
+
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -538,6 +540,23 @@ class TestRefundCapacityFromResponseValidation:
             reservation, usage={"total_tokens": 80}
         )
         mock_backend.refund_capacity.assert_awaited_once()
+
+    async def test_kwargs_usage_mapping_path(self):
+        builder, mock_backend = make_mock_backend_builder()
+        limiter = RateLimiter(make_limited_config(), backend=builder)
+        await limiter.acquire_capacity({"tokens": 100, "requests": 1}, model="gpt-4")
+        reservation = CapacityReservation(
+            usage={"tokens": 100.0, "requests": 1.0},
+            model_family="gpt-4",
+        )
+        await limiter.refund_capacity_from_response(
+            reservation,
+            usage=UserDict({"total_tokens": 80}),
+        )
+        mock_backend.refund_capacity.assert_awaited_once_with(
+            reservation.get_usage(),
+            {"tokens": 80, "requests": 1},
+        )
 
     async def test_no_response_no_usage_raises(self):
         builder, _ = make_mock_backend_builder()

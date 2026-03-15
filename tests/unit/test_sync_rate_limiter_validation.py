@@ -1,5 +1,7 @@
 """Tests for all ValueError paths in SyncRateLimiter.acquire_capacity and refund_capacity."""
 
+from collections import UserDict
+
 from unittest.mock import MagicMock
 
 import pytest
@@ -502,6 +504,30 @@ class TestRefundCapacityFromResponseValidation:
         )
 
         mock_backend.refund_capacity.assert_called_once()
+
+    def test_mapping_kwargs_usage(self):
+        builder, mock_backend = make_mock_backend_builder()
+        limiter = SyncRateLimiter(make_limited_config(), backend=builder)
+
+        limiter.acquire_capacity(
+            {"tokens": 100, "requests": 1},
+            model="gpt-4",
+        )
+
+        reservation = CapacityReservation(
+            usage={"tokens": 100.0, "requests": 1.0},
+            model_family="gpt-4",
+        )
+
+        limiter.refund_capacity_from_response(
+            reservation,
+            usage=UserDict({"total_tokens": 80}),
+        )
+
+        mock_backend.refund_capacity.assert_called_once_with(
+            reservation.get_usage(),
+            {"tokens": 80, "requests": 1},
+        )
 
     def test_dict_response_object(self):
         """Response.usage is a dict (not object with attributes)."""
