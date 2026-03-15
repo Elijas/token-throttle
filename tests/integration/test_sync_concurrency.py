@@ -65,19 +65,38 @@ class TestConcurrentAcquiresRespectCapacity:
             backend.wait_for_capacity(usage)
 
         # Now try one more — it should block because no capacity remains
+        acquired = threading.Event()
         completed = threading.Event()
+        waiter_errors: list[BaseException] = []
 
         def try_acquire():
-            backend.wait_for_capacity(usage)
-            completed.set()
+            try:
+                backend.wait_for_capacity(usage)
+            except BaseException as exc:  # pragma: no cover - unexpected path
+                waiter_errors.append(exc)
+            else:
+                acquired.set()
+            finally:
+                completed.set()
 
-        t = threading.Thread(target=try_acquire, daemon=True)
+        t = threading.Thread(target=try_acquire)
         t.start()
 
-        # Wait 1 second — the thread should NOT have completed
-        assert not completed.wait(timeout=1.0), (
-            "Expected the extra acquire to still be waiting"
-        )
+        try:
+            # Wait 1 second — the thread should NOT have completed
+            assert not completed.wait(timeout=1.0), (
+                "Expected the extra acquire to still be waiting"
+            )
+        finally:
+            backend.refund_capacity(
+                reserved_usage=usage,
+                actual_usage=frozen_usage({"requests": 0}),
+            )
+            t.join(timeout=2.0)
+
+        assert not t.is_alive(), "Background waiter thread did not exit cleanly"
+        assert waiter_errors == [], f"Unexpected waiter errors: {waiter_errors}"
+        assert acquired.is_set(), "Cleanup refund should have released the waiter"
 
 
 class TestConcurrentAcquireAndRefund:

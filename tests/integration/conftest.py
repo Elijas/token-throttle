@@ -21,6 +21,7 @@ def redis_url(request: pytest.FixtureRequest) -> str:
 async def redis_client(redis_url: str):
     client = redis.from_url(redis_url)
     try:
+        await client.flushdb()
         yield client
     finally:
         await client.flushdb()
@@ -42,6 +43,7 @@ def backend_builder(request: pytest.FixtureRequest):
 def sync_redis_client(redis_url: str):
     client = sync_redis.from_url(redis_url)
     try:
+        client.flushdb()
         yield client
     finally:
         client.flushdb()
