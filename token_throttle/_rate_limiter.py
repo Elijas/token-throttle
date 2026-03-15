@@ -17,10 +17,12 @@ from token_throttle._interfaces._models import (
 from token_throttle._validation import (
     _UNLIMITED_FLAG,
     extract_total_tokens,
+    extract_usage_from_response,
     is_unlimited_reservation,
     merge_extra_usage,
     resolve_config,
     validate_acquire_usage,
+    validate_extra_usage,
     validate_max_capacity_value,
     validate_metric,
     validate_per_seconds,
@@ -103,6 +105,7 @@ class RateLimiter(BaseRateLimiter):
         **kwargs,
     ) -> CapacityReservation:
         timeout = validate_timeout(timeout)
+        extra_usage = validate_extra_usage(extra_usage)
         if "model" not in kwargs:
             raise ValueError("'model' parameter is required")
         model = kwargs["model"]
@@ -181,14 +184,9 @@ class RateLimiter(BaseRateLimiter):
         if is_unlimited_reservation(reservation):
             return
         if response is not None:
-            # Pydantic model (OpenAI SDK v1+) or any object with .usage
-            usage = response.usage
-            if usage is None:
-                raise ValueError(
-                    "response.usage is None — cannot extract token counts. "
-                    "Streaming responses may not include usage data; "
-                    "pass actual usage via refund_capacity() instead."
-                )
+            # Pydantic model (OpenAI SDK v1+), raw response dict, or any object
+            # with usage data.
+            usage = extract_usage_from_response(response)
             total_tokens = extract_total_tokens(usage)
         else:
             if "usage" not in kwargs:

@@ -21,6 +21,38 @@ def is_unlimited_reservation(reservation: CapacityReservation) -> bool:
     return reservation.model_family == _UNLIMITED_FLAG and not reservation.usage
 
 
+def extract_usage_from_response(response: object) -> object:
+    """Extract usage payload from a response object or raw response mapping."""
+    if isinstance(response, Mapping):
+        try:
+            usage = response["usage"]
+        except KeyError:
+            raise ValueError(
+                "response must include usage data — pass actual usage via "
+                "refund_capacity() instead."
+            ) from None
+    else:
+        usage = getattr(response, "usage", None)
+        if usage is None:
+            if hasattr(response, "usage"):
+                raise ValueError(
+                    "response.usage is None — cannot extract token counts. "
+                    "Streaming responses may not include usage data; "
+                    "pass actual usage via refund_capacity() instead."
+                )
+            raise ValueError(
+                "response must include usage data — pass actual usage via "
+                "refund_capacity() instead."
+            )
+    if usage is None:
+        raise ValueError(
+            "response.usage is None — cannot extract token counts. "
+            "Streaming responses may not include usage data; "
+            "pass actual usage via refund_capacity() instead."
+        )
+    return usage
+
+
 def extract_total_tokens(usage: object) -> float:
     """Extract total_tokens from a usage object (attribute or dict access)."""
     if hasattr(usage, "total_tokens"):
@@ -67,9 +99,14 @@ def _validate_usage_mapping(
     usage: Usage,
     expected_keys: AbstractSet[str],
     *,
+    mapping_label: str,
     expected_keys_label: str,
     value_label: str,
 ) -> None:
+    if not isinstance(usage, Mapping):
+        raise ValueError(  # noqa: TRY004
+            f"{mapping_label} must be a mapping (got {type(usage).__name__})"
+        )
     if set(usage) != expected_keys:
         raise ValueError(
             f"Usage keys {set(usage)} do not match {expected_keys_label} {expected_keys}",
@@ -99,6 +136,7 @@ def validate_acquire_usage(usage: FrozenUsage, quotas: UsageQuotas) -> None:
     _validate_usage_mapping(
         usage,
         set(quotas.names),
+        mapping_label="usage",
         expected_keys_label="quota keys",
         value_label="Usage value",
     )
@@ -115,6 +153,7 @@ def validate_refund_usage(actual_usage: Usage, reservation_keys: set[str]) -> No
     _validate_usage_mapping(
         actual_usage,
         reservation_keys,
+        mapping_label="actual_usage",
         expected_keys_label="reservation usage keys",
         value_label="Actual usage value",
     )
@@ -133,6 +172,7 @@ def validate_backend_usage(
     _validate_usage_mapping(
         usage,
         backend_metric_names,
+        mapping_label="usage",
         expected_keys_label="backend metric keys",
         value_label="Usage value",
     )
@@ -147,6 +187,7 @@ def validate_backend_refund_usage(
     _validate_usage_mapping(
         reserved_usage,
         backend_metric_names,
+        mapping_label="reserved_usage",
         expected_keys_label="backend metric keys",
         value_label="Reserved usage value",
     )
@@ -196,6 +237,12 @@ def merge_extra_usage(
     extra_usage: Mapping[str, object] | None,
 ) -> FrozenUsage:
     """Merge extra usage values into counted usage with consistent numeric checks."""
+    if extra_usage is None:
+        return usage
+    if not isinstance(extra_usage, Mapping):
+        raise ValueError(  # noqa: TRY004
+            f"extra_usage must be a mapping or None (got {type(extra_usage).__name__})"
+        )
     if not extra_usage:
         return usage
 
@@ -223,6 +270,19 @@ def merge_extra_usage(
             raise ValueError(f"Usage value for {metric} must be non-negative")
         merged_usage[metric] += amount
     return frozen_usage(merged_usage)
+
+
+def validate_extra_usage(
+    extra_usage: object,
+) -> Mapping[str, object] | None:
+    """Validate optional extra_usage payloads for request-based acquire helpers."""
+    if extra_usage is None:
+        return None
+    if not isinstance(extra_usage, Mapping):
+        raise ValueError(  # noqa: TRY004
+            f"extra_usage must be a mapping or None (got {type(extra_usage).__name__})"
+        )
+    return extra_usage
 
 
 def validate_metric(metric: object) -> str:

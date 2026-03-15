@@ -127,6 +127,10 @@ def _coerce_usage_value(
 
 def frozen_usage(usage: Usage) -> FrozenUsage:
     """Convert usage to a frozendict."""
+    if not isinstance(usage, Mapping):
+        raise ValueError(  # noqa: TRY004
+            f"usage must be a mapping (got {type(usage).__name__})"
+        )
     converted: dict[MetricName, float] = {}
     for metric, amount in usage.items():
         converted[metric] = _coerce_usage_value(metric, amount)

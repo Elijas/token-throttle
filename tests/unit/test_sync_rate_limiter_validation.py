@@ -49,6 +49,13 @@ def make_unlimited_config() -> PerModelConfig:
 class TestAcquireCapacityValidation:
     """Tests for ValueError paths in acquire_capacity."""
 
+    def test_usage_must_be_mapping(self):
+        builder, _ = make_mock_backend_builder()
+        limiter = SyncRateLimiter(make_limited_config(), backend=builder)
+
+        with pytest.raises(ValueError, match="usage must be a mapping"):
+            limiter.acquire_capacity([], model="gpt-4")
+
     def test_empty_model_name_raises(self):
         builder, _ = make_mock_backend_builder()
         limiter = SyncRateLimiter(make_limited_config(), backend=builder)
@@ -227,6 +234,20 @@ class TestRefundCapacityValidation:
 
 class TestAcquireCapacityForRequestValidation:
     """Tests for ValueError paths in acquire_capacity_for_request."""
+
+    def test_extra_usage_must_be_mapping_or_none(self):
+        def fake_counter(**_kwargs):
+            return {"tokens": 100.0, "requests": 1.0}
+
+        builder, _ = make_mock_backend_builder()
+        config = make_limited_config(usage_counter=fake_counter)
+        limiter = SyncRateLimiter(config, backend=builder)
+
+        with pytest.raises(ValueError, match="extra_usage must be a mapping or None"):
+            limiter.acquire_capacity_for_request(
+                model="gpt-4",
+                extra_usage=[],
+            )
 
     def test_missing_model_param_raises(self):
         builder, _ = make_mock_backend_builder()
@@ -497,6 +518,39 @@ class TestRefundCapacityFromResponseValidation:
 
         limiter.refund_capacity_from_response(reservation, response=FakeResponse())
         mock_backend.refund_capacity.assert_called_once()
+
+    def test_response_dict_with_usage_key(self):
+        builder, mock_backend = make_mock_backend_builder()
+        limiter = SyncRateLimiter(make_limited_config(), backend=builder)
+        limiter.acquire_capacity({"tokens": 100, "requests": 1}, model="gpt-4")
+        reservation = CapacityReservation(
+            usage={"tokens": 100.0, "requests": 1.0},
+            model_family="gpt-4",
+        )
+
+        limiter.refund_capacity_from_response(
+            reservation,
+            response={"usage": {"total_tokens": 80}},
+        )
+
+        mock_backend.refund_capacity.assert_called_once_with(
+            reservation.get_usage(),
+            {"tokens": 80, "requests": 1},
+        )
+
+    def test_response_dict_missing_usage_key_raises_value_error(self):
+        builder, _ = make_mock_backend_builder()
+        limiter = SyncRateLimiter(make_limited_config(), backend=builder)
+        reservation = CapacityReservation(
+            usage={"tokens": 100.0, "requests": 1.0},
+            model_family="gpt-4",
+        )
+
+        with pytest.raises(ValueError, match=r"response.*usage"):
+            limiter.refund_capacity_from_response(
+                reservation,
+                response={},
+            )
 
     def test_no_response_no_usage_raises(self):
         builder, _ = make_mock_backend_builder()
