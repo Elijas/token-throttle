@@ -6,9 +6,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from frozendict import frozendict
+from pydantic import ValidationError
 
 from token_throttle._interfaces._callbacks import (
     RateLimiterCallbacks,
+    SyncRateLimiterCallbacks,
     _get_loguru_logger,
     _log,
     _loguru_cache,
@@ -60,6 +62,28 @@ class TestRateLimiterCallbacks:
         assert callbacks.on_capacity_consumed is None
         assert callbacks.on_capacity_refunded is None
         assert callbacks.on_missing_consumption_data is None
+
+    def test_rejects_sync_callbacks(self):
+        def on_wait_start(**_kwargs) -> None:
+            return None
+
+        with pytest.raises(
+            ValidationError,
+            match="on_wait_start must be an async callable",
+        ):
+            RateLimiterCallbacks(on_wait_start=on_wait_start)
+
+
+class TestSyncRateLimiterCallbacks:
+    def test_rejects_async_callbacks(self):
+        async def on_wait_start(**_kwargs) -> None:
+            return None
+
+        with pytest.raises(
+            ValidationError,
+            match="on_wait_start must be a synchronous callable",
+        ):
+            SyncRateLimiterCallbacks(on_wait_start=on_wait_start)
 
 
 # ---------------------------------------------------------------------------

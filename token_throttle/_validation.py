@@ -1,9 +1,14 @@
 """Shared validation logic — used by both async RateLimiter and SyncRateLimiter."""
 
+import inspect
 import math
 from collections.abc import Mapping
 from collections.abc import Set as AbstractSet
 
+from token_throttle._interfaces._callable_utils import (
+    close_awaitable_if_possible,
+    is_async_callable,
+)
 from token_throttle._interfaces._interfaces import PerModelConfig, PerModelConfigGetter
 from token_throttle._interfaces._models import (
     CapacityReservation,
@@ -328,5 +333,10 @@ def resolve_config(
         )
     if not model_name:
         raise ValueError("model_name cannot be empty")
+    if callable(cfg) and is_async_callable(cfg):
+        raise ValueError("cfg must be a synchronous PerModelConfig getter")
     r = cfg(model_name) if callable(cfg) else cfg
+    if inspect.isawaitable(r):
+        close_awaitable_if_possible(r)
+        raise ValueError("cfg must be a synchronous PerModelConfig getter")
     return r if r.model_family else r.model_copy(update={"model_family": model_name})

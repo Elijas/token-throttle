@@ -1,8 +1,9 @@
 import logging
 from typing import Protocol, runtime_checkable
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 
+from token_throttle._interfaces._callable_utils import is_async_callable
 from token_throttle._interfaces._models import Capacities, FrozenUsage
 
 # ---------------------------------------------------------------------------
@@ -155,6 +156,24 @@ class RateLimiterCallbacks(BaseModel):
         description="Called when no previous consumption data is detected, assuming full quota",
     )
 
+    @field_validator(
+        "on_wait_start",
+        "after_wait_end_consumption",
+        "on_capacity_consumed",
+        "on_capacity_refunded",
+        "on_missing_consumption_data",
+        mode="after",
+    )
+    @classmethod
+    def _validate_async_callbacks(
+        cls,
+        value: object,
+        info: ValidationInfo,
+    ) -> object:
+        if value is not None and not is_async_callable(value):
+            raise ValueError(f"{info.field_name} must be an async callable")
+        return value
+
 
 # ---------------------------------------------------------------------------
 # Sync callback protocols
@@ -246,6 +265,26 @@ class SyncRateLimiterCallbacks(BaseModel):
         default=None,
         description="Called when no previous consumption data is detected, assuming full quota",
     )
+
+    @field_validator(
+        "on_wait_start",
+        "after_wait_end_consumption",
+        "on_capacity_consumed",
+        "on_capacity_refunded",
+        "on_missing_consumption_data",
+        mode="after",
+    )
+    @classmethod
+    def _validate_sync_callbacks(
+        cls,
+        value: object,
+        info: ValidationInfo,
+    ) -> object:
+        if value is not None and is_async_callable(value):
+            raise ValueError(
+                f"{info.field_name} must be a synchronous callable"
+            )
+        return value
 
 
 # ---------------------------------------------------------------------------

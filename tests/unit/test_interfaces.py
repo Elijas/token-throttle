@@ -2,6 +2,7 @@
 
 import pytest
 from frozendict import frozendict
+from pydantic import ValidationError
 
 from token_throttle._interfaces._interfaces import PerModelConfig
 from token_throttle._interfaces._models import Quota, UsageQuotas
@@ -62,3 +63,18 @@ class TestPerModelConfig:
             usage_counter=my_counter,
         )
         assert config.usage_counter is my_counter
+
+    def test_usage_counter_rejects_async_callable(self):
+        async def my_counter(**_request) -> frozendict:
+            return frozendict({"requests": 1.0})
+
+        quotas = UsageQuotas([Quota(metric="requests", limit=100.0)])
+        with pytest.raises(
+            ValidationError,
+            match="usage_counter must be a synchronous callable",
+        ):
+            PerModelConfig(
+                quotas=quotas,
+                model_family="test",
+                usage_counter=my_counter,
+            )

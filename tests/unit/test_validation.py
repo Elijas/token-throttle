@@ -5,8 +5,10 @@ import math
 import pytest
 from frozendict import frozendict
 
+from token_throttle._interfaces._interfaces import PerModelConfig
 from token_throttle._interfaces._models import Quota, UsageQuotas
 from token_throttle._validation import (
+    resolve_config,
     validate_acquire_usage,
     validate_metric,
     validate_per_seconds,
@@ -163,3 +165,20 @@ class TestValidatePerSeconds:
         result = validate_per_seconds(60.0)
         assert result == 60
         assert isinstance(result, int)
+
+
+class TestResolveConfig:
+    @pytest.mark.filterwarnings(
+        "ignore:coroutine '.*' was never awaited:RuntimeWarning"
+    )
+    def test_rejects_async_config_getter(self):
+        async def async_config_getter(model_name: str):
+            return PerModelConfig(
+                quotas=UsageQuotas([Quota(metric=model_name, limit=1)])
+            )
+
+        with pytest.raises(
+            ValueError,
+            match="cfg must be a synchronous PerModelConfig getter",
+        ):
+            resolve_config(async_config_getter, "tokens")

@@ -3,8 +3,9 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 
+from token_throttle._interfaces._callable_utils import is_async_callable
 from token_throttle._interfaces._callbacks import RateLimiterCallbacks
 from token_throttle._interfaces._models import (
     CapacityReservation,
@@ -44,6 +45,17 @@ class PerModelConfig(BaseModel):
     def _reject_empty_string(cls, value: object) -> object:
         if isinstance(value, str) and not value:
             raise ValueError("model_family must not be an empty string")
+        return value
+
+    @field_validator("usage_counter", mode="after")
+    @classmethod
+    def _reject_async_usage_counter(
+        cls,
+        value: UsageCounter | None,
+        info: ValidationInfo,
+    ) -> UsageCounter | None:
+        if value is not None and is_async_callable(value):
+            raise ValueError(f"{info.field_name} must be a synchronous callable")
         return value
 
     def get_model_family(self) -> str:
