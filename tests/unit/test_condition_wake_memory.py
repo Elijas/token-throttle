@@ -1,8 +1,7 @@
 """Tests that refund_capacity and set_max_capacity wake blocked waiters immediately.
 
 These tests use a long sleep_interval (5.0s) to prove that the waiter is woken
-by a condition signal, not by the polling loop.  With the current poll-based
-implementation, these tests will fail (TDD red phase).
+by a condition signal, not by the polling loop.
 
 Covers: async MemoryBackend and sync SyncMemoryBackend.
 """

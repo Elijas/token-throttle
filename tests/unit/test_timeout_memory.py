@@ -1,8 +1,7 @@
 """Tests for the timeout parameter on await_for_capacity / wait_for_capacity.
 
 Tests cover timeout=0 (try-acquire), timeout=N (bounded wait), and
-timeout=None (default, blocks indefinitely).  These tests will fail until
-the timeout parameter is implemented (TDD red phase).
+timeout=None (default, blocks indefinitely).
 
 Covers: async MemoryBackend and sync SyncMemoryBackend.
 """
