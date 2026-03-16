@@ -74,7 +74,7 @@ class OnWaitStartCallback(Protocol):
         usage: FrozenUsage,
         preconsumption_capacities: Capacities,
     ) -> None:
-        """Called before waiting for capacity."""
+        """Called when capacity required waiting."""
 
 
 @runtime_checkable
@@ -137,7 +137,7 @@ class RateLimiterCallbacks(BaseModel):
 
     on_wait_start: OnWaitStartCallback | None = Field(
         default=None,
-        description="Called before waiting for capacity",
+        description="Called when capacity required waiting",
     )
     after_wait_end_consumption: OnWaitEndCallback | None = Field(
         default=None,
@@ -247,7 +247,7 @@ class SyncRateLimiterCallbacks(BaseModel):
 
     on_wait_start: SyncOnWaitStartCallback | None = Field(
         default=None,
-        description="Called before waiting for capacity",
+        description="Called when capacity required waiting",
     )
     after_wait_end_consumption: SyncOnWaitEndCallback | None = Field(
         default=None,

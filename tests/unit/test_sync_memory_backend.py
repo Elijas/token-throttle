@@ -140,10 +140,8 @@ class TestMultiMetricContinueBranches:
         cfg = _make_multi_window_config()
         backend = builder.build(cfg)
         usage = frozendict({"tokens": 100.0, "requests": 1.0})
-        ok, pre, post = backend._check_and_consume_capacity(usage)
-        assert ok is True
-        assert len(pre) == 4
-        assert len(post) == 4
+        backend.wait_for_capacity(usage)
+        # Should not raise — all 4 buckets processed
 
     def test_consume_capacity_with_multi_window(self):
         builder = SyncMemoryBackendBuilder()

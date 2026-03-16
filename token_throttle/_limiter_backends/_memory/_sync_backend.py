@@ -114,82 +114,58 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
                 raise ValueError(f"Bucket '{usage_metric}/{per_seconds}s' not found")
             bucket.set_capacity(amount, current_time, allow_negative=allow_negative)
 
-    def _check_and_consume_capacity(
+    def _try_consume_locked(
         self,
         usage: FrozenUsage,
-    ) -> tuple[bool, Capacities, Capacities]:
-        """Check if there's enough capacity and consume it if available."""
-        usage = frozendict({metric: float(amount) for metric, amount in usage.items()})
-        # Empty on the failure path; callers only read postconsumption on success.
-        postconsumption_capacities: Capacities = frozendict()
-        fresh_start_buckets: list[MemoryBucket] = []
-
-        with self._condition:
-            current_time = time.time()
-            preconsumption_capacities, fresh_start_buckets = self._get_capacities(
-                current_time,
-            )
-
-            # Fail fast: if usage exceeds any bucket's max_capacity, it can
-            # never be satisfied (capacity is capped at max_capacity).
-            for usage_metric, usage_amount in usage.items():
-                for bucket in self._buckets:
-                    if bucket.usage_metric != usage_metric:
-                        continue
-                    if usage_amount > bucket.max_capacity:
-                        raise ValueError(
-                            f"Usage value for {usage_metric} ({usage_amount}) "
-                            f"exceeds bucket max capacity ({bucket.max_capacity})",
-                        )
-
-            # All-or-nothing: check every bucket for the relevant metric
-            for usage_metric, usage_amount in usage.items():
-                for (cap_metric, _), cap_amount in preconsumption_capacities.items():
-                    if usage_metric != cap_metric:
-                        continue
-                    if usage_amount > cap_amount:
-                        return (
-                            False,
-                            preconsumption_capacities,
-                            postconsumption_capacities,
-                        )
-
-            # Sufficient capacity — subtract usage from each matching bucket.
-            postconsumption_dict: dict[tuple[str, int], float] = {}
-            for (
-                cap_metric,
-                per_seconds,
-            ), cap_amount in preconsumption_capacities.items():
-                for usage_metric, usage_amount in usage.items():
-                    if cap_metric != usage_metric:
-                        continue
-                    postconsumption_dict[(cap_metric, per_seconds)] = (
-                        cap_amount - usage_amount
+        preconsumption: Capacities,
+        current_time: float,
+    ) -> tuple[bool, Capacities]:
+        """Check and consume atomically. Caller MUST hold self._condition."""
+        # Fail fast: if usage exceeds any bucket's max_capacity, it can
+        # never be satisfied (capacity is capped at max_capacity).
+        for usage_metric, usage_amount in usage.items():
+            for bucket in self._buckets:
+                if bucket.usage_metric != usage_metric:
+                    continue
+                if usage_amount > bucket.max_capacity:
+                    raise ValueError(
+                        f"Usage value for {usage_metric} ({usage_amount}) "
+                        f"exceeds bucket max capacity ({bucket.max_capacity})",
                     )
-            # Invariant: validate_acquire_usage() guarantees usage keys == quota
-            # keys, so every capacity bucket must have a matching usage entry.
-            if len(postconsumption_dict) != len(
-                preconsumption_capacities
-            ):  # pragma: no cover
-                raise RuntimeError(
-                    f"postconsumption covers {len(postconsumption_dict)} buckets but "
-                    f"preconsumption has {len(preconsumption_capacities)} — "
-                    f"validate_acquire_usage() should prevent this"
-                )
-            postconsumption_capacities = frozendict(postconsumption_dict)
-            self._set_capacities(postconsumption_capacities, current_time)
 
-        # Callbacks fired outside the lock
-        self._fresh_start_buckets_callback(fresh_start_buckets)
-        if self._callbacks and self._callbacks.on_capacity_consumed:
-            self._callbacks.on_capacity_consumed(
-                model_family=self._limit_config.get_model_family(),
-                preconsumption_capacities=preconsumption_capacities,
-                postconsumption_capacities=postconsumption_capacities,
-                usage=usage,
-                current_time=current_time,
+        # All-or-nothing: check every bucket for the relevant metric
+        for usage_metric, usage_amount in usage.items():
+            for (cap_metric, _), cap_amount in preconsumption.items():
+                if usage_metric != cap_metric:
+                    continue
+                if usage_amount > cap_amount:
+                    return False, frozendict()
+
+        # Sufficient capacity — subtract usage from each matching bucket.
+        postconsumption_dict: dict[tuple[str, int], float] = {}
+        for (
+            cap_metric,
+            per_seconds,
+        ), cap_amount in preconsumption.items():
+            for usage_metric, usage_amount in usage.items():
+                if cap_metric != usage_metric:
+                    continue
+                postconsumption_dict[(cap_metric, per_seconds)] = (
+                    cap_amount - usage_amount
+                )
+        # Invariant: validate_acquire_usage() guarantees usage keys == quota
+        # keys, so every capacity bucket must have a matching usage entry.
+        if len(postconsumption_dict) != len(
+            preconsumption
+        ):  # pragma: no cover
+            raise RuntimeError(
+                f"postconsumption covers {len(postconsumption_dict)} buckets but "
+                f"preconsumption has {len(preconsumption)} — "
+                f"validate_acquire_usage() should prevent this"
             )
-        return True, preconsumption_capacities, postconsumption_capacities
+        postconsumption = frozendict(postconsumption_dict)
+        self._set_capacities(postconsumption, current_time)
+        return True, postconsumption
 
     def consume_capacity(self, usage: FrozenUsage) -> None:
         """
@@ -270,46 +246,55 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
         usage = frozendict({metric: float(amount) for metric, amount in usage.items()})
         deadline = None if timeout is None else time.monotonic() + timeout
         has_waited = False
+        first_failed_pre: Capacities = frozendict()
         start_time = time.monotonic()
-        while True:
-            (
-                available,
-                preconsumption,
-                postconsumption,
-            ) = self._check_and_consume_capacity(usage)
-            if available:
-                if (
-                    has_waited
-                    and self._callbacks
-                    and self._callbacks.after_wait_end_consumption
-                ):
-                    wait_time_s = time.monotonic() - start_time
-                    self._callbacks.after_wait_end_consumption(
-                        model_family=self._limit_config.get_model_family(),
-                        preconsumption_capacities=preconsumption,
-                        postconsumption_capacities=postconsumption,
-                        usage=frozendict(usage),
-                        wait_time_s=wait_time_s,
-                    )
-                return
+        postconsumption: Capacities = frozendict()
+        fresh: list[MemoryBucket] = []
 
-            if deadline is not None and time.monotonic() >= deadline:
-                raise TimeoutError("Timed out waiting for capacity")
-
-            if not has_waited:
-                has_waited = True
-                if self._callbacks and self._callbacks.on_wait_start:
-                    self._callbacks.on_wait_start(
-                        model_family=self._limit_config.get_model_family(),
-                        preconsumption_capacities=preconsumption,
-                        usage=usage,
-                    )
-
-            computed = self._compute_sleep(usage, preconsumption)
-            if deadline is not None:
-                computed = min(computed, max(0, deadline - time.monotonic()))
-            with self._condition:
+        with self._condition:
+            while True:
+                current_time = time.time()
+                preconsumption, fresh = self._get_capacities(current_time)
+                ok, postconsumption = self._try_consume_locked(
+                    usage, preconsumption, current_time,
+                )
+                if ok:
+                    break
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise TimeoutError("Timed out waiting for capacity")
+                if not has_waited:
+                    has_waited = True
+                    first_failed_pre = preconsumption
+                computed = self._compute_sleep(usage, preconsumption)
+                if deadline is not None:
+                    computed = min(computed, max(0, deadline - time.monotonic()))
                 self._condition.wait(timeout=max(0.001, computed))
+
+        # All callbacks fired outside the lock
+        self._fresh_start_buckets_callback(fresh)
+        if self._callbacks and self._callbacks.on_capacity_consumed:
+            self._callbacks.on_capacity_consumed(
+                model_family=self._limit_config.get_model_family(),
+                preconsumption_capacities=preconsumption,
+                postconsumption_capacities=postconsumption,
+                usage=usage,
+                current_time=current_time,
+            )
+        if has_waited and self._callbacks and self._callbacks.on_wait_start:
+            self._callbacks.on_wait_start(
+                model_family=self._limit_config.get_model_family(),
+                preconsumption_capacities=first_failed_pre,
+                usage=usage,
+            )
+        if has_waited and self._callbacks and self._callbacks.after_wait_end_consumption:
+            wait_time_s = time.monotonic() - start_time
+            self._callbacks.after_wait_end_consumption(
+                model_family=self._limit_config.get_model_family(),
+                preconsumption_capacities=preconsumption,
+                postconsumption_capacities=postconsumption,
+                usage=frozendict(usage),
+                wait_time_s=wait_time_s,
+            )
 
     def _compute_sleep(self, usage: FrozenUsage, preconsumption: Capacities) -> float:
         """Compute max wait across all buckets based on deficit / rate."""

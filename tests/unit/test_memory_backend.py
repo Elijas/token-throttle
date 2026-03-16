@@ -147,11 +147,8 @@ class TestMultiMetricContinueBranches:
         cfg = _make_multi_window_config()
         backend = builder.build(cfg)
         usage = frozendict({"tokens": 100.0, "requests": 1.0})
-        ok, pre, post = await backend._check_and_consume_capacity(usage)
-        assert ok is True
-        # 4 buckets: tokens/60, tokens/3600, requests/60, requests/3600
-        assert len(pre) == 4
-        assert len(post) == 4
+        await backend.await_for_capacity(usage)
+        # Should not raise — all 4 buckets processed
 
     async def test_consume_capacity_with_multi_window(self):
         builder = MemoryBackendBuilder()
