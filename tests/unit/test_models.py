@@ -169,6 +169,11 @@ class TestUsageQuotas:
         assert q2 in iterated
         assert len(iterated) == 2
 
+    @pytest.mark.parametrize("raw_quota", [{"metric": "requests"}, object(), "quota"])
+    def test_rejects_non_quota_entries(self, raw_quota):
+        with pytest.raises(ValueError, match="Each quota must be a Quota instance"):
+            UsageQuotas([raw_quota])
+
 
 class TestFrozenUsage:
     def test_converts_dict_to_frozendict(self):

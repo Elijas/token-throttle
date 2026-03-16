@@ -1,7 +1,6 @@
 """Tests for all ValueError paths in RateLimiter.acquire_capacity, acquire_capacity_for_request, and refund_capacity."""
 
 from collections import UserDict
-
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -116,6 +115,16 @@ class TestAcquireCapacityValidation:
         with pytest.raises(ValueError, match="must be finite"):
             await limiter.acquire_capacity(
                 {"tokens": object(), "requests": 1},
+                model="gpt-4",
+            )
+
+    async def test_config_getter_returning_wrong_type_raises_value_error(self):
+        builder, _ = make_mock_backend_builder()
+        limiter = RateLimiter(lambda _model_name: {"quotas": []}, backend=builder)
+
+        with pytest.raises(ValueError, match="must resolve to PerModelConfig"):
+            await limiter.acquire_capacity(
+                {"tokens": 1, "requests": 1},
                 model="gpt-4",
             )
 

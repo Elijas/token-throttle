@@ -79,6 +79,10 @@ class UsageQuotas:
         return not bool(self._metrics)
 
     def add_metric(self, quota: Quota) -> None:
+        if not isinstance(quota, Quota):
+            raise ValueError(  # noqa: TRY004
+                f"Each quota must be a Quota instance (got {type(quota).__name__})"
+            )
         if (
             quota.metric in self._metrics
             and quota.per_seconds in self._metrics[quota.metric]

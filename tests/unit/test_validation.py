@@ -182,3 +182,11 @@ class TestResolveConfig:
             match="cfg must be a synchronous PerModelConfig getter",
         ):
             resolve_config(async_config_getter, "tokens")
+
+    def test_rejects_static_cfg_with_wrong_type(self):
+        with pytest.raises(ValueError, match="must resolve to PerModelConfig"):
+            resolve_config({"quotas": []}, "tokens")
+
+    def test_rejects_getter_returning_wrong_type(self):
+        with pytest.raises(ValueError, match="must resolve to PerModelConfig"):
+            resolve_config(lambda _model_name: {"quotas": []}, "tokens")

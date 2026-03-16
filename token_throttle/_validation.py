@@ -339,4 +339,8 @@ def resolve_config(
     if inspect.isawaitable(r):
         close_awaitable_if_possible(r)
         raise ValueError("cfg must be a synchronous PerModelConfig getter")
+    if not isinstance(r, PerModelConfig):
+        raise ValueError(  # noqa: TRY004
+            f"cfg must resolve to PerModelConfig (got {type(r).__name__})"
+        )
     return r if r.model_family else r.model_copy(update={"model_family": model_name})
