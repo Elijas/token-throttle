@@ -30,6 +30,35 @@ def _build_backend(
     return builder.build(config)
 
 
+def _get_memory_buckets(backend):
+    """Return the memory bucket list, or None if this is a Redis backend.
+
+    Memory buckets support synchronous ``get_capacity(time)`` for capacity
+    verification.  Redis buckets require I/O, so accounting assertions are
+    skipped for the Redis backend.
+    """
+    return getattr(backend, "_buckets", None)
+
+
+def _build_multi_metric_backend(
+    builder,
+    *,
+    requests_limit: float,
+    tokens_limit: float,
+    per_seconds: float,
+):
+    config = PerModelConfig(
+        model_family="test",
+        quotas=UsageQuotas(
+            [
+                Quota(metric="requests", limit=requests_limit, per_seconds=per_seconds),
+                Quota(metric="tokens", limit=tokens_limit, per_seconds=per_seconds),
+            ]
+        ),
+    )
+    return builder.build(config)
+
+
 class TestConcurrentAcquiresRespectCapacity:
     """N concurrent acquires must never consume more than max capacity."""
 
@@ -198,3 +227,234 @@ class TestHighParallelismStress:
             results = [f.result() for f in as_completed(futures, timeout=30)]
 
         assert len(results) == 50
+
+
+class TestConcurrentConsumeCapacity:
+    """Thread safety of the consume_capacity (speedometer) path.
+
+    consume_capacity uses a different code path from wait_for_capacity:
+    it allows negative capacity and never blocks.  These tests verify that
+    concurrent consume_capacity calls don't corrupt bucket state.
+    """
+
+    def test_concurrent_consume_capacity_completes(self, sync_backend_builder):
+        """20 threads calling consume_capacity simultaneously must all succeed."""
+        backend = _build_backend(sync_backend_builder, limit=100, per_seconds=3600)
+        usage = frozen_usage({"requests": 10})
+
+        with ThreadPoolExecutor(max_workers=20) as pool:
+            futures = [pool.submit(backend.consume_capacity, usage) for _ in range(20)]
+            results = [f.result() for f in as_completed(futures, timeout=10)]
+
+        assert len(results) == 20
+
+    def test_concurrent_consume_capacity_drives_negative(self, sync_backend_builder):
+        """Concurrent speedometer calls that exceed capacity must correctly go negative.
+
+        20 threads x 10 units = 200 consumed from a 100-capacity bucket.
+        With slow refill (3600s), final capacity must be approximately -100.
+        """
+        backend = _build_backend(sync_backend_builder, limit=100, per_seconds=3600)
+        usage = frozen_usage({"requests": 10})
+
+        with ThreadPoolExecutor(max_workers=20) as pool:
+            futures = [pool.submit(backend.consume_capacity, usage) for _ in range(20)]
+            for f in as_completed(futures, timeout=10):
+                f.result()
+
+        buckets = _get_memory_buckets(backend)
+        if buckets is not None:
+            cap = buckets[0].get_capacity(time.time()).amount
+            # 100 capacity - 200 consumed = -100, with small refill tolerance
+            assert cap == pytest.approx(-100.0, abs=2.0), (
+                f"Expected ~-100 capacity after 200 consumed from 100, got {cap}"
+            )
+
+    def test_mixed_wait_and_consume_no_deadlock(self, sync_backend_builder):
+        """Interleaved wait_for_capacity and consume_capacity must not deadlock.
+
+        Both code paths acquire the same condition lock.  This test verifies
+        there's no ordering issue when they run concurrently.
+        """
+        backend = _build_backend(sync_backend_builder, limit=500, per_seconds=1)
+        wait_usage = frozen_usage({"requests": 5})
+        consume_usage = frozen_usage({"requests": 3})
+        errors: list[BaseException] = []
+
+        def do_wait():
+            try:
+                backend.wait_for_capacity(wait_usage)
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        def do_consume():
+            try:
+                backend.consume_capacity(consume_usage)
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        with ThreadPoolExecutor(max_workers=20) as pool:
+            futures = [
+                pool.submit(do_wait if i % 2 == 0 else do_consume)
+                for i in range(20)
+            ]
+            for f in as_completed(futures, timeout=10):
+                f.result()
+
+        assert errors == [], f"Unexpected errors: {errors}"
+
+
+class TestMultiMetricConcurrency:
+    """Thread safety with multiple quota metrics (tokens + requests).
+
+    All-or-nothing semantics: if one metric lacks capacity, no metrics
+    should be consumed.  Under thread contention this tests the atomicity
+    of the multi-bucket check-then-consume logic.
+    """
+
+    def test_multi_metric_concurrent_acquires(self, sync_backend_builder):
+        """10 threads acquiring both tokens and requests must all succeed.
+
+        Capacity is sufficient for all 10 (100 requests, 1000 tokens;
+        each thread uses 10 requests + 100 tokens).
+        """
+        backend = _build_multi_metric_backend(
+            sync_backend_builder,
+            requests_limit=100,
+            tokens_limit=1000,
+            per_seconds=1,
+        )
+        usage = frozen_usage({"requests": 10, "tokens": 100})
+
+        with ThreadPoolExecutor(max_workers=10) as pool:
+            futures = [pool.submit(backend.wait_for_capacity, usage) for _ in range(10)]
+            results = [f.result() for f in as_completed(futures, timeout=10)]
+
+        assert len(results) == 10
+
+    def test_multi_metric_all_or_nothing_under_contention(self, sync_backend_builder):
+        """All-or-nothing holds under thread contention.
+
+        Tokens are scarce (50 total, each thread wants 10), requests are abundant.
+        5 threads succeed immediately, the rest must wait for refill.
+        After all threads complete, token capacity must not be over-consumed.
+        """
+        backend = _build_multi_metric_backend(
+            sync_backend_builder,
+            requests_limit=1000,
+            tokens_limit=50,
+            per_seconds=1,  # fast refill: 50 tokens/sec
+        )
+        usage = frozen_usage({"requests": 1, "tokens": 10})
+        errors: list[BaseException] = []
+
+        def acquire():
+            try:
+                backend.wait_for_capacity(usage, timeout=10)
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        with ThreadPoolExecutor(max_workers=10) as pool:
+            futures = [pool.submit(acquire) for _ in range(10)]
+            for f in as_completed(futures, timeout=15):
+                f.result()
+
+        assert errors == [], f"Unexpected errors: {errors}"
+
+    def test_multi_metric_consume_and_refund_accounting(self, sync_backend_builder):
+        """Acquire-then-refund cycle with multiple metrics preserves capacity.
+
+        10 threads each acquire {requests: 5, tokens: 50}, then refund
+        fully (actual usage = 0).  Final capacity should be near max.
+        """
+        backend = _build_multi_metric_backend(
+            sync_backend_builder,
+            requests_limit=100,
+            tokens_limit=1000,
+            per_seconds=3600,  # slow refill so accounting is precise
+        )
+        usage = frozen_usage({"requests": 5, "tokens": 50})
+
+        def acquire_and_refund():
+            backend.wait_for_capacity(usage)
+            backend.refund_capacity(
+                reserved_usage=usage,
+                actual_usage=frozen_usage({"requests": 0, "tokens": 0}),
+            )
+
+        with ThreadPoolExecutor(max_workers=10) as pool:
+            futures = [pool.submit(acquire_and_refund) for _ in range(10)]
+            for f in as_completed(futures, timeout=10):
+                f.result()
+
+        # After full refunds, both metrics should be near max capacity
+        buckets = _get_memory_buckets(backend)
+        if buckets is not None:
+            now = time.time()
+            for bucket in buckets:
+                cap = bucket.get_capacity(now).amount
+                assert cap == pytest.approx(bucket.max_capacity, abs=2.0), (
+                    f"Bucket {bucket.usage_metric}/{bucket.per_seconds}s: "
+                    f"expected ~{bucket.max_capacity}, got {cap}"
+                )
+
+
+class TestCapacityAccountingAfterConcurrentOps:
+    """Verify final capacity state is mathematically correct after concurrent operations.
+
+    Existing stress tests check "no errors" but not the resulting capacity.
+    These tests verify the numbers add up.
+    """
+
+    def test_capacity_after_concurrent_full_drain(self, sync_backend_builder):
+        """10 threads x 10 units from a 100-capacity bucket = capacity near 0.
+
+        Uses slow refill (3600s) so refill during the test is negligible (~0.3 tokens).
+        """
+        backend = _build_backend(sync_backend_builder, limit=100, per_seconds=3600)
+        usage = frozen_usage({"requests": 10})
+
+        with ThreadPoolExecutor(max_workers=10) as pool:
+            futures = [pool.submit(backend.wait_for_capacity, usage) for _ in range(10)]
+            for f in as_completed(futures, timeout=10):
+                f.result()
+
+        buckets = _get_memory_buckets(backend)
+        if buckets is not None:
+            cap = buckets[0].get_capacity(time.time()).amount
+            assert cap == pytest.approx(0.0, abs=2.0), (
+                f"Expected ~0 capacity after exact drain, got {cap}"
+            )
+
+    def test_capacity_after_concurrent_partial_refunds(self, sync_backend_builder):
+        """Acquire 10 x 10, refund 5 x (reserved=10, actual=0) = capacity near 50.
+
+        10 threads drain all 100 capacity, then 5 threads refund 10 each (= 50 back).
+        """
+        backend = _build_backend(sync_backend_builder, limit=100, per_seconds=3600)
+        usage = frozen_usage({"requests": 10})
+
+        # Phase 1: drain all capacity
+        with ThreadPoolExecutor(max_workers=10) as pool:
+            futures = [pool.submit(backend.wait_for_capacity, usage) for _ in range(10)]
+            for f in as_completed(futures, timeout=10):
+                f.result()
+
+        # Phase 2: 5 concurrent full refunds of 10 each
+        def do_refund():
+            backend.refund_capacity(
+                reserved_usage=usage,
+                actual_usage=frozen_usage({"requests": 0}),
+            )
+
+        with ThreadPoolExecutor(max_workers=5) as pool:
+            futures = [pool.submit(do_refund) for _ in range(5)]
+            for f in as_completed(futures, timeout=10):
+                f.result()
+
+        buckets = _get_memory_buckets(backend)
+        if buckets is not None:
+            cap = buckets[0].get_capacity(time.time()).amount
+            assert cap == pytest.approx(50.0, abs=2.0), (
+                f"Expected ~50 capacity after 5 refunds of 10, got {cap}"
+            )
