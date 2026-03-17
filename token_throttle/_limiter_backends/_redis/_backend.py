@@ -339,16 +339,20 @@ class RedisBackend(RateLimiterBackend):
                 pipeline=pipeline,
                 current_time=current_time,
             )
-        await self._fresh_start_buckets_callback(fresh_start_buckets)
-        if self._callbacks and self._callbacks.on_capacity_consumed:
-            await self._invoke_callback_safe(
-                self._callbacks.on_capacity_consumed,
-                model_family=self._limit_config.get_model_family(),
-                preconsumption_capacities=preconsumption_capacities,
-                postconsumption_capacities=postconsumption_capacities,
-                usage=usage,
-                current_time=current_time,
-            )
+        try:
+            await self._fresh_start_buckets_callback(fresh_start_buckets)
+            if self._callbacks and self._callbacks.on_capacity_consumed:
+                await self._invoke_callback_safe(
+                    self._callbacks.on_capacity_consumed,
+                    model_family=self._limit_config.get_model_family(),
+                    preconsumption_capacities=preconsumption_capacities,
+                    postconsumption_capacities=postconsumption_capacities,
+                    usage=usage,
+                    current_time=current_time,
+                )
+        except asyncio.CancelledError:
+            await self._refund_cancelled_consumption(usage)
+            raise
         return True, preconsumption_capacities, postconsumption_capacities
 
     async def consume_capacity(self, usage: FrozenUsage) -> None:
@@ -459,17 +463,21 @@ class RedisBackend(RateLimiterBackend):
                     raise
                 raise TimeoutError("Timed out waiting for capacity") from exc
             if available:
-                if has_waited:
-                    wait_time_s = time.monotonic() - start_time
-                    if self._callbacks and self._callbacks.after_wait_end_consumption:
-                        await self._invoke_callback_safe(
-                            self._callbacks.after_wait_end_consumption,
-                            model_family=self._limit_config.get_model_family(),
-                            preconsumption_capacities=preconsumption,
-                            postconsumption_capacities=postconsumption,
-                            usage=frozendict(usage),
-                            wait_time_s=wait_time_s,
-                        )
+                try:
+                    if has_waited:
+                        wait_time_s = time.monotonic() - start_time
+                        if self._callbacks and self._callbacks.after_wait_end_consumption:
+                            await self._invoke_callback_safe(
+                                self._callbacks.after_wait_end_consumption,
+                                model_family=self._limit_config.get_model_family(),
+                                preconsumption_capacities=preconsumption,
+                                postconsumption_capacities=postconsumption,
+                                usage=frozendict(usage),
+                                wait_time_s=wait_time_s,
+                            )
+                except asyncio.CancelledError:
+                    await self._refund_cancelled_consumption(usage)
+                    raise
                 return
 
             if deadline is not None and time.monotonic() >= deadline:
@@ -710,6 +718,44 @@ class RedisBackend(RateLimiterBackend):
                 RuntimeWarning,
                 stacklevel=3,
             )
+
+    async def _refund_cancelled_consumption(self, usage: FrozenUsage) -> None:
+        """Refund capacity consumed before a CancelledError hit callbacks.
+
+        Uses asyncio.shield() because the refund involves multiple Redis I/O
+        await points (lock acquisition, pipeline get, pipeline set).  Shield
+        ensures the refund completes even if the task is re-cancelled.
+        Fires no callbacks to avoid recursion and another cancellation window.
+        """
+
+        async def _do_refund() -> None:
+            async with await self._lock(timeout=LOCK_TIMEOUT_SECONDS):
+                pipeline = self._redis.pipeline()
+                current_time = time.time()
+                capacities, _ = await self._get_capacities_unsafe(
+                    pipeline=pipeline, current_time=current_time,
+                )
+                refunded: dict[tuple[str, int], float] = dict(capacities)
+                for (cap_metric, per_seconds), cap_amount in capacities.items():
+                    for usage_metric, usage_amount in usage.items():
+                        if cap_metric != usage_metric:
+                            continue
+                        bucket = next(
+                            b
+                            for b in self.sorted_buckets
+                            if b.usage_metric == cap_metric
+                            and b.per_seconds == per_seconds
+                        )
+                        refunded[(cap_metric, per_seconds)] = min(
+                            cap_amount + usage_amount, bucket.max_capacity,
+                        )
+                await self._set_capacities_unsafe(
+                    frozendict(refunded), pipeline=pipeline, current_time=current_time,
+                )
+            async with self._local_condition:
+                self._local_condition.notify_all()
+
+        await asyncio.shield(_do_refund())
 
     async def _fresh_start_buckets_callback(
         self,
