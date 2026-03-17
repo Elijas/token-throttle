@@ -341,7 +341,8 @@ class RedisBackend(RateLimiterBackend):
             )
         await self._fresh_start_buckets_callback(fresh_start_buckets)
         if self._callbacks and self._callbacks.on_capacity_consumed:
-            await self._callbacks.on_capacity_consumed(
+            await self._invoke_callback_safe(
+                self._callbacks.on_capacity_consumed,
                 model_family=self._limit_config.get_model_family(),
                 preconsumption_capacities=preconsumption_capacities,
                 postconsumption_capacities=postconsumption_capacities,
@@ -418,7 +419,8 @@ class RedisBackend(RateLimiterBackend):
             )
         await self._fresh_start_buckets_callback(fresh_start_buckets)
         if self._callbacks and self._callbacks.on_capacity_consumed:
-            await self._callbacks.on_capacity_consumed(
+            await self._invoke_callback_safe(
+                self._callbacks.on_capacity_consumed,
                 model_family=self._limit_config.get_model_family(),
                 preconsumption_capacities=preconsumption_capacities,
                 postconsumption_capacities=postconsumption_capacities,
@@ -460,7 +462,8 @@ class RedisBackend(RateLimiterBackend):
                 if has_waited:
                     wait_time_s = time.monotonic() - start_time
                     if self._callbacks and self._callbacks.after_wait_end_consumption:
-                        await self._callbacks.after_wait_end_consumption(
+                        await self._invoke_callback_safe(
+                            self._callbacks.after_wait_end_consumption,
                             model_family=self._limit_config.get_model_family(),
                             preconsumption_capacities=preconsumption,
                             postconsumption_capacities=postconsumption,
@@ -475,7 +478,8 @@ class RedisBackend(RateLimiterBackend):
             if not has_waited:
                 has_waited = True
                 if self._callbacks and self._callbacks.on_wait_start:
-                    await self._callbacks.on_wait_start(
+                    await self._invoke_callback_safe(
+                        self._callbacks.on_wait_start,
                         model_family=self._limit_config.get_model_family(),
                         preconsumption_capacities=preconsumption,
                         usage=usage,
@@ -665,7 +669,8 @@ class RedisBackend(RateLimiterBackend):
             self._local_condition.notify_all()
         await self._fresh_start_buckets_callback(fresh_start_buckets)
         if self._callbacks and self._callbacks.on_capacity_refunded:
-            await self._callbacks.on_capacity_refunded(
+            await self._invoke_callback_safe(
+                self._callbacks.on_capacity_refunded,
                 model_family=self._limit_config.get_model_family(),
                 reserved_usage=reserved_usage,
                 actual_usage=actual_usage,
@@ -695,6 +700,17 @@ class RedisBackend(RateLimiterBackend):
         async with self._local_condition:
             self._local_condition.notify_all()
 
+    async def _invoke_callback_safe(self, callback, **kwargs) -> None:
+        """Fire a user callback, suppressing exceptions to prevent capacity leaks."""
+        try:
+            await callback(**kwargs)
+        except Exception as exc:  # noqa: BLE001
+            warnings.warn(
+                f"Rate limiter callback raised {type(exc).__name__}: {exc}",
+                RuntimeWarning,
+                stacklevel=3,
+            )
+
     async def _fresh_start_buckets_callback(
         self,
         fresh_start_buckets: list[RedisBucket],
@@ -705,7 +721,8 @@ class RedisBackend(RateLimiterBackend):
             and self._callbacks.on_missing_consumption_data
         ):
             for bucket in fresh_start_buckets:
-                await self._callbacks.on_missing_consumption_data(
+                await self._invoke_callback_safe(
+                    self._callbacks.on_missing_consumption_data,
                     model_family=self._limit_config.get_model_family(),
                     usage_metric=bucket.usage_metric,
                     per_seconds=bucket.per_seconds,

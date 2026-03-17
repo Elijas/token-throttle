@@ -230,7 +230,8 @@ class MemoryBackend(RateLimiterBackend):
         # Callbacks fired outside the lock
         await self._fresh_start_buckets_callback(fresh_start_buckets)
         if self._callbacks and self._callbacks.on_capacity_consumed:
-            await self._callbacks.on_capacity_consumed(
+            await self._invoke_callback_safe(
+                self._callbacks.on_capacity_consumed,
                 model_family=self._limit_config.get_model_family(),
                 preconsumption_capacities=preconsumption_capacities,
                 postconsumption_capacities=postconsumption_capacities,
@@ -281,7 +282,8 @@ class MemoryBackend(RateLimiterBackend):
         # All callbacks fired outside the lock
         await self._fresh_start_buckets_callback(fresh)
         if self._callbacks and self._callbacks.on_capacity_consumed:
-            await self._callbacks.on_capacity_consumed(
+            await self._invoke_callback_safe(
+                self._callbacks.on_capacity_consumed,
                 model_family=self._limit_config.get_model_family(),
                 preconsumption_capacities=preconsumption,
                 postconsumption_capacities=postconsumption,
@@ -289,14 +291,16 @@ class MemoryBackend(RateLimiterBackend):
                 current_time=current_time,
             )
         if has_waited and self._callbacks and self._callbacks.on_wait_start:
-            await self._callbacks.on_wait_start(
+            await self._invoke_callback_safe(
+                self._callbacks.on_wait_start,
                 model_family=self._limit_config.get_model_family(),
                 preconsumption_capacities=first_failed_pre,
                 usage=usage,
             )
         if has_waited and self._callbacks and self._callbacks.after_wait_end_consumption:
             wait_time_s = time.monotonic() - start_time
-            await self._callbacks.after_wait_end_consumption(
+            await self._invoke_callback_safe(
+                self._callbacks.after_wait_end_consumption,
                 model_family=self._limit_config.get_model_family(),
                 preconsumption_capacities=preconsumption,
                 postconsumption_capacities=postconsumption,
@@ -405,7 +409,8 @@ class MemoryBackend(RateLimiterBackend):
         # Callbacks fired outside the lock
         await self._fresh_start_buckets_callback(fresh_start_buckets)
         if self._callbacks and self._callbacks.on_capacity_refunded:
-            await self._callbacks.on_capacity_refunded(
+            await self._invoke_callback_safe(
+                self._callbacks.on_capacity_refunded,
                 model_family=self._limit_config.get_model_family(),
                 reserved_usage=reserved_usage,
                 actual_usage=actual_usage,
@@ -434,6 +439,17 @@ class MemoryBackend(RateLimiterBackend):
             bucket.set_max_capacity(value)
             self._condition.notify_all()
 
+    async def _invoke_callback_safe(self, callback, **kwargs) -> None:
+        """Fire a user callback, suppressing exceptions to prevent capacity leaks."""
+        try:
+            await callback(**kwargs)
+        except Exception as exc:  # noqa: BLE001
+            warnings.warn(
+                f"Rate limiter callback raised {type(exc).__name__}: {exc}",
+                RuntimeWarning,
+                stacklevel=3,
+            )
+
     async def _fresh_start_buckets_callback(
         self,
         fresh_start_buckets: list[MemoryBucket],
@@ -444,7 +460,8 @@ class MemoryBackend(RateLimiterBackend):
             and self._callbacks.on_missing_consumption_data
         ):
             for bucket in fresh_start_buckets:
-                await self._callbacks.on_missing_consumption_data(
+                await self._invoke_callback_safe(
+                    self._callbacks.on_missing_consumption_data,
                     model_family=self._limit_config.get_model_family(),
                     usage_metric=bucket.usage_metric,
                     per_seconds=bucket.per_seconds,
