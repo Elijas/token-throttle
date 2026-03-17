@@ -319,6 +319,77 @@ class TestUsageValueCoercion:
             )
 
 
+# ---------------------------------------------------------------------------
+# Callback exception handling (capacity leak prevention)
+# ---------------------------------------------------------------------------
+
+
+class TestCallbackExceptionSuppression:
+    """Callback exceptions must not propagate — they would prevent
+    CapacityReservation construction and cause permanent capacity leaks.
+    """
+
+    def test_on_capacity_consumed_exception_suppressed_on_acquire(self):
+        cbs = _make_callbacks(
+            on_capacity_consumed=MagicMock(side_effect=RuntimeError("boom")),
+        )
+        backend = SyncMemoryBackendBuilder().build(_make_config(), callbacks=cbs)
+        usage = frozendict({"tokens": 100.0, "requests": 1.0})
+        with pytest.warns(RuntimeWarning, match="RuntimeError.*boom"):
+            backend.wait_for_capacity(usage)
+        cbs.on_capacity_consumed.assert_called_once()
+
+    def test_on_capacity_consumed_exception_suppressed_on_consume(self):
+        cbs = _make_callbacks(
+            on_capacity_consumed=MagicMock(side_effect=RuntimeError("boom")),
+        )
+        backend = SyncMemoryBackendBuilder().build(_make_config(), callbacks=cbs)
+        usage = frozendict({"tokens": 100.0, "requests": 1.0})
+        with pytest.warns(RuntimeWarning, match="RuntimeError.*boom"):
+            backend.consume_capacity(usage)
+        cbs.on_capacity_consumed.assert_called_once()
+
+    def test_on_capacity_refunded_exception_suppressed(self):
+        cbs = _make_callbacks(
+            on_capacity_refunded=MagicMock(side_effect=RuntimeError("refund boom")),
+        )
+        backend = SyncMemoryBackendBuilder().build(_make_config(), callbacks=cbs)
+        reserved = frozendict({"tokens": 200.0, "requests": 2.0})
+        actual = frozendict({"tokens": 100.0, "requests": 1.0})
+        backend.wait_for_capacity(reserved)
+        with pytest.warns(RuntimeWarning, match="RuntimeError.*refund boom"):
+            backend.refund_capacity(reserved, actual)
+        cbs.on_capacity_refunded.assert_called_once()
+
+    def test_on_missing_consumption_data_exception_suppressed(self):
+        cbs = _make_callbacks(
+            on_missing_consumption_data=MagicMock(
+                side_effect=RuntimeError("fresh boom"),
+            ),
+        )
+        backend = SyncMemoryBackendBuilder().build(_make_config(), callbacks=cbs)
+        usage = frozendict({"tokens": 10.0, "requests": 1.0})
+        with pytest.warns(RuntimeWarning, match="RuntimeError.*fresh boom"):
+            backend.wait_for_capacity(usage)
+        assert cbs.on_missing_consumption_data.call_count == 2
+
+    def test_capacity_still_consumed_despite_callback_exception(self):
+        """Verify capacity is actually consumed even when callback raises."""
+        cbs = _make_callbacks(
+            on_capacity_consumed=MagicMock(side_effect=RuntimeError("boom")),
+        )
+        cfg = _make_config(
+            quotas=[Quota(metric="tokens", limit=100, per_seconds=SecondsIn.MINUTE)],
+        )
+        backend = SyncMemoryBackendBuilder().build(cfg, callbacks=cbs)
+        with pytest.warns(RuntimeWarning):
+            backend.wait_for_capacity(frozendict({"tokens": 90.0}))
+        with pytest.raises(TimeoutError):
+            backend.wait_for_capacity(
+                frozendict({"tokens": 50.0}), timeout=0.05,
+            )
+
+
 class TestNegativeRefundWarning:
     def test_overuse_warns(self):
         builder = SyncMemoryBackendBuilder()

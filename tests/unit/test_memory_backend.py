@@ -16,6 +16,7 @@ from token_throttle._limiter_backends._memory._backend import (
     MemoryBackend,
     MemoryBackendBuilder,
 )
+from token_throttle._rate_limiter import RateLimiter
 
 
 def _make_config(
@@ -377,6 +378,79 @@ class TestUsageValueCoercion:
             )
 
 
+# ---------------------------------------------------------------------------
+# Callback exception handling (capacity leak prevention)
+# ---------------------------------------------------------------------------
+
+
+class TestCallbackExceptionSuppression:
+    """Callback exceptions must not propagate — they would prevent
+    CapacityReservation construction and cause permanent capacity leaks.
+    """
+
+    async def test_on_capacity_consumed_exception_suppressed_on_acquire(self):
+        cbs = _make_callbacks(
+            on_capacity_consumed=AsyncMock(side_effect=RuntimeError("boom")),
+        )
+        backend = MemoryBackendBuilder().build(_make_config(), callbacks=cbs)
+        usage = frozendict({"tokens": 100.0, "requests": 1.0})
+        with pytest.warns(RuntimeWarning, match="RuntimeError.*boom"):
+            await backend.await_for_capacity(usage)
+        cbs.on_capacity_consumed.assert_awaited_once()
+
+    async def test_on_capacity_consumed_exception_suppressed_on_consume(self):
+        cbs = _make_callbacks(
+            on_capacity_consumed=AsyncMock(side_effect=RuntimeError("boom")),
+        )
+        backend = MemoryBackendBuilder().build(_make_config(), callbacks=cbs)
+        usage = frozendict({"tokens": 100.0, "requests": 1.0})
+        with pytest.warns(RuntimeWarning, match="RuntimeError.*boom"):
+            await backend.consume_capacity(usage)
+        cbs.on_capacity_consumed.assert_awaited_once()
+
+    async def test_on_capacity_refunded_exception_suppressed(self):
+        cbs = _make_callbacks(
+            on_capacity_refunded=AsyncMock(side_effect=RuntimeError("refund boom")),
+        )
+        backend = MemoryBackendBuilder().build(_make_config(), callbacks=cbs)
+        reserved = frozendict({"tokens": 200.0, "requests": 2.0})
+        actual = frozendict({"tokens": 100.0, "requests": 1.0})
+        await backend.await_for_capacity(reserved)
+        with pytest.warns(RuntimeWarning, match="RuntimeError.*refund boom"):
+            await backend.refund_capacity(reserved, actual)
+        cbs.on_capacity_refunded.assert_awaited_once()
+
+    async def test_on_missing_consumption_data_exception_suppressed(self):
+        cbs = _make_callbacks(
+            on_missing_consumption_data=AsyncMock(
+                side_effect=RuntimeError("fresh boom"),
+            ),
+        )
+        backend = MemoryBackendBuilder().build(_make_config(), callbacks=cbs)
+        usage = frozendict({"tokens": 10.0, "requests": 1.0})
+        with pytest.warns(RuntimeWarning, match="RuntimeError.*fresh boom"):
+            await backend.await_for_capacity(usage)
+        # Both buckets triggered fresh-start, so called twice despite first raising
+        assert cbs.on_missing_consumption_data.await_count == 2
+
+    async def test_capacity_still_consumed_despite_callback_exception(self):
+        """Verify capacity is actually consumed even when callback raises."""
+        cbs = _make_callbacks(
+            on_capacity_consumed=AsyncMock(side_effect=RuntimeError("boom")),
+        )
+        cfg = _make_config(
+            quotas=[Quota(metric="tokens", limit=100, per_seconds=SecondsIn.MINUTE)],
+        )
+        backend = MemoryBackendBuilder().build(cfg, callbacks=cbs)
+        with pytest.warns(RuntimeWarning):
+            await backend.await_for_capacity(frozendict({"tokens": 90.0}))
+        # Only 10 tokens remain — trying to acquire 50 should time out
+        with pytest.raises(TimeoutError):
+            await backend.await_for_capacity(
+                frozendict({"tokens": 50.0}), timeout=0.05,
+            )
+
+
 class TestNegativeRefundWarning:
     async def test_overuse_warns(self):
         builder = MemoryBackendBuilder()
@@ -386,3 +460,48 @@ class TestNegativeRefundWarning:
         await backend.await_for_capacity(reserved)
         with pytest.warns(RuntimeWarning, match="exceeds reserved usage"):
             await backend.refund_capacity(reserved, actual)
+
+
+# ---------------------------------------------------------------------------
+# End-to-end: callback exception must not leak capacity via rate limiter
+# ---------------------------------------------------------------------------
+
+
+class TestCallbackExceptionCapacityLeakE2E:
+    """Regression test: if on_capacity_consumed raises, the rate limiter must
+    still return a CapacityReservation so the caller can refund.
+    """
+
+    async def test_acquire_returns_reservation_despite_callback_exception(self):
+        cbs = _make_callbacks(
+            on_capacity_consumed=AsyncMock(side_effect=RuntimeError("boom")),
+        )
+        cfg = _make_config()
+        builder = MemoryBackendBuilder()
+        limiter = RateLimiter(cfg, backend=builder, callbacks=cbs)
+
+        usage = {"tokens": 100, "requests": 1}
+        with pytest.warns(RuntimeWarning, match="RuntimeError.*boom"):
+            reservation = await limiter.acquire_capacity(usage, model="test-model")
+
+        assert reservation is not None
+        assert reservation.usage["tokens"] == 100
+        assert reservation.model_family == "test-family"
+
+        # Reservation is usable for refund
+        await limiter.refund_capacity({"tokens": 80, "requests": 1}, reservation)
+
+    async def test_record_usage_returns_reservation_despite_callback_exception(self):
+        cbs = _make_callbacks(
+            on_capacity_consumed=AsyncMock(side_effect=RuntimeError("boom")),
+        )
+        cfg = _make_config()
+        builder = MemoryBackendBuilder()
+        limiter = RateLimiter(cfg, backend=builder, callbacks=cbs)
+
+        usage = {"tokens": 100, "requests": 1}
+        with pytest.warns(RuntimeWarning, match="RuntimeError.*boom"):
+            reservation = await limiter.record_usage(usage, model="test-model")
+
+        assert reservation is not None
+        assert reservation.model_family == "test-family"
