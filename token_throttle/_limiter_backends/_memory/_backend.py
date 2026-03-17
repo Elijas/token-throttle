@@ -156,9 +156,7 @@ class MemoryBackend(RateLimiterBackend):
                 )
         # Invariant: validate_acquire_usage() guarantees usage keys == quota
         # keys, so every capacity bucket must have a matching usage entry.
-        if len(postconsumption_dict) != len(
-            preconsumption
-        ):  # pragma: no cover
+        if len(postconsumption_dict) != len(preconsumption):  # pragma: no cover
             raise RuntimeError(
                 f"postconsumption covers {len(postconsumption_dict)} buckets but "
                 f"preconsumption has {len(preconsumption)} — "
@@ -261,7 +259,9 @@ class MemoryBackend(RateLimiterBackend):
                 current_time = time.time()
                 preconsumption, fresh = self._get_capacities(current_time)
                 ok, postconsumption = self._try_consume_locked(
-                    usage, preconsumption, current_time,
+                    usage,
+                    preconsumption,
+                    current_time,
                 )
                 if ok:
                     break
@@ -300,7 +300,11 @@ class MemoryBackend(RateLimiterBackend):
                     preconsumption_capacities=first_failed_pre,
                     usage=usage,
                 )
-            if has_waited and self._callbacks and self._callbacks.after_wait_end_consumption:
+            if (
+                has_waited
+                and self._callbacks
+                and self._callbacks.after_wait_end_consumption
+            ):
                 wait_time_s = time.monotonic() - start_time
                 await self._invoke_callback_safe(
                     self._callbacks.after_wait_end_consumption,
@@ -460,28 +464,36 @@ class MemoryBackend(RateLimiterBackend):
         """
         Refund capacity consumed before a CancelledError hit callbacks.
 
-        Acquires the lock, adds back consumed amounts (capped at max_capacity),
-        and notifies waiters.  Fires no callbacks to avoid recursion and another
-        cancellation window.
+        Uses asyncio.shield() because the refund must complete even if the
+        task is re-cancelled (e.g. in structured concurrency / TaskGroups).
+        Fires no callbacks to avoid recursion and another cancellation window.
         """
-        async with self._condition:
-            current_time = time.time()
-            capacities, _ = self._get_capacities(current_time)
-            refunded: dict[tuple[str, int], float] = dict(capacities)
-            for (cap_metric, per_seconds), cap_amount in capacities.items():
-                for usage_metric, usage_amount in usage.items():
-                    if cap_metric != usage_metric:
-                        continue
-                    bucket = next(
-                        b
-                        for b in self._buckets
-                        if b.usage_metric == cap_metric and b.per_seconds == per_seconds
-                    )
-                    refunded[(cap_metric, per_seconds)] = min(
-                        cap_amount + usage_amount, bucket.max_capacity,
-                    )
-            self._set_capacities(frozendict(refunded), current_time, allow_negative=True)
-            self._condition.notify_all()
+
+        async def _do_refund() -> None:
+            async with self._condition:
+                current_time = time.time()
+                capacities, _ = self._get_capacities(current_time)
+                refunded: dict[tuple[str, int], float] = dict(capacities)
+                for (cap_metric, per_seconds), cap_amount in capacities.items():
+                    for usage_metric, usage_amount in usage.items():
+                        if cap_metric != usage_metric:
+                            continue
+                        bucket = next(
+                            b
+                            for b in self._buckets
+                            if b.usage_metric == cap_metric
+                            and b.per_seconds == per_seconds
+                        )
+                        refunded[(cap_metric, per_seconds)] = min(
+                            cap_amount + usage_amount,
+                            bucket.max_capacity,
+                        )
+                self._set_capacities(
+                    frozendict(refunded), current_time, allow_negative=True
+                )
+                self._condition.notify_all()
+
+        await asyncio.shield(_do_refund())
 
     async def _fresh_start_buckets_callback(
         self,

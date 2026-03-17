@@ -33,7 +33,10 @@ _LONG_POLL_INTERVAL = 5.0
 
 
 def _make_config(
-    *, limit: float = 100, per_seconds: int = _SLOW_REFILL_PER_SECONDS, metric: str = "requests"
+    *,
+    limit: float = 100,
+    per_seconds: int = _SLOW_REFILL_PER_SECONDS,
+    metric: str = "requests",
 ) -> PerModelConfig:
     return PerModelConfig(
         model_family="test",
@@ -101,9 +104,7 @@ class TestAsyncTimeoutNoCapacityLeak:
         await backend.await_for_capacity(frozendict({"requests": 100.0}))
 
         with pytest.raises(TimeoutError):
-            await backend.await_for_capacity(
-                frozendict({"requests": 10.0}), timeout=0
-            )
+            await backend.await_for_capacity(frozendict({"requests": 10.0}), timeout=0)
 
         # Wait for refill (~0.2s at 100 tokens/sec gives ~20 tokens)
         await asyncio.sleep(0.2)
@@ -254,9 +255,7 @@ class TestSyncCancellationNoCapacityLeak:
 
         def waiter():
             try:
-                backend.wait_for_capacity(
-                    frozendict({"requests": 10.0}), timeout=0.2
-                )
+                backend.wait_for_capacity(frozendict({"requests": 10.0}), timeout=0.2)
             except TimeoutError as e:
                 error_holder.append(e)
 
@@ -330,7 +329,9 @@ class TestAsyncCallbackCancellationRefundsCapacity:
         cap_after = _get_bucket_capacity(backend)
         assert cap_after == pytest.approx(cap_before, abs=1.0)
 
-    async def test_cancellation_during_after_wait_end_consumption_refunds_capacity(self):
+    async def test_cancellation_during_after_wait_end_consumption_refunds_capacity(
+        self,
+    ):
         """CancelledError during after_wait_end_consumption callback refunds capacity."""
         gate = asyncio.Event()
         entered_callback = asyncio.Event()
@@ -341,7 +342,9 @@ class TestAsyncCallbackCancellationRefundsCapacity:
             entered_callback.set()
             await asyncio.sleep(10)
 
-        callbacks = RateLimiterCallbacks(after_wait_end_consumption=slow_wait_end_callback)
+        callbacks = RateLimiterCallbacks(
+            after_wait_end_consumption=slow_wait_end_callback
+        )
         builder = MemoryBackendBuilder(sleep_interval=0.01)
         config = _make_config(limit=100, per_seconds=1)  # fast refill
         backend = builder.build(config, callbacks=callbacks)
@@ -373,7 +376,9 @@ class TestAsyncCallbackCancellationRefundsCapacity:
             entered_callback.set()
             await asyncio.sleep(10)
 
-        callbacks = RateLimiterCallbacks(on_missing_consumption_data=slow_fresh_start_callback)
+        callbacks = RateLimiterCallbacks(
+            on_missing_consumption_data=slow_fresh_start_callback
+        )
         builder = MemoryBackendBuilder()
         # Fresh-start callback fires on the very first call to a bucket
         config = _make_config(limit=100)
@@ -449,7 +454,9 @@ class TestCancellationDebtPreservation:
         await backend.consume_capacity(frozendict({"requests": 200.0}))
         cap_after_consume = _get_bucket_capacity(backend)
         # capacity was 40 (50-10 already consumed by task_a) → 40-200 = -160
-        assert cap_after_consume < -100, f"Expected deep negative debt, got {cap_after_consume}"
+        assert cap_after_consume < -100, (
+            f"Expected deep negative debt, got {cap_after_consume}"
+        )
 
         # Cancel Task A during callback → triggers _refund_cancelled_consumption
         task_a.cancel()
@@ -463,4 +470,143 @@ class TestCancellationDebtPreservation:
             f"Debt erased! Expected {expected}, got {cap_final}. "
             f"If cap_final ≈ 0, the bug is that _refund_cancelled_consumption "
             f"calls _set_capacities without allow_negative=True."
+        )
+
+
+# ---------------------------------------------------------------------------
+# Group 6: Double-cancellation / structured concurrency must not leak capacity
+# ---------------------------------------------------------------------------
+
+
+class TestDoubleCancellationNoCapacityLeak:
+    """
+    Regression: _refund_cancelled_consumption was not wrapped in asyncio.shield(),
+    so a second CancelledError (e.g. from TaskGroup cancellation) could interrupt
+    the lock acquisition during the refund, permanently leaking capacity.
+
+    The Redis backend was fixed in commit 24d3a95 but the memory backend was not.
+    """
+
+    async def test_double_cancellation_does_not_leak_capacity(self):
+        """Manual double-cancel with lock contention proves shield is needed.
+
+        Without asyncio.shield(), the second cancel interrupts the lock wait
+        inside _refund_cancelled_consumption and capacity is never restored.
+        """
+        gate = asyncio.Event()
+        entered_callback = asyncio.Event()
+
+        async def slow_callback(**kwargs):
+            if not gate.is_set():
+                return
+            entered_callback.set()
+            await asyncio.sleep(10)
+
+        callbacks = RateLimiterCallbacks(on_capacity_consumed=slow_callback)
+        builder = MemoryBackendBuilder()
+        config = _make_config(limit=100)
+        backend = builder.build(config, callbacks=callbacks)
+
+        # Consume 90, leaving 10 available (callback fast — gate closed)
+        await backend.await_for_capacity(frozendict({"requests": 90.0}))
+        cap_before = _get_bucket_capacity(backend)
+        assert cap_before == pytest.approx(10.0, abs=1.0)
+
+        # Open gate — next consumption enters the slow callback
+        gate.set()
+
+        # Start a task that consumes 5 tokens, then enters slow callback
+        # (lock is free here, so consumption succeeds and callback fires)
+        task = asyncio.create_task(
+            backend.await_for_capacity(frozendict({"requests": 5.0}))
+        )
+        await asyncio.wait_for(entered_callback.wait(), timeout=2.0)
+
+        # NOW hold the condition lock from a separate task to force contention
+        # when _refund_cancelled_consumption tries to acquire it during refund.
+        lock_holder_ready = asyncio.Event()
+        lock_holder_release = asyncio.Event()
+
+        async def hold_lock():
+            async with backend._condition:
+                lock_holder_ready.set()
+                await lock_holder_release.wait()
+
+        lock_task = asyncio.create_task(hold_lock())
+        await asyncio.wait_for(lock_holder_ready.wait(), timeout=2.0)
+
+        # First cancel — triggers _refund_cancelled_consumption, which tries
+        # to acquire the lock (held by lock_task) and blocks at `await`
+        task.cancel()
+        await asyncio.sleep(0.05)  # let refund attempt start
+
+        # Second cancel — without shield, this kills the lock acquisition
+        task.cancel()
+        await asyncio.sleep(0.05)
+
+        # Release the held lock — shielded coroutine can now complete
+        lock_holder_release.set()
+        await lock_task
+        await asyncio.sleep(0.1)  # let shielded refund finish
+
+        # Capacity should be restored to ~10, not leaked to ~5
+        cap_after = _get_bucket_capacity(backend)
+        assert cap_after == pytest.approx(cap_before, abs=1.0), (
+            f"Capacity leaked! Expected ~{cap_before}, got {cap_after}. "
+            f"Without asyncio.shield(), double cancellation kills the refund."
+        )
+
+    async def test_taskgroup_cancellation_does_not_leak_capacity(self):
+        """Structured concurrency scenario: double cancel with full capacity.
+
+        Simulates a TaskGroup-like pattern where a consuming task is cancelled
+        while another task holds the condition lock, then cancelled again
+        (as happens when an outer scope cancels the TaskGroup itself).
+        """
+        entered_callback = asyncio.Event()
+
+        async def slow_callback(**kwargs):
+            entered_callback.set()
+            await asyncio.sleep(10)
+
+        callbacks = RateLimiterCallbacks(on_capacity_consumed=slow_callback)
+        builder = MemoryBackendBuilder()
+        config = _make_config(limit=100)
+        backend = builder.build(config, callbacks=callbacks)
+
+        # Start consuming task — enters slow callback immediately (no gate)
+        task = asyncio.create_task(
+            backend.await_for_capacity(frozendict({"requests": 5.0}))
+        )
+        await asyncio.wait_for(entered_callback.wait(), timeout=2.0)
+
+        # NOW hold the lock (after consumption) to force contention on refund
+        lock_holder_ready = asyncio.Event()
+        lock_holder_release = asyncio.Event()
+
+        async def hold_lock():
+            async with backend._condition:
+                lock_holder_ready.set()
+                await lock_holder_release.wait()
+
+        lock_task = asyncio.create_task(hold_lock())
+        await asyncio.wait_for(lock_holder_ready.wait(), timeout=2.0)
+
+        # Simulate structured concurrency: first cancel (TaskGroup abort),
+        # then second cancel (outer scope cleanup)
+        task.cancel()
+        await asyncio.sleep(0.05)
+        task.cancel()
+        await asyncio.sleep(0.05)
+
+        # Release lock so shielded refund can complete
+        lock_holder_release.set()
+        await lock_task
+        await asyncio.sleep(0.1)
+
+        # Capacity should be restored to ~100, not leaked to ~95
+        cap_after = _get_bucket_capacity(backend)
+        assert cap_after == pytest.approx(100.0, abs=1.0), (
+            f"Capacity leaked! Expected ~100, got {cap_after}. "
+            f"Structured concurrency cancellation interrupted the refund."
         )
