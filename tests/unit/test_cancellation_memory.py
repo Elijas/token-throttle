@@ -327,6 +327,67 @@ class TestAsyncCallbackCancellationRefundsCapacity:
 
         # If capacity were NOT leaked, cap_after would equal cap_before (~10).
         # But capacity WAS consumed (5 tokens), so cap_after should be ~5.
-        # The xfail asserts that the capacity was properly preserved (it won't be).
         cap_after = _get_bucket_capacity(backend)
         assert cap_after == pytest.approx(cap_before, abs=1.0)
+
+    async def test_cancellation_during_after_wait_end_consumption_refunds_capacity(self):
+        """CancelledError during after_wait_end_consumption callback refunds capacity."""
+        gate = asyncio.Event()
+        entered_callback = asyncio.Event()
+
+        async def slow_wait_end_callback(**kwargs):
+            if not gate.is_set():
+                return
+            entered_callback.set()
+            await asyncio.sleep(10)
+
+        callbacks = RateLimiterCallbacks(after_wait_end_consumption=slow_wait_end_callback)
+        builder = MemoryBackendBuilder(sleep_interval=0.01)
+        config = _make_config(limit=100, per_seconds=1)  # fast refill
+        backend = builder.build(config, callbacks=callbacks)
+
+        # Exhaust capacity so the next call must wait
+        await backend.await_for_capacity(frozendict({"requests": 100.0}))
+        gate.set()
+
+        task = asyncio.create_task(
+            backend.await_for_capacity(frozendict({"requests": 5.0}))
+        )
+        await asyncio.wait_for(entered_callback.wait(), timeout=5.0)
+
+        cap_before = _get_bucket_capacity(backend)
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        # Capacity should be restored (5 tokens refunded)
+        cap_after = _get_bucket_capacity(backend)
+        assert cap_after >= cap_before + 4.0
+
+    async def test_cancellation_during_fresh_start_callback_refunds_capacity(self):
+        """CancelledError during on_missing_consumption_data callback refunds capacity."""
+        entered_callback = asyncio.Event()
+
+        async def slow_fresh_start_callback(**kwargs):
+            entered_callback.set()
+            await asyncio.sleep(10)
+
+        callbacks = RateLimiterCallbacks(on_missing_consumption_data=slow_fresh_start_callback)
+        builder = MemoryBackendBuilder()
+        # Fresh-start callback fires on the very first call to a bucket
+        config = _make_config(limit=100)
+        backend = builder.build(config, callbacks=callbacks)
+
+        task = asyncio.create_task(
+            backend.await_for_capacity(frozendict({"requests": 5.0}))
+        )
+        await asyncio.wait_for(entered_callback.wait(), timeout=2.0)
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        # 5 tokens should be refunded — capacity should be ~100 (fresh bucket)
+        cap_after = _get_bucket_capacity(backend)
+        assert cap_after == pytest.approx(100.0, abs=1.0)

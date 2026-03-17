@@ -457,7 +457,8 @@ class MemoryBackend(RateLimiterBackend):
             )
 
     async def _refund_cancelled_consumption(self, usage: FrozenUsage) -> None:
-        """Refund capacity consumed before a CancelledError hit callbacks.
+        """
+        Refund capacity consumed before a CancelledError hit callbacks.
 
         Acquires the lock, adds back consumed amounts (capped at max_capacity),
         and notifies waiters.  Fires no callbacks to avoid recursion and another

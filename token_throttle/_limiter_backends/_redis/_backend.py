@@ -720,7 +720,8 @@ class RedisBackend(RateLimiterBackend):
             )
 
     async def _refund_cancelled_consumption(self, usage: FrozenUsage) -> None:
-        """Refund capacity consumed before a CancelledError hit callbacks.
+        """
+        Refund capacity consumed before a CancelledError hit callbacks.
 
         Uses asyncio.shield() because the refund involves multiple Redis I/O
         await points (lock acquisition, pipeline get, pipeline set).  Shield
