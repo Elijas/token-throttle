@@ -279,34 +279,40 @@ class MemoryBackend(RateLimiterBackend):
                         timeout=max(0.001, computed),
                     )
 
-        # All callbacks fired outside the lock
-        await self._fresh_start_buckets_callback(fresh)
-        if self._callbacks and self._callbacks.on_capacity_consumed:
-            await self._invoke_callback_safe(
-                self._callbacks.on_capacity_consumed,
-                model_family=self._limit_config.get_model_family(),
-                preconsumption_capacities=preconsumption,
-                postconsumption_capacities=postconsumption,
-                usage=usage,
-                current_time=current_time,
-            )
-        if has_waited and self._callbacks and self._callbacks.on_wait_start:
-            await self._invoke_callback_safe(
-                self._callbacks.on_wait_start,
-                model_family=self._limit_config.get_model_family(),
-                preconsumption_capacities=first_failed_pre,
-                usage=usage,
-            )
-        if has_waited and self._callbacks and self._callbacks.after_wait_end_consumption:
-            wait_time_s = time.monotonic() - start_time
-            await self._invoke_callback_safe(
-                self._callbacks.after_wait_end_consumption,
-                model_family=self._limit_config.get_model_family(),
-                preconsumption_capacities=preconsumption,
-                postconsumption_capacities=postconsumption,
-                usage=frozendict(usage),
-                wait_time_s=wait_time_s,
-            )
+        # All callbacks fired outside the lock.  If CancelledError arrives
+        # during any callback await, refund the consumed capacity so it is
+        # not permanently lost (the caller never receives a reservation).
+        try:
+            await self._fresh_start_buckets_callback(fresh)
+            if self._callbacks and self._callbacks.on_capacity_consumed:
+                await self._invoke_callback_safe(
+                    self._callbacks.on_capacity_consumed,
+                    model_family=self._limit_config.get_model_family(),
+                    preconsumption_capacities=preconsumption,
+                    postconsumption_capacities=postconsumption,
+                    usage=usage,
+                    current_time=current_time,
+                )
+            if has_waited and self._callbacks and self._callbacks.on_wait_start:
+                await self._invoke_callback_safe(
+                    self._callbacks.on_wait_start,
+                    model_family=self._limit_config.get_model_family(),
+                    preconsumption_capacities=first_failed_pre,
+                    usage=usage,
+                )
+            if has_waited and self._callbacks and self._callbacks.after_wait_end_consumption:
+                wait_time_s = time.monotonic() - start_time
+                await self._invoke_callback_safe(
+                    self._callbacks.after_wait_end_consumption,
+                    model_family=self._limit_config.get_model_family(),
+                    preconsumption_capacities=preconsumption,
+                    postconsumption_capacities=postconsumption,
+                    usage=frozendict(usage),
+                    wait_time_s=wait_time_s,
+                )
+        except asyncio.CancelledError:
+            await self._refund_cancelled_consumption(usage)
+            raise
 
     def _compute_sleep(self, usage: FrozenUsage, preconsumption: Capacities) -> float:
         """Compute max wait across all buckets based on deficit / rate."""
@@ -449,6 +455,32 @@ class MemoryBackend(RateLimiterBackend):
                 RuntimeWarning,
                 stacklevel=3,
             )
+
+    async def _refund_cancelled_consumption(self, usage: FrozenUsage) -> None:
+        """Refund capacity consumed before a CancelledError hit callbacks.
+
+        Acquires the lock, adds back consumed amounts (capped at max_capacity),
+        and notifies waiters.  Fires no callbacks to avoid recursion and another
+        cancellation window.
+        """
+        async with self._condition:
+            current_time = time.time()
+            capacities, _ = self._get_capacities(current_time)
+            refunded: dict[tuple[str, int], float] = dict(capacities)
+            for (cap_metric, per_seconds), cap_amount in capacities.items():
+                for usage_metric, usage_amount in usage.items():
+                    if cap_metric != usage_metric:
+                        continue
+                    bucket = next(
+                        b
+                        for b in self._buckets
+                        if b.usage_metric == cap_metric and b.per_seconds == per_seconds
+                    )
+                    refunded[(cap_metric, per_seconds)] = min(
+                        cap_amount + usage_amount, bucket.max_capacity,
+                    )
+            self._set_capacities(frozendict(refunded), current_time)
+            self._condition.notify_all()
 
     async def _fresh_start_buckets_callback(
         self,
