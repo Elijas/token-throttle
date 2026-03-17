@@ -480,7 +480,7 @@ class MemoryBackend(RateLimiterBackend):
                     refunded[(cap_metric, per_seconds)] = min(
                         cap_amount + usage_amount, bucket.max_capacity,
                     )
-            self._set_capacities(frozendict(refunded), current_time)
+            self._set_capacities(frozendict(refunded), current_time, allow_negative=True)
             self._condition.notify_all()
 
     async def _fresh_start_buckets_callback(

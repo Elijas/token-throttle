@@ -752,6 +752,7 @@ class RedisBackend(RateLimiterBackend):
                         )
                 await self._set_capacities_unsafe(
                     frozendict(refunded), pipeline=pipeline, current_time=current_time,
+                    allow_negative=True,
                 )
             async with self._local_condition:
                 self._local_condition.notify_all()

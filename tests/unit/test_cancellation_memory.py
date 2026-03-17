@@ -391,3 +391,76 @@ class TestAsyncCallbackCancellationRefundsCapacity:
         # 5 tokens should be refunded — capacity should be ~100 (fresh bucket)
         cap_after = _get_bucket_capacity(backend)
         assert cap_after == pytest.approx(100.0, abs=1.0)
+
+
+# ---------------------------------------------------------------------------
+# Group 5: Cancellation refund must preserve negative debt
+# ---------------------------------------------------------------------------
+
+
+class TestCancellationDebtPreservation:
+    """
+    Regression: _refund_cancelled_consumption called _set_capacities without
+    allow_negative=True, so max(0, value) clamped negative debt to 0.
+
+    Scenario:
+    1. Task A acquires 50 (capacity → 50)
+    2. Task A enters a slow on_capacity_consumed callback
+    3. While callback runs, Task B calls consume_capacity(200) → capacity → -150
+    4. Task A is cancelled during callback → refund 50 → capacity should be -100
+    5. BUG: _set_capacities clamps -100 to 0, erasing 100 units of debt
+    """
+
+    async def test_cancellation_refund_preserves_negative_debt(self):
+        gate = asyncio.Event()
+        entered_callback = asyncio.Event()
+
+        async def slow_callback(**kwargs):
+            if not gate.is_set():
+                return
+            entered_callback.set()
+            await asyncio.sleep(10)
+
+        callbacks = RateLimiterCallbacks(on_capacity_consumed=slow_callback)
+        builder = MemoryBackendBuilder()
+        config = _make_config(limit=100)
+        backend = builder.build(config, callbacks=callbacks)
+
+        # Task A: acquire 50 (capacity → 50).  Callback returns fast (gate closed).
+        await backend.await_for_capacity(frozendict({"requests": 50.0}))
+        cap = _get_bucket_capacity(backend)
+        assert cap == pytest.approx(50.0, abs=1.0)
+
+        # Open the gate so the NEXT consumption enters the slow callback
+        gate.set()
+
+        # Task A (second call): acquire 10 — will enter slow callback
+        task_a = asyncio.create_task(
+            backend.await_for_capacity(frozendict({"requests": 10.0}))
+        )
+        await asyncio.wait_for(entered_callback.wait(), timeout=2.0)
+
+        # Close the gate BEFORE consume_capacity so its callback returns fast
+        # (otherwise the main coroutine blocks in slow_callback for 10s)
+        gate.clear()
+
+        # While Task A is stuck in callback, Task B drives capacity negative
+        # consume_capacity is a "speedometer" op — it uses allow_negative=True
+        await backend.consume_capacity(frozendict({"requests": 200.0}))
+        cap_after_consume = _get_bucket_capacity(backend)
+        # capacity was 40 (50-10 already consumed by task_a) → 40-200 = -160
+        assert cap_after_consume < -100, f"Expected deep negative debt, got {cap_after_consume}"
+
+        # Cancel Task A during callback → triggers _refund_cancelled_consumption
+        task_a.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task_a
+
+        # Refund should add back 10 but PRESERVE the negative debt from Task B
+        cap_final = _get_bucket_capacity(backend)
+        expected = cap_after_consume + 10.0  # debt preserved, only refund added back
+        assert cap_final == pytest.approx(expected, abs=1.0), (
+            f"Debt erased! Expected {expected}, got {cap_final}. "
+            f"If cap_final ≈ 0, the bug is that _refund_cancelled_consumption "
+            f"calls _set_capacities without allow_negative=True."
+        )
