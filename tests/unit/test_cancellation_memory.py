@@ -4,7 +4,7 @@ Regression tests for audit findings:
 - Timeout (0 or N) does not consume capacity (Finding 1)
 - Cancellation during condition.wait() does not consume capacity (Finding 2)
 - Sync thread timeout does not consume capacity (Finding 3)
-- CancelledError during async callback leaks capacity (Finding 4 — xfail)
+- CancelledError during async callback refunds capacity (Finding 4)
 
 Covers: async MemoryBackend and sync SyncMemoryBackend.
 """
@@ -276,23 +276,16 @@ class TestSyncCancellationNoCapacityLeak:
 # ---------------------------------------------------------------------------
 
 
-class TestAsyncCallbackCancellationLeaksCapacity:
+class TestAsyncCallbackCancellationRefundsCapacity:
     """
-    Finding 4: CancelledError during on_capacity_consumed leaks capacity.
+    CancelledError during post-consumption callbacks refunds capacity.
 
     After _try_consume_locked() succeeds (inside lock), callbacks fire outside the
     lock with real `await` calls. If a CancelledError arrives during a callback,
-    capacity is consumed but await_for_capacity() raises CancelledError — the
-    caller never gets a CapacityReservation, so no refund is possible.
-
-    Marked xfail(strict=True): the test MUST fail (capacity is leaked).
+    the backend refunds consumed capacity under the lock and re-raises.
     """
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="Known: CancelledError during on_capacity_consumed callback leaks capacity",
-    )
-    async def test_cancellation_during_on_capacity_consumed_leaks_capacity(self):
+    async def test_cancellation_during_on_capacity_consumed_refunds_capacity(self):
         # Gate ensures the slow path only activates AFTER the initial exhaust.
         # on_capacity_consumed fires for every consumption, including the exhaust.
         gate = asyncio.Event()
