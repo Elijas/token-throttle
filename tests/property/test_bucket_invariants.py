@@ -1,5 +1,5 @@
 """
-Property-based tests for RedisBucket.calculate_capacity() using Hypothesis.
+Property-based tests for calculate_capacity() using Hypothesis.
 
 These are pure math tests -- no Redis or async needed. They verify invariants
 that must hold for ANY valid combination of inputs, not just hand-picked examples.
@@ -23,6 +23,9 @@ limits = st.floats(min_value=0.1, max_value=1e6, allow_nan=False, allow_infinity
 per_seconds = st.integers(min_value=1, max_value=86400)
 capacities = st.floats(
     min_value=0.0, max_value=1e6, allow_nan=False, allow_infinity=False
+)
+negative_capacities = st.floats(
+    min_value=-1e6, max_value=1e6, allow_nan=False, allow_infinity=False
 )
 times = st.floats(min_value=0.0, max_value=1e6, allow_nan=False, allow_infinity=False)
 
@@ -309,3 +312,105 @@ class TestFreshStartOnNone:
         )
         assert result.amount == bucket.max_capacity
         assert result.is_fresh_start is True
+
+
+# ---------------------------------------------------------------------------
+# Negative-capacity property tests
+# ---------------------------------------------------------------------------
+
+
+class TestCapacityBoundFromNegative:
+    """calculate_capacity with negative outdated_capacity must still return <= max_capacity."""
+
+    @given(
+        limit=limits,
+        per_seconds_val=per_seconds,
+        outdated_capacity=negative_capacities,
+        last_checked=times,
+        time_delta=times,
+    )
+    def test_result_never_exceeds_max_capacity_from_negative(
+        self,
+        limit: float,
+        per_seconds_val: int,
+        outdated_capacity: float,
+        last_checked: float,
+        time_delta: float,
+    ):
+        bucket = make_bucket(limit=limit, per_seconds_val=per_seconds_val)
+        current_time = last_checked + time_delta
+
+        result = bucket.calculate_capacity(
+            last_checked=last_checked,
+            outdated_capacity=outdated_capacity,
+            current_time=current_time,
+        )
+
+        assert result.amount <= bucket.max_capacity + 1e-9, (
+            f"Capacity {result.amount} exceeded max {bucket.max_capacity} "
+            f"(from negative start {outdated_capacity})"
+        )
+
+
+class TestRefillMonotonicFromNegative:
+    """More elapsed time must produce >= capacity, even starting from negative."""
+
+    @given(data=st.data())
+    def test_more_time_means_more_or_equal_capacity_from_negative(
+        self, data: st.DataObject
+    ):
+        limit = data.draw(limits, label="limit")
+        per_seconds_val = data.draw(per_seconds, label="per_seconds")
+        outdated_capacity = data.draw(negative_capacities, label="outdated_capacity")
+        last_checked = data.draw(times, label="last_checked")
+        delta1 = data.draw(times, label="delta1")
+        extra_delta = data.draw(times, label="extra_delta")
+
+        bucket = make_bucket(limit=limit, per_seconds_val=per_seconds_val)
+
+        t1 = last_checked + delta1
+        t2 = t1 + extra_delta  # t2 >= t1 by construction
+
+        r1 = bucket.calculate_capacity(
+            last_checked=last_checked,
+            outdated_capacity=outdated_capacity,
+            current_time=t1,
+        )
+        r2 = bucket.calculate_capacity(
+            last_checked=last_checked,
+            outdated_capacity=outdated_capacity,
+            current_time=t2,
+        )
+
+        assert r2.amount >= r1.amount - 1e-9, (
+            f"Capacity decreased with more time from negative start: "
+            f"{r1.amount} -> {r2.amount} (outdated={outdated_capacity})"
+        )
+
+
+class TestRefundCappingWithNegativeCapacity:
+    """min(current + refund, max_cap) where current and refund can be negative — result <= max_cap."""
+
+    @given(
+        limit=limits,
+        per_seconds_val=per_seconds,
+        current_capacity=negative_capacities,
+        refund_amount=negative_capacities,
+    )
+    def test_refund_result_never_exceeds_max(
+        self,
+        limit: float,
+        per_seconds_val: int,
+        current_capacity: float,
+        refund_amount: float,
+    ):
+        bucket = make_bucket(limit=limit, per_seconds_val=per_seconds_val)
+        max_cap = bucket.max_capacity
+
+        # Mirrors the capping logic from SyncMemoryBackend.refund_capacity
+        refunded = min(current_capacity + refund_amount, max_cap)
+
+        assert refunded <= max_cap + 1e-9, (
+            f"Refund result {refunded} exceeded max {max_cap} "
+            f"(current={current_capacity}, refund={refund_amount})"
+        )
