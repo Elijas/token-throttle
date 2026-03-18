@@ -458,3 +458,144 @@ class TestCapacityAccountingAfterConcurrentOps:
             assert cap == pytest.approx(50.0, abs=2.0), (
                 f"Expected ~50 capacity after 5 refunds of 10, got {cap}"
             )
+
+
+class TestConcurrentSetMaxCapacity:
+    """Thread safety of set_max_capacity mixed with consume and acquire.
+
+    set_max_capacity modifies max_capacity and rate under the condition lock.
+    These tests verify it plays nicely with concurrent consumers and acquirers.
+    """
+
+    def test_concurrent_set_max_and_consume_no_errors(self, sync_backend_builder):
+        """10 threads consuming + 5 threads changing max_capacity must not error.
+
+        Final capacity should be within [negative, current_max].
+        """
+        backend = _build_backend(sync_backend_builder, limit=200, per_seconds=60)
+        errors: list[BaseException] = []
+
+        def do_consume():
+            try:
+                backend.consume_capacity(frozen_usage({"requests": 10}))
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        def do_set_max(new_max):
+            try:
+                backend.set_max_capacity("requests", 60, new_max)
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        max_values = [50.0, 100.0, 300.0, 150.0, 200.0]
+
+        with ThreadPoolExecutor(max_workers=15) as pool:
+            futures = [pool.submit(do_consume) for _ in range(10)]
+            futures.extend(pool.submit(do_set_max, v) for v in max_values)
+            for f in as_completed(futures, timeout=10):
+                f.result()
+
+        assert errors == [], f"Unexpected errors: {errors}"
+
+        buckets = _get_memory_buckets(backend)
+        if buckets is not None:
+            cap = buckets[0].get_capacity(time.time()).amount
+            current_max = buckets[0].max_capacity
+            assert cap <= current_max + 1.0, (
+                f"Capacity {cap} exceeded max {current_max}"
+            )
+
+    def test_concurrent_set_max_and_acquire_no_deadlock(self, sync_backend_builder):
+        """Interleaved wait_for_capacity and set_max_capacity must not deadlock.
+
+        Both paths hold the condition lock. Capacity changes also call
+        notify_all, which should unblock waiters.
+        """
+        backend = _build_backend(sync_backend_builder, limit=100, per_seconds=1)
+        errors: list[BaseException] = []
+
+        def do_acquire():
+            try:
+                backend.wait_for_capacity(frozen_usage({"requests": 5}), timeout=5)
+            except TimeoutError:
+                pass  # acceptable — capacity may have been lowered
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        def do_set_max(new_max):
+            try:
+                backend.set_max_capacity("requests", 1, new_max)
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        with ThreadPoolExecutor(max_workers=20) as pool:
+            futures = [pool.submit(do_acquire) for _ in range(10)]
+            futures.extend(
+                pool.submit(do_set_max, v)
+                for v in [50.0, 200.0, 30.0, 150.0, 100.0, 75.0, 300.0, 10.0, 500.0, 60.0]
+            )
+            for f in as_completed(futures, timeout=15):
+                f.result()
+
+        assert errors == [], f"Unexpected errors: {errors}"
+
+    def test_lower_max_below_acquire_raises_on_next_poll(self, sync_backend_builder):
+        """Lowering max_capacity below a requested acquire amount raises ValueError.
+
+        After set_max_capacity(5), wait_for_capacity(10) should raise
+        immediately because 10 > max_capacity of 5 (can never be satisfied).
+        """
+        backend = _build_backend(sync_backend_builder, limit=100, per_seconds=60)
+
+        # Lower max_capacity to 5
+        backend.set_max_capacity("requests", 60, 5.0)
+
+        # Requesting 10 when max is 5 should raise ValueError
+        with pytest.raises(ValueError, match="exceeds bucket max capacity"):
+            backend.wait_for_capacity(frozen_usage({"requests": 10}), timeout=0.0)
+
+    def test_set_max_capacity_final_bounds(self, sync_backend_builder):
+        """After concurrent set_max + consume + refund, capacity is in valid bounds.
+
+        Final capacity must be <= current max_capacity.
+        """
+        backend = _build_backend(sync_backend_builder, limit=100, per_seconds=3600)
+        errors: list[BaseException] = []
+
+        def do_consume():
+            try:
+                backend.consume_capacity(frozen_usage({"requests": 5}))
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        def do_refund():
+            try:
+                backend.refund_capacity(
+                    reserved_usage=frozen_usage({"requests": 10}),
+                    actual_usage=frozen_usage({"requests": 5}),
+                )
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        def do_set_max(v):
+            try:
+                backend.set_max_capacity("requests", 3600, v)
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        with ThreadPoolExecutor(max_workers=20) as pool:
+            futures = [pool.submit(do_consume) for _ in range(5)]
+            futures.extend(pool.submit(do_refund) for _ in range(5))
+            futures.extend(pool.submit(do_set_max, v) for v in [50.0, 200.0, 80.0, 150.0, 100.0])
+            for f in as_completed(futures, timeout=10):
+                f.result()
+
+        assert errors == [], f"Unexpected errors: {errors}"
+
+        buckets = _get_memory_buckets(backend)
+        if buckets is not None:
+            cap = buckets[0].get_capacity(time.time()).amount
+            current_max = buckets[0].max_capacity
+            assert cap <= current_max + 1.0, (
+                f"Capacity {cap} exceeded max {current_max}"
+            )

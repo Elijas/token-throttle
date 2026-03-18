@@ -1,34 +1,31 @@
 """
-Temporal property tests for MemoryBackend quota accounting.
+Lifecycle property tests for quota accounting correctness.
 
-Uses Hypothesis RuleBasedStateMachine to generate random sequences of
-operations WITH advancing time, testing the interaction between time-based
-refill (stored + elapsed * rate) and mutations (consume, refund, set_max_capacity).
+Three stateful machines targeting specific invariant gaps:
 
-The existing stateful tests in test_stateful_accounting.py all use FROZEN_TIME,
-so the refill path through calculate_capacity() is never exercised under random
-operation sequences.  These tests close that gap.
+1. NegativeCapacitySetMaxMachine  - set_max_capacity interactions with negative
+   capacity and time advancement (Gaps 3, 4)
+2. ReservationTrackingMachine     - acquire-refund lifecycle tracking with
+   conservation (Gap 2)
+3. FullLifecycleMachine           - complete operation cycle on two-window quotas
+   with lifecycle-tracked reservations (Gap 5)
 """
 
-import asyncio
-import enum
-import warnings
 from unittest.mock import patch
 
 import pytest
-from hypothesis import given
 from hypothesis import settings as hypothesis_settings
 from hypothesis import strategies as st
 from hypothesis.stateful import (
     RuleBasedStateMachine,
     initialize,
     invariant,
+    precondition,
     rule,
 )
 
 from token_throttle._interfaces._interfaces import PerModelConfig
 from token_throttle._interfaces._models import Quota, UsageQuotas, frozen_usage
-from token_throttle._limiter_backends._memory._backend import MemoryBackend
 from token_throttle._limiter_backends._memory._bucket import MemoryBucket
 from token_throttle._limiter_backends._memory._sync_backend import SyncMemoryBackend
 
@@ -38,9 +35,16 @@ from token_throttle._limiter_backends._memory._sync_backend import SyncMemoryBac
 
 INITIAL_TIME = 1_000_000.0
 METRIC = "tokens"
-WINDOW = 60
-LIMIT = 1000.0
 
+# Machine 1: small limit to frequently drive capacity negative
+M1_WINDOW = 60
+M1_LIMIT = 200.0
+
+# Machine 2: moderate limit
+M2_WINDOW = 60
+M2_LIMIT = 500.0
+
+# Machine 3: two windows
 SHORT_WINDOW = 60
 SHORT_LIMIT = 100.0
 LONG_WINDOW = 3600
@@ -53,51 +57,43 @@ LONG_LIMIT = 1000.0
 time_deltas = st.floats(
     min_value=0.0, max_value=120.0, allow_nan=False, allow_infinity=False
 )
-amounts = st.floats(
-    min_value=0.1, max_value=500.0, allow_nan=False, allow_infinity=False
+# Machine 1: large amounts relative to limit to drive deeply negative
+m1_amounts = st.floats(
+    min_value=50.0, max_value=500.0, allow_nan=False, allow_infinity=False
 )
-small_amounts = st.floats(
+m1_small_amounts = st.floats(
+    min_value=1.0, max_value=100.0, allow_nan=False, allow_infinity=False
+)
+m1_max_cap_values = st.floats(
+    min_value=1.0, max_value=1000.0, allow_nan=False, allow_infinity=False
+)
+
+m2_amounts = st.floats(
+    min_value=1.0, max_value=250.0, allow_nan=False, allow_infinity=False
+)
+
+m3_amounts = st.floats(
     min_value=0.1, max_value=50.0, allow_nan=False, allow_infinity=False
 )
-max_cap_values = st.floats(
-    min_value=1.0, max_value=5000.0, allow_nan=False, allow_infinity=False
+m3_max_cap_values = st.floats(
+    min_value=1.0, max_value=500.0, allow_nan=False, allow_infinity=False
 )
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-def _make_config(limit: float = LIMIT, window: int = WINDOW) -> PerModelConfig:
-    quota = Quota(metric=METRIC, limit=limit, per_seconds=window)
-    return PerModelConfig(model_family="test", quotas=UsageQuotas([quota]))
-
-
-def _make_bucket(limit: float = LIMIT, window: int = WINDOW) -> MemoryBucket:
-    return MemoryBucket(
-        metric=METRIC, per_seconds=window, limit=limit, model_family="test"
-    )
-
-
-def _make_sync_backend(limit: float = LIMIT, window: int = WINDOW) -> SyncMemoryBackend:
-    config = _make_config(limit, window)
-    bucket = _make_bucket(limit, window)
-    return SyncMemoryBackend(buckets=[bucket], limit_config=config)
-
 
 # ---------------------------------------------------------------------------
-# 1a. TimeAdvancingAccountingMachine (single bucket)
+# Machine 1: NegativeCapacitySetMaxMachine
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.filterwarnings("ignore::RuntimeWarning")
-class TimeAdvancingAccountingMachine(RuleBasedStateMachine):
+class NegativeCapacitySetMaxMachine(RuleBasedStateMachine):
     """
-    Shadow-model test for a single-bucket SyncMemoryBackend with advancing time.
+    Test set_max_capacity interactions with negative capacity and time advancement.
 
-    Unlike SingleBucketAccountingMachine (frozen time), this machine advances
-    a mutable mock clock between operations so that the lazy refill path
-    (stored + elapsed * rate) in calculate_capacity() is exercised.
+    Uses a small LIMIT (200) with large consume amounts (50-500) to frequently
+    drive capacity deeply negative. Exercises the interaction between
+    set_max_capacity (which changes rate and max but NOT stored) and deeply
+    negative stored capacity recovering through time-based refill.
     """
 
     def __init__(self):
@@ -106,16 +102,16 @@ class TimeAdvancingAccountingMachine(RuleBasedStateMachine):
         self.bucket: MemoryBucket | None = None
         self.current_time: float = INITIAL_TIME
 
-        # Shadow state — mirrors bucket.capacity / bucket.last_checked
+        # Shadow state
         self.shadow_stored: float | None = None
         self.shadow_last_checked: float | None = None
-        self.shadow_max_capacity: float = LIMIT
-        self.shadow_rate: float = LIMIT / WINDOW
+        self.shadow_max_capacity: float = M1_LIMIT
+        self.shadow_rate: float = M1_LIMIT / M1_WINDOW
 
         # Conservation accounting
         self.total_consumed: float = 0.0
         self.total_refunded: float = 0.0
-        self.accounting_baseline: float = LIMIT
+        self.accounting_baseline: float = M1_LIMIT
         self.cumulative_max_refill: float = 0.0
 
         self._time_patcher = patch(
@@ -126,7 +122,6 @@ class TimeAdvancingAccountingMachine(RuleBasedStateMachine):
         self._mock_time.monotonic.side_effect = lambda: self.current_time
 
     def _shadow_readable(self) -> float:
-        """Mirror calculate_capacity() logic with the shadow's stored state."""
         if self.shadow_stored is None:
             return self.shadow_max_capacity
         time_passed = max(0.0, self.current_time - self.shadow_last_checked)
@@ -137,25 +132,38 @@ class TimeAdvancingAccountingMachine(RuleBasedStateMachine):
 
     @initialize()
     def init_backend(self):
-        self.backend = _make_sync_backend()
-        self.bucket = self.backend._buckets[0]
+        config = PerModelConfig(
+            model_family="test",
+            quotas=UsageQuotas(
+                [Quota(metric=METRIC, limit=M1_LIMIT, per_seconds=M1_WINDOW)]
+            ),
+        )
+        bucket = MemoryBucket(
+            metric=METRIC,
+            per_seconds=M1_WINDOW,
+            limit=M1_LIMIT,
+            model_family="test",
+        )
+        self.backend = SyncMemoryBackend(
+            buckets=[bucket], limit_config=config
+        )
+        self.bucket = bucket
         self.current_time = INITIAL_TIME
         self.shadow_stored = None
         self.shadow_last_checked = None
-        self.shadow_max_capacity = LIMIT
-        self.shadow_rate = LIMIT / WINDOW
+        self.shadow_max_capacity = M1_LIMIT
+        self.shadow_rate = M1_LIMIT / M1_WINDOW
         self.total_consumed = 0.0
         self.total_refunded = 0.0
-        self.accounting_baseline = LIMIT
+        self.accounting_baseline = M1_LIMIT
         self.cumulative_max_refill = 0.0
 
     @rule(delta=time_deltas)
     def advance_time(self, delta):
-        """Tick the clock forward.  No backend call — refill is lazy."""
         self.cumulative_max_refill += delta * self.shadow_rate
         self.current_time += delta
 
-    @rule(amount=amounts)
+    @rule(amount=m1_amounts)
     def consume(self, amount):
         readable = self._shadow_readable()
         self.backend.consume_capacity(frozen_usage({METRIC: amount}))
@@ -163,7 +171,7 @@ class TimeAdvancingAccountingMachine(RuleBasedStateMachine):
         self.shadow_last_checked = self.current_time
         self.total_consumed += amount
 
-    @rule(amount=amounts)
+    @rule(amount=m1_small_amounts)
     def try_acquire(self, amount):
         readable = self._shadow_readable()
         if amount > self.shadow_max_capacity:
@@ -187,7 +195,7 @@ class TimeAdvancingAccountingMachine(RuleBasedStateMachine):
                 )
 
     @rule(
-        reserved=amounts,
+        reserved=m1_small_amounts,
         actual_fraction=st.floats(
             min_value=0.0, max_value=2.0, allow_nan=False, allow_infinity=False
         ),
@@ -206,12 +214,12 @@ class TimeAdvancingAccountingMachine(RuleBasedStateMachine):
         self.shadow_last_checked = self.current_time
         self.total_refunded += refund_amount
 
-    @rule(value=max_cap_values)
+    @rule(value=m1_max_cap_values)
     def set_max_capacity(self, value):
         old_readable = self._shadow_readable()
-        self.backend.set_max_capacity(METRIC, WINDOW, value)
+        self.backend.set_max_capacity(METRIC, M1_WINDOW, value)
         self.shadow_max_capacity = value
-        self.shadow_rate = value / WINDOW
+        self.shadow_rate = value / M1_WINDOW
         new_readable = self._shadow_readable()
         gain = new_readable - old_readable
         if gain > 0:
@@ -240,14 +248,7 @@ class TimeAdvancingAccountingMachine(RuleBasedStateMachine):
 
     @invariant()
     def conservation(self):
-        """No operation should create capacity from nothing.
-
-        capacity + consumed - refunded <= baseline + cumulative_max_refill.
-        The baseline starts at LIMIT and increases when set_max_capacity
-        raises the readable ceiling.  cumulative_max_refill is the integral
-        of rate * dt across all time advances (an upper bound on actual
-        refill, since capping can only lose capacity).
-        """
+        """No operation should create capacity from nothing."""
         if self.bucket is None:
             return
         actual = self.bucket.get_capacity(self.current_time).amount
@@ -263,28 +264,213 @@ class TimeAdvancingAccountingMachine(RuleBasedStateMachine):
         self._time_patcher.stop()
 
 
-StatefulTimeAdvancing = TimeAdvancingAccountingMachine.TestCase
-StatefulTimeAdvancing.settings = hypothesis_settings(
+StatefulNegativeCapacitySetMax = NegativeCapacitySetMaxMachine.TestCase
+StatefulNegativeCapacitySetMax.settings = hypothesis_settings(
     max_examples=200, stateful_step_count=50, deadline=None
 )
 
 
 # ---------------------------------------------------------------------------
-# 1b. TimeAdvancingMultiWindowMachine (two windows)
+# Machine 2: ReservationTrackingMachine
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.filterwarnings("ignore::RuntimeWarning")
-class TimeAdvancingMultiWindowMachine(RuleBasedStateMachine):
+class ReservationTrackingMachine(RuleBasedStateMachine):
     """
-    Shadow-model test for a two-window SyncMemoryBackend with advancing time.
+    Lifecycle-tracked acquire-refund with conservation.
 
-    Two quotas for the same metric: 60s window (limit=100) and 3600s window
-    (limit=1000).  Time advances between operations, creating asymmetric
-    refill rates (short window refills ~6x faster per unit time).
+    Unlike existing tests where refunds are arbitrary (not tied to prior
+    acquires), this machine tracks outstanding reservations from successful
+    acquires and only refunds against actual reservations. This makes the
+    conservation invariant much tighter.
+    """
 
-    Key invariant: try_acquire succeeds iff BOTH windows have sufficient
-    capacity (including refill).
+    def __init__(self):
+        super().__init__()
+        self.backend: SyncMemoryBackend | None = None
+        self.bucket: MemoryBucket | None = None
+        self.current_time: float = INITIAL_TIME
+
+        # Shadow state
+        self.shadow_stored: float | None = None
+        self.shadow_last_checked: float | None = None
+        self.shadow_max_capacity: float = M2_LIMIT
+        self.shadow_rate: float = M2_LIMIT / M2_WINDOW
+
+        # Lifecycle tracking
+        self.outstanding_reservations: list[float] = []
+
+        # Conservation accounting
+        self.total_consumed: float = 0.0
+        self.total_refunded: float = 0.0
+        self.accounting_baseline: float = M2_LIMIT
+        self.cumulative_max_refill: float = 0.0
+
+        self._time_patcher = patch(
+            "token_throttle._limiter_backends._memory._sync_backend.time"
+        )
+        self._mock_time = self._time_patcher.start()
+        self._mock_time.time.side_effect = lambda: self.current_time
+        self._mock_time.monotonic.side_effect = lambda: self.current_time
+
+    def _shadow_readable(self) -> float:
+        if self.shadow_stored is None:
+            return self.shadow_max_capacity
+        time_passed = max(0.0, self.current_time - self.shadow_last_checked)
+        return min(
+            self.shadow_max_capacity,
+            self.shadow_stored + time_passed * self.shadow_rate,
+        )
+
+    @initialize()
+    def init_backend(self):
+        config = PerModelConfig(
+            model_family="test",
+            quotas=UsageQuotas(
+                [Quota(metric=METRIC, limit=M2_LIMIT, per_seconds=M2_WINDOW)]
+            ),
+        )
+        bucket = MemoryBucket(
+            metric=METRIC,
+            per_seconds=M2_WINDOW,
+            limit=M2_LIMIT,
+            model_family="test",
+        )
+        self.backend = SyncMemoryBackend(
+            buckets=[bucket], limit_config=config
+        )
+        self.bucket = bucket
+        self.current_time = INITIAL_TIME
+        self.shadow_stored = None
+        self.shadow_last_checked = None
+        self.shadow_max_capacity = M2_LIMIT
+        self.shadow_rate = M2_LIMIT / M2_WINDOW
+        self.outstanding_reservations = []
+        self.total_consumed = 0.0
+        self.total_refunded = 0.0
+        self.accounting_baseline = M2_LIMIT
+        self.cumulative_max_refill = 0.0
+
+    @rule(delta=time_deltas)
+    def advance_time(self, delta):
+        self.cumulative_max_refill += delta * self.shadow_rate
+        self.current_time += delta
+
+    @rule(amount=m2_amounts)
+    def consume(self, amount):
+        """Speedometer-style consume (no reservation tracking)."""
+        readable = self._shadow_readable()
+        self.backend.consume_capacity(frozen_usage({METRIC: amount}))
+        self.shadow_stored = readable - amount
+        self.shadow_last_checked = self.current_time
+        self.total_consumed += amount
+
+    @rule(amount=m2_amounts)
+    def try_acquire(self, amount):
+        """Acquire with lifecycle tracking — successful acquires are recorded."""
+        readable = self._shadow_readable()
+        if amount > self.shadow_max_capacity:
+            with pytest.raises(ValueError, match="exceeds bucket max capacity"):
+                self.backend.wait_for_capacity(
+                    frozen_usage({METRIC: amount}), timeout=0.0
+                )
+            return
+
+        if amount <= readable:
+            self.backend.wait_for_capacity(
+                frozen_usage({METRIC: amount}), timeout=0.0
+            )
+            self.shadow_stored = max(0.0, readable - amount)
+            self.shadow_last_checked = self.current_time
+            self.total_consumed += amount
+            self.outstanding_reservations.append(amount)
+        else:
+            with pytest.raises(TimeoutError):
+                self.backend.wait_for_capacity(
+                    frozen_usage({METRIC: amount}), timeout=0.0
+                )
+
+    @precondition(lambda self: len(self.outstanding_reservations) > 0)
+    @rule(
+        actual_fraction=st.floats(
+            min_value=0.0, max_value=1.0, allow_nan=False, allow_infinity=False
+        ),
+    )
+    def refund_outstanding(self, actual_fraction):
+        """Refund against an actual outstanding reservation."""
+        reserved = self.outstanding_reservations.pop()
+        actual = reserved * actual_fraction
+        readable = self._shadow_readable()
+        self.backend.refund_capacity(
+            frozen_usage({METRIC: reserved}),
+            frozen_usage({METRIC: actual}),
+        )
+        refund_amount = reserved - actual
+        self.shadow_stored = min(
+            readable + refund_amount, self.shadow_max_capacity
+        )
+        self.shadow_last_checked = self.current_time
+        self.total_refunded += refund_amount
+
+    @invariant()
+    def capacity_matches_shadow(self):
+        if self.bucket is None:
+            return
+        actual = self.bucket.get_capacity(self.current_time).amount
+        expected = self._shadow_readable()
+        assert actual == pytest.approx(expected, abs=1e-9), (
+            f"Capacity mismatch: actual={actual}, shadow={expected}"
+        )
+
+    @invariant()
+    def capacity_within_max(self):
+        if self.bucket is None:
+            return
+        actual = self.bucket.get_capacity(self.current_time).amount
+        assert actual <= self.shadow_max_capacity + 1e-9, (
+            f"Capacity {actual} exceeded max {self.shadow_max_capacity}"
+        )
+
+    @invariant()
+    def conservation(self):
+        """Conservation is tight because refunds are bounded by actual acquisitions."""
+        if self.bucket is None:
+            return
+        actual = self.bucket.get_capacity(self.current_time).amount
+        balance = actual + self.total_consumed - self.total_refunded
+        budget = self.accounting_baseline + self.cumulative_max_refill
+        assert balance <= budget + 1e-6, (
+            f"Conservation violation: capacity={actual}, "
+            f"consumed={self.total_consumed}, refunded={self.total_refunded}, "
+            f"balance={balance}, budget={budget}"
+        )
+
+    def teardown(self):
+        self._time_patcher.stop()
+
+
+StatefulReservationTracking = ReservationTrackingMachine.TestCase
+StatefulReservationTracking.settings = hypothesis_settings(
+    max_examples=200, stateful_step_count=50, deadline=None
+)
+
+
+# ---------------------------------------------------------------------------
+# Machine 3: FullLifecycleMachine
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.filterwarnings("ignore::RuntimeWarning")
+class FullLifecycleMachine(RuleBasedStateMachine):
+    """
+    Complete operation cycle on two-window quotas with lifecycle-tracked
+    reservations.
+
+    Two windows: SHORT (60s, limit=100) and LONG (3600s, limit=1000), same
+    metric. Exercises acquire + consume + refund + set_max_capacity + time
+    advance together. Lifecycle-tracked reservations (acquire pushes, refund
+    pops). All-or-nothing acquire semantics verified against both window shadows.
     """
 
     def __init__(self):
@@ -305,6 +491,9 @@ class TimeAdvancingMultiWindowMachine(RuleBasedStateMachine):
         self.long_last_checked: float | None = None
         self.long_max: float = LONG_LIMIT
         self.long_rate: float = LONG_LIMIT / LONG_WINDOW
+
+        # Lifecycle tracking
+        self.outstanding_reservations: list[float] = []
 
         # Per-window conservation accounting
         self.short_consumed: float = 0.0
@@ -380,6 +569,8 @@ class TimeAdvancingMultiWindowMachine(RuleBasedStateMachine):
         self.long_max = LONG_LIMIT
         self.long_rate = LONG_LIMIT / LONG_WINDOW
 
+        self.outstanding_reservations = []
+
         self.short_consumed = 0.0
         self.short_refunded = 0.0
         self.short_baseline = SHORT_LIMIT
@@ -396,7 +587,7 @@ class TimeAdvancingMultiWindowMachine(RuleBasedStateMachine):
         self.long_cumulative_refill += delta * self.long_rate
         self.current_time += delta
 
-    @rule(amount=small_amounts)
+    @rule(amount=m3_amounts)
     def consume(self, amount):
         short_r = self._short_readable()
         long_r = self._long_readable()
@@ -408,12 +599,13 @@ class TimeAdvancingMultiWindowMachine(RuleBasedStateMachine):
         self.short_consumed += amount
         self.long_consumed += amount
 
-    @rule(amount=small_amounts)
+    @rule(amount=m3_amounts)
     def try_acquire(self, amount):
         short_r = self._short_readable()
         long_r = self._long_readable()
 
-        if amount > self.short_max:
+        # The backend raises ValueError if usage exceeds ANY bucket's max_capacity
+        if amount > self.short_max or amount > self.long_max:
             with pytest.raises(ValueError, match="exceeds bucket max capacity"):
                 self.backend.wait_for_capacity(
                     frozen_usage({METRIC: amount}), timeout=0.0
@@ -431,19 +623,21 @@ class TimeAdvancingMultiWindowMachine(RuleBasedStateMachine):
             self.long_last_checked = self.current_time
             self.short_consumed += amount
             self.long_consumed += amount
+            self.outstanding_reservations.append(amount)
         else:
             with pytest.raises(TimeoutError):
                 self.backend.wait_for_capacity(
                     frozen_usage({METRIC: amount}), timeout=0.0
                 )
 
+    @precondition(lambda self: len(self.outstanding_reservations) > 0)
     @rule(
-        reserved=small_amounts,
         actual_fraction=st.floats(
-            min_value=0.0, max_value=2.0, allow_nan=False, allow_infinity=False
+            min_value=0.0, max_value=1.0, allow_nan=False, allow_infinity=False
         ),
     )
-    def refund(self, reserved, actual_fraction):
+    def refund_outstanding(self, actual_fraction):
+        reserved = self.outstanding_reservations.pop()
         actual = reserved * actual_fraction
         short_r = self._short_readable()
         long_r = self._long_readable()
@@ -458,6 +652,28 @@ class TimeAdvancingMultiWindowMachine(RuleBasedStateMachine):
         self.long_last_checked = self.current_time
         self.short_refunded += refund_amount
         self.long_refunded += refund_amount
+
+    @rule(value=m3_max_cap_values)
+    def set_max_capacity_short(self, value):
+        old_readable = self._short_readable()
+        self.backend.set_max_capacity(METRIC, SHORT_WINDOW, value)
+        self.short_max = value
+        self.short_rate = value / SHORT_WINDOW
+        new_readable = self._short_readable()
+        gain = new_readable - old_readable
+        if gain > 0:
+            self.short_baseline += gain
+
+    @rule(value=m3_max_cap_values)
+    def set_max_capacity_long(self, value):
+        old_readable = self._long_readable()
+        self.backend.set_max_capacity(METRIC, LONG_WINDOW, value)
+        self.long_max = value
+        self.long_rate = value / LONG_WINDOW
+        new_readable = self._long_readable()
+        gain = new_readable - old_readable
+        if gain > 0:
+            self.long_baseline += gain
 
     @invariant()
     def short_capacity_matches_shadow(self):
@@ -490,7 +706,6 @@ class TimeAdvancingMultiWindowMachine(RuleBasedStateMachine):
 
     @invariant()
     def short_conservation(self):
-        """Short window: no operation should create capacity from nothing."""
         if self.short_bucket is None:
             return
         actual = self.short_bucket.get_capacity(self.current_time).amount
@@ -504,7 +719,6 @@ class TimeAdvancingMultiWindowMachine(RuleBasedStateMachine):
 
     @invariant()
     def long_conservation(self):
-        """Long window: no operation should create capacity from nothing."""
         if self.long_bucket is None:
             return
         actual = self.long_bucket.get_capacity(self.current_time).amount
@@ -520,175 +734,7 @@ class TimeAdvancingMultiWindowMachine(RuleBasedStateMachine):
         self._time_patcher.stop()
 
 
-StatefulTimeAdvancingMultiWindow = TimeAdvancingMultiWindowMachine.TestCase
-StatefulTimeAdvancingMultiWindow.settings = hypothesis_settings(
+StatefulFullLifecycle = FullLifecycleMachine.TestCase
+StatefulFullLifecycle.settings = hypothesis_settings(
     max_examples=200, stateful_step_count=50, deadline=None
 )
-
-
-# ---------------------------------------------------------------------------
-# 1c. Time-advancing sync/async parity property test
-# ---------------------------------------------------------------------------
-
-
-class Op(enum.Enum):
-    CONSUME = "consume"
-    REFUND = "refund"
-    ACQUIRE = "acquire"
-    ADVANCE_TIME = "advance_time"
-
-
-@st.composite
-def temporal_ops_strategy(draw):
-    """Generate a list of (Op, ...) tuples including time advances."""
-    ops = []
-    n = draw(st.integers(min_value=1, max_value=20))
-    for _ in range(n):
-        op_type = draw(st.sampled_from(Op))
-        if op_type == Op.CONSUME:
-            amount = draw(
-                st.floats(
-                    min_value=0.1, max_value=200.0,
-                    allow_nan=False, allow_infinity=False,
-                )
-            )
-            ops.append((Op.CONSUME, amount))
-        elif op_type == Op.REFUND:
-            reserved = draw(
-                st.floats(
-                    min_value=0.1, max_value=200.0,
-                    allow_nan=False, allow_infinity=False,
-                )
-            )
-            actual = draw(
-                st.floats(
-                    min_value=0.0, max_value=400.0,
-                    allow_nan=False, allow_infinity=False,
-                )
-            )
-            ops.append((Op.REFUND, reserved, actual))
-        elif op_type == Op.ACQUIRE:
-            amount = draw(
-                st.floats(
-                    min_value=0.1, max_value=100.0,
-                    allow_nan=False, allow_infinity=False,
-                )
-            )
-            ops.append((Op.ACQUIRE, amount))
-        else:
-            delta = draw(
-                st.floats(
-                    min_value=0.0, max_value=60.0,
-                    allow_nan=False, allow_infinity=False,
-                )
-            )
-            ops.append((Op.ADVANCE_TIME, delta))
-    return ops
-
-
-def _run_sync_temporal_ops(backend, ops, clock):
-    """Execute ops on a sync backend with a mutable clock."""
-    acquire_results = []
-    for op in ops:
-        if op[0] == Op.ADVANCE_TIME:
-            clock[0] += op[1]
-        elif op[0] == Op.CONSUME:
-            backend.consume_capacity(frozen_usage({METRIC: op[1]}))
-        elif op[0] == Op.REFUND:
-            backend.refund_capacity(
-                frozen_usage({METRIC: op[1]}),
-                frozen_usage({METRIC: op[2]}),
-            )
-        elif op[0] == Op.ACQUIRE:
-            try:
-                backend.wait_for_capacity(
-                    frozen_usage({METRIC: op[1]}), timeout=0.0
-                )
-                acquire_results.append(True)
-            except (TimeoutError, ValueError):
-                acquire_results.append(False)
-    return acquire_results
-
-
-async def _run_async_temporal_ops(backend, ops, clock):
-    """Execute ops on an async backend with a mutable clock."""
-    acquire_results = []
-    for op in ops:
-        if op[0] == Op.ADVANCE_TIME:
-            clock[0] += op[1]
-        elif op[0] == Op.CONSUME:
-            await backend.consume_capacity(frozen_usage({METRIC: op[1]}))
-        elif op[0] == Op.REFUND:
-            await backend.refund_capacity(
-                frozen_usage({METRIC: op[1]}),
-                frozen_usage({METRIC: op[2]}),
-            )
-        elif op[0] == Op.ACQUIRE:
-            try:
-                await backend.await_for_capacity(
-                    frozen_usage({METRIC: op[1]}), timeout=0.0
-                )
-                acquire_results.append(True)
-            except (TimeoutError, ValueError):
-                acquire_results.append(False)
-    return acquire_results
-
-
-@pytest.mark.filterwarnings("ignore::RuntimeWarning")
-@hypothesis_settings(max_examples=100, deadline=None)
-@given(ops=temporal_ops_strategy())
-def test_temporal_sync_async_parity(ops):
-    """Identical op sequences with time advancement on sync and async backends
-    must produce identical final capacity and identical acquire results."""
-    sync_config = _make_config()
-    sync_bucket = _make_bucket()
-    async_config = _make_config()
-    async_bucket = _make_bucket()
-
-    # Mutable clock shared via single-element list so lambdas capture by ref
-    sync_clock = [INITIAL_TIME]
-    async_clock = [INITIAL_TIME]
-
-    with (
-        patch(
-            "token_throttle._limiter_backends._memory._sync_backend.time"
-        ) as sync_mock,
-        warnings.catch_warnings(),
-    ):
-        warnings.simplefilter("ignore", RuntimeWarning)
-        sync_mock.time.side_effect = lambda: sync_clock[0]
-        sync_mock.monotonic.side_effect = lambda: sync_clock[0]
-        sync_backend = SyncMemoryBackend(
-            buckets=[sync_bucket], limit_config=sync_config
-        )
-        sync_acquire_results = _run_sync_temporal_ops(sync_backend, ops, sync_clock)
-
-    with (
-        patch(
-            "token_throttle._limiter_backends._memory._backend.time"
-        ) as async_mock,
-        warnings.catch_warnings(),
-    ):
-        warnings.simplefilter("ignore", RuntimeWarning)
-        async_mock.time.side_effect = lambda: async_clock[0]
-        async_mock.monotonic.side_effect = lambda: async_clock[0]
-        async_backend = MemoryBackend(
-            buckets=[async_bucket], limit_config=async_config
-        )
-        async_acquire_results = asyncio.run(
-            _run_async_temporal_ops(async_backend, ops, async_clock)
-        )
-
-    # Both clocks should have advanced identically
-    assert sync_clock[0] == pytest.approx(async_clock[0], abs=1e-12)
-
-    sync_cap = sync_bucket.get_capacity(sync_clock[0]).amount
-    async_cap = async_bucket.get_capacity(async_clock[0]).amount
-
-    assert sync_acquire_results == async_acquire_results, (
-        f"Acquire results diverged: sync={sync_acquire_results}, "
-        f"async={async_acquire_results}"
-    )
-    assert sync_cap == pytest.approx(async_cap, abs=1e-12), (
-        f"Sync/async capacity divergence: sync={sync_cap}, async={async_cap}"
-    )
