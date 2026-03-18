@@ -267,79 +267,81 @@ class RedisBackend(RateLimiterBackend):
         postconsumption_capacities: Capacities = frozendict()
         current_time: float = 0.0
         fresh_start_buckets: list[RedisBucket] = []
-        async with await self._lock(
-            timeout=LOCK_TIMEOUT_SECONDS,
-            blocking_timeout=lock_blocking_timeout,
-        ):
-            # Pipeline is reused: _get_capacities_unsafe executes it (clearing
-            # the command buffer), then _set_capacities_unsafe adds new commands
-            # and executes again.  Safe because redis-py clears the buffer on execute().
-            pipeline = self._redis.pipeline()
-            current_time = time.time()
+        consumed = False
+        try:
+            async with await self._lock(
+                timeout=LOCK_TIMEOUT_SECONDS,
+                blocking_timeout=lock_blocking_timeout,
+            ):
+                # Pipeline is reused: _get_capacities_unsafe executes it (clearing
+                # the command buffer), then _set_capacities_unsafe adds new commands
+                # and executes again.  Safe because redis-py clears the buffer on execute().
+                pipeline = self._redis.pipeline()
+                current_time = time.time()
 
-            (
-                preconsumption_capacities,
-                fresh_start_buckets,
-            ) = await self._get_capacities_unsafe(
-                pipeline=pipeline,
-                current_time=current_time,
-            )
+                (
+                    preconsumption_capacities,
+                    fresh_start_buckets,
+                ) = await self._get_capacities_unsafe(
+                    pipeline=pipeline,
+                    current_time=current_time,
+                )
 
-            # Fail fast: if usage exceeds any bucket's max_capacity, it can
-            # never be satisfied (capacity is capped at max_capacity).
-            for usage_metric_name, usage_amount in usage.items():
-                for bucket in self.sorted_buckets:
-                    if bucket.usage_metric != usage_metric_name:
-                        continue
-                    # Uses cached max_capacity — refreshed by get_max_capacity() in _refresh_capacity
-                    if usage_amount > bucket.max_capacity:
-                        raise ValueError(
-                            f"Usage value for {usage_metric_name} ({usage_amount}) "
-                            f"exceeds bucket max capacity ({bucket.max_capacity})",
-                        )
+                # Fail fast: if usage exceeds any bucket's max_capacity, it can
+                # never be satisfied (capacity is capped at max_capacity).
+                for usage_metric_name, usage_amount in usage.items():
+                    for bucket in self.sorted_buckets:
+                        if bucket.usage_metric != usage_metric_name:
+                            continue
+                        # Uses cached max_capacity — refreshed by get_max_capacity() in _refresh_capacity
+                        if usage_amount > bucket.max_capacity:
+                            raise ValueError(
+                                f"Usage value for {usage_metric_name} ({usage_amount}) "
+                                f"exceeds bucket max capacity ({bucket.max_capacity})",
+                            )
 
-            for usage_metric_name, usage_amount in usage.items():
+                for usage_metric_name, usage_amount in usage.items():
+                    for (
+                        capacity_metric_name,
+                        _,
+                    ), capacity_amount in preconsumption_capacities.items():
+                        if usage_metric_name != capacity_metric_name:
+                            continue
+                        if usage_amount > capacity_amount:
+                            return (
+                                False,
+                                preconsumption_capacities,
+                                postconsumption_capacities,
+                            )
+
+                postconsumption_dict = {}
                 for (
                     capacity_metric_name,
-                    _,
+                    per_seconds,
                 ), capacity_amount in preconsumption_capacities.items():
-                    if usage_metric_name != capacity_metric_name:
-                        continue
-                    if usage_amount > capacity_amount:
-                        return (
-                            False,
-                            preconsumption_capacities,
-                            postconsumption_capacities,
+                    for usage_metric_name, usage_amount in usage.items():
+                        if capacity_metric_name != usage_metric_name:
+                            continue
+                        postconsumption_dict[(capacity_metric_name, per_seconds)] = (
+                            capacity_amount - usage_amount
                         )
-
-            postconsumption_dict = {}
-            for (
-                capacity_metric_name,
-                per_seconds,
-            ), capacity_amount in preconsumption_capacities.items():
-                for usage_metric_name, usage_amount in usage.items():
-                    if capacity_metric_name != usage_metric_name:
-                        continue
-                    postconsumption_dict[(capacity_metric_name, per_seconds)] = (
-                        capacity_amount - usage_amount
+                # Invariant: validate_acquire_usage() guarantees usage keys == quota
+                # keys, so every capacity bucket must have a matching usage entry.
+                if len(postconsumption_dict) != len(
+                    preconsumption_capacities
+                ):  # pragma: no cover
+                    raise RuntimeError(
+                        f"postconsumption covers {len(postconsumption_dict)} buckets but "
+                        f"preconsumption has {len(preconsumption_capacities)} — "
+                        f"validate_acquire_usage() should prevent this"
                     )
-            # Invariant: validate_acquire_usage() guarantees usage keys == quota
-            # keys, so every capacity bucket must have a matching usage entry.
-            if len(postconsumption_dict) != len(
-                preconsumption_capacities
-            ):  # pragma: no cover
-                raise RuntimeError(
-                    f"postconsumption covers {len(postconsumption_dict)} buckets but "
-                    f"preconsumption has {len(preconsumption_capacities)} — "
-                    f"validate_acquire_usage() should prevent this"
+                postconsumption_capacities = frozendict(postconsumption_dict)
+                await self._set_capacities_unsafe(
+                    postconsumption_capacities,
+                    pipeline=pipeline,
+                    current_time=current_time,
                 )
-            postconsumption_capacities = frozendict(postconsumption_dict)
-            await self._set_capacities_unsafe(
-                postconsumption_capacities,
-                pipeline=pipeline,
-                current_time=current_time,
-            )
-        try:
+                consumed = True
             await self._fresh_start_buckets_callback(fresh_start_buckets)
             if self._callbacks and self._callbacks.on_capacity_consumed:
                 await self._invoke_callback_safe(
@@ -351,7 +353,8 @@ class RedisBackend(RateLimiterBackend):
                     current_time=current_time,
                 )
         except asyncio.CancelledError:
-            await self._refund_cancelled_consumption(usage)
+            if consumed:
+                await self._refund_cancelled_consumption(usage)
             raise
         return True, preconsumption_capacities, postconsumption_capacities
 
@@ -466,7 +469,10 @@ class RedisBackend(RateLimiterBackend):
                 try:
                     if has_waited:
                         wait_time_s = time.monotonic() - start_time
-                        if self._callbacks and self._callbacks.after_wait_end_consumption:
+                        if (
+                            self._callbacks
+                            and self._callbacks.after_wait_end_consumption
+                        ):
                             await self._invoke_callback_safe(
                                 self._callbacks.after_wait_end_consumption,
                                 model_family=self._limit_config.get_model_family(),
@@ -734,7 +740,8 @@ class RedisBackend(RateLimiterBackend):
                 pipeline = self._redis.pipeline()
                 current_time = time.time()
                 capacities, _ = await self._get_capacities_unsafe(
-                    pipeline=pipeline, current_time=current_time,
+                    pipeline=pipeline,
+                    current_time=current_time,
                 )
                 refunded: dict[tuple[str, int], float] = dict(capacities)
                 for (cap_metric, per_seconds), cap_amount in capacities.items():
@@ -748,10 +755,13 @@ class RedisBackend(RateLimiterBackend):
                             and b.per_seconds == per_seconds
                         )
                         refunded[(cap_metric, per_seconds)] = min(
-                            cap_amount + usage_amount, bucket.max_capacity,
+                            cap_amount + usage_amount,
+                            bucket.max_capacity,
                         )
                 await self._set_capacities_unsafe(
-                    frozendict(refunded), pipeline=pipeline, current_time=current_time,
+                    frozendict(refunded),
+                    pipeline=pipeline,
+                    current_time=current_time,
                     allow_negative=True,
                 )
             async with self._local_condition:
