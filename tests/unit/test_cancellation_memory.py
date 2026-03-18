@@ -610,3 +610,126 @@ class TestDoubleCancellationNoCapacityLeak:
             f"Capacity leaked! Expected ~100, got {cap_after}. "
             f"Structured concurrency cancellation interrupted the refund."
         )
+
+
+# ---------------------------------------------------------------------------
+# Group 7: consume_capacity CancelledError does NOT refund (intentional)
+# ---------------------------------------------------------------------------
+
+
+class TestConsumeCapacityNoRefundOnCancellation:
+    """
+    consume_capacity (the record_usage / speedometer path) intentionally does
+    NOT refund capacity on CancelledError.  This is the opposite of
+    await_for_capacity, which DOES refund.
+
+    The asymmetry exists because consume_capacity records actual usage that
+    already occurred — refunding would inflate capacity and violate rate limits.
+    """
+
+    async def test_consume_capacity_cancelled_during_callback_does_not_refund(self):
+        """CancelledError during consume_capacity callback must NOT restore capacity.
+
+        This documents the intentional asymmetry vs await_for_capacity, which
+        DOES refund on CancelledError (Group 4 tests above).
+        """
+        gate = asyncio.Event()
+        entered_callback = asyncio.Event()
+
+        async def slow_callback(**kwargs):
+            if not gate.is_set():
+                return
+            entered_callback.set()
+            await asyncio.sleep(10)
+
+        callbacks = RateLimiterCallbacks(on_capacity_consumed=slow_callback)
+        builder = MemoryBackendBuilder()
+        config = _make_config(limit=100)
+        backend = builder.build(config, callbacks=callbacks)
+
+        # Consume 50, leaving 50 (callback fast — gate closed)
+        await backend.consume_capacity(frozendict({"requests": 50.0}))
+        cap_before = _get_bucket_capacity(backend)
+        assert cap_before == pytest.approx(50.0, abs=1.0)
+
+        # Open gate — next consumption enters slow callback
+        gate.set()
+
+        task = asyncio.create_task(
+            backend.consume_capacity(frozendict({"requests": 20.0}))
+        )
+        await asyncio.wait_for(entered_callback.wait(), timeout=2.0)
+
+        # Cancel during the callback — capacity is already consumed
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        # Capacity should be ~30 (50 - 20), NOT refunded back to ~50
+        cap_after = _get_bucket_capacity(backend)
+        assert cap_after == pytest.approx(30.0, abs=1.0), (
+            f"consume_capacity should NOT refund on cancellation! "
+            f"Expected ~30, got {cap_after}. "
+            f"If ~50, capacity was erroneously refunded."
+        )
+
+
+# ---------------------------------------------------------------------------
+# Group 8: CancelledError during condition lock acquisition (pre-check)
+# ---------------------------------------------------------------------------
+
+
+class TestCancellationDuringLockAcquisitionNoLeak:
+    """
+    CancelledError before any capacity check — while waiting to acquire
+    the condition lock in await_for_capacity — must not leak capacity.
+
+    This exercises the path where a task is cancelled at line 257
+    (async with self._condition) before _try_consume_locked ever runs.
+    """
+
+    async def test_cancel_while_waiting_for_condition_lock(self):
+        """A task cancelled while waiting for the condition lock leaks nothing."""
+        builder = MemoryBackendBuilder()
+        config = _make_config(limit=100)
+        backend = builder.build(config)
+
+        # Consume 90, leaving 10
+        await backend.await_for_capacity(frozendict({"requests": 90.0}))
+        cap_before = _get_bucket_capacity(backend)
+        assert cap_before == pytest.approx(10.0, abs=1.0)
+
+        # Hold the condition lock so the next waiter blocks at lock acquisition
+        lock_holder_ready = asyncio.Event()
+        lock_holder_release = asyncio.Event()
+
+        async def hold_lock():
+            async with backend._condition:
+                lock_holder_ready.set()
+                await lock_holder_release.wait()
+
+        lock_task = asyncio.create_task(hold_lock())
+        await asyncio.wait_for(lock_holder_ready.wait(), timeout=2.0)
+
+        # Start a waiter — it will block at `async with self._condition`
+        # (never enters the while-loop or _try_consume_locked)
+        waiter = asyncio.create_task(
+            backend.await_for_capacity(frozendict({"requests": 5.0}))
+        )
+        await asyncio.sleep(0.05)  # let waiter reach the lock wait
+
+        # Cancel it while it's waiting for the lock
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+
+        # Release the lock holder
+        lock_holder_release.set()
+        await lock_task
+
+        # Capacity must be unchanged — waiter never consumed anything
+        cap_after = _get_bucket_capacity(backend)
+        assert cap_after == pytest.approx(cap_before, abs=1.0), (
+            f"Capacity leaked! Expected ~{cap_before}, got {cap_after}. "
+            f"CancelledError during lock acquisition consumed capacity."
+        )

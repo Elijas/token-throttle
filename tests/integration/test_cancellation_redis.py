@@ -300,6 +300,60 @@ class TestRedisCancellationDebtPreservation:
 
 
 @pytest.mark.redis
+class TestRedisConsumeCapacityNoRefundOnCancellation:
+    """consume_capacity (record_usage / speedometer) does NOT refund on CancelledError.
+
+    Mirrors test_cancellation_memory.py:TestConsumeCapacityNoRefundOnCancellation.
+    This documents the intentional asymmetry: await_for_capacity DOES refund,
+    but consume_capacity does NOT — the usage already occurred.
+    """
+
+    async def test_consume_capacity_cancelled_during_callback_does_not_refund(
+        self,
+        redis_client,
+    ):
+        gate = asyncio.Event()
+        entered_callback = asyncio.Event()
+
+        async def slow_callback(**kwargs):
+            if not gate.is_set():
+                return
+            entered_callback.set()
+            await asyncio.sleep(10)
+
+        callbacks = RateLimiterCallbacks(on_capacity_consumed=slow_callback)
+        builder = RedisBackendBuilder(redis_client)
+        config = _make_config(limit=100)
+        backend = builder.build(config, callbacks=callbacks)
+
+        # Consume 50, leaving 50 (callback fast — gate closed)
+        await backend.consume_capacity(frozendict({"requests": 50.0}))
+        cap_before = await _get_redis_capacity(backend)
+        assert cap_before == pytest.approx(50.0, abs=1.0)
+
+        # Open gate — next consumption enters slow callback
+        gate.set()
+
+        task = asyncio.create_task(
+            backend.consume_capacity(frozendict({"requests": 20.0}))
+        )
+        await asyncio.wait_for(entered_callback.wait(), timeout=5.0)
+
+        # Cancel during the callback — capacity is already consumed
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        # Capacity should be ~30 (50 - 20), NOT refunded back to ~50
+        cap_after = await _get_redis_capacity(backend)
+        assert cap_after == pytest.approx(30.0, abs=1.0), (
+            f"consume_capacity should NOT refund on cancellation! "
+            f"Expected ~30, got {cap_after}. "
+            f"If ~50, capacity was erroneously refunded."
+        )
+
+
+@pytest.mark.redis
 class TestRedisDoubleCancellationNoCapacityLeak:
     """Double cancellation (structured concurrency) must not leak capacity.
 
