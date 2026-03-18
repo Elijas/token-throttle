@@ -236,6 +236,59 @@ async def test_async_timeout_zero_includes_redis_lock_wait(
         await lock_client.aclose()
 
 
+async def test_async_timeout_zero_multi_metric_with_lock_contention(
+    redis_url: str,
+    redis_client,
+):
+    """timeout=0 with multi-metric config must fail fast under lock contention.
+
+    Combines two failure modes: multi-metric all-or-nothing semantics AND
+    Redis distributed lock contention.  The _lock() method acquires locks for
+    all buckets in sorted order; contention on ANY bucket must convert to
+    TimeoutError, not hang.
+    """
+    config = PerModelConfig(
+        model_family="test",
+        quotas=UsageQuotas(
+            [
+                Quota(metric="requests", limit=10, per_seconds=60),
+                Quota(metric="tokens", limit=100, per_seconds=60),
+            ]
+        ),
+    )
+    backend = RedisBackendBuilder(redis_client).build(config)
+
+    # Hold ONE bucket's lock from a separate client (simulating another worker)
+    lock_client = redis.from_url(redis_url)
+    lock = None
+    try:
+        # Lock the "requests" bucket — _lock() will fail acquiring this one
+        bucket = RedisBucket(
+            quota=Quota(metric="requests", limit=10, per_seconds=60),
+            limit_config=config,
+            redis_client=lock_client,
+        )
+        lock = bucket.lock(timeout=1.2)
+        assert await lock.acquire() is True
+
+        start = time.monotonic()
+        with pytest.raises(TimeoutError):
+            await backend.await_for_capacity(
+                frozen_usage({"requests": 1, "tokens": 10}), timeout=0
+            )
+        elapsed = time.monotonic() - start
+
+        assert elapsed < 0.5, (
+            f"timeout=0 with multi-metric should fail fast under lock contention, "
+            f"took {elapsed:.2f}s"
+        )
+    finally:
+        if lock is not None:
+            with contextlib.suppress(Exception):
+                await lock.release()
+        await lock_client.aclose()
+
+
 def test_sync_timeout_zero_includes_redis_lock_wait(
     redis_url: str,
     sync_redis_client,
