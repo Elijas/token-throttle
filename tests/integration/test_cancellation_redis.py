@@ -401,3 +401,58 @@ class TestRedisDoubleCancellationNoCapacityLeak:
             f"Capacity leaked! Expected ~100, got {cap_after}. "
             f"Double cancellation interrupted the refund."
         )
+
+
+@pytest.mark.redis
+class TestRedisPipelineExecuteCancellationRefundsCapacity:
+    """CancelledError during pipeline.execute() in _set_capacities_unsafe refunds capacity.
+
+    Regression: consumed=True was set AFTER _set_capacities_unsafe, so a
+    CancelledError during the pipeline read-responses phase left capacity
+    consumed server-side with no refund (consumed stayed False).
+    """
+
+    async def test_cancellation_during_pipeline_execute_refunds_capacity(
+        self,
+        redis_client,
+    ):
+        """CancelledError after _set_capacities_unsafe completes triggers refund."""
+        builder = RedisBackendBuilder(redis_client)
+        config = _make_config(limit=100)
+        backend = builder.build(config)
+
+        # Consume 90, leaving 10
+        await backend.await_for_capacity(frozendict({"requests": 90.0}))
+        cap_before = await _get_redis_capacity(backend)
+        assert cap_before == pytest.approx(10.0, abs=1.0)
+
+        # Monkeypatch _set_capacities_unsafe to call the real impl then raise
+        # CancelledError — simulates cancellation arriving during
+        # pipeline.execute()'s response-read phase.  Fires only once so the
+        # shielded refund can use the real method.
+        real_set = backend._set_capacities_unsafe
+        fire_once = True
+
+        async def cancelling_set(*args, **kwargs):
+            nonlocal fire_once
+            await real_set(*args, **kwargs)
+            if fire_once:
+                fire_once = False
+                backend._set_capacities_unsafe = real_set
+                raise asyncio.CancelledError
+
+        backend._set_capacities_unsafe = cancelling_set
+
+        with pytest.raises(asyncio.CancelledError):
+            await backend.await_for_capacity(
+                frozendict({"requests": 5.0}), timeout=0
+            )
+
+        # Give the shielded refund time to complete
+        await asyncio.sleep(0.5)
+
+        cap_after = await _get_redis_capacity(backend)
+        assert cap_after == pytest.approx(cap_before, abs=1.0), (
+            f"Capacity leaked! Expected ~{cap_before}, got {cap_after}. "
+            f"CancelledError during pipeline.execute() bypassed the refund."
+        )

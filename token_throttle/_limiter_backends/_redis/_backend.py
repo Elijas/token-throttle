@@ -336,12 +336,12 @@ class RedisBackend(RateLimiterBackend):
                         f"validate_acquire_usage() should prevent this"
                     )
                 postconsumption_capacities = frozendict(postconsumption_dict)
+                consumed = True
                 await self._set_capacities_unsafe(
                     postconsumption_capacities,
                     pipeline=pipeline,
                     current_time=current_time,
                 )
-                consumed = True
             await self._fresh_start_buckets_callback(fresh_start_buckets)
             if self._callbacks and self._callbacks.on_capacity_consumed:
                 await self._invoke_callback_safe(
