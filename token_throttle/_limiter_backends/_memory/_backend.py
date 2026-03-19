@@ -315,7 +315,13 @@ class MemoryBackend(RateLimiterBackend):
                     wait_time_s=wait_time_s,
                 )
         except asyncio.CancelledError:
-            await self._refund_cancelled_consumption(usage)
+            try:  # noqa: SIM105
+                await self._refund_cancelled_consumption(usage)
+            except BaseException:  # noqa: BLE001, S110
+                # Best-effort: shield ensures background completion.
+                # Swallow so CancelledError always propagates for
+                # structured concurrency (TaskGroups).
+                pass
             raise
 
     def _compute_sleep(self, usage: FrozenUsage, preconsumption: Capacities) -> float:
