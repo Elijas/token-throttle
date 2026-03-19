@@ -73,7 +73,7 @@ class TestGetMaxCapacity:
         """get_max_capacity() fetches from Redis when cache is empty."""
         mock_redis.get.return_value = b"15.0"
 
-        result = asyncio.get_event_loop().run_until_complete(bucket.get_max_capacity())
+        result = asyncio.run(bucket.get_max_capacity())
 
         assert result == 15.0
         mock_redis.get.assert_called_once_with(bucket._max_capacity_key)
@@ -83,7 +83,7 @@ class TestGetMaxCapacity:
         bucket._max_capacity_cached = 10.0
         bucket._max_capacity_cache_time = time.time()  # Fresh cache
 
-        result = asyncio.get_event_loop().run_until_complete(bucket.get_max_capacity())
+        result = asyncio.run(bucket.get_max_capacity())
 
         assert result == 10.0
         mock_redis.get.assert_not_called()
@@ -94,7 +94,7 @@ class TestGetMaxCapacity:
         bucket._max_capacity_cache_time = time.time() - 2.0  # Stale (>1s TTL)
         mock_redis.get.return_value = b"8.0"
 
-        result = asyncio.get_event_loop().run_until_complete(bucket.get_max_capacity())
+        result = asyncio.run(bucket.get_max_capacity())
 
         assert result == 8.0
         mock_redis.get.assert_called_once()
@@ -103,7 +103,7 @@ class TestGetMaxCapacity:
         """get_max_capacity() returns default when Redis key doesn't exist."""
         mock_redis.get.return_value = None
 
-        result = asyncio.get_event_loop().run_until_complete(bucket.get_max_capacity())
+        result = asyncio.run(bucket.get_max_capacity())
 
         assert result == quota.limit
         assert result == 20.0
@@ -112,7 +112,7 @@ class TestGetMaxCapacity:
         """get_max_capacity() returns default for invalid Redis values."""
         mock_redis.get.return_value = b"not-a-number"
 
-        result = asyncio.get_event_loop().run_until_complete(bucket.get_max_capacity())
+        result = asyncio.run(bucket.get_max_capacity())
 
         assert result == quota.limit
 
@@ -120,7 +120,7 @@ class TestGetMaxCapacity:
         """get_max_capacity() returns default when Redis contains NaN."""
         mock_redis.get.return_value = b"nan"
 
-        result = asyncio.get_event_loop().run_until_complete(bucket.get_max_capacity())
+        result = asyncio.run(bucket.get_max_capacity())
 
         assert result == quota.limit
 
@@ -128,7 +128,7 @@ class TestGetMaxCapacity:
         """get_max_capacity() returns default when Redis contains inf."""
         mock_redis.get.return_value = b"inf"
 
-        result = asyncio.get_event_loop().run_until_complete(bucket.get_max_capacity())
+        result = asyncio.run(bucket.get_max_capacity())
 
         assert result == quota.limit
 
@@ -138,13 +138,13 @@ class TestSetMaxCapacity:
 
     def test_stores_value_in_redis(self, bucket, mock_redis):
         """set_max_capacity() stores the value in Redis."""
-        asyncio.get_event_loop().run_until_complete(bucket.set_max_capacity(5.0))
+        asyncio.run(bucket.set_max_capacity(5.0))
 
         mock_redis.set.assert_called_once_with(bucket._max_capacity_key, 5.0)
 
     def test_updates_cache_immediately(self, bucket, mock_redis):
         """set_max_capacity() updates local cache immediately."""
-        asyncio.get_event_loop().run_until_complete(bucket.set_max_capacity(5.0))
+        asyncio.run(bucket.set_max_capacity(5.0))
 
         assert bucket._max_capacity_cached == 5.0
         assert bucket._max_capacity_cache_time > 0
@@ -152,38 +152,32 @@ class TestSetMaxCapacity:
     def test_rejects_zero_value(self, bucket):
         """set_max_capacity() raises for zero value."""
         with pytest.raises(ValueError, match="must be finite and greater than 0"):
-            asyncio.get_event_loop().run_until_complete(bucket.set_max_capacity(0))
+            asyncio.run(bucket.set_max_capacity(0))
 
     def test_rejects_negative_value(self, bucket):
         """set_max_capacity() raises for negative value."""
         with pytest.raises(ValueError, match="must be finite and greater than 0"):
-            asyncio.get_event_loop().run_until_complete(bucket.set_max_capacity(-5.0))
+            asyncio.run(bucket.set_max_capacity(-5.0))
 
     def test_rejects_nan(self, bucket):
         """set_max_capacity() raises for NaN."""
         with pytest.raises(ValueError, match="must be finite and greater than 0"):
-            asyncio.get_event_loop().run_until_complete(
-                bucket.set_max_capacity(float("nan"))
-            )
+            asyncio.run(bucket.set_max_capacity(float("nan")))
 
     def test_rejects_positive_inf(self, bucket):
         """set_max_capacity() raises for positive infinity."""
         with pytest.raises(ValueError, match="must be finite and greater than 0"):
-            asyncio.get_event_loop().run_until_complete(
-                bucket.set_max_capacity(float("inf"))
-            )
+            asyncio.run(bucket.set_max_capacity(float("inf")))
 
     def test_rejects_negative_inf(self, bucket):
         """set_max_capacity() raises for negative infinity."""
         with pytest.raises(ValueError, match="must be finite and greater than 0"):
-            asyncio.get_event_loop().run_until_complete(
-                bucket.set_max_capacity(float("-inf"))
-            )
+            asyncio.run(bucket.set_max_capacity(float("-inf")))
 
     def test_rejects_boolean(self, bucket):
         """set_max_capacity() raises for boolean values."""
         with pytest.raises(ValueError, match="max_capacity must not be a boolean"):
-            asyncio.get_event_loop().run_until_complete(bucket.set_max_capacity(True))
+            asyncio.run(bucket.set_max_capacity(True))
 
 
 class TestMaxCapacityInCalculations:
@@ -231,7 +225,7 @@ class TestSetMaxCapacityUpdatesRate:
         # Initial: limit=20, per_seconds=1 -> rate=20.0
         assert bucket._rate_per_sec == pytest.approx(20.0)
 
-        asyncio.get_event_loop().run_until_complete(bucket.set_max_capacity(10.0))
+        asyncio.run(bucket.set_max_capacity(10.0))
 
         # New rate should be 10/1 = 10.0
         assert bucket._rate_per_sec == pytest.approx(10.0)
@@ -241,7 +235,7 @@ class TestSetMaxCapacityUpdatesRate:
 
         Uses a short time delta so the refill is observable below the cap.
         """
-        asyncio.get_event_loop().run_until_complete(bucket.set_max_capacity(100.0))
+        asyncio.run(bucket.set_max_capacity(100.0))
         # New rate = 100/1 = 100.0/s
         current_time = time.time()
 
@@ -259,7 +253,7 @@ class TestSetMaxCapacityUpdatesRate:
         mock_redis.get.return_value = b"50.0"
         bucket._max_capacity_cache_time = 0.0  # Force cache miss
 
-        asyncio.get_event_loop().run_until_complete(bucket.get_max_capacity())
+        asyncio.run(bucket.get_max_capacity())
 
         assert bucket._rate_per_sec == pytest.approx(50.0)
 
