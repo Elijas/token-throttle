@@ -456,3 +456,196 @@ class TestRedisPipelineExecuteCancellationRefundsCapacity:
             f"Capacity leaked! Expected ~{cap_before}, got {cap_after}. "
             f"CancelledError during pipeline.execute() bypassed the refund."
         )
+
+
+# ---------------------------------------------------------------------------
+# Multi-metric CancelledError refund (mirrors memory Group 9)
+# ---------------------------------------------------------------------------
+
+
+def _make_multi_metric_config(
+    *,
+    requests_limit: float = 100,
+    tokens_limit: float = 500,
+    per_seconds: int = _SLOW_REFILL_PER_SECONDS,
+) -> PerModelConfig:
+    return PerModelConfig(
+        model_family="test",
+        quotas=UsageQuotas(
+            [
+                Quota(metric="requests", limit=requests_limit, per_seconds=per_seconds),
+                Quota(metric="tokens", limit=tokens_limit, per_seconds=per_seconds),
+            ]
+        ),
+    )
+
+
+async def _get_redis_capacities_by_metric(backend) -> dict[str, float]:
+    """Read current capacity from Redis for every bucket, keyed by metric name."""
+    pipeline = backend._redis.pipeline()
+    current_time = time.time()
+    result = await backend._get_capacities_unsafe(
+        pipeline=pipeline, current_time=current_time
+    )
+    return {
+        metric: amount for (metric, _per_seconds), amount in result.capacities.items()
+    }
+
+
+@pytest.mark.redis
+class TestRedisMultiMetricCancellationRefundsAllMetrics:
+    """
+    All existing cancellation tests use single-metric configs.  The refund loop
+    in _refund_cancelled_consumption iterates all (cap_metric, per_seconds) pairs.
+    A bug that only refunds the first metric would be invisible to single-metric tests.
+    """
+
+    async def test_cancel_during_callback_refunds_both_metrics(self, redis_client):
+        """CancelledError during callback refunds BOTH requests AND tokens."""
+        gate = asyncio.Event()
+        entered_callback = asyncio.Event()
+
+        async def slow_callback(**kwargs):
+            if not gate.is_set():
+                return
+            entered_callback.set()
+            await asyncio.sleep(10)
+
+        callbacks = RateLimiterCallbacks(on_capacity_consumed=slow_callback)
+        builder = RedisBackendBuilder(redis_client)
+        config = _make_multi_metric_config(requests_limit=100, tokens_limit=500)
+        backend = builder.build(config, callbacks=callbacks)
+
+        # Consume most capacity (callback fast — gate closed)
+        await backend.await_for_capacity(
+            frozendict({"requests": 90.0, "tokens": 450.0})
+        )
+        caps_before = await _get_redis_capacities_by_metric(backend)
+        assert caps_before["requests"] == pytest.approx(10.0, abs=1.0)
+        assert caps_before["tokens"] == pytest.approx(50.0, abs=1.0)
+
+        gate.set()
+
+        # timeout=0 goes through _check_and_consume_capacity directly
+        task = asyncio.create_task(
+            backend.await_for_capacity(
+                frozendict({"requests": 5.0, "tokens": 20.0}), timeout=0
+            )
+        )
+        await asyncio.wait_for(entered_callback.wait(), timeout=5.0)
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        # Give the shielded refund time to complete
+        await asyncio.sleep(0.5)
+
+        # BOTH metrics must be refunded
+        caps_after = await _get_redis_capacities_by_metric(backend)
+        assert caps_after["requests"] == pytest.approx(
+            caps_before["requests"], abs=1.0
+        ), (
+            f"requests not refunded! Before={caps_before['requests']}, "
+            f"after={caps_after['requests']}"
+        )
+        assert caps_after["tokens"] == pytest.approx(
+            caps_before["tokens"], abs=1.0
+        ), (
+            f"tokens not refunded! Before={caps_before['tokens']}, "
+            f"after={caps_after['tokens']}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# CancelledError during local condition wait (mirrors memory Group 2)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.redis
+class TestRedisCancellationDuringLocalConditionWait:
+    """
+    Memory backend has Group 2 tests for CancelledError during condition.wait().
+    This exercises the equivalent path in the Redis backend: _local_condition.wait()
+    at _redis/_backend.py:520-523.  Cancellation here must not leak capacity.
+    """
+
+    async def test_cancel_during_local_condition_wait_no_capacity_leak(
+        self, redis_client
+    ):
+        """A task cancelled during _local_condition.wait() must not consume capacity."""
+        builder = RedisBackendBuilder(redis_client, sleep_interval=5.0)
+        config = _make_config(limit=100)
+        backend = builder.build(config)
+
+        # Exhaust capacity so the next caller enters the wait loop
+        await backend.await_for_capacity(frozendict({"requests": 100.0}))
+        cap_before = await _get_redis_capacity(backend)
+
+        task = asyncio.create_task(
+            backend.await_for_capacity(frozendict({"requests": 10.0}))
+        )
+        # Let the task enter _local_condition.wait() (sleep_interval=5.0 ensures
+        # it stays there rather than looping back to check-and-consume)
+        await asyncio.sleep(0.2)
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        cap_after = await _get_redis_capacity(backend)
+        assert cap_after == pytest.approx(cap_before, abs=1.0), (
+            f"Capacity leaked! Expected ~{cap_before}, got {cap_after}. "
+            f"CancelledError during _local_condition.wait() consumed capacity."
+        )
+
+    async def test_cancel_multiple_local_condition_waiters(self, redis_client):
+        """Cancelling several waiters in _local_condition.wait() doesn't leak capacity."""
+        builder = RedisBackendBuilder(redis_client, sleep_interval=5.0)
+        config = _make_config(limit=100)
+        backend = builder.build(config)
+
+        await backend.await_for_capacity(frozendict({"requests": 100.0}))
+        cap_before = await _get_redis_capacity(backend)
+
+        tasks = [
+            asyncio.create_task(
+                backend.await_for_capacity(frozendict({"requests": 10.0}))
+            )
+            for _ in range(5)
+        ]
+        await asyncio.sleep(0.2)
+
+        for t in tasks:
+            t.cancel()
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        assert all(isinstance(r, asyncio.CancelledError) for r in results)
+
+        cap_after = await _get_redis_capacity(backend)
+        assert cap_after == pytest.approx(cap_before, abs=1.0), (
+            f"Capacity leaked! Expected ~{cap_before}, got {cap_after}. "
+            f"Cancelling multiple _local_condition waiters leaked capacity."
+        )
+
+    async def test_cancel_does_not_block_subsequent_acquire(self, redis_client):
+        """After cancelling a local-condition waiter, a new caller can still acquire."""
+        builder = RedisBackendBuilder(redis_client, sleep_interval=5.0)
+        config = _make_config(limit=100)
+        backend = builder.build(config)
+
+        # Consume 90, leaving 10
+        await backend.await_for_capacity(frozendict({"requests": 90.0}))
+
+        task = asyncio.create_task(
+            backend.await_for_capacity(frozendict({"requests": 50.0}))
+        )
+        await asyncio.sleep(0.2)
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        # The remaining ~10 tokens should still be available
+        await backend.await_for_capacity(
+            frozendict({"requests": 5.0}), timeout=2.0
+        )

@@ -733,3 +733,265 @@ class TestCancellationDuringLockAcquisitionNoLeak:
             f"Capacity leaked! Expected ~{cap_before}, got {cap_after}. "
             f"CancelledError during lock acquisition consumed capacity."
         )
+
+
+# ---------------------------------------------------------------------------
+# Group 9: Multi-metric CancelledError refund
+# ---------------------------------------------------------------------------
+
+
+def _make_multi_metric_config(
+    *,
+    requests_limit: float = 100,
+    tokens_limit: float = 500,
+    per_seconds: int = _SLOW_REFILL_PER_SECONDS,
+) -> PerModelConfig:
+    return PerModelConfig(
+        model_family="test",
+        quotas=UsageQuotas(
+            [
+                Quota(metric="requests", limit=requests_limit, per_seconds=per_seconds),
+                Quota(metric="tokens", limit=tokens_limit, per_seconds=per_seconds),
+            ]
+        ),
+    )
+
+
+def _get_all_bucket_capacities(
+    backend, current_time: float | None = None
+) -> dict[str, float]:
+    """Read current capacity from every bucket, keyed by metric name."""
+    if current_time is None:
+        current_time = time.time()
+    return {
+        bucket.usage_metric: bucket.get_capacity(current_time).amount
+        for bucket in backend._buckets
+    }
+
+
+class TestMultiMetricCancellationRefundsAllMetrics:
+    """
+    All existing cancellation tests use single-metric configs.  The refund loop
+    in _refund_cancelled_consumption iterates all (cap_metric, per_seconds) pairs.
+    A bug that only refunds the first metric would be invisible to single-metric tests.
+    """
+
+    async def test_cancel_during_callback_refunds_both_metrics(self):
+        """CancelledError during callback refunds BOTH requests AND tokens."""
+        gate = asyncio.Event()
+        entered_callback = asyncio.Event()
+
+        async def slow_callback(**kwargs):
+            if not gate.is_set():
+                return
+            entered_callback.set()
+            await asyncio.sleep(10)
+
+        callbacks = RateLimiterCallbacks(on_capacity_consumed=slow_callback)
+        builder = MemoryBackendBuilder()
+        config = _make_multi_metric_config(requests_limit=100, tokens_limit=500)
+        backend = builder.build(config, callbacks=callbacks)
+
+        # Consume most capacity (callback fast — gate closed)
+        await backend.await_for_capacity(
+            frozendict({"requests": 90.0, "tokens": 450.0})
+        )
+        caps_before = _get_all_bucket_capacities(backend)
+        assert caps_before["requests"] == pytest.approx(10.0, abs=1.0)
+        assert caps_before["tokens"] == pytest.approx(50.0, abs=1.0)
+
+        gate.set()
+
+        # Consume from both metrics — enters slow callback
+        task = asyncio.create_task(
+            backend.await_for_capacity(
+                frozendict({"requests": 5.0, "tokens": 20.0})
+            )
+        )
+        await asyncio.wait_for(entered_callback.wait(), timeout=2.0)
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        # BOTH metrics must be refunded
+        caps_after = _get_all_bucket_capacities(backend)
+        assert caps_after["requests"] == pytest.approx(
+            caps_before["requests"], abs=1.0
+        ), (
+            f"requests not refunded! Before={caps_before['requests']}, "
+            f"after={caps_after['requests']}"
+        )
+        assert caps_after["tokens"] == pytest.approx(
+            caps_before["tokens"], abs=1.0
+        ), (
+            f"tokens not refunded! Before={caps_before['tokens']}, "
+            f"after={caps_after['tokens']}"
+        )
+
+    async def test_double_cancel_refunds_both_metrics(self):
+        """Double cancellation with lock contention refunds BOTH metrics."""
+        gate = asyncio.Event()
+        entered_callback = asyncio.Event()
+
+        async def slow_callback(**kwargs):
+            if not gate.is_set():
+                return
+            entered_callback.set()
+            await asyncio.sleep(10)
+
+        callbacks = RateLimiterCallbacks(on_capacity_consumed=slow_callback)
+        builder = MemoryBackendBuilder()
+        config = _make_multi_metric_config(requests_limit=100, tokens_limit=500)
+        backend = builder.build(config, callbacks=callbacks)
+
+        await backend.await_for_capacity(
+            frozendict({"requests": 90.0, "tokens": 450.0})
+        )
+        caps_before = _get_all_bucket_capacities(backend)
+
+        gate.set()
+
+        task = asyncio.create_task(
+            backend.await_for_capacity(
+                frozendict({"requests": 5.0, "tokens": 20.0})
+            )
+        )
+        await asyncio.wait_for(entered_callback.wait(), timeout=2.0)
+
+        # Hold lock to force contention on refund
+        lock_holder_ready = asyncio.Event()
+        lock_holder_release = asyncio.Event()
+
+        async def hold_lock():
+            async with backend._condition:
+                lock_holder_ready.set()
+                await lock_holder_release.wait()
+
+        lock_task = asyncio.create_task(hold_lock())
+        await asyncio.wait_for(lock_holder_ready.wait(), timeout=2.0)
+
+        task.cancel()
+        await asyncio.sleep(0.05)
+        task.cancel()
+        await asyncio.sleep(0.05)
+
+        lock_holder_release.set()
+        await lock_task
+        await asyncio.sleep(0.1)
+
+        caps_after = _get_all_bucket_capacities(backend)
+        assert caps_after["requests"] == pytest.approx(
+            caps_before["requests"], abs=1.0
+        ), f"requests leaked! Before={caps_before['requests']}, after={caps_after['requests']}"
+        assert caps_after["tokens"] == pytest.approx(
+            caps_before["tokens"], abs=1.0
+        ), f"tokens leaked! Before={caps_before['tokens']}, after={caps_after['tokens']}"
+
+
+# ---------------------------------------------------------------------------
+# Group 10: CancelledError during on_wait_start callback refunds capacity
+# ---------------------------------------------------------------------------
+
+
+class TestCancellationDuringOnWaitStartRefundsCapacity:
+    """
+    Group 4 covers on_capacity_consumed, after_wait_end_consumption, and
+    on_missing_consumption_data.  This covers the remaining callback:
+    on_wait_start (which only fires when has_waited=True).
+    """
+
+    async def test_cancellation_during_on_wait_start_refunds_capacity(self):
+        """CancelledError during on_wait_start callback refunds consumed capacity."""
+        gate = asyncio.Event()
+        entered_callback = asyncio.Event()
+
+        async def slow_wait_start_callback(**kwargs):
+            if not gate.is_set():
+                return
+            entered_callback.set()
+            await asyncio.sleep(10)
+
+        callbacks = RateLimiterCallbacks(on_wait_start=slow_wait_start_callback)
+        # Fast refill + fast poll so the waiter gets capacity quickly after exhaust
+        builder = MemoryBackendBuilder(sleep_interval=0.01)
+        config = _make_config(limit=100, per_seconds=1)
+        backend = builder.build(config, callbacks=callbacks)
+
+        # Exhaust capacity so the next call must wait (has_waited=True)
+        await backend.await_for_capacity(frozendict({"requests": 100.0}))
+        gate.set()
+
+        # This will wait for refill, consume capacity, then hit slow on_wait_start
+        task = asyncio.create_task(
+            backend.await_for_capacity(frozendict({"requests": 5.0}))
+        )
+        await asyncio.wait_for(entered_callback.wait(), timeout=5.0)
+
+        cap_before = _get_bucket_capacity(backend)
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        # 5 tokens should be refunded
+        cap_after = _get_bucket_capacity(backend)
+        assert cap_after >= cap_before + 4.0, (
+            f"Capacity not refunded! Before={cap_before}, after={cap_after}. "
+            f"CancelledError during on_wait_start lost 5 tokens."
+        )
+
+
+# ---------------------------------------------------------------------------
+# Group 11: Real asyncio.TaskGroup cancellation
+# ---------------------------------------------------------------------------
+
+
+class TestTaskGroupCancellationRefundsCapacity:
+    """
+    Existing double-cancellation tests use manual task.cancel() calls.
+    This uses a real asyncio.TaskGroup for authentic structured concurrency,
+    validating that asyncio.shield() works under real TaskGroup semantics.
+    """
+
+    async def test_taskgroup_error_refunds_cancelled_sibling(self):
+        """When one TaskGroup task raises, the cancelled sibling's capacity is refunded."""
+        entered_callback = asyncio.Event()
+
+        async def slow_callback(**kwargs):
+            entered_callback.set()
+            await asyncio.sleep(10)
+
+        callbacks = RateLimiterCallbacks(on_capacity_consumed=slow_callback)
+        builder = MemoryBackendBuilder()
+        config = _make_config(limit=100)
+        backend = builder.build(config, callbacks=callbacks)
+
+        async def consumer():
+            """Acquires capacity, then gets stuck in the slow callback."""
+            await backend.await_for_capacity(frozendict({"requests": 5.0}))
+
+        async def raiser():
+            """Waits for sibling to enter callback, then raises to trigger cancellation."""
+            await entered_callback.wait()
+            raise RuntimeError("intentional error to cancel siblings")
+
+        with pytest.raises(ExceptionGroup) as exc_info:  # noqa: PT012
+            async with asyncio.TaskGroup() as tg:
+                tg.create_task(consumer())
+                tg.create_task(raiser())
+
+        # Verify the ExceptionGroup contains our RuntimeError
+        assert any(
+            isinstance(e, RuntimeError) for e in exc_info.value.exceptions
+        )
+
+        # Give the shielded refund time to complete (lock contention possible)
+        await asyncio.sleep(0.2)
+
+        # Capacity should be fully restored — consumer's 5 tokens refunded
+        cap_after = _get_bucket_capacity(backend)
+        assert cap_after == pytest.approx(100.0, abs=1.0), (
+            f"Capacity leaked! Expected ~100, got {cap_after}. "
+            f"TaskGroup cancellation interrupted the refund."
+        )
