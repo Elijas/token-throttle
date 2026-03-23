@@ -654,9 +654,7 @@ class TestRefundCapacityFromResponseValidation:
             usage = {"prompt_tokens": 50, "completion_tokens": 30}  # noqa: RUF012
 
         with pytest.raises(ValueError, match="total_tokens"):
-            limiter.refund_capacity_from_response(
-                reservation, response=FakeResponse()
-            )
+            limiter.refund_capacity_from_response(reservation, response=FakeResponse())
 
 
 class TestExtractTotalTokensValidation:
@@ -679,9 +677,7 @@ class TestExtractTotalTokensValidation:
             usage = FakeUsage()
 
         with pytest.raises(ValueError, match="total_tokens"):
-            limiter.refund_capacity_from_response(
-                reservation, response=FakeResponse()
-            )
+            limiter.refund_capacity_from_response(reservation, response=FakeResponse())
 
     def test_boolean_total_tokens_from_kwargs_raises(self):
         builder, _ = make_mock_backend_builder()
@@ -752,9 +748,7 @@ class TestExtractTotalTokensValidation:
             usage={"tokens": 100.0, "requests": 1.0},
             model_family="gpt-4",
         )
-        limiter.refund_capacity_from_response(
-            reservation, usage={"total_tokens": "80"}
-        )
+        limiter.refund_capacity_from_response(reservation, usage={"total_tokens": "80"})
         mock_backend.refund_capacity.assert_called_once()
 
     def test_zero_total_tokens_is_valid(self):
@@ -765,9 +759,7 @@ class TestExtractTotalTokensValidation:
             usage={"tokens": 100.0, "requests": 1.0},
             model_family="gpt-4",
         )
-        limiter.refund_capacity_from_response(
-            reservation, usage={"total_tokens": 0}
-        )
+        limiter.refund_capacity_from_response(reservation, usage={"total_tokens": 0})
         mock_backend.refund_capacity.assert_called_once()
 
 
@@ -795,7 +787,9 @@ class TestSetMaxCapacityValidation:
 class TestGetBackendValidation:
     def test_empty_model_family_rejected_at_construction(self):
         """PerModelConfig rejects empty model_family at construction time."""
-        with pytest.raises(ValidationError, match="model_family must not be an empty string"):
+        with pytest.raises(
+            ValidationError, match="model_family must not be an empty string"
+        ):
             PerModelConfig(
                 quotas=UsageQuotas(
                     [
@@ -815,27 +809,21 @@ class TestModelNameTypeValidation:
         limiter = SyncRateLimiter(make_limited_config(), backend=builder)
 
         with pytest.raises(ValueError, match="model_name must be a string"):
-            limiter.acquire_capacity(
-                {"tokens": 1, "requests": 1}, model=True
-            )
+            limiter.acquire_capacity({"tokens": 1, "requests": 1}, model=True)
 
     def test_integer_model_raises(self):
         builder, _ = make_mock_backend_builder()
         limiter = SyncRateLimiter(make_limited_config(), backend=builder)
 
         with pytest.raises(ValueError, match="model_name must be a string"):
-            limiter.acquire_capacity(
-                {"tokens": 1, "requests": 1}, model=42
-            )
+            limiter.acquire_capacity({"tokens": 1, "requests": 1}, model=42)
 
     def test_none_model_raises(self):
         builder, _ = make_mock_backend_builder()
         limiter = SyncRateLimiter(make_limited_config(), backend=builder)
 
         with pytest.raises(ValueError, match="model_name must be a string"):
-            limiter.acquire_capacity(
-                {"tokens": 1, "requests": 1}, model=None
-            )
+            limiter.acquire_capacity({"tokens": 1, "requests": 1}, model=None)
 
 
 class TestTimeoutValidation:
@@ -888,18 +876,14 @@ class TestTimeoutValidation:
         limiter = SyncRateLimiter(make_unlimited_config(), backend=builder)
 
         with pytest.raises(ValueError, match="must be finite"):
-            limiter.acquire_capacity_for_request(
-                model="gpt-4", timeout=float("nan")
-            )
+            limiter.acquire_capacity_for_request(model="gpt-4", timeout=float("nan"))
 
     def test_acquire_capacity_for_request_inf_timeout_raises(self):
         builder, _ = make_mock_backend_builder()
         limiter = SyncRateLimiter(make_unlimited_config(), backend=builder)
 
         with pytest.raises(ValueError, match="must be finite"):
-            limiter.acquire_capacity_for_request(
-                model="gpt-4", timeout=float("inf")
-            )
+            limiter.acquire_capacity_for_request(model="gpt-4", timeout=float("inf"))
 
     def test_acquire_capacity_for_request_negative_timeout_raises(self):
         builder, _ = make_mock_backend_builder()

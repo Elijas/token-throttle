@@ -315,7 +315,8 @@ class TestUsageValueCoercion:
         backend.consume_capacity(frozendict({"tokens": 100.0}))
         with pytest.raises(TimeoutError):
             backend.wait_for_capacity(
-                frozendict({"tokens": "50"}), timeout=0.05,
+                frozendict({"tokens": "50"}),
+                timeout=0.05,
             )
 
 
@@ -386,7 +387,8 @@ class TestCallbackExceptionSuppression:
             backend.wait_for_capacity(frozendict({"tokens": 90.0}))
         with pytest.raises(TimeoutError):
             backend.wait_for_capacity(
-                frozendict({"tokens": 50.0}), timeout=0.05,
+                frozendict({"tokens": 50.0}),
+                timeout=0.05,
             )
 
 

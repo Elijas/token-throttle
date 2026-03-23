@@ -263,9 +263,7 @@ class TestSetMaxCapacity:
 
     def test_rejects_boolean(self):
         bucket = make_bucket(limit=100, per_seconds=60)
-        with pytest.raises(
-            ValueError, match="max_capacity must not be a boolean"
-        ):
+        with pytest.raises(ValueError, match="max_capacity must not be a boolean"):
             bucket.set_max_capacity(True)
 
     def test_accepts_positive(self):

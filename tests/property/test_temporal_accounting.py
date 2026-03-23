@@ -174,9 +174,7 @@ class TimeAdvancingAccountingMachine(RuleBasedStateMachine):
             return
 
         if amount <= readable:
-            self.backend.wait_for_capacity(
-                frozen_usage({METRIC: amount}), timeout=0.0
-            )
+            self.backend.wait_for_capacity(frozen_usage({METRIC: amount}), timeout=0.0)
             self.shadow_stored = max(0.0, readable - amount)
             self.shadow_last_checked = self.current_time
             self.total_consumed += amount
@@ -200,9 +198,7 @@ class TimeAdvancingAccountingMachine(RuleBasedStateMachine):
             frozen_usage({METRIC: actual}),
         )
         refund_amount = reserved - actual
-        self.shadow_stored = min(
-            readable + refund_amount, self.shadow_max_capacity
-        )
+        self.shadow_stored = min(readable + refund_amount, self.shadow_max_capacity)
         self.shadow_last_checked = self.current_time
         self.total_refunded += refund_amount
 
@@ -338,14 +334,18 @@ class TimeAdvancingMultiWindowMachine(RuleBasedStateMachine):
 
     def _short_readable(self) -> float:
         return self._readable(
-            self.short_stored, self.short_last_checked,
-            self.short_max, self.short_rate,
+            self.short_stored,
+            self.short_last_checked,
+            self.short_max,
+            self.short_rate,
         )
 
     def _long_readable(self) -> float:
         return self._readable(
-            self.long_stored, self.long_last_checked,
-            self.long_max, self.long_rate,
+            self.long_stored,
+            self.long_last_checked,
+            self.long_max,
+            self.long_rate,
         )
 
     @initialize()
@@ -356,16 +356,18 @@ class TimeAdvancingMultiWindowMachine(RuleBasedStateMachine):
             model_family="test", quotas=UsageQuotas([short_q, long_q])
         )
         short_b = MemoryBucket(
-            metric=METRIC, per_seconds=SHORT_WINDOW,
-            limit=SHORT_LIMIT, model_family="test",
+            metric=METRIC,
+            per_seconds=SHORT_WINDOW,
+            limit=SHORT_LIMIT,
+            model_family="test",
         )
         long_b = MemoryBucket(
-            metric=METRIC, per_seconds=LONG_WINDOW,
-            limit=LONG_LIMIT, model_family="test",
+            metric=METRIC,
+            per_seconds=LONG_WINDOW,
+            limit=LONG_LIMIT,
+            model_family="test",
         )
-        self.backend = SyncMemoryBackend(
-            buckets=[short_b, long_b], limit_config=config
-        )
+        self.backend = SyncMemoryBackend(buckets=[short_b, long_b], limit_config=config)
         self.short_bucket = short_b
         self.long_bucket = long_b
         self.current_time = INITIAL_TIME
@@ -422,9 +424,7 @@ class TimeAdvancingMultiWindowMachine(RuleBasedStateMachine):
 
         # All-or-nothing: both windows must have enough
         if amount <= short_r and amount <= long_r:
-            self.backend.wait_for_capacity(
-                frozen_usage({METRIC: amount}), timeout=0.0
-            )
+            self.backend.wait_for_capacity(frozen_usage({METRIC: amount}), timeout=0.0)
             self.short_stored = max(0.0, short_r - amount)
             self.short_last_checked = self.current_time
             self.long_stored = max(0.0, long_r - amount)
@@ -548,38 +548,48 @@ def temporal_ops_strategy(draw):
         if op_type == Op.CONSUME:
             amount = draw(
                 st.floats(
-                    min_value=0.1, max_value=200.0,
-                    allow_nan=False, allow_infinity=False,
+                    min_value=0.1,
+                    max_value=200.0,
+                    allow_nan=False,
+                    allow_infinity=False,
                 )
             )
             ops.append((Op.CONSUME, amount))
         elif op_type == Op.REFUND:
             reserved = draw(
                 st.floats(
-                    min_value=0.1, max_value=200.0,
-                    allow_nan=False, allow_infinity=False,
+                    min_value=0.1,
+                    max_value=200.0,
+                    allow_nan=False,
+                    allow_infinity=False,
                 )
             )
             actual = draw(
                 st.floats(
-                    min_value=0.0, max_value=400.0,
-                    allow_nan=False, allow_infinity=False,
+                    min_value=0.0,
+                    max_value=400.0,
+                    allow_nan=False,
+                    allow_infinity=False,
                 )
             )
             ops.append((Op.REFUND, reserved, actual))
         elif op_type == Op.ACQUIRE:
             amount = draw(
                 st.floats(
-                    min_value=0.1, max_value=100.0,
-                    allow_nan=False, allow_infinity=False,
+                    min_value=0.1,
+                    max_value=100.0,
+                    allow_nan=False,
+                    allow_infinity=False,
                 )
             )
             ops.append((Op.ACQUIRE, amount))
         else:
             delta = draw(
                 st.floats(
-                    min_value=0.0, max_value=60.0,
-                    allow_nan=False, allow_infinity=False,
+                    min_value=0.0,
+                    max_value=60.0,
+                    allow_nan=False,
+                    allow_infinity=False,
                 )
             )
             ops.append((Op.ADVANCE_TIME, delta))
@@ -601,9 +611,7 @@ def _run_sync_temporal_ops(backend, ops, clock):
             )
         elif op[0] == Op.ACQUIRE:
             try:
-                backend.wait_for_capacity(
-                    frozen_usage({METRIC: op[1]}), timeout=0.0
-                )
+                backend.wait_for_capacity(frozen_usage({METRIC: op[1]}), timeout=0.0)
                 acquire_results.append(True)
             except (TimeoutError, ValueError):
                 acquire_results.append(False)
@@ -639,7 +647,8 @@ async def _run_async_temporal_ops(backend, ops, clock):
 @given(ops=temporal_ops_strategy())
 def test_temporal_sync_async_parity(ops):
     """Identical op sequences with time advancement on sync and async backends
-    must produce identical final capacity and identical acquire results."""
+    must produce identical final capacity and identical acquire results.
+    """
     sync_config = _make_config()
     sync_bucket = _make_bucket()
     async_config = _make_config()
@@ -664,17 +673,13 @@ def test_temporal_sync_async_parity(ops):
         sync_acquire_results = _run_sync_temporal_ops(sync_backend, ops, sync_clock)
 
     with (
-        patch(
-            "token_throttle._limiter_backends._memory._backend.time"
-        ) as async_mock,
+        patch("token_throttle._limiter_backends._memory._backend.time") as async_mock,
         warnings.catch_warnings(),
     ):
         warnings.simplefilter("ignore", RuntimeWarning)
         async_mock.time.side_effect = lambda: async_clock[0]
         async_mock.monotonic.side_effect = lambda: async_clock[0]
-        async_backend = MemoryBackend(
-            buckets=[async_bucket], limit_config=async_config
-        )
+        async_backend = MemoryBackend(buckets=[async_bucket], limit_config=async_config)
         async_acquire_results = asyncio.run(
             _run_async_temporal_ops(async_backend, ops, async_clock)
         )

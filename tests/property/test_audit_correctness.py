@@ -65,9 +65,15 @@ T3_LIMIT = 500.0
 # Strategies
 # ---------------------------------------------------------------------------
 
-amounts = st.floats(min_value=0.1, max_value=500.0, allow_nan=False, allow_infinity=False)
-small_amounts = st.floats(min_value=0.1, max_value=50.0, allow_nan=False, allow_infinity=False)
-time_deltas = st.floats(min_value=0.0, max_value=120.0, allow_nan=False, allow_infinity=False)
+amounts = st.floats(
+    min_value=0.1, max_value=500.0, allow_nan=False, allow_infinity=False
+)
+small_amounts = st.floats(
+    min_value=0.1, max_value=50.0, allow_nan=False, allow_infinity=False
+)
+time_deltas = st.floats(
+    min_value=0.0, max_value=120.0, allow_nan=False, allow_infinity=False
+)
 
 # Test 2: amounts sized for the smallest bucket (requests/60s = 20)
 t2_token_amounts = st.floats(
@@ -218,7 +224,12 @@ class TightConservationMachine(RuleBasedStateMachine):
         if self.bucket is None:
             return
         actual = self.bucket.get_capacity(FROZEN_TIME).amount
-        balance = actual + self.total_consumed - self.total_refunded + self.total_clipped_by_cap
+        balance = (
+            actual
+            + self.total_consumed
+            - self.total_refunded
+            + self.total_clipped_by_cap
+        )
         assert balance == pytest.approx(T1_LIMIT, abs=1e-9), (
             f"Tight conservation violation: capacity={actual}, "
             f"consumed={self.total_consumed}, refunded={self.total_refunded}, "
@@ -405,7 +416,9 @@ class MultiMetricMultiWindowMachine(RuleBasedStateMachine):
     def try_acquire(self, tokens_amount, requests_amount):
         # Check if exceeds any bucket's max
         tokens_short_max = self.shadows[(TOKENS_METRIC, T2_TOKENS_SHORT_WINDOW)]["max"]
-        requests_short_max = self.shadows[(REQUESTS_METRIC, T2_REQUESTS_SHORT_WINDOW)]["max"]
+        requests_short_max = self.shadows[(REQUESTS_METRIC, T2_REQUESTS_SHORT_WINDOW)][
+            "max"
+        ]
 
         if tokens_amount > tokens_short_max or requests_amount > requests_short_max:
             with pytest.raises(ValueError, match="exceeds bucket max capacity"):
@@ -827,7 +840,9 @@ def test_acquire_exact_max_on_fresh_bucket(limit):
 @hypothesis_settings(max_examples=100, deadline=None)
 @given(
     limit=boundary_limits,
-    amount=st.floats(min_value=0.1, max_value=500.0, allow_nan=False, allow_infinity=False),
+    amount=st.floats(
+        min_value=0.1, max_value=500.0, allow_nan=False, allow_infinity=False
+    ),
 )
 def test_consume_then_full_refund_roundtrip(limit, amount):
     """Consume X, refund (reserved=X, actual=0). Capacity should return to original."""
@@ -879,18 +894,14 @@ def test_acquire_boundary_no_partial_state(limit, amount_fraction):
         if amount > limit:
             # Exceeds max capacity -> ValueError, state unchanged
             with pytest.raises(ValueError, match="exceeds bucket max capacity"):
-                backend.wait_for_capacity(
-                    frozen_usage({"tokens": amount}), timeout=0.0
-                )
+                backend.wait_for_capacity(frozen_usage({"tokens": amount}), timeout=0.0)
             cap_after = bucket.get_capacity(FROZEN_TIME).amount
             assert cap_after == pytest.approx(cap_before, abs=1e-9), (
                 f"State changed after rejected acquire: before={cap_before}, after={cap_after}"
             )
         elif amount <= cap_before:
             # Should succeed
-            backend.wait_for_capacity(
-                frozen_usage({"tokens": amount}), timeout=0.0
-            )
+            backend.wait_for_capacity(frozen_usage({"tokens": amount}), timeout=0.0)
             cap_after = bucket.get_capacity(FROZEN_TIME).amount
             expected = max(0.0, cap_before - amount)
             assert cap_after == pytest.approx(expected, abs=1e-9), (
@@ -899,9 +910,7 @@ def test_acquire_boundary_no_partial_state(limit, amount_fraction):
         else:
             # Insufficient capacity -> TimeoutError, state unchanged
             with pytest.raises(TimeoutError):
-                backend.wait_for_capacity(
-                    frozen_usage({"tokens": amount}), timeout=0.0
-                )
+                backend.wait_for_capacity(frozen_usage({"tokens": amount}), timeout=0.0)
             cap_after = bucket.get_capacity(FROZEN_TIME).amount
             assert cap_after == pytest.approx(cap_before, abs=1e-9), (
                 f"State changed after timeout: before={cap_before}, after={cap_after}"
@@ -922,7 +931,9 @@ def test_acquire_boundary_no_partial_state(limit, amount_fraction):
         min_value=0.0, max_value=1.0, allow_nan=False, allow_infinity=False
     ),
 )
-def test_refund_never_exceeds_max(limit, consume_amount, refund_reserved, actual_fraction):
+def test_refund_never_exceeds_max(
+    limit, consume_amount, refund_reserved, actual_fraction
+):
     """After arbitrary consume + refund, capacity must never exceed max_capacity."""
     with (
         patch(
@@ -978,9 +989,7 @@ def test_cancellation_refund_math(limit, pre_consume, cancel_amount, time_delta)
     clock = [INITIAL_TIME]
 
     with (
-        patch(
-            "token_throttle._limiter_backends._memory._backend.time"
-        ) as mock_time,
+        patch("token_throttle._limiter_backends._memory._backend.time") as mock_time,
         warnings.catch_warnings(),
     ):
         warnings.simplefilter("ignore", RuntimeWarning)
@@ -989,9 +998,7 @@ def test_cancellation_refund_math(limit, pre_consume, cancel_amount, time_delta)
 
         config = PerModelConfig(
             model_family="test",
-            quotas=UsageQuotas(
-                [Quota(metric="tokens", limit=limit, per_seconds=60)]
-            ),
+            quotas=UsageQuotas([Quota(metric="tokens", limit=limit, per_seconds=60)]),
         )
         bucket = MemoryBucket(
             metric="tokens", per_seconds=60, limit=limit, model_family="test"

@@ -281,9 +281,7 @@ class SyncRateLimiterCallbacks(BaseModel):
         info: ValidationInfo,
     ) -> object:
         if value is not None and is_async_callable(value):
-            raise ValueError(
-                f"{info.field_name} must be a synchronous callable"
-            )
+            raise ValueError(f"{info.field_name} must be a synchronous callable")
         return value
 
 

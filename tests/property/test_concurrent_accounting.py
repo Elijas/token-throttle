@@ -179,7 +179,6 @@ def test_sync_concurrent_ops_no_corruption(ops, n_threads):
     Verifies no unexpected exceptions and post-condition invariants hold.
     """
     backend = _build_sync_backend()
-    initial_cap = _get_capacity(backend)
 
     # Thread-safe accumulators
     consumed_lock = threading.Lock()
@@ -204,9 +203,7 @@ def test_sync_concurrent_ops_no_corruption(ops, n_threads):
             elif op_type == OP_SET_MAX:
                 backend.set_max_capacity(METRIC, SLOW_WINDOW, max_cap_val)
             elif op_type == OP_ACQUIRE:
-                backend.wait_for_capacity(
-                    frozen_usage({METRIC: amount}), timeout=0.0
-                )
+                backend.wait_for_capacity(frozen_usage({METRIC: amount}), timeout=0.0)
                 with consumed_lock:
                     consumed_total[0] += amount
         except (TimeoutError, ValueError):
@@ -227,9 +224,7 @@ def test_sync_concurrent_ops_no_corruption(ops, n_threads):
 
     final_cap = _get_capacity(backend)
     max_cap = _get_max_capacity(backend)
-    assert final_cap <= max_cap + 0.01, (
-        f"capacity {final_cap} exceeded max {max_cap}"
-    )
+    assert final_cap <= max_cap + 0.01, f"capacity {final_cap} exceeded max {max_cap}"
 
 
 # ---------------------------------------------------------------------------
@@ -301,9 +296,7 @@ def test_sync_concurrent_all_acquires_no_double_spend(n_requesters):
 
     with ThreadPoolExecutor(max_workers=n_requesters) as pool:
         futures = [
-            pool.submit(
-                backend.wait_for_capacity, frozen_usage({METRIC: per_thread})
-            )
+            pool.submit(backend.wait_for_capacity, frozen_usage({METRIC: per_thread}))
             for _ in range(n_requesters)
         ]
         results = [f.result() for f in as_completed(futures, timeout=10)]
@@ -473,9 +466,7 @@ def test_sync_multiple_waiters_wake_on_refund(n_waiters, per_waiter):
 
     def blocking_acquire():
         try:
-            backend.wait_for_capacity(
-                frozen_usage({METRIC: per_waiter}), timeout=5.0
-            )
+            backend.wait_for_capacity(frozen_usage({METRIC: per_waiter}), timeout=5.0)
             with count_lock:
                 acquired_count[0] += 1
         except BaseException as exc:

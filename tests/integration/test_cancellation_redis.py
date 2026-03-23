@@ -444,9 +444,7 @@ class TestRedisPipelineExecuteCancellationRefundsCapacity:
         backend._set_capacities_unsafe = cancelling_set
 
         with pytest.raises(asyncio.CancelledError):
-            await backend.await_for_capacity(
-                frozendict({"requests": 5.0}), timeout=0
-            )
+            await backend.await_for_capacity(frozendict({"requests": 5.0}), timeout=0)
 
         # Give the shielded refund time to complete
         await asyncio.sleep(0.5)
@@ -549,9 +547,7 @@ class TestRedisMultiMetricCancellationRefundsAllMetrics:
             f"requests not refunded! Before={caps_before['requests']}, "
             f"after={caps_after['requests']}"
         )
-        assert caps_after["tokens"] == pytest.approx(
-            caps_before["tokens"], abs=1.0
-        ), (
+        assert caps_after["tokens"] == pytest.approx(caps_before["tokens"], abs=1.0), (
             f"tokens not refunded! Before={caps_before['tokens']}, "
             f"after={caps_after['tokens']}"
         )
@@ -646,6 +642,4 @@ class TestRedisCancellationDuringLocalConditionWait:
             await task
 
         # The remaining ~10 tokens should still be available
-        await backend.await_for_capacity(
-            frozendict({"requests": 5.0}), timeout=2.0
-        )
+        await backend.await_for_capacity(frozendict({"requests": 5.0}), timeout=2.0)

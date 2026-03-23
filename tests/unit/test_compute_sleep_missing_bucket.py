@@ -16,6 +16,9 @@ from token_throttle._limiter_backends._memory._bucket import MemoryBucket
 from token_throttle._limiter_backends._memory._sync_backend import (
     SyncMemoryBackendBuilder,
 )
+
+pytest.importorskip("redis", reason="redis package not installed")
+
 from token_throttle._limiter_backends._redis._backend import RedisBackend
 from token_throttle._limiter_backends._redis._sync_backend import SyncRedisBackend
 

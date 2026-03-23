@@ -37,9 +37,15 @@ LIMIT = 1000.0
 # Strategies
 # ---------------------------------------------------------------------------
 
-amounts = st.floats(min_value=0.1, max_value=500.0, allow_nan=False, allow_infinity=False)
-small_amounts = st.floats(min_value=0.1, max_value=50.0, allow_nan=False, allow_infinity=False)
-max_cap_values = st.floats(min_value=1.0, max_value=5000.0, allow_nan=False, allow_infinity=False)
+amounts = st.floats(
+    min_value=0.1, max_value=500.0, allow_nan=False, allow_infinity=False
+)
+small_amounts = st.floats(
+    min_value=0.1, max_value=50.0, allow_nan=False, allow_infinity=False
+)
+max_cap_values = st.floats(
+    min_value=1.0, max_value=5000.0, allow_nan=False, allow_infinity=False
+)
 
 
 # ---------------------------------------------------------------------------
@@ -130,9 +136,7 @@ class SingleBucketAccountingMachine(RuleBasedStateMachine):
 
         if amount <= readable:
             # Should succeed (no wait needed, capacity is sufficient)
-            self.backend.wait_for_capacity(
-                frozen_usage({METRIC: amount}), timeout=0.0
-            )
+            self.backend.wait_for_capacity(frozen_usage({METRIC: amount}), timeout=0.0)
             # After successful acquire: capacity = max(0, readable - amount)
             self.shadow_raw_stored = max(0.0, readable - amount)
             self.total_consumed += amount
@@ -288,9 +292,7 @@ class MultiWindowAccountingMachine(RuleBasedStateMachine):
             limit=LONG_LIMIT,
             model_family="test",
         )
-        self.backend = SyncMemoryBackend(
-            buckets=[short_b, long_b], limit_config=config
-        )
+        self.backend = SyncMemoryBackend(buckets=[short_b, long_b], limit_config=config)
         self.short_bucket = short_b
         self.long_bucket = long_b
         self.shadow_short_raw = None
@@ -321,9 +323,7 @@ class MultiWindowAccountingMachine(RuleBasedStateMachine):
 
         # All-or-nothing: both windows must have enough
         if amount <= short_r and amount <= long_r:
-            self.backend.wait_for_capacity(
-                frozen_usage({METRIC: amount}), timeout=0.0
-            )
+            self.backend.wait_for_capacity(frozen_usage({METRIC: amount}), timeout=0.0)
             self.shadow_short_raw = max(0.0, short_r - amount)
             self.shadow_long_raw = max(0.0, long_r - amount)
         else:
@@ -463,9 +463,7 @@ def _run_sync_ops(backend, ops):
             )
         elif op[0] == Op.ACQUIRE:
             try:
-                backend.wait_for_capacity(
-                    frozen_usage({METRIC: op[1]}), timeout=0.0
-                )
+                backend.wait_for_capacity(frozen_usage({METRIC: op[1]}), timeout=0.0)
                 acquire_results.append(True)
             except (TimeoutError, ValueError):
                 acquire_results.append(False)
@@ -519,17 +517,13 @@ def test_sync_async_parity(ops):
         sync_acquire_results = _run_sync_ops(sync_backend, ops)
 
     with (
-        patch(
-            "token_throttle._limiter_backends._memory._backend.time"
-        ) as async_mock,
+        patch("token_throttle._limiter_backends._memory._backend.time") as async_mock,
         warnings.catch_warnings(),
     ):
         warnings.simplefilter("ignore", RuntimeWarning)
         async_mock.time.return_value = FROZEN_TIME
         async_mock.monotonic.return_value = FROZEN_TIME
-        async_backend = MemoryBackend(
-            buckets=[async_bucket], limit_config=async_config
-        )
+        async_backend = MemoryBackend(buckets=[async_bucket], limit_config=async_config)
         async_acquire_results = asyncio.run(_run_async_ops(async_backend, ops))
 
     sync_cap = sync_bucket.get_capacity(FROZEN_TIME).amount
@@ -638,7 +632,9 @@ class MultiMetricAccountingMachine(RuleBasedStateMachine):
         tokens_r = self._tokens_readable()
         requests_r = self._requests_readable()
         self.backend.consume_capacity(
-            frozen_usage({TOKENS_METRIC: tokens_amount, REQUESTS_METRIC: requests_amount})
+            frozen_usage(
+                {TOKENS_METRIC: tokens_amount, REQUESTS_METRIC: requests_amount}
+            )
         )
         self.shadow_tokens_raw = tokens_r - tokens_amount
         self.shadow_requests_raw = requests_r - requests_amount

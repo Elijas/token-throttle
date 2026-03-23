@@ -75,9 +75,7 @@ class TestCancelDuringTimeoutWait:
         cap_before = _get_bucket_capacity(backend)
 
         task = asyncio.create_task(
-            backend.await_for_capacity(
-                frozendict({"requests": 10.0}), timeout=10.0
-            )
+            backend.await_for_capacity(frozendict({"requests": 10.0}), timeout=10.0)
         )
         await asyncio.sleep(0.05)
 
@@ -102,9 +100,7 @@ class TestCancelDuringTimeoutWait:
         cap_before = _get_bucket_capacity(backend)
 
         task = asyncio.create_task(
-            backend.await_for_capacity(
-                frozendict({"requests": 10.0}), timeout=0.2
-            )
+            backend.await_for_capacity(frozendict({"requests": 10.0}), timeout=0.2)
         )
         await asyncio.sleep(0.1)
 
@@ -146,9 +142,7 @@ class TestCancelDuringTimeoutWait:
 
         tasks = [
             asyncio.create_task(
-                backend.await_for_capacity(
-                    frozendict({"requests": 10.0}), timeout=10.0
-                )
+                backend.await_for_capacity(frozendict({"requests": 10.0}), timeout=10.0)
             )
             for _ in range(3)
         ]

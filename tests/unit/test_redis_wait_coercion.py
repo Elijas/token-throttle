@@ -10,6 +10,7 @@ import asyncio
 import threading
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 from frozendict import frozendict
 
 from token_throttle._interfaces._callbacks import (
@@ -18,6 +19,9 @@ from token_throttle._interfaces._callbacks import (
 )
 from token_throttle._interfaces._interfaces import PerModelConfig
 from token_throttle._interfaces._models import Quota, SecondsIn, UsageQuotas
+
+pytest.importorskip("redis", reason="redis package not installed")
+
 from token_throttle._limiter_backends._redis._backend import RedisBackend
 from token_throttle._limiter_backends._redis._sync_backend import SyncRedisBackend
 

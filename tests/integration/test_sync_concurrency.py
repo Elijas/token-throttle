@@ -284,19 +284,18 @@ class TestConcurrentConsumeCapacity:
         def do_wait():
             try:
                 backend.wait_for_capacity(wait_usage)
-            except BaseException as exc:  # noqa: BLE001
+            except BaseException as exc:
                 errors.append(exc)
 
         def do_consume():
             try:
                 backend.consume_capacity(consume_usage)
-            except BaseException as exc:  # noqa: BLE001
+            except BaseException as exc:
                 errors.append(exc)
 
         with ThreadPoolExecutor(max_workers=20) as pool:
             futures = [
-                pool.submit(do_wait if i % 2 == 0 else do_consume)
-                for i in range(20)
+                pool.submit(do_wait if i % 2 == 0 else do_consume) for i in range(20)
             ]
             for f in as_completed(futures, timeout=10):
                 f.result()
@@ -351,7 +350,7 @@ class TestMultiMetricConcurrency:
         def acquire():
             try:
                 backend.wait_for_capacity(usage, timeout=10)
-            except BaseException as exc:  # noqa: BLE001
+            except BaseException as exc:
                 errors.append(exc)
 
         with ThreadPoolExecutor(max_workers=10) as pool:
@@ -478,13 +477,13 @@ class TestConcurrentSetMaxCapacity:
         def do_consume():
             try:
                 backend.consume_capacity(frozen_usage({"requests": 10}))
-            except BaseException as exc:  # noqa: BLE001
+            except BaseException as exc:
                 errors.append(exc)
 
         def do_set_max(new_max):
             try:
                 backend.set_max_capacity("requests", 60, new_max)
-            except BaseException as exc:  # noqa: BLE001
+            except BaseException as exc:
                 errors.append(exc)
 
         max_values = [50.0, 100.0, 300.0, 150.0, 200.0]
@@ -519,20 +518,31 @@ class TestConcurrentSetMaxCapacity:
                 backend.wait_for_capacity(frozen_usage({"requests": 5}), timeout=5)
             except TimeoutError:
                 pass  # acceptable — capacity may have been lowered
-            except BaseException as exc:  # noqa: BLE001
+            except BaseException as exc:
                 errors.append(exc)
 
         def do_set_max(new_max):
             try:
                 backend.set_max_capacity("requests", 1, new_max)
-            except BaseException as exc:  # noqa: BLE001
+            except BaseException as exc:
                 errors.append(exc)
 
         with ThreadPoolExecutor(max_workers=20) as pool:
             futures = [pool.submit(do_acquire) for _ in range(10)]
             futures.extend(
                 pool.submit(do_set_max, v)
-                for v in [50.0, 200.0, 30.0, 150.0, 100.0, 75.0, 300.0, 10.0, 500.0, 60.0]
+                for v in [
+                    50.0,
+                    200.0,
+                    30.0,
+                    150.0,
+                    100.0,
+                    75.0,
+                    300.0,
+                    10.0,
+                    500.0,
+                    60.0,
+                ]
             )
             for f in as_completed(futures, timeout=15):
                 f.result()
@@ -565,7 +575,7 @@ class TestConcurrentSetMaxCapacity:
         def do_consume():
             try:
                 backend.consume_capacity(frozen_usage({"requests": 5}))
-            except BaseException as exc:  # noqa: BLE001
+            except BaseException as exc:
                 errors.append(exc)
 
         def do_refund():
@@ -574,19 +584,21 @@ class TestConcurrentSetMaxCapacity:
                     reserved_usage=frozen_usage({"requests": 10}),
                     actual_usage=frozen_usage({"requests": 5}),
                 )
-            except BaseException as exc:  # noqa: BLE001
+            except BaseException as exc:
                 errors.append(exc)
 
         def do_set_max(v):
             try:
                 backend.set_max_capacity("requests", 3600, v)
-            except BaseException as exc:  # noqa: BLE001
+            except BaseException as exc:
                 errors.append(exc)
 
         with ThreadPoolExecutor(max_workers=20) as pool:
             futures = [pool.submit(do_consume) for _ in range(5)]
             futures.extend(pool.submit(do_refund) for _ in range(5))
-            futures.extend(pool.submit(do_set_max, v) for v in [50.0, 200.0, 80.0, 150.0, 100.0])
+            futures.extend(
+                pool.submit(do_set_max, v) for v in [50.0, 200.0, 80.0, 150.0, 100.0]
+            )
             for f in as_completed(futures, timeout=10):
                 f.result()
 

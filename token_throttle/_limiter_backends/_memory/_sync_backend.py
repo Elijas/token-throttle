@@ -155,9 +155,7 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
                 )
         # Invariant: validate_acquire_usage() guarantees usage keys == quota
         # keys, so every capacity bucket must have a matching usage entry.
-        if len(postconsumption_dict) != len(
-            preconsumption
-        ):  # pragma: no cover
+        if len(postconsumption_dict) != len(preconsumption):  # pragma: no cover
             raise RuntimeError(
                 f"postconsumption covers {len(postconsumption_dict)} buckets but "
                 f"preconsumption has {len(preconsumption)} — "
@@ -257,7 +255,9 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
                 current_time = time.time()
                 preconsumption, fresh = self._get_capacities(current_time)
                 ok, postconsumption = self._try_consume_locked(
-                    usage, preconsumption, current_time,
+                    usage,
+                    preconsumption,
+                    current_time,
                 )
                 if ok:
                     break
@@ -289,7 +289,11 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
                 preconsumption_capacities=first_failed_pre,
                 usage=usage,
             )
-        if has_waited and self._callbacks and self._callbacks.after_wait_end_consumption:
+        if (
+            has_waited
+            and self._callbacks
+            and self._callbacks.after_wait_end_consumption
+        ):
             wait_time_s = time.monotonic() - start_time
             self._invoke_callback_safe(
                 self._callbacks.after_wait_end_consumption,

@@ -208,15 +208,11 @@ def validate_timeout(timeout: object) -> float | None:
     try:
         timeout_value = float(timeout)
     except (TypeError, ValueError) as exc:
-        raise ValueError(
-            f"timeout must be finite or None (got {timeout!r})"
-        ) from exc
+        raise ValueError(f"timeout must be finite or None (got {timeout!r})") from exc
     if not math.isfinite(timeout_value):
         raise ValueError(f"timeout must be finite or None (got {timeout!r})")
     if timeout_value < 0:
-        raise ValueError(
-            f"timeout must be non-negative or None (got {timeout!r})"
-        )
+        raise ValueError(f"timeout must be non-negative or None (got {timeout!r})")
     return timeout_value
 
 

@@ -53,8 +53,7 @@ class OpenAIUsageCounter:
                 tokens = len(encoding.encode(input_)) + reserved_output_tokens
                 return frozendict({"tokens": tokens, "requests": 1})
             tokens = (
-                count_structured_input_tokens(encoding, input_)
-                + reserved_output_tokens
+                count_structured_input_tokens(encoding, input_) + reserved_output_tokens
             )
             return frozendict({"tokens": tokens, "requests": 1})
 
@@ -65,8 +64,7 @@ class OpenAIUsageCounter:
             ):
                 raise ValueError("'inputs' must be a list of strings")
             tokens = (
-                sum(len(encoding.encode(i)) for i in inputs)
-                + reserved_output_tokens
+                sum(len(encoding.encode(i)) for i in inputs) + reserved_output_tokens
             )
             return frozendict({"tokens": tokens, "requests": 1})
 
@@ -76,10 +74,13 @@ class OpenAIUsageCounter:
                 isinstance(m, dict) for m in messages
             ):
                 raise ValueError("All messages must be dicts")
-            tokens = count_chat_input_tokens(
-                encoding,
-                messages=cast("list[dict[str, object]]", messages),
-            ) + reserved_output_tokens
+            tokens = (
+                count_chat_input_tokens(
+                    encoding,
+                    messages=cast("list[dict[str, object]]", messages),
+                )
+                + reserved_output_tokens
+            )
             return frozendict({"tokens": tokens, "requests": 1})
 
         raise ValueError("Request must contain 'input', 'inputs', or 'messages'")

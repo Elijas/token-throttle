@@ -126,9 +126,7 @@ class TestSetMaxCapacityValidation:
         builder, _mock_backend = make_mock_backend_builder()
         config = make_limited_config(model_family="gpt-4o")
         limiter = RateLimiter(config, backend=builder)
-        await limiter.acquire_capacity(
-            {"tokens": 100, "requests": 1}, model="gpt-4o"
-        )
+        await limiter.acquire_capacity({"tokens": 100, "requests": 1}, model="gpt-4o")
         return limiter
 
     async def test_boolean_value_raises(self):
@@ -138,22 +136,30 @@ class TestSetMaxCapacityValidation:
 
     async def test_nan_value_raises(self):
         limiter = await self._make_limiter_with_backend()
-        with pytest.raises(ValueError, match="max_capacity must be finite and greater than 0"):
+        with pytest.raises(
+            ValueError, match="max_capacity must be finite and greater than 0"
+        ):
             await limiter.set_max_capacity("gpt-4o", "tokens", 60, float("nan"))
 
     async def test_inf_value_raises(self):
         limiter = await self._make_limiter_with_backend()
-        with pytest.raises(ValueError, match="max_capacity must be finite and greater than 0"):
+        with pytest.raises(
+            ValueError, match="max_capacity must be finite and greater than 0"
+        ):
             await limiter.set_max_capacity("gpt-4o", "tokens", 60, float("inf"))
 
     async def test_negative_value_raises(self):
         limiter = await self._make_limiter_with_backend()
-        with pytest.raises(ValueError, match="max_capacity must be finite and greater than 0"):
+        with pytest.raises(
+            ValueError, match="max_capacity must be finite and greater than 0"
+        ):
             await limiter.set_max_capacity("gpt-4o", "tokens", 60, -5.0)
 
     async def test_zero_value_raises(self):
         limiter = await self._make_limiter_with_backend()
-        with pytest.raises(ValueError, match="max_capacity must be finite and greater than 0"):
+        with pytest.raises(
+            ValueError, match="max_capacity must be finite and greater than 0"
+        ):
             await limiter.set_max_capacity("gpt-4o", "tokens", 60, 0.0)
 
 
@@ -164,9 +170,7 @@ class TestSetMaxCapacityMetricValidation:
         builder, _mock_backend = make_mock_backend_builder()
         config = make_limited_config(model_family="gpt-4o")
         limiter = RateLimiter(config, backend=builder)
-        await limiter.acquire_capacity(
-            {"tokens": 100, "requests": 1}, model="gpt-4o"
-        )
+        await limiter.acquire_capacity({"tokens": 100, "requests": 1}, model="gpt-4o")
         return limiter
 
     async def test_boolean_metric_raises(self):
@@ -192,9 +196,7 @@ class TestSetMaxCapacityPerSecondsValidation:
         builder, _mock_backend = make_mock_backend_builder()
         config = make_limited_config(model_family="gpt-4o")
         limiter = RateLimiter(config, backend=builder)
-        await limiter.acquire_capacity(
-            {"tokens": 100, "requests": 1}, model="gpt-4o"
-        )
+        await limiter.acquire_capacity({"tokens": 100, "requests": 1}, model="gpt-4o")
         return limiter
 
     async def test_boolean_per_seconds_raises(self):
@@ -244,9 +246,7 @@ class TestSetMaxCapacityCoercion:
         config = make_limited_config(model_family="gpt-4o")
         limiter = RateLimiter(config, backend=builder)
 
-        await limiter.acquire_capacity(
-            {"tokens": 100, "requests": 1}, model="gpt-4o"
-        )
+        await limiter.acquire_capacity({"tokens": 100, "requests": 1}, model="gpt-4o")
 
         await limiter.set_max_capacity("gpt-4o", "tokens", 60, 5000)
 

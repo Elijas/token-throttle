@@ -374,7 +374,8 @@ class TestUsageValueCoercion:
         await backend.consume_capacity(frozendict({"tokens": 100.0}))
         with pytest.raises(TimeoutError):
             await backend.await_for_capacity(
-                frozendict({"tokens": "50"}), timeout=0.05,
+                frozendict({"tokens": "50"}),
+                timeout=0.05,
             )
 
 
@@ -447,7 +448,8 @@ class TestCallbackExceptionSuppression:
         # Only 10 tokens remain — trying to acquire 50 should time out
         with pytest.raises(TimeoutError):
             await backend.await_for_capacity(
-                frozendict({"tokens": 50.0}), timeout=0.05,
+                frozendict({"tokens": 50.0}),
+                timeout=0.05,
             )
 
 

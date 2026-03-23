@@ -99,9 +99,7 @@ class SyncRateLimiter:
         limit_config = self._config_getter(model)
         if limit_config.is_unlimited:
             if extra_usage:
-                raise ValueError(
-                    "extra_usage must be empty for unlimited capacity"
-                )
+                raise ValueError("extra_usage must be empty for unlimited capacity")
             return CapacityReservation(
                 usage={},
                 model_family=_UNLIMITED_FLAG,
@@ -113,9 +111,7 @@ class SyncRateLimiter:
             frozen_usage(limit_config.usage_counter(**kwargs)),
             extra_usage,
         )
-        return self._acquire_capacity(
-            usage, limit_config, timeout=timeout
-        )
+        return self._acquire_capacity(usage, limit_config, timeout=timeout)
 
     def _acquire_capacity(
         self,
@@ -197,9 +193,7 @@ class SyncRateLimiter:
         value = validate_max_capacity_value(value)
         limit_config = self._config_getter(model)
         if limit_config.is_unlimited:
-            raise ValueError(
-                "Cannot set max capacity: model has unlimited quotas"
-            )
+            raise ValueError("Cannot set max capacity: model has unlimited quotas")
         model_family = limit_config.get_model_family()
         backend = self._model_family_to_backend.get(model_family)
         if backend is None:

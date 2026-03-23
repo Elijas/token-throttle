@@ -28,7 +28,7 @@ def _make_mock_get_encoding(chars_per_token: int = 1):
     """Return a get_encoding callable that always returns a mock encoding."""
     mock_enc = _make_mock_encoding(chars_per_token)
 
-    def getter(model_name: str):  # noqa: ARG001
+    def getter(model_name: str):
         return mock_enc
 
     return getter
@@ -108,37 +108,27 @@ class TestOpenAIUsageCounterWithInputs:
 
     def test_inputs_non_string_items_raises_value_error(self):
         counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
-        with pytest.raises(
-            ValueError, match="'inputs' must be a list of strings"
-        ):
+        with pytest.raises(ValueError, match="'inputs' must be a list of strings"):
             counter("gpt-4", inputs=["hello", 42])
 
     def test_inputs_bare_string_raises_value_error(self):
         counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
-        with pytest.raises(
-            ValueError, match="'inputs' must be a list of strings"
-        ):
+        with pytest.raises(ValueError, match="'inputs' must be a list of strings"):
             counter("gpt-4", inputs="hello")
 
     def test_inputs_integer_raises_value_error(self):
         counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
-        with pytest.raises(
-            ValueError, match="'inputs' must be a list of strings"
-        ):
+        with pytest.raises(ValueError, match="'inputs' must be a list of strings"):
             counter("gpt-4", inputs=42)
 
     def test_inputs_none_raises_value_error(self):
         counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
-        with pytest.raises(
-            ValueError, match="'inputs' must be a list of strings"
-        ):
+        with pytest.raises(ValueError, match="'inputs' must be a list of strings"):
             counter("gpt-4", inputs=None)
 
     def test_inputs_dict_raises_value_error(self):
         counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
-        with pytest.raises(
-            ValueError, match="'inputs' must be a list of strings"
-        ):
+        with pytest.raises(ValueError, match="'inputs' must be a list of strings"):
             counter("gpt-4", inputs={"key": "value"})
 
     def test_inputs_empty_list(self):

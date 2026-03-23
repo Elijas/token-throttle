@@ -128,9 +128,7 @@ class TestSyncSetMaxCapacityValidation:
         builder, _mock_backend = make_mock_backend_builder()
         config = make_limited_config(model_family="gpt-4o")
         limiter = SyncRateLimiter(config, backend=builder)
-        limiter.acquire_capacity(
-            {"tokens": 100, "requests": 1}, model="gpt-4o"
-        )
+        limiter.acquire_capacity({"tokens": 100, "requests": 1}, model="gpt-4o")
         return limiter
 
     def test_boolean_value_raises(self):
@@ -140,22 +138,30 @@ class TestSyncSetMaxCapacityValidation:
 
     def test_nan_value_raises(self):
         limiter = self._make_limiter_with_backend()
-        with pytest.raises(ValueError, match="max_capacity must be finite and greater than 0"):
+        with pytest.raises(
+            ValueError, match="max_capacity must be finite and greater than 0"
+        ):
             limiter.set_max_capacity("gpt-4o", "tokens", 60, float("nan"))
 
     def test_inf_value_raises(self):
         limiter = self._make_limiter_with_backend()
-        with pytest.raises(ValueError, match="max_capacity must be finite and greater than 0"):
+        with pytest.raises(
+            ValueError, match="max_capacity must be finite and greater than 0"
+        ):
             limiter.set_max_capacity("gpt-4o", "tokens", 60, float("inf"))
 
     def test_negative_value_raises(self):
         limiter = self._make_limiter_with_backend()
-        with pytest.raises(ValueError, match="max_capacity must be finite and greater than 0"):
+        with pytest.raises(
+            ValueError, match="max_capacity must be finite and greater than 0"
+        ):
             limiter.set_max_capacity("gpt-4o", "tokens", 60, -5.0)
 
     def test_zero_value_raises(self):
         limiter = self._make_limiter_with_backend()
-        with pytest.raises(ValueError, match="max_capacity must be finite and greater than 0"):
+        with pytest.raises(
+            ValueError, match="max_capacity must be finite and greater than 0"
+        ):
             limiter.set_max_capacity("gpt-4o", "tokens", 60, 0.0)
 
 
@@ -166,9 +172,7 @@ class TestSyncSetMaxCapacityMetricValidation:
         builder, _mock_backend = make_mock_backend_builder()
         config = make_limited_config(model_family="gpt-4o")
         limiter = SyncRateLimiter(config, backend=builder)
-        limiter.acquire_capacity(
-            {"tokens": 100, "requests": 1}, model="gpt-4o"
-        )
+        limiter.acquire_capacity({"tokens": 100, "requests": 1}, model="gpt-4o")
         return limiter
 
     def test_boolean_metric_raises(self):
@@ -194,9 +198,7 @@ class TestSyncSetMaxCapacityPerSecondsValidation:
         builder, _mock_backend = make_mock_backend_builder()
         config = make_limited_config(model_family="gpt-4o")
         limiter = SyncRateLimiter(config, backend=builder)
-        limiter.acquire_capacity(
-            {"tokens": 100, "requests": 1}, model="gpt-4o"
-        )
+        limiter.acquire_capacity({"tokens": 100, "requests": 1}, model="gpt-4o")
         return limiter
 
     def test_boolean_per_seconds_raises(self):
@@ -233,9 +235,7 @@ class TestSyncSetMaxCapacityCoercion:
         config = make_limited_config(model_family="test-model")
         limiter = SyncRateLimiter(config, backend=SyncMemoryBackendBuilder())
 
-        limiter.acquire_capacity(
-            {"tokens": 100, "requests": 1}, model="test-model"
-        )
+        limiter.acquire_capacity({"tokens": 100, "requests": 1}, model="test-model")
 
         # Should not raise — Decimal must be coerced to float
         limiter.set_max_capacity("test-model", "tokens", 60, Decimal(5000))
@@ -246,9 +246,7 @@ class TestSyncSetMaxCapacityCoercion:
         config = make_limited_config(model_family="gpt-4o")
         limiter = SyncRateLimiter(config, backend=builder)
 
-        limiter.acquire_capacity(
-            {"tokens": 100, "requests": 1}, model="gpt-4o"
-        )
+        limiter.acquire_capacity({"tokens": 100, "requests": 1}, model="gpt-4o")
 
         limiter.set_max_capacity("gpt-4o", "tokens", 60, 5000)
 

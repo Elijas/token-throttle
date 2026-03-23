@@ -167,14 +167,18 @@ class SpeedometerRefundLifecycleMachine(RuleBasedStateMachine):
 
     def _short_readable(self) -> float:
         return self._readable(
-            self.short_stored, self.short_last_checked,
-            self.short_max, self.short_rate,
+            self.short_stored,
+            self.short_last_checked,
+            self.short_max,
+            self.short_rate,
         )
 
     def _long_readable(self) -> float:
         return self._readable(
-            self.long_stored, self.long_last_checked,
-            self.long_max, self.long_rate,
+            self.long_stored,
+            self.long_last_checked,
+            self.long_max,
+            self.long_rate,
         )
 
     @initialize()
@@ -182,23 +186,23 @@ class SpeedometerRefundLifecycleMachine(RuleBasedStateMachine):
         short_q = Quota(
             metric=METRIC, limit=M1_SHORT_LIMIT, per_seconds=M1_SHORT_WINDOW
         )
-        long_q = Quota(
-            metric=METRIC, limit=M1_LONG_LIMIT, per_seconds=M1_LONG_WINDOW
-        )
+        long_q = Quota(metric=METRIC, limit=M1_LONG_LIMIT, per_seconds=M1_LONG_WINDOW)
         config = PerModelConfig(
             model_family="test", quotas=UsageQuotas([short_q, long_q])
         )
         short_b = MemoryBucket(
-            metric=METRIC, per_seconds=M1_SHORT_WINDOW,
-            limit=M1_SHORT_LIMIT, model_family="test",
+            metric=METRIC,
+            per_seconds=M1_SHORT_WINDOW,
+            limit=M1_SHORT_LIMIT,
+            model_family="test",
         )
         long_b = MemoryBucket(
-            metric=METRIC, per_seconds=M1_LONG_WINDOW,
-            limit=M1_LONG_LIMIT, model_family="test",
+            metric=METRIC,
+            per_seconds=M1_LONG_WINDOW,
+            limit=M1_LONG_LIMIT,
+            model_family="test",
         )
-        self.backend = SyncMemoryBackend(
-            buckets=[short_b, long_b], limit_config=config
-        )
+        self.backend = SyncMemoryBackend(buckets=[short_b, long_b], limit_config=config)
         self.short_bucket = short_b
         self.long_bucket = long_b
         self.current_time = INITIAL_TIME
@@ -334,9 +338,7 @@ class SpeedometerRefundLifecycleMachine(RuleBasedStateMachine):
             return
 
         if amount <= short_r and amount <= long_r:
-            self.backend.wait_for_capacity(
-                frozen_usage({METRIC: amount}), timeout=0.0
-            )
+            self.backend.wait_for_capacity(frozen_usage({METRIC: amount}), timeout=0.0)
             self.short_stored = max(0.0, short_r - amount)
             self.short_last_checked = self.current_time
             self.long_stored = max(0.0, long_r - amount)
@@ -456,9 +458,7 @@ class ConsumeSetMaxRefundChainMachine(RuleBasedStateMachine):
         if self.shadow_stored is None:
             return self.shadow_max
         time_passed = max(0.0, self.current_time - self.shadow_last_checked)
-        return min(
-            self.shadow_max, self.shadow_stored + time_passed * self.shadow_rate
-        )
+        return min(self.shadow_max, self.shadow_stored + time_passed * self.shadow_rate)
 
     @initialize()
     def init_backend(self):
@@ -469,8 +469,10 @@ class ConsumeSetMaxRefundChainMachine(RuleBasedStateMachine):
             ),
         )
         bucket = MemoryBucket(
-            metric=METRIC, per_seconds=M2_WINDOW,
-            limit=M2_LIMIT, model_family="test",
+            metric=METRIC,
+            per_seconds=M2_WINDOW,
+            limit=M2_LIMIT,
+            model_family="test",
         )
         self.backend = SyncMemoryBackend(buckets=[bucket], limit_config=config)
         self.bucket = bucket
@@ -583,9 +585,7 @@ class ConsumeSetMaxRefundChainMachine(RuleBasedStateMachine):
             return
 
         if amount <= readable:
-            self.backend.wait_for_capacity(
-                frozen_usage({METRIC: amount}), timeout=0.0
-            )
+            self.backend.wait_for_capacity(frozen_usage({METRIC: amount}), timeout=0.0)
             self.shadow_stored = max(0.0, readable - amount)
             self.shadow_last_checked = self.current_time
             self.total_consumed += amount
@@ -691,9 +691,7 @@ class FractionalLimitsMachine(RuleBasedStateMachine):
         if self.shadow_stored is None:
             return self.shadow_max
         time_passed = max(0.0, self.current_time - self.shadow_last_checked)
-        return min(
-            self.shadow_max, self.shadow_stored + time_passed * self.shadow_rate
-        )
+        return min(self.shadow_max, self.shadow_stored + time_passed * self.shadow_rate)
 
     @initialize(
         limit=st.sampled_from([0.5, 3.7, 7.77, 17.31, 33.333, 99.99]),
@@ -703,13 +701,13 @@ class FractionalLimitsMachine(RuleBasedStateMachine):
         self.window = window
         config = PerModelConfig(
             model_family="test",
-            quotas=UsageQuotas(
-                [Quota(metric=METRIC, limit=limit, per_seconds=window)]
-            ),
+            quotas=UsageQuotas([Quota(metric=METRIC, limit=limit, per_seconds=window)]),
         )
         bucket = MemoryBucket(
-            metric=METRIC, per_seconds=window,
-            limit=limit, model_family="test",
+            metric=METRIC,
+            per_seconds=window,
+            limit=limit,
+            model_family="test",
         )
         self.backend = SyncMemoryBackend(buckets=[bucket], limit_config=config)
         self.bucket = bucket
@@ -749,9 +747,7 @@ class FractionalLimitsMachine(RuleBasedStateMachine):
             return
 
         if amount <= readable:
-            self.backend.wait_for_capacity(
-                frozen_usage({METRIC: amount}), timeout=0.0
-            )
+            self.backend.wait_for_capacity(frozen_usage({METRIC: amount}), timeout=0.0)
             self.shadow_stored = max(0.0, readable - amount)
             self.shadow_last_checked = self.current_time
             self.total_consumed += amount
@@ -884,8 +880,10 @@ class LongSequenceStressMachine(RuleBasedStateMachine):
             ),
         )
         bucket = MemoryBucket(
-            metric=METRIC, per_seconds=M4_WINDOW,
-            limit=M4_LIMIT, model_family="test",
+            metric=METRIC,
+            per_seconds=M4_WINDOW,
+            limit=M4_LIMIT,
+            model_family="test",
         )
         self.backend = SyncMemoryBackend(buckets=[bucket], limit_config=config)
         self.bucket = bucket
@@ -916,9 +914,7 @@ class LongSequenceStressMachine(RuleBasedStateMachine):
             return
 
         if amount <= readable:
-            self.backend.wait_for_capacity(
-                frozen_usage({METRIC: amount}), timeout=0.0
-            )
+            self.backend.wait_for_capacity(frozen_usage({METRIC: amount}), timeout=0.0)
             self.shadow_stored = max(0.0, readable - amount)
             self.total_consumed += amount
         else:
@@ -959,7 +955,7 @@ class LongSequenceStressMachine(RuleBasedStateMachine):
         if change > 0:
             self.accounting_baseline += change
         elif change < 0:
-            self.total_clipped_by_cap += (-change)
+            self.total_clipped_by_cap += -change
 
     @invariant()
     def capacity_matches_shadow(self):
@@ -1043,9 +1039,7 @@ def test_consume_time_advance_refund_roundtrip(limit, consume_amount, time_delta
 
         config = PerModelConfig(
             model_family="test",
-            quotas=UsageQuotas(
-                [Quota(metric=METRIC, limit=limit, per_seconds=60)]
-            ),
+            quotas=UsageQuotas([Quota(metric=METRIC, limit=limit, per_seconds=60)]),
         )
         bucket = MemoryBucket(
             metric=METRIC, per_seconds=60, limit=limit, model_family="test"
@@ -1108,9 +1102,7 @@ def test_set_max_preserves_negative_debt(limit, overshoot, new_max):
 
         config = PerModelConfig(
             model_family="test",
-            quotas=UsageQuotas(
-                [Quota(metric=METRIC, limit=limit, per_seconds=60)]
-            ),
+            quotas=UsageQuotas([Quota(metric=METRIC, limit=limit, per_seconds=60)]),
         )
         bucket = MemoryBucket(
             metric=METRIC, per_seconds=60, limit=limit, model_family="test"
@@ -1134,6 +1126,4 @@ def test_set_max_preserves_negative_debt(limit, overshoot, new_max):
 
         # Readable is capped at new_max (but negative stored stays negative)
         readable = bucket.get_capacity(FROZEN_TIME).amount
-        assert readable == pytest.approx(
-            min(new_max, stored_before), abs=1e-9
-        )
+        assert readable == pytest.approx(min(new_max, stored_before), abs=1e-9)

@@ -665,7 +665,9 @@ class TestSetMaxCapacityValidation:
 class TestGetBackendValidation:
     async def test_empty_model_family_rejected_at_construction(self):
         """PerModelConfig rejects empty model_family at construction time."""
-        with pytest.raises(ValidationError, match="model_family must not be an empty string"):
+        with pytest.raises(
+            ValidationError, match="model_family must not be an empty string"
+        ):
             PerModelConfig(
                 quotas=UsageQuotas(
                     [
@@ -797,27 +799,21 @@ class TestModelNameTypeValidation:
         limiter = RateLimiter(make_limited_config(), backend=builder)
 
         with pytest.raises(ValueError, match="model_name must be a string"):
-            await limiter.acquire_capacity(
-                {"tokens": 1, "requests": 1}, model=True
-            )
+            await limiter.acquire_capacity({"tokens": 1, "requests": 1}, model=True)
 
     async def test_integer_model_raises(self):
         builder, _ = make_mock_backend_builder()
         limiter = RateLimiter(make_limited_config(), backend=builder)
 
         with pytest.raises(ValueError, match="model_name must be a string"):
-            await limiter.acquire_capacity(
-                {"tokens": 1, "requests": 1}, model=42
-            )
+            await limiter.acquire_capacity({"tokens": 1, "requests": 1}, model=42)
 
     async def test_none_model_raises(self):
         builder, _ = make_mock_backend_builder()
         limiter = RateLimiter(make_limited_config(), backend=builder)
 
         with pytest.raises(ValueError, match="model_name must be a string"):
-            await limiter.acquire_capacity(
-                {"tokens": 1, "requests": 1}, model=None
-            )
+            await limiter.acquire_capacity({"tokens": 1, "requests": 1}, model=None)
 
 
 class TestTimeoutValidation:

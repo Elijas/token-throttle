@@ -144,9 +144,7 @@ class NegativeCapacitySetMaxMachine(RuleBasedStateMachine):
             limit=M1_LIMIT,
             model_family="test",
         )
-        self.backend = SyncMemoryBackend(
-            buckets=[bucket], limit_config=config
-        )
+        self.backend = SyncMemoryBackend(buckets=[bucket], limit_config=config)
         self.bucket = bucket
         self.current_time = INITIAL_TIME
         self.shadow_stored = None
@@ -182,9 +180,7 @@ class NegativeCapacitySetMaxMachine(RuleBasedStateMachine):
             return
 
         if amount <= readable:
-            self.backend.wait_for_capacity(
-                frozen_usage({METRIC: amount}), timeout=0.0
-            )
+            self.backend.wait_for_capacity(frozen_usage({METRIC: amount}), timeout=0.0)
             self.shadow_stored = max(0.0, readable - amount)
             self.shadow_last_checked = self.current_time
             self.total_consumed += amount
@@ -208,9 +204,7 @@ class NegativeCapacitySetMaxMachine(RuleBasedStateMachine):
             frozen_usage({METRIC: actual}),
         )
         refund_amount = reserved - actual
-        self.shadow_stored = min(
-            readable + refund_amount, self.shadow_max_capacity
-        )
+        self.shadow_stored = min(readable + refund_amount, self.shadow_max_capacity)
         self.shadow_last_checked = self.current_time
         self.total_refunded += refund_amount
 
@@ -337,9 +331,7 @@ class ReservationTrackingMachine(RuleBasedStateMachine):
             limit=M2_LIMIT,
             model_family="test",
         )
-        self.backend = SyncMemoryBackend(
-            buckets=[bucket], limit_config=config
-        )
+        self.backend = SyncMemoryBackend(buckets=[bucket], limit_config=config)
         self.bucket = bucket
         self.current_time = INITIAL_TIME
         self.shadow_stored = None
@@ -378,9 +370,7 @@ class ReservationTrackingMachine(RuleBasedStateMachine):
             return
 
         if amount <= readable:
-            self.backend.wait_for_capacity(
-                frozen_usage({METRIC: amount}), timeout=0.0
-            )
+            self.backend.wait_for_capacity(frozen_usage({METRIC: amount}), timeout=0.0)
             self.shadow_stored = max(0.0, readable - amount)
             self.shadow_last_checked = self.current_time
             self.total_consumed += amount
@@ -407,9 +397,7 @@ class ReservationTrackingMachine(RuleBasedStateMachine):
             frozen_usage({METRIC: actual}),
         )
         refund_amount = reserved - actual
-        self.shadow_stored = min(
-            readable + refund_amount, self.shadow_max_capacity
-        )
+        self.shadow_stored = min(readable + refund_amount, self.shadow_max_capacity)
         self.shadow_last_checked = self.current_time
         self.total_refunded += refund_amount
 
@@ -527,14 +515,18 @@ class FullLifecycleMachine(RuleBasedStateMachine):
 
     def _short_readable(self) -> float:
         return self._readable(
-            self.short_stored, self.short_last_checked,
-            self.short_max, self.short_rate,
+            self.short_stored,
+            self.short_last_checked,
+            self.short_max,
+            self.short_rate,
         )
 
     def _long_readable(self) -> float:
         return self._readable(
-            self.long_stored, self.long_last_checked,
-            self.long_max, self.long_rate,
+            self.long_stored,
+            self.long_last_checked,
+            self.long_max,
+            self.long_rate,
         )
 
     @initialize()
@@ -545,16 +537,18 @@ class FullLifecycleMachine(RuleBasedStateMachine):
             model_family="test", quotas=UsageQuotas([short_q, long_q])
         )
         short_b = MemoryBucket(
-            metric=METRIC, per_seconds=SHORT_WINDOW,
-            limit=SHORT_LIMIT, model_family="test",
+            metric=METRIC,
+            per_seconds=SHORT_WINDOW,
+            limit=SHORT_LIMIT,
+            model_family="test",
         )
         long_b = MemoryBucket(
-            metric=METRIC, per_seconds=LONG_WINDOW,
-            limit=LONG_LIMIT, model_family="test",
+            metric=METRIC,
+            per_seconds=LONG_WINDOW,
+            limit=LONG_LIMIT,
+            model_family="test",
         )
-        self.backend = SyncMemoryBackend(
-            buckets=[short_b, long_b], limit_config=config
-        )
+        self.backend = SyncMemoryBackend(buckets=[short_b, long_b], limit_config=config)
         self.short_bucket = short_b
         self.long_bucket = long_b
         self.current_time = INITIAL_TIME
@@ -614,9 +608,7 @@ class FullLifecycleMachine(RuleBasedStateMachine):
 
         # All-or-nothing: both windows must have enough
         if amount <= short_r and amount <= long_r:
-            self.backend.wait_for_capacity(
-                frozen_usage({METRIC: amount}), timeout=0.0
-            )
+            self.backend.wait_for_capacity(frozen_usage({METRIC: amount}), timeout=0.0)
             self.short_stored = max(0.0, short_r - amount)
             self.short_last_checked = self.current_time
             self.long_stored = max(0.0, long_r - amount)

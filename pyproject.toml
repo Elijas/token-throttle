@@ -220,8 +220,11 @@ target-version = "py312"
 "tests/**/*.py" = [
     "PT006",   # Wrong type passed to first argument of `pytest.mark.parametrize`; expected `tuple`
     "ANN201",  # Missing return type annotation for public function
+    "ARG001",  # Unused function argument (callback stubs matching protocol signatures)
     "ARG002",  # Unused method argument (fixtures injected by pytest)
+    "BLE001",  # Blind exception catch (intentional in concurrent test harnesses)
     "D213",    # Multi-line docstring summary should start at the second line
+    "ERA001",  # Commented-out code (invariant formulas documented as comments)
     "S101",    # Use of `assert` detected
     "S102",    # Use of `exec` detected (star-import test)
     "SLF001",  # Private member accessed (expected in tests)

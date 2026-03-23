@@ -130,9 +130,7 @@ def _coerce_usage_value(
             f"{label} for {metric} must be finite (got {amount!r})"
         ) from exc
     if not math.isfinite(value):
-        raise ValueError(
-            f"{label} for {metric} must be finite (got {amount!r})"
-        )
+        raise ValueError(f"{label} for {metric} must be finite (got {amount!r})")
     return value
 
 

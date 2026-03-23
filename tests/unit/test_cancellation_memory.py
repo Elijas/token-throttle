@@ -804,9 +804,7 @@ class TestMultiMetricCancellationRefundsAllMetrics:
 
         # Consume from both metrics — enters slow callback
         task = asyncio.create_task(
-            backend.await_for_capacity(
-                frozendict({"requests": 5.0, "tokens": 20.0})
-            )
+            backend.await_for_capacity(frozendict({"requests": 5.0, "tokens": 20.0}))
         )
         await asyncio.wait_for(entered_callback.wait(), timeout=2.0)
 
@@ -822,9 +820,7 @@ class TestMultiMetricCancellationRefundsAllMetrics:
             f"requests not refunded! Before={caps_before['requests']}, "
             f"after={caps_after['requests']}"
         )
-        assert caps_after["tokens"] == pytest.approx(
-            caps_before["tokens"], abs=1.0
-        ), (
+        assert caps_after["tokens"] == pytest.approx(caps_before["tokens"], abs=1.0), (
             f"tokens not refunded! Before={caps_before['tokens']}, "
             f"after={caps_after['tokens']}"
         )
@@ -853,9 +849,7 @@ class TestMultiMetricCancellationRefundsAllMetrics:
         gate.set()
 
         task = asyncio.create_task(
-            backend.await_for_capacity(
-                frozendict({"requests": 5.0, "tokens": 20.0})
-            )
+            backend.await_for_capacity(frozendict({"requests": 5.0, "tokens": 20.0}))
         )
         await asyncio.wait_for(entered_callback.wait(), timeout=2.0)
 
@@ -883,10 +877,12 @@ class TestMultiMetricCancellationRefundsAllMetrics:
         caps_after = _get_all_bucket_capacities(backend)
         assert caps_after["requests"] == pytest.approx(
             caps_before["requests"], abs=1.0
-        ), f"requests leaked! Before={caps_before['requests']}, after={caps_after['requests']}"
-        assert caps_after["tokens"] == pytest.approx(
-            caps_before["tokens"], abs=1.0
-        ), f"tokens leaked! Before={caps_before['tokens']}, after={caps_after['tokens']}"
+        ), (
+            f"requests leaked! Before={caps_before['requests']}, after={caps_after['requests']}"
+        )
+        assert caps_after["tokens"] == pytest.approx(caps_before["tokens"], abs=1.0), (
+            f"tokens leaked! Before={caps_before['tokens']}, after={caps_after['tokens']}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -982,9 +978,7 @@ class TestTaskGroupCancellationRefundsCapacity:
                 tg.create_task(raiser())
 
         # Verify the ExceptionGroup contains our RuntimeError
-        assert any(
-            isinstance(e, RuntimeError) for e in exc_info.value.exceptions
-        )
+        assert any(isinstance(e, RuntimeError) for e in exc_info.value.exceptions)
 
         # Give the shielded refund time to complete (lock contention possible)
         await asyncio.sleep(0.2)

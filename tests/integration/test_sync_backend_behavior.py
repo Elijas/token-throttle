@@ -91,7 +91,9 @@ def test_direct_backend_refund_rejects_invalid_actual_usage(builder):
 
     backend.wait_for_capacity(reserved_usage)
 
-    with pytest.raises(ValueError, match="Actual usage value for requests must be non-negative"):
+    with pytest.raises(
+        ValueError, match="Actual usage value for requests must be non-negative"
+    ):
         backend.refund_capacity(
             reserved_usage=reserved_usage,
             actual_usage=frozen_usage({"requests": -1.0}),
