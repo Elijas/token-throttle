@@ -175,3 +175,127 @@ class TestCallableConfigMetricSetChange:
             warnings.simplefilter("always")
             with pytest.raises(ValueError, match=r"exceeds.*max.capacity"):
                 await limiter.acquire_capacity({"requests": 10}, "test-model")
+
+
+class TestCallableConfigMetricSetStateTransfer:
+    """When metric set changes, consumption state for surviving metrics must be preserved."""
+
+    async def test_metric_expansion_preserves_surviving_state(self):
+        """Expanding {tokens} → {tokens, requests}: tokens consumption state preserved."""
+        use_expanded = False
+
+        def config_getter(model_name: str) -> PerModelConfig:
+            if use_expanded:
+                quotas = UsageQuotas([
+                    Quota(metric="tokens", limit=100, per_seconds=60),
+                    Quota(metric="requests", limit=10, per_seconds=60),
+                ])
+            else:
+                quotas = UsageQuotas([Quota(metric="tokens", limit=100, per_seconds=60)])
+            return PerModelConfig(quotas=quotas, model_family="test-family")
+
+        limiter = RateLimiter(config_getter, backend=MemoryBackendBuilder())
+
+        # Consume 90 tokens → ~10 remaining
+        reservation = await limiter.acquire_capacity({"tokens": 90}, "test-model")
+        await limiter.refund_capacity({"tokens": 90}, reservation)
+
+        # Expand metric set to include requests
+        use_expanded = True
+
+        # 20 tokens should fail — only ~10 remain from old backend
+        with warnings.catch_warnings(record=True):
+            warnings.simplefilter("always")
+            with pytest.raises(TimeoutError):
+                await limiter.acquire_capacity(
+                    {"tokens": 20, "requests": 1}, "test-model", timeout=0,
+                )
+
+    async def test_metric_expansion_new_metric_starts_fresh(self):
+        """Expanding {tokens} → {tokens, requests}: new 'requests' metric has full capacity."""
+        use_expanded = False
+
+        def config_getter(model_name: str) -> PerModelConfig:
+            if use_expanded:
+                quotas = UsageQuotas([
+                    Quota(metric="tokens", limit=100, per_seconds=60),
+                    Quota(metric="requests", limit=10, per_seconds=60),
+                ])
+            else:
+                quotas = UsageQuotas([Quota(metric="tokens", limit=100, per_seconds=60)])
+            return PerModelConfig(quotas=quotas, model_family="test-family")
+
+        limiter = RateLimiter(config_getter, backend=MemoryBackendBuilder())
+
+        # Consume 5 tokens → ~95 remaining
+        reservation = await limiter.acquire_capacity({"tokens": 5}, "test-model")
+        await limiter.refund_capacity({"tokens": 5}, reservation)
+
+        # Expand metric set
+        use_expanded = True
+
+        # 5 tokens + 10 requests should succeed (tokens ~95 remaining, requests fresh 10)
+        with warnings.catch_warnings(record=True):
+            warnings.simplefilter("always")
+            reservation2 = await limiter.acquire_capacity(
+                {"tokens": 5, "requests": 10}, "test-model",
+            )
+        assert reservation2.usage["tokens"] == 5
+        assert reservation2.usage["requests"] == 10
+
+    async def test_metric_contraction_preserves_surviving_state(self):
+        """Contracting {tokens, requests} → {tokens}: tokens consumption state preserved."""
+        use_contracted = False
+
+        def config_getter(model_name: str) -> PerModelConfig:
+            if use_contracted:
+                quotas = UsageQuotas([Quota(metric="tokens", limit=100, per_seconds=60)])
+            else:
+                quotas = UsageQuotas([
+                    Quota(metric="tokens", limit=100, per_seconds=60),
+                    Quota(metric="requests", limit=10, per_seconds=60),
+                ])
+            return PerModelConfig(quotas=quotas, model_family="test-family")
+
+        limiter = RateLimiter(config_getter, backend=MemoryBackendBuilder())
+
+        # Consume 90 tokens + 5 requests
+        reservation = await limiter.acquire_capacity(
+            {"tokens": 90, "requests": 5}, "test-model",
+        )
+        await limiter.refund_capacity({"tokens": 90, "requests": 5}, reservation)
+
+        # Contract metric set — drop requests
+        use_contracted = True
+
+        # 20 tokens should fail — only ~10 remain
+        with warnings.catch_warnings(record=True):
+            warnings.simplefilter("always")
+            with pytest.raises(TimeoutError):
+                await limiter.acquire_capacity({"tokens": 20}, "test-model", timeout=0)
+
+    async def test_metric_replacement_no_surviving_state(self):
+        """Replacing {tokens} → {requests}: no common metrics, requests starts fresh."""
+        use_new = False
+
+        def config_getter(model_name: str) -> PerModelConfig:
+            if use_new:
+                quotas = UsageQuotas([Quota(metric="requests", limit=10, per_seconds=60)])
+            else:
+                quotas = UsageQuotas([Quota(metric="tokens", limit=100, per_seconds=60)])
+            return PerModelConfig(quotas=quotas, model_family="test-family")
+
+        limiter = RateLimiter(config_getter, backend=MemoryBackendBuilder())
+
+        # Consume 90 tokens
+        reservation = await limiter.acquire_capacity({"tokens": 90}, "test-model")
+        await limiter.refund_capacity({"tokens": 90}, reservation)
+
+        # Replace with completely different metric
+        use_new = True
+
+        # Requests starts fresh — full 10 available
+        with warnings.catch_warnings(record=True):
+            warnings.simplefilter("always")
+            reservation2 = await limiter.acquire_capacity({"requests": 10}, "test-model")
+        assert reservation2.usage["requests"] == 10
