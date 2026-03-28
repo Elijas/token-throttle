@@ -15,6 +15,8 @@ from token_throttle._capacity import CalculatedCapacity, calculate_capacity
 from token_throttle._interfaces._interfaces import PerModelConfig
 from token_throttle._interfaces._models import Quota
 
+from ._server_time import sync_server_time
+
 __all__ = ["CalculatedCapacity", "SyncRedisBucket"]
 
 
@@ -164,7 +166,7 @@ class SyncRedisBucket:
     ) -> CalculatedCapacity | None:
         """Get the current capacity of the bucket."""
         if current_time is None:
-            current_time = time.time()
+            current_time = sync_server_time(self._redis)
 
         own_pipeline = pipeline is None
         if own_pipeline:
@@ -198,7 +200,7 @@ class SyncRedisBucket:
         (must preserve negative debt for natural refill recovery).
         """
         if current_time is None:
-            current_time = time.time()
+            current_time = sync_server_time(self._redis)
 
         own_pipeline = pipeline is None
         if own_pipeline:

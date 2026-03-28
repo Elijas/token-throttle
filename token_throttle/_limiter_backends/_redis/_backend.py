@@ -31,6 +31,7 @@ from token_throttle._validation import (
 )
 
 from ._bucket import RedisBucket
+from ._server_time import async_server_time
 
 
 class CapacitiesGetterResult(typing.NamedTuple):
@@ -159,7 +160,7 @@ class RedisBackend(RateLimiterBackend):
             pipeline = self._redis.pipeline()
 
         if current_time is None:
-            current_time = time.time()
+            current_time = await async_server_time(self._redis)
 
         # sorted_buckets is sorted once in __init__ and never mutated, so the
         # deadlock-prevention ordering invariant holds for the lifetime of the backend.
@@ -230,7 +231,7 @@ class RedisBackend(RateLimiterBackend):
             pipeline = self._redis.pipeline()
 
         if current_time is None:
-            current_time = time.time()
+            current_time = await async_server_time(self._redis)
 
         for (usage_metric, per_seconds), amount in new_capacities.items():
             bucket = next(
@@ -277,7 +278,7 @@ class RedisBackend(RateLimiterBackend):
                 # the command buffer), then _set_capacities_unsafe adds new commands
                 # and executes again.  Safe because redis-py clears the buffer on execute().
                 pipeline = self._redis.pipeline()
-                current_time = time.time()
+                current_time = await async_server_time(self._redis)
 
                 (
                     preconsumption_capacities,
@@ -381,7 +382,7 @@ class RedisBackend(RateLimiterBackend):
         fresh_start_buckets: list[RedisBucket] = []
         async with await self._lock(timeout=LOCK_TIMEOUT_SECONDS):
             pipeline = self._redis.pipeline()
-            current_time = time.time()
+            current_time = await async_server_time(self._redis)
 
             (
                 preconsumption_capacities,
@@ -637,7 +638,7 @@ class RedisBackend(RateLimiterBackend):
         fresh_start_buckets: list[RedisBucket] = []
         async with await self._lock(timeout=LOCK_TIMEOUT_SECONDS):
             pipeline = self._redis.pipeline()
-            current_time = time.time()
+            current_time = await async_server_time(self._redis)
 
             # Get current capacities (which already account for time-based refill)
             (
@@ -750,7 +751,7 @@ class RedisBackend(RateLimiterBackend):
         async def _do_refund() -> None:
             async with await self._lock(timeout=LOCK_TIMEOUT_SECONDS):
                 pipeline = self._redis.pipeline()
-                current_time = time.time()
+                current_time = await async_server_time(self._redis)
                 capacities, _ = await self._get_capacities_unsafe(
                     pipeline=pipeline,
                     current_time=current_time,

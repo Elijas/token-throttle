@@ -1,4 +1,5 @@
 import threading
+import warnings
 
 from token_throttle._interfaces._callbacks import SyncRateLimiterCallbacks
 from token_throttle._interfaces._interfaces import (
@@ -30,6 +31,11 @@ from token_throttle._validation import (
 )
 
 
+def _quotas_snapshot(cfg: PerModelConfig) -> dict[tuple[str, int], float]:
+    """Snapshot of quotas for change detection: {(metric, per_seconds): limit}."""
+    return {(q.metric, q.per_seconds): q.limit for q in cfg.quotas}
+
+
 class SyncRateLimiter:
     """Synchronous counterpart of ``RateLimiter`` — same architecture and contract."""
 
@@ -46,6 +52,7 @@ class SyncRateLimiter:
         self._callbacks = callbacks
         self._config_getter = lambda model_name: resolve_config(cfg, model_name)
         self._model_family_to_backend: dict[str, SyncRateLimiterBackend] = {}
+        self._model_family_to_quotas: dict[str, dict[tuple[str, int], float]] = {}
 
     def acquire_capacity(
         self, usage: Usage, model: str, *, timeout: float | None = None
@@ -224,14 +231,46 @@ class SyncRateLimiter:
         # Lock-free read is safe: GIL protects dict lookups, and the value
         # is set once (never mutated/removed after insertion).
         if cfg.model_family in self._model_family_to_backend:
-            return self._model_family_to_backend[cfg.model_family]
+            return self._sync_backend_quotas(cfg)
 
         with self._lock:
             # Double-checked locking: re-check after acquiring lock
             if cfg.model_family in self._model_family_to_backend:  # pragma: no cover
-                return self._model_family_to_backend[cfg.model_family]
+                return self._sync_backend_quotas(cfg)
 
             backend = self._backend.build(cfg, callbacks=self._callbacks)
-
             self._model_family_to_backend[cfg.model_family] = backend
+            self._model_family_to_quotas[cfg.model_family] = _quotas_snapshot(cfg)
             return backend
+
+    def _sync_backend_quotas(self, cfg: PerModelConfig) -> SyncRateLimiterBackend:
+        """If quotas changed since backend was built, update or rebuild it."""
+        model_family = cfg.model_family
+        new_snapshot = _quotas_snapshot(cfg)
+        old_snapshot = self._model_family_to_quotas[model_family]
+
+        if new_snapshot == old_snapshot:
+            return self._model_family_to_backend[model_family]
+
+        if set(new_snapshot) != set(old_snapshot):
+            # Metric set changed — must rebuild backend from scratch
+            warnings.warn(
+                f"Callable config for model family '{model_family}' changed metric set "
+                f"(was {sorted(old_snapshot)}, now {sorted(new_snapshot)}). "
+                "Rebuilding backend; current consumption state will be lost.",
+                UserWarning,
+                stacklevel=2,
+            )
+            backend = self._backend.build(cfg, callbacks=self._callbacks)
+            self._model_family_to_backend[model_family] = backend
+            self._model_family_to_quotas[model_family] = new_snapshot
+            return backend
+
+        # Only limits changed — update in place via set_max_capacity
+        backend = self._model_family_to_backend[model_family]
+        for bucket_id, new_limit in new_snapshot.items():
+            if new_limit != old_snapshot[bucket_id]:
+                metric, per_seconds = bucket_id
+                backend.set_max_capacity(metric, per_seconds, new_limit)
+        self._model_family_to_quotas[model_family] = new_snapshot
+        return backend

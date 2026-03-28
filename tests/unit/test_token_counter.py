@@ -52,10 +52,18 @@ class TestOpenAIUsageCounterWithInput:
         with pytest.raises(ValueError, match="must be of type str"):
             counter("gpt-4", input=123)
 
-    def test_input_list_raises_value_error(self):
+    def test_input_single_item_string_list(self):
+        """input=["hello"] is valid per the OpenAI Embeddings API."""
         counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
-        with pytest.raises(ValueError, match="must be of type str"):
-            counter("gpt-4", input=["hello"])
+        result = counter("gpt-4", input=["hello"])
+        assert result == frozendict({"tokens": 5, "requests": 1})
+
+    def test_input_multi_string_list(self):
+        """input=["hello", "world"] is valid per the OpenAI Embeddings API."""
+        counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
+        result = counter("gpt-4", input=["hello", "world"])
+        # "hello" = 5 tokens, "world" = 5 tokens => total 10
+        assert result == frozendict({"tokens": 10, "requests": 1})
 
     def test_input_structured_message_list_counts_text(self):
         counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())

@@ -29,6 +29,7 @@ from token_throttle._validation import (
     validate_timeout,
 )
 
+from ._server_time import sync_server_time
 from ._sync_bucket import SyncRedisBucket
 
 
@@ -147,7 +148,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
             pipeline = self._redis.pipeline()
 
         if current_time is None:
-            current_time = time.time()
+            current_time = sync_server_time(self._redis)
 
         # sorted_buckets is sorted once in __init__ and never mutated, so the
         # deadlock-prevention ordering invariant holds for the lifetime of the backend.
@@ -214,7 +215,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
             pipeline = self._redis.pipeline()
 
         if current_time is None:
-            current_time = time.time()
+            current_time = sync_server_time(self._redis)
 
         for (usage_metric, per_seconds), amount in new_capacities.items():
             bucket = next(
@@ -259,7 +260,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
             # the command buffer), then _set_capacities_unsafe adds new commands
             # and executes again.  Safe because redis-py clears the buffer on execute().
             pipeline = self._redis.pipeline()
-            current_time = time.time()
+            current_time = sync_server_time(self._redis)
 
             preconsumption_capacities, fresh_start_buckets = (
                 self._get_capacities_unsafe(
@@ -351,7 +352,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         fresh_start_buckets: list[SyncRedisBucket] = []
         with self._lock(timeout=LOCK_TIMEOUT_SECONDS):
             pipeline = self._redis.pipeline()
-            current_time = time.time()
+            current_time = sync_server_time(self._redis)
 
             preconsumption_capacities, fresh_start_buckets = (
                 self._get_capacities_unsafe(
@@ -533,7 +534,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         fresh_start_buckets: list[SyncRedisBucket] = []
         with self._lock(timeout=LOCK_TIMEOUT_SECONDS):
             pipeline = self._redis.pipeline()
-            current_time = time.time()
+            current_time = sync_server_time(self._redis)
 
             # Get current capacities (which already account for time-based refill)
             prerefund_capacities, fresh_start_buckets = self._get_capacities_unsafe(
