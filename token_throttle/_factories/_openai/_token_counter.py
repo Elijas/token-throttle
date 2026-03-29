@@ -55,9 +55,7 @@ class OpenAIUsageCounter:
             # List of strings — valid for OpenAI Embeddings API (e.g. input=["hello", "world"]).
             # NOTE: the `inputs` (plural) branch below handles the same shape under a
             # nonstandard key; consider deprecating `inputs` in favour of this path.
-            if isinstance(input_, list) and all(
-                isinstance(i, str) for i in input_
-            ):
+            if isinstance(input_, list) and all(isinstance(i, str) for i in input_):
                 tokens = (
                     sum(len(encoding.encode(i)) for i in input_)
                     + reserved_output_tokens

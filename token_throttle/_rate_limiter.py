@@ -40,6 +40,36 @@ def _quotas_snapshot(cfg: PerModelConfig) -> dict[tuple[str, int], float]:
     return {(q.metric, q.per_seconds): q.limit for q in cfg.quotas}
 
 
+def _project_refund_usage(
+    reserved_usage: FrozenUsage,
+    actual_usage: FrozenUsage,
+    backend: RateLimiterBackend,
+) -> tuple[FrozenUsage, FrozenUsage]:
+    """
+    Shape refund data to the backend's current metric set.
+
+    Callable configs can rebuild a model-family backend with a different
+    metric set after a reservation was created. Surviving metrics keep their
+    original refund values, removed metrics are dropped, and newly added
+    metrics are filled with zero so backend validation still succeeds.
+    """
+    backend_metric_names = getattr(backend, "_usage_metric_names", None)
+    if not isinstance(backend_metric_names, (set, frozenset)):
+        return reserved_usage, actual_usage
+
+    if set(reserved_usage) == backend_metric_names:
+        return reserved_usage, actual_usage
+
+    return (
+        frozendict(
+            {metric: reserved_usage.get(metric, 0.0) for metric in backend_metric_names}
+        ),
+        frozendict(
+            {metric: actual_usage.get(metric, 0.0) for metric in backend_metric_names}
+        ),
+    )
+
+
 class RateLimiter(BaseRateLimiter):
     """
     Top-level async rate limiter — the main public entry point.
@@ -236,35 +266,51 @@ class RateLimiter(BaseRateLimiter):
         reservation: CapacityReservation,
     ) -> None:
         actual_usage = frozen_usage(actual_usage)
-        # Lock-free read is safe: same reasoning as _get_backend (asyncio is
-        # single-threaded; values are set once and never mutated/removed).
         backend = self._model_family_to_backend.get(reservation.model_family)
         if backend is None:
             raise ValueError(
                 f"Backend not found for model family {reservation.model_family}",
             )
-        await backend.refund_capacity(reservation.get_usage(), actual_usage)
+        reserved_usage, actual_usage = _project_refund_usage(
+            reservation.get_usage(),
+            actual_usage,
+            backend,
+        )
+        await backend.refund_capacity(reserved_usage, actual_usage)
 
     async def _get_backend(self, cfg: PerModelConfig) -> RateLimiterBackend:
         if not cfg.model_family:
             raise ValueError("cfg.model_family cannot be empty")
-        # Lock-free read is safe: asyncio is single-threaded, and the dict
-        # value is set once (never mutated/removed after insertion).
-        if cfg.model_family in self._model_family_to_backend:
-            return await self._sync_backend_quotas(cfg)
+        model_family = cfg.model_family
+        new_snapshot = _quotas_snapshot(cfg)
+
+        # Fast path: unchanged configs can reuse the cached backend without
+        # taking the limiter lock. Refresh/rebuild work is serialized below so
+        # concurrent callers cannot duplicate a rebuild.
+        backend = self._model_family_to_backend.get(model_family)
+        if (
+            backend is not None
+            and self._model_family_to_quotas.get(model_family) == new_snapshot
+        ):
+            return backend
 
         async with self._lock:
-            # Check again after acquiring lock
-            if cfg.model_family in self._model_family_to_backend:  # pragma: no cover
+            backend = self._model_family_to_backend.get(model_family)
+            if backend is not None:
                 return await self._sync_backend_quotas(cfg)
 
             backend = self._backend.build(cfg, callbacks=self._callbacks)
-            self._model_family_to_backend[cfg.model_family] = backend
-            self._model_family_to_quotas[cfg.model_family] = _quotas_snapshot(cfg)
+            self._model_family_to_backend[model_family] = backend
+            self._model_family_to_quotas[model_family] = new_snapshot
             return backend
 
     async def _sync_backend_quotas(self, cfg: PerModelConfig) -> RateLimiterBackend:
-        """If quotas changed since backend was built, update or rebuild it."""
+        """
+        If quotas changed since backend creation, update or rebuild it.
+
+        Caller must hold ``self._lock`` so only one concurrent caller can
+        mutate a model-family backend at a time.
+        """
         model_family = cfg.model_family
         new_snapshot = _quotas_snapshot(cfg)
         old_snapshot = self._model_family_to_quotas[model_family]
@@ -293,8 +339,18 @@ class RateLimiter(BaseRateLimiter):
             backend = self._backend.build(cfg, callbacks=self._callbacks)
 
             # Transfer consumption state for metrics present in both old and new backends
-            if old_capacities is not None and surviving_keys and hasattr(backend, "_set_capacities"):
-                transfer = frozendict({k: old_capacities[k] for k in surviving_keys if k in old_capacities})
+            if (
+                old_capacities is not None
+                and surviving_keys
+                and hasattr(backend, "_set_capacities")
+            ):
+                transfer = frozendict(
+                    {
+                        k: old_capacities[k]
+                        for k in surviving_keys
+                        if k in old_capacities
+                    }
+                )
                 if transfer:
                     async with backend._condition:  # noqa: SLF001
                         backend._set_capacities(transfer, time.time())  # noqa: SLF001
