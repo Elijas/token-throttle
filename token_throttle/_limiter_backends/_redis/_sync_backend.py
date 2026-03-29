@@ -107,6 +107,11 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         self._usage_metric_names: set[str] = {bucket.usage_metric for bucket in buckets}
         self._local_condition = threading.Condition()
 
+    def supports_metric_set_change(self) -> bool:
+        # Surviving bucket state lives in Redis under stable keys, so a rebuilt
+        # backend can safely point at the same buckets.
+        return True
+
     def _lock(
         self,
         *,

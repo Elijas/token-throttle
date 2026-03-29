@@ -1,5 +1,4 @@
 import threading
-import time
 import warnings
 
 from frozendict import frozendict
@@ -42,7 +41,7 @@ def _quotas_snapshot(cfg: PerModelConfig) -> dict[tuple[str, int], float]:
 def _project_refund_usage(
     reserved_usage: FrozenUsage,
     actual_usage: FrozenUsage,
-    backend: SyncRateLimiterBackend,
+    active_metric_names: set[str] | frozenset[str] | None,
 ) -> tuple[FrozenUsage, FrozenUsage]:
     """
     Shape refund data to the backend's current metric set.
@@ -52,19 +51,18 @@ def _project_refund_usage(
     original refund values, removed metrics are dropped, and newly added
     metrics are filled with zero so backend validation still succeeds.
     """
-    backend_metric_names = getattr(backend, "_usage_metric_names", None)
-    if not isinstance(backend_metric_names, (set, frozenset)):
+    if active_metric_names is None:
         return reserved_usage, actual_usage
 
-    if set(reserved_usage) == backend_metric_names:
+    if set(reserved_usage) == set(active_metric_names):
         return reserved_usage, actual_usage
 
     return (
         frozendict(
-            {metric: reserved_usage.get(metric, 0.0) for metric in backend_metric_names}
+            {metric: reserved_usage.get(metric, 0.0) for metric in active_metric_names}
         ),
         frozendict(
-            {metric: actual_usage.get(metric, 0.0) for metric in backend_metric_names}
+            {metric: actual_usage.get(metric, 0.0) for metric in active_metric_names}
         ),
     )
 
@@ -254,10 +252,14 @@ class SyncRateLimiter:
             raise ValueError(
                 f"Backend not found for model family {reservation.model_family}",
             )
+        active_metric_names = None
+        snapshot = self._model_family_to_quotas.get(reservation.model_family)
+        if snapshot is not None:
+            active_metric_names = frozenset(metric for metric, _ in snapshot)
         reserved_usage, actual_usage = _project_refund_usage(
             reservation.get_usage(),
             actual_usage,
-            backend,
+            active_metric_names,
         )
         backend.refund_capacity(reserved_usage, actual_usage)
 
@@ -304,13 +306,12 @@ class SyncRateLimiter:
         if set(new_snapshot) != set(old_snapshot):
             # Metric set changed — must rebuild backend (new metrics need new buckets)
             old_backend = self._model_family_to_backend[model_family]
-            surviving_keys = set(new_snapshot) & set(old_snapshot)
-
-            # Snapshot capacities from old backend for metrics that survive the rebuild
-            old_capacities = None
-            if surviving_keys and hasattr(old_backend, "_get_capacities"):
-                with old_backend._condition:  # noqa: SLF001
-                    old_capacities, _ = old_backend._get_capacities(time.time())  # noqa: SLF001
+            if not old_backend.supports_metric_set_change():
+                raise RuntimeError(
+                    f"Callable config for model family '{model_family}' changed metric set, "
+                    f"but backend {type(old_backend).__name__} does not support "
+                    "metric-set changes."
+                )
 
             warnings.warn(
                 f"Callable config for model family '{model_family}' changed metric set "
@@ -320,23 +321,7 @@ class SyncRateLimiter:
                 stacklevel=2,
             )
             backend = self._backend.build(cfg, callbacks=self._callbacks)
-
-            # Transfer consumption state for metrics present in both old and new backends
-            if (
-                old_capacities is not None
-                and surviving_keys
-                and hasattr(backend, "_set_capacities")
-            ):
-                transfer = frozendict(
-                    {
-                        k: old_capacities[k]
-                        for k in surviving_keys
-                        if k in old_capacities
-                    }
-                )
-                if transfer:
-                    with backend._condition:  # noqa: SLF001
-                        backend._set_capacities(transfer, time.time())  # noqa: SLF001
+            backend = old_backend.prepare_reconfigured_backend(backend, cfg)
 
             self._model_family_to_backend[model_family] = backend
             self._model_family_to_quotas[model_family] = new_snapshot

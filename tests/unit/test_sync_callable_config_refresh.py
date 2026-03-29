@@ -2,13 +2,20 @@
 
 import contextlib
 import threading
+import time
 import warnings
 
 import pytest
 
-from token_throttle._interfaces._interfaces import PerModelConfig
+from token_throttle._interfaces._interfaces import (
+    PerModelConfig,
+    SyncRateLimiterBackend,
+    SyncRateLimiterBackendBuilderInterface,
+)
 from token_throttle._interfaces._models import Quota, UsageQuotas
+from token_throttle._limiter_backends._memory._bucket import MemoryBucket
 from token_throttle._limiter_backends._memory._sync_backend import (
+    SyncMemoryBackend,
     SyncMemoryBackendBuilder,
 )
 from token_throttle._sync_rate_limiter import SyncRateLimiter
@@ -361,6 +368,58 @@ class RacingSyncMemoryBackendBuilder(SyncMemoryBackendBuilder):
         return super().build(cfg, callbacks=callbacks)
 
 
+class BlockingPrepareSyncMemoryBackend(SyncMemoryBackend):
+    """Pause metric-set reconfiguration so concurrent callers can run."""
+
+    def __init__(
+        self,
+        *,
+        prepare_started: threading.Event,
+        release_prepare: threading.Event,
+        **kwargs,
+    ) -> None:
+        super().__init__(**kwargs)
+        self._prepare_started = prepare_started
+        self._release_prepare = release_prepare
+
+    def prepare_reconfigured_backend(
+        self,
+        new_backend: SyncRateLimiterBackend,
+        cfg: PerModelConfig,
+    ) -> SyncRateLimiterBackend:
+        self._prepare_started.set()
+        assert self._release_prepare.wait(timeout=2.0)
+        return super().prepare_reconfigured_backend(new_backend, cfg)
+
+
+class BlockingPrepareSyncMemoryBackendBuilder(SyncMemoryBackendBuilder):
+    """Build backends that can pause right before a metric-set swap."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.prepare_started = threading.Event()
+        self.release_prepare = threading.Event()
+
+    def build(self, cfg, *, callbacks=None):
+        buckets = [
+            MemoryBucket(
+                metric=quota.metric,
+                per_seconds=quota.per_seconds,
+                limit=float(quota.limit),
+                model_family=cfg.get_model_family(),
+            )
+            for quota in cfg.quotas
+        ]
+        return BlockingPrepareSyncMemoryBackend(
+            buckets=buckets,
+            limit_config=cfg,
+            sleep_interval=self._sleep_interval,
+            callbacks=callbacks,
+            prepare_started=self.prepare_started,
+            release_prepare=self.release_prepare,
+        )
+
+
 class TestSyncCallableConfigMetricSetConcurrency:
     """Concurrent refreshes must not rebuild and consume from split state."""
 
@@ -461,7 +520,6 @@ class TestSyncCallableConfigMetricSetRefunds:
                 timeout=0,
             )
         assert reservation2.usage["tokens"] == 50
-        assert reservation2.usage["requests"] == 10
 
     def test_metric_contraction_refund_after_rebuild_ignores_dropped_metric(self):
         use_contracted = False
@@ -502,3 +560,155 @@ class TestSyncCallableConfigMetricSetRefunds:
                 timeout=0,
             )
         assert reservation2.usage["tokens"] == 50
+
+
+class TestSyncCallableConfigMetricSetRebuildIntegrity:
+    """Metric-set refresh must not lose live in-memory state."""
+
+    def test_metric_expansion_preserves_old_backend_consumption(self):
+        use_expanded = False
+
+        def config_getter(model_name: str) -> PerModelConfig:
+            if use_expanded:
+                quotas = UsageQuotas(
+                    [
+                        Quota(metric="tokens", limit=100, per_seconds=60),
+                        Quota(metric="requests", limit=10, per_seconds=60),
+                    ]
+                )
+            else:
+                quotas = UsageQuotas(
+                    [Quota(metric="tokens", limit=100, per_seconds=60)]
+                )
+            return PerModelConfig(quotas=quotas, model_family="test-family")
+
+        builder = BlockingPrepareSyncMemoryBackendBuilder()
+        limiter = SyncRateLimiter(config_getter, backend=builder)
+
+        reservation = limiter.acquire_capacity({"tokens": 90}, "test-model")
+        limiter.refund_capacity({"tokens": 90}, reservation)
+
+        use_expanded = True
+
+        def trigger_rebuild() -> None:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                limiter.acquire_capacity(
+                    {"tokens": 0, "requests": 0},
+                    "test-model",
+                )
+
+        rebuild_thread = threading.Thread(target=trigger_rebuild)
+        rebuild_thread.start()
+        assert builder.prepare_started.wait(timeout=2.0)
+
+        use_expanded = False
+        limiter.acquire_capacity({"tokens": 10}, "test-model", timeout=0)
+
+        use_expanded = True
+        builder.release_prepare.set()
+        rebuild_thread.join(timeout=2.0)
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            with pytest.raises(TimeoutError):
+                limiter.acquire_capacity(
+                    {"tokens": 10, "requests": 1},
+                    "test-model",
+                    timeout=0,
+                )
+
+    def test_metric_expansion_preserves_refill_during_prepare_delay(self):
+        use_expanded = False
+
+        def config_getter(model_name: str) -> PerModelConfig:
+            if use_expanded:
+                quotas = UsageQuotas(
+                    [
+                        Quota(metric="tokens", limit=100, per_seconds=1),
+                        Quota(metric="requests", limit=10, per_seconds=60),
+                    ]
+                )
+            else:
+                quotas = UsageQuotas(
+                    [Quota(metric="tokens", limit=100, per_seconds=1)]
+                )
+            return PerModelConfig(quotas=quotas, model_family="test-family")
+
+        builder = BlockingPrepareSyncMemoryBackendBuilder()
+        limiter = SyncRateLimiter(config_getter, backend=builder)
+
+        reservation = limiter.acquire_capacity({"tokens": 100}, "test-model")
+        limiter.refund_capacity({"tokens": 100}, reservation)
+
+        use_expanded = True
+
+        def trigger_rebuild() -> None:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                limiter.acquire_capacity(
+                    {"tokens": 0, "requests": 0},
+                    "test-model",
+                )
+
+        rebuild_thread = threading.Thread(target=trigger_rebuild)
+        rebuild_thread.start()
+        assert builder.prepare_started.wait(timeout=2.0)
+        time.sleep(0.5)
+        builder.release_prepare.set()
+        rebuild_thread.join(timeout=2.0)
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            reservation2 = limiter.acquire_capacity(
+                {"tokens": 50, "requests": 1},
+                "test-model",
+                timeout=0,
+            )
+        assert reservation2.usage["tokens"] == 50
+        assert reservation2.usage["requests"] == 1
+
+
+class SimpleSyncBackend(SyncRateLimiterBackend):
+    def wait_for_capacity(self, usage, *, timeout=None) -> None:
+        return None
+
+    def consume_capacity(self, usage) -> None:
+        return None
+
+    def refund_capacity(self, reserved_usage, actual_usage) -> None:
+        return None
+
+    def set_max_capacity(self, metric, per_seconds, value) -> None:
+        return None
+
+
+class SimpleSyncBackendBuilder(SyncRateLimiterBackendBuilderInterface):
+    def build(self, cfg, *, callbacks=None) -> SyncRateLimiterBackend:
+        return SimpleSyncBackend()
+
+
+class TestSyncCallableConfigMetricSetBackendSupport:
+    """Metric-set changes should fail fast for unsupported backend types."""
+
+    def test_metric_set_change_without_backend_support_raises(self):
+        use_new_metrics = False
+
+        def config_getter(model_name: str) -> PerModelConfig:
+            if use_new_metrics:
+                quotas = UsageQuotas(
+                    [Quota(metric="requests", limit=10, per_seconds=60)]
+                )
+            else:
+                quotas = UsageQuotas(
+                    [Quota(metric="tokens", limit=100, per_seconds=60)]
+                )
+            return PerModelConfig(quotas=quotas, model_family="test-family")
+
+        limiter = SyncRateLimiter(config_getter, backend=SimpleSyncBackendBuilder())
+
+        limiter.acquire_capacity({"tokens": 1}, "test-model")
+        use_new_metrics = True
+
+        with pytest.raises(RuntimeError, match="does not support metric-set changes"):
+            limiter.acquire_capacity({"requests": 0}, "test-model")

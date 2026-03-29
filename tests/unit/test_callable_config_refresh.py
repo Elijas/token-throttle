@@ -5,9 +5,17 @@ import warnings
 
 import pytest
 
-from token_throttle._interfaces._interfaces import PerModelConfig
+from token_throttle._interfaces._interfaces import (
+    PerModelConfig,
+    RateLimiterBackend,
+    RateLimiterBackendBuilderInterface,
+)
 from token_throttle._interfaces._models import Quota, UsageQuotas
-from token_throttle._limiter_backends._memory._backend import MemoryBackendBuilder
+from token_throttle._limiter_backends._memory._backend import (
+    MemoryBackend,
+    MemoryBackendBuilder,
+)
+from token_throttle._limiter_backends._memory._bucket import MemoryBucket
 from token_throttle._rate_limiter import RateLimiter
 
 
@@ -381,6 +389,58 @@ class RacingMemoryBackendBuilder(MemoryBackendBuilder):
         return backend
 
 
+class BlockingPrepareMemoryBackend(MemoryBackend):
+    """Pause metric-set reconfiguration so concurrent callers can run."""
+
+    def __init__(
+        self,
+        *,
+        prepare_started: asyncio.Event,
+        release_prepare: asyncio.Event,
+        **kwargs,
+    ) -> None:
+        super().__init__(**kwargs)
+        self._prepare_started = prepare_started
+        self._release_prepare = release_prepare
+
+    async def prepare_reconfigured_backend(
+        self,
+        new_backend: RateLimiterBackend,
+        cfg: PerModelConfig,
+    ) -> RateLimiterBackend:
+        self._prepare_started.set()
+        await self._release_prepare.wait()
+        return await super().prepare_reconfigured_backend(new_backend, cfg)
+
+
+class BlockingPrepareMemoryBackendBuilder(MemoryBackendBuilder):
+    """Build backends that can pause right before a metric-set swap."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.prepare_started = asyncio.Event()
+        self.release_prepare = asyncio.Event()
+
+    def build(self, cfg, *, callbacks=None):
+        buckets = [
+            MemoryBucket(
+                metric=quota.metric,
+                per_seconds=quota.per_seconds,
+                limit=float(quota.limit),
+                model_family=cfg.get_model_family(),
+            )
+            for quota in cfg.quotas
+        ]
+        return BlockingPrepareMemoryBackend(
+            buckets=buckets,
+            limit_config=cfg,
+            sleep_interval=self._sleep_interval,
+            callbacks=callbacks,
+            prepare_started=self.prepare_started,
+            release_prepare=self.release_prepare,
+        )
+
+
 class TestCallableConfigMetricSetConcurrency:
     """Concurrent refreshes must not rebuild and consume from split state."""
 
@@ -519,3 +579,153 @@ class TestCallableConfigMetricSetRefunds:
                 timeout=0,
             )
         assert reservation2.usage["tokens"] == 50
+
+
+class TestCallableConfigMetricSetRebuildIntegrity:
+    """Metric-set refresh must not lose live in-memory state."""
+
+    async def test_metric_expansion_preserves_old_backend_consumption(self):
+        use_expanded = False
+
+        def config_getter(model_name: str) -> PerModelConfig:
+            if use_expanded:
+                quotas = UsageQuotas(
+                    [
+                        Quota(metric="tokens", limit=100, per_seconds=60),
+                        Quota(metric="requests", limit=10, per_seconds=60),
+                    ]
+                )
+            else:
+                quotas = UsageQuotas(
+                    [Quota(metric="tokens", limit=100, per_seconds=60)]
+                )
+            return PerModelConfig(quotas=quotas, model_family="test-family")
+
+        builder = BlockingPrepareMemoryBackendBuilder()
+        limiter = RateLimiter(config_getter, backend=builder)
+
+        reservation = await limiter.acquire_capacity({"tokens": 90}, "test-model")
+        await limiter.refund_capacity({"tokens": 90}, reservation)
+
+        use_expanded = True
+
+        async def trigger_rebuild() -> None:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                await limiter.acquire_capacity(
+                    {"tokens": 0, "requests": 0},
+                    "test-model",
+                )
+
+        rebuild_task = asyncio.create_task(trigger_rebuild())
+        await builder.prepare_started.wait()
+
+        use_expanded = False
+        await limiter.acquire_capacity({"tokens": 10}, "test-model", timeout=0)
+
+        use_expanded = True
+        builder.release_prepare.set()
+        await rebuild_task
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            with pytest.raises(TimeoutError):
+                await limiter.acquire_capacity(
+                    {"tokens": 10, "requests": 1},
+                    "test-model",
+                    timeout=0,
+                )
+
+    async def test_metric_expansion_preserves_refill_during_prepare_delay(self):
+        use_expanded = False
+
+        def config_getter(model_name: str) -> PerModelConfig:
+            if use_expanded:
+                quotas = UsageQuotas(
+                    [
+                        Quota(metric="tokens", limit=100, per_seconds=1),
+                        Quota(metric="requests", limit=10, per_seconds=60),
+                    ]
+                )
+            else:
+                quotas = UsageQuotas(
+                    [Quota(metric="tokens", limit=100, per_seconds=1)]
+                )
+            return PerModelConfig(quotas=quotas, model_family="test-family")
+
+        builder = BlockingPrepareMemoryBackendBuilder()
+        limiter = RateLimiter(config_getter, backend=builder)
+
+        reservation = await limiter.acquire_capacity({"tokens": 100}, "test-model")
+        await limiter.refund_capacity({"tokens": 100}, reservation)
+
+        use_expanded = True
+
+        async def trigger_rebuild() -> None:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                await limiter.acquire_capacity(
+                    {"tokens": 0, "requests": 0},
+                    "test-model",
+                )
+
+        rebuild_task = asyncio.create_task(trigger_rebuild())
+        await builder.prepare_started.wait()
+        await asyncio.sleep(0.5)
+        builder.release_prepare.set()
+        await rebuild_task
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            reservation2 = await limiter.acquire_capacity(
+                {"tokens": 50, "requests": 1},
+                "test-model",
+                timeout=0,
+            )
+        assert reservation2.usage["tokens"] == 50
+        assert reservation2.usage["requests"] == 1
+
+
+class SimpleAsyncBackend(RateLimiterBackend):
+    async def await_for_capacity(self, usage, **kwargs) -> None:
+        return None
+
+    async def consume_capacity(self, usage) -> None:
+        return None
+
+    async def refund_capacity(self, reserved_usage, actual_usage) -> None:
+        return None
+
+    async def set_max_capacity(self, metric, per_seconds, value) -> None:
+        return None
+
+
+class SimpleAsyncBackendBuilder(RateLimiterBackendBuilderInterface):
+    def build(self, cfg, *, callbacks=None) -> RateLimiterBackend:
+        return SimpleAsyncBackend()
+
+
+class TestCallableConfigMetricSetBackendSupport:
+    """Metric-set changes should fail fast for unsupported backend types."""
+
+    async def test_metric_set_change_without_backend_support_raises(self):
+        use_new_metrics = False
+
+        def config_getter(model_name: str) -> PerModelConfig:
+            if use_new_metrics:
+                quotas = UsageQuotas(
+                    [Quota(metric="requests", limit=10, per_seconds=60)]
+                )
+            else:
+                quotas = UsageQuotas(
+                    [Quota(metric="tokens", limit=100, per_seconds=60)]
+                )
+            return PerModelConfig(quotas=quotas, model_family="test-family")
+
+        limiter = RateLimiter(config_getter, backend=SimpleAsyncBackendBuilder())
+
+        await limiter.acquire_capacity({"tokens": 1}, "test-model")
+        use_new_metrics = True
+
+        with pytest.raises(RuntimeError, match="does not support metric-set changes"):
+            await limiter.acquire_capacity({"requests": 0}, "test-model")

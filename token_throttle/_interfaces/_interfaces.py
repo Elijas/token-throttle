@@ -166,6 +166,33 @@ class RateLimiterBackend(ABC):
         so that a full refill still takes exactly one time window.
         """
 
+    def supports_metric_set_change(self) -> bool:
+        """
+        Whether the backend can safely handle callable config metric-set changes.
+
+        The default is ``False`` because rebuilding a backend that keeps its
+        state only in local memory will otherwise lose or split accounting.
+        Backends with shared external state (for example Redis) or custom
+        rebuild logic should override this and, when needed, also override
+        :meth:`prepare_reconfigured_backend`.
+        """
+        return False
+
+    async def prepare_reconfigured_backend(
+        self,
+        new_backend: RateLimiterBackend,
+        _cfg: PerModelConfig,
+    ) -> RateLimiterBackend:
+        """
+        Finalize a rebuilt backend before the limiter installs it.
+
+        Called only for metric-set changes after ``new_backend`` has been
+        constructed from the new config. The default implementation is a no-op.
+        Backends that keep local state can override this to share or migrate
+        live state into the rebuilt backend.
+        """
+        return new_backend
+
 
 class BaseRateLimiter(ABC):
     @abstractmethod
@@ -230,6 +257,33 @@ class SyncRateLimiterBackend(ABC):
         value: float,
     ) -> None:
         """Dynamically change the max capacity for a specific bucket."""
+
+    def supports_metric_set_change(self) -> bool:
+        """
+        Whether the backend can safely handle callable config metric-set changes.
+
+        The default is ``False`` because rebuilding a backend that keeps its
+        state only in local memory will otherwise lose or split accounting.
+        Backends with shared external state (for example Redis) or custom
+        rebuild logic should override this and, when needed, also override
+        :meth:`prepare_reconfigured_backend`.
+        """
+        return False
+
+    def prepare_reconfigured_backend(
+        self,
+        new_backend: SyncRateLimiterBackend,
+        _cfg: PerModelConfig,
+    ) -> SyncRateLimiterBackend:
+        """
+        Finalize a rebuilt backend before the limiter installs it.
+
+        Called only for metric-set changes after ``new_backend`` has been
+        constructed from the new config. The default implementation is a no-op.
+        Backends that keep local state can override this to share or migrate
+        live state into the rebuilt backend.
+        """
+        return new_backend
 
 
 class SyncRateLimiterBackendBuilderInterface(ABC):

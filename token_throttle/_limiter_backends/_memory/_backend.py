@@ -75,6 +75,9 @@ class MemoryBackend(RateLimiterBackend):
         self._limit_config = limit_config
         self._usage_metric_names: set[str] = {bucket.usage_metric for bucket in buckets}
 
+    def supports_metric_set_change(self) -> bool:
+        return True
+
     def _get_capacities(
         self,
         current_time: float,
@@ -454,6 +457,58 @@ class MemoryBackend(RateLimiterBackend):
         async with self._condition:
             bucket.set_max_capacity(value)
             self._condition.notify_all()
+
+    async def prepare_reconfigured_backend(
+        self,
+        new_backend: RateLimiterBackend,
+        cfg: PerModelConfig,
+    ) -> RateLimiterBackend:
+        if not isinstance(new_backend, MemoryBackend):
+            raise TypeError(
+                "MemoryBackend can only reconfigure into another MemoryBackend"
+            )
+
+        existing_buckets = {
+            (bucket.usage_metric, int(bucket.per_seconds)): bucket
+            for bucket in self._buckets
+        }
+
+        async with self._condition:
+            prepared_buckets: list[MemoryBucket] = []
+            for quota in cfg.quotas:
+                bucket_id = (quota.metric, int(quota.per_seconds))
+                bucket = existing_buckets.get(bucket_id)
+                if bucket is None:
+                    bucket = MemoryBucket(
+                        metric=quota.metric,
+                        per_seconds=quota.per_seconds,
+                        limit=float(quota.limit),
+                        model_family=cfg.get_model_family(),
+                    )
+                else:
+                    bucket.set_max_capacity(float(quota.limit))
+                prepared_buckets.append(bucket)
+
+            new_backend.install_reconfigured_state(
+                condition=self._condition,
+                buckets=prepared_buckets,
+                cfg=cfg,
+            )
+            self._condition.notify_all()
+
+        return new_backend
+
+    def install_reconfigured_state(
+        self,
+        *,
+        condition: asyncio.Condition,
+        buckets: list[MemoryBucket],
+        cfg: PerModelConfig,
+    ) -> None:
+        self._condition = condition
+        self._buckets = buckets
+        self._usage_metric_names = {bucket.usage_metric for bucket in buckets}
+        self._limit_config = cfg
 
     async def _invoke_callback_safe(self, callback, **kwargs) -> None:
         """Fire a user callback, suppressing exceptions to prevent capacity leaks."""
