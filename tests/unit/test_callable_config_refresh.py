@@ -377,9 +377,7 @@ class RacingMemoryBackendBuilder(MemoryBackendBuilder):
         self.build_calls += 1
         backend = super().build(cfg, callbacks=callbacks)
         if self.build_calls >= 2:
-            backend._condition = GateCondition(  # noqa: SLF001
-                self.release_new_backend_condition
-            )
+            backend._condition = GateCondition(self.release_new_backend_condition)
         return backend
 
 
@@ -424,7 +422,7 @@ class TestCallableConfigMetricSetConcurrency:
         use_expanded = True
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            async with old_backend._condition:  # noqa: SLF001
+            async with old_backend._condition:
                 task1 = asyncio.create_task(worker())
                 task2 = asyncio.create_task(worker())
                 await asyncio.sleep(0)

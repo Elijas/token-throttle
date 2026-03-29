@@ -1,5 +1,6 @@
 """Tests for SyncRateLimiter callable config refresh (stale-callable-config fix)."""
 
+import contextlib
 import threading
 import warnings
 
@@ -355,10 +356,8 @@ class RacingSyncMemoryBackendBuilder(SyncMemoryBackendBuilder):
             self.build_calls += 1
             build_call = self.build_calls
         if build_call >= 2:
-            try:
+            with contextlib.suppress(threading.BrokenBarrierError):
                 self._rebuild_barrier.wait(timeout=0.2)
-            except threading.BrokenBarrierError:
-                pass
         return super().build(cfg, callbacks=callbacks)
 
 
@@ -411,7 +410,7 @@ class TestSyncCallableConfigMetricSetConcurrency:
         use_expanded = True
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            with old_backend._condition:  # noqa: SLF001
+            with old_backend._condition:
                 threads = [threading.Thread(target=worker) for _ in range(2)]
                 for thread in threads:
                     thread.start()
