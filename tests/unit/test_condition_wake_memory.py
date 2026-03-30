@@ -206,10 +206,10 @@ class TestSyncSetMaxCapacityWake:
 # ---------------------------------------------------------------------------
 # Lost-wakeup regression tests
 #
-# These tests use on_wait_start as a synchronization point.  In the buggy code,
+# These tests use on_wait_start as a synchronization point. In the buggy code,
 # on_wait_start fired in the unlocked gap between check and wait, so a refund
-# during the callback produced a lost notify_all().  After the fix, on_wait_start
-# fires after the wait loop completes (outside the lock).
+# during the callback produced a lost notify_all(). After the fix, the backend
+# re-checks capacity immediately after the callback before it ever sleeps.
 # ---------------------------------------------------------------------------
 
 
@@ -219,8 +219,8 @@ class TestSyncLostWakeupRegression:
 
         Before the fix: on_wait_start fires in the unlocked gap, the refund's
         notify_all() is lost, and the waiter sleeps for sleep_interval (5s).
-        After the fix: check+wait are in the same lock, so refunds are properly
-        serialized and the waiter wakes promptly.
+        After the fix: the waiter re-checks capacity immediately after the
+        callback, so refunds are observed before sleeping.
         """
         in_callback = threading.Event()
 
@@ -252,8 +252,7 @@ class TestSyncLostWakeupRegression:
         t = threading.Thread(target=waiter, daemon=True)
         t.start()
 
-        # Wait for the waiter to either enter the callback (buggy code)
-        # or enter condition.wait (fixed code, in_callback won't be set yet)
+        # Wait for the waiter to enter the callback, then refund.
         in_callback.wait(2.0)
 
         # Refund all capacity — in buggy code, notify_all() is lost

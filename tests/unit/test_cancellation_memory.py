@@ -886,19 +886,19 @@ class TestMultiMetricCancellationRefundsAllMetrics:
 
 
 # ---------------------------------------------------------------------------
-# Group 10: CancelledError during on_wait_start callback refunds capacity
+# Group 10: CancelledError during on_wait_start callback occurs before consume
 # ---------------------------------------------------------------------------
 
 
-class TestCancellationDuringOnWaitStartRefundsCapacity:
+class TestCancellationDuringOnWaitStartLeavesCapacityUnchanged:
     """
     Group 4 covers on_capacity_consumed, after_wait_end_consumption, and
     on_missing_consumption_data.  This covers the remaining callback:
     on_wait_start (which only fires when has_waited=True).
     """
 
-    async def test_cancellation_during_on_wait_start_refunds_capacity(self):
-        """CancelledError during on_wait_start callback refunds consumed capacity."""
+    async def test_cancellation_during_on_wait_start_does_not_mutate_capacity(self):
+        """CancelledError during on_wait_start happens before any capacity is consumed."""
         gate = asyncio.Event()
         entered_callback = asyncio.Event()
 
@@ -918,7 +918,7 @@ class TestCancellationDuringOnWaitStartRefundsCapacity:
         await backend.await_for_capacity(frozendict({"requests": 100.0}))
         gate.set()
 
-        # This will wait for refill, consume capacity, then hit slow on_wait_start
+        # This now hits on_wait_start before any capacity is consumed.
         task = asyncio.create_task(
             backend.await_for_capacity(frozendict({"requests": 5.0}))
         )
@@ -930,11 +930,11 @@ class TestCancellationDuringOnWaitStartRefundsCapacity:
         with pytest.raises(asyncio.CancelledError):
             await task
 
-        # 5 tokens should be refunded
+        # No capacity was consumed yet, so cancellation should not change it
         cap_after = _get_bucket_capacity(backend)
-        assert cap_after >= cap_before + 4.0, (
-            f"Capacity not refunded! Before={cap_before}, after={cap_after}. "
-            f"CancelledError during on_wait_start lost 5 tokens."
+        assert cap_after == pytest.approx(cap_before, abs=1.0), (
+            f"Capacity changed during on_wait_start cancellation. "
+            f"Before={cap_before}, after={cap_after}"
         )
 
 

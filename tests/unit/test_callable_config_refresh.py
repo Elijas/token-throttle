@@ -135,10 +135,10 @@ class TestCallableConfigQuotaRefresh:
 
 
 class TestCallableConfigMetricSetChange:
-    """When the callable changes metric names, the backend must be rebuilt."""
+    """When the callable changes metric names, the backend must be refreshed."""
 
-    async def test_metric_set_change_triggers_rebuild(self):
-        """Changing metric names causes a new backend to be built."""
+    async def test_metric_set_change_reconfigures_cached_backend_in_place(self):
+        """Changing metric names updates the cached backend object in place."""
         use_new_metrics = False
 
         def config_getter(model_name: str) -> PerModelConfig:
@@ -162,7 +162,7 @@ class TestCallableConfigMetricSetChange:
         # Switch to "requests" metric
         use_new_metrics = True
 
-        # Next call should rebuild the backend and warn
+        # Next call should refresh the backend and warn
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
             reservation2 = await limiter.acquire_capacity({"requests": 5}, "test-model")
@@ -171,7 +171,7 @@ class TestCallableConfigMetricSetChange:
         assert "changed metric set" in str(w[0].message)
 
         new_backend = limiter._model_family_to_backend["test-family"]
-        assert new_backend is not old_backend
+        assert new_backend is old_backend
         assert reservation2.usage["requests"] == 5
 
     async def test_metric_set_change_new_limits_enforced(self):
@@ -347,6 +347,96 @@ class TestCallableConfigMetricSetStateTransfer:
                 {"requests": 10}, "test-model"
             )
         assert reservation2.usage["requests"] == 10
+
+
+class TestCallableConfigWindowChangeHandling:
+    """Window-only changes must update blocked acquires and later refunds correctly."""
+
+    async def test_window_change_applies_to_existing_blocked_waiter(self):
+        current_window = 1
+
+        def config_getter(model_name: str) -> PerModelConfig:
+            return PerModelConfig(
+                quotas=UsageQuotas(
+                    [Quota(metric="tokens", limit=100, per_seconds=current_window)]
+                ),
+                model_family="test-family",
+            )
+
+        limiter = RateLimiter(config_getter, backend=MemoryBackendBuilder())
+
+        await limiter.acquire_capacity({"tokens": 100}, "test-model")
+
+        async def waiter():
+            started_at = asyncio.get_running_loop().time()
+            await limiter.acquire_capacity({"tokens": 50}, "test-model", timeout=0.6)
+            return asyncio.get_running_loop().time() - started_at
+
+        waiter = asyncio.create_task(
+            waiter()
+        )
+        await asyncio.sleep(0.05)
+
+        current_window = 3600
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            await limiter.acquire_capacity({"tokens": 0}, "test-model")
+
+        elapsed = await waiter
+        assert elapsed < 0.25
+
+    async def test_refund_after_window_replacement_does_not_credit_new_window(self):
+        current_window = 60
+
+        def config_getter(model_name: str) -> PerModelConfig:
+            return PerModelConfig(
+                quotas=UsageQuotas(
+                    [Quota(metric="tokens", limit=100, per_seconds=current_window)]
+                ),
+                model_family="test-family",
+            )
+
+        limiter = RateLimiter(config_getter, backend=MemoryBackendBuilder())
+
+        reservation = await limiter.acquire_capacity({"tokens": 50}, "test-model")
+
+        current_window = 3600
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            await limiter.acquire_capacity({"tokens": 0}, "test-model")
+
+        await limiter.acquire_capacity({"tokens": 80}, "test-model")
+        await limiter.refund_capacity({"tokens": 0}, reservation)
+
+        with pytest.raises(TimeoutError):
+            await limiter.acquire_capacity({"tokens": 70}, "test-model", timeout=0)
+
+    async def test_refund_only_credits_surviving_same_metric_windows(self):
+        use_expanded_windows = False
+
+        def config_getter(model_name: str) -> PerModelConfig:
+            quotas = [Quota(metric="tokens", limit=100, per_seconds=60)]
+            if use_expanded_windows:
+                quotas.append(Quota(metric="tokens", limit=20, per_seconds=3600))
+            return PerModelConfig(
+                quotas=UsageQuotas(quotas),
+                model_family="test-family",
+            )
+
+        limiter = RateLimiter(config_getter, backend=MemoryBackendBuilder())
+
+        reservation = await limiter.acquire_capacity({"tokens": 20}, "test-model")
+
+        use_expanded_windows = True
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            await limiter.acquire_capacity({"tokens": 0}, "test-model")
+
+        await limiter.acquire_capacity({"tokens": 10}, "test-model")
+        await limiter.refund_capacity({"tokens": 0}, reservation)
+
+        with pytest.raises(TimeoutError):
+            await limiter.acquire_capacity({"tokens": 15}, "test-model", timeout=0)
 
 
 class GateCondition:

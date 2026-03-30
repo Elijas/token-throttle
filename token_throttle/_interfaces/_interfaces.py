@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validat
 from token_throttle._interfaces._callable_utils import is_async_callable
 from token_throttle._interfaces._callbacks import RateLimiterCallbacks
 from token_throttle._interfaces._models import (
+    BucketId,
     CapacityReservation,
     FrozenUsage,
     Usage,
@@ -152,6 +153,22 @@ class RateLimiterBackend(ABC):
         created by the speedometer / ``record_usage`` path.
         """
 
+    async def refund_capacity_for_buckets(
+        self,
+        reserved_usage: FrozenUsage,
+        actual_usage: FrozenUsage,
+        *,
+        bucket_ids: set[BucketId] | frozenset[BucketId] | None = None,
+    ) -> None:
+        """
+        Return unused capacity to a specific subset of buckets.
+
+        Backends that support metric-set reconfiguration should override this
+        so refunds created before a config rebuild only touch surviving bucket
+        ids. The default falls back to ``refund_capacity()``.
+        """
+        await self.refund_capacity(reserved_usage, actual_usage)
+
     @abstractmethod
     async def set_max_capacity(
         self,
@@ -248,6 +265,21 @@ class SyncRateLimiterBackend(ABC):
         reserved_usage: FrozenUsage,
         actual_usage: FrozenUsage,
     ) -> None: ...
+
+    def refund_capacity_for_buckets(
+        self,
+        reserved_usage: FrozenUsage,
+        actual_usage: FrozenUsage,
+        *,
+        bucket_ids: set[BucketId] | frozenset[BucketId] | None = None,
+    ) -> None:
+        """
+        Synchronous counterpart of ``refund_capacity_for_buckets``.
+
+        The default falls back to ``refund_capacity()`` for backwards
+        compatibility with custom backends.
+        """
+        self.refund_capacity(reserved_usage, actual_usage)
 
     @abstractmethod
     def set_max_capacity(

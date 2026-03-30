@@ -137,10 +137,10 @@ class TestSyncCallableConfigQuotaRefresh:
 
 
 class TestSyncCallableConfigMetricSetChange:
-    """When the callable changes metric names, the backend must be rebuilt."""
+    """When the callable changes metric names, the backend must be refreshed."""
 
-    def test_metric_set_change_triggers_rebuild(self):
-        """Changing metric names causes a new backend to be built."""
+    def test_metric_set_change_reconfigures_cached_backend_in_place(self):
+        """Changing metric names updates the cached backend object in place."""
         use_new_metrics = False
 
         def config_getter(model_name: str) -> PerModelConfig:
@@ -164,7 +164,7 @@ class TestSyncCallableConfigMetricSetChange:
         # Switch to "requests" metric
         use_new_metrics = True
 
-        # Next call should rebuild the backend and warn
+        # Next call should refresh the backend and warn
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
             reservation2 = limiter.acquire_capacity({"requests": 5}, "test-model")
@@ -173,7 +173,7 @@ class TestSyncCallableConfigMetricSetChange:
         assert "changed metric set" in str(w[0].message)
 
         new_backend = limiter._model_family_to_backend["test-family"]
-        assert new_backend is not old_backend
+        assert new_backend is old_backend
         assert reservation2.usage["requests"] == 5
 
     def test_metric_set_change_new_limits_enforced(self):
@@ -347,6 +347,103 @@ class TestSyncCallableConfigMetricSetStateTransfer:
             warnings.simplefilter("always")
             reservation2 = limiter.acquire_capacity({"requests": 10}, "test-model")
         assert reservation2.usage["requests"] == 10
+
+
+class TestSyncCallableConfigWindowChangeHandling:
+    """Window-only changes must update blocked acquires and later refunds correctly."""
+
+    def test_window_change_applies_to_existing_blocked_waiter(self):
+        current_window = 1
+
+        def config_getter(model_name: str) -> PerModelConfig:
+            return PerModelConfig(
+                quotas=UsageQuotas(
+                    [Quota(metric="tokens", limit=100, per_seconds=current_window)]
+                ),
+                model_family="test-family",
+            )
+
+        limiter = SyncRateLimiter(config_getter, backend=SyncMemoryBackendBuilder())
+
+        limiter.acquire_capacity({"tokens": 100}, "test-model")
+
+        result: dict[str, object] = {}
+
+        def waiter() -> None:
+            try:
+                started_at = time.monotonic()
+                limiter.acquire_capacity({"tokens": 50}, "test-model", timeout=0.6)
+            except Exception as exc:  # noqa: BLE001
+                result["error"] = exc
+            else:
+                result["elapsed"] = time.monotonic() - started_at
+
+        thread = threading.Thread(target=waiter)
+        thread.start()
+        time.sleep(0.05)
+
+        current_window = 3600
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            limiter.acquire_capacity({"tokens": 0}, "test-model")
+
+        thread.join(timeout=2.0)
+        assert not thread.is_alive()
+        assert "error" not in result
+        assert result["elapsed"] < 0.25
+
+    def test_refund_after_window_replacement_does_not_credit_new_window(self):
+        current_window = 60
+
+        def config_getter(model_name: str) -> PerModelConfig:
+            return PerModelConfig(
+                quotas=UsageQuotas(
+                    [Quota(metric="tokens", limit=100, per_seconds=current_window)]
+                ),
+                model_family="test-family",
+            )
+
+        limiter = SyncRateLimiter(config_getter, backend=SyncMemoryBackendBuilder())
+
+        reservation = limiter.acquire_capacity({"tokens": 50}, "test-model")
+
+        current_window = 3600
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            limiter.acquire_capacity({"tokens": 0}, "test-model")
+
+        limiter.acquire_capacity({"tokens": 80}, "test-model")
+        limiter.refund_capacity({"tokens": 0}, reservation)
+
+        with pytest.raises(TimeoutError):
+            limiter.acquire_capacity({"tokens": 70}, "test-model", timeout=0)
+
+    def test_refund_only_credits_surviving_same_metric_windows(self):
+        use_expanded_windows = False
+
+        def config_getter(model_name: str) -> PerModelConfig:
+            quotas = [Quota(metric="tokens", limit=100, per_seconds=60)]
+            if use_expanded_windows:
+                quotas.append(Quota(metric="tokens", limit=20, per_seconds=3600))
+            return PerModelConfig(
+                quotas=UsageQuotas(quotas),
+                model_family="test-family",
+            )
+
+        limiter = SyncRateLimiter(config_getter, backend=SyncMemoryBackendBuilder())
+
+        reservation = limiter.acquire_capacity({"tokens": 20}, "test-model")
+
+        use_expanded_windows = True
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            limiter.acquire_capacity({"tokens": 0}, "test-model")
+
+        limiter.acquire_capacity({"tokens": 10}, "test-model")
+        limiter.refund_capacity({"tokens": 0}, reservation)
+
+        with pytest.raises(TimeoutError):
+            limiter.acquire_capacity({"tokens": 15}, "test-model", timeout=0)
 
 
 class RacingSyncMemoryBackendBuilder(SyncMemoryBackendBuilder):

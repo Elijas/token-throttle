@@ -149,6 +149,7 @@ def frozen_usage(usage: Usage) -> FrozenUsage:
 class CapacityReservation(BaseModel):
     usage: FrozenUsage
     model_family: str
+    bucket_ids: frozenset[BucketId] | None = None
     model_config = ConfigDict(arbitrary_types_allowed=True, frozen=True)
 
     @field_validator("usage", mode="before")
@@ -167,6 +168,40 @@ class CapacityReservation(BaseModel):
                     )
             return normalized_usage
         return value
+
+    @field_validator("bucket_ids", mode="before")
+    @classmethod
+    def _normalize_bucket_ids(cls, value: object) -> object:
+        if value is None:
+            return None
+        if not isinstance(value, (set, frozenset, list, tuple)):
+            return value
+
+        normalized: set[BucketId] = set()
+        for item in value:
+            if not isinstance(item, tuple) or len(item) != 2:
+                raise ValueError(
+                    "Each bucket_id must be a (metric, per_seconds) pair"
+                )
+            metric, per_seconds = item
+            if not isinstance(metric, str) or not metric:
+                raise ValueError("bucket_id metric must be a non-empty string")
+            if isinstance(per_seconds, bool):
+                raise ValueError("bucket_id per_seconds must not be a boolean")
+            try:
+                parsed_per_seconds = float(per_seconds)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    "bucket_id per_seconds must be a positive integer"
+                ) from exc
+            if (
+                not math.isfinite(parsed_per_seconds)
+                or parsed_per_seconds <= 0
+                or not parsed_per_seconds.is_integer()
+            ):
+                raise ValueError("bucket_id per_seconds must be a positive integer")
+            normalized.add((metric, int(parsed_per_seconds)))
+        return frozenset(normalized)
 
     def get_usage(self) -> FrozenUsage:
         return self.usage

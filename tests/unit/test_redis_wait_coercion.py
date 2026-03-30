@@ -72,8 +72,8 @@ def _make_async_fake_check():
         call_count += 1
         caps = frozendict({("tokens", 60): 50.0})
         if call_count == 1:
-            return False, caps, frozendict()
-        return True, caps, frozendict({("tokens", 60): 0.0})
+            return False, caps, frozendict(), None
+        return True, caps, frozendict({("tokens", 60): 0.0}), 0.0
 
     return _fn
 
@@ -87,8 +87,8 @@ def _make_sync_fake_check():
         call_count += 1
         caps = frozendict({("tokens", 60): 50.0})
         if call_count == 1:
-            return False, caps, frozendict()
-        return True, caps, frozendict({("tokens", 60): 0.0})
+            return False, caps, frozendict(), None
+        return True, caps, frozendict({("tokens", 60): 0.0}), 0.0
 
     return _fn
 

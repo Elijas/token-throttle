@@ -11,6 +11,7 @@ from token_throttle._interfaces._interfaces import (
     SyncRateLimiterBackendBuilderInterface,
 )
 from token_throttle._interfaces._models import (
+    BucketId,
     CapacityReservation,
     FrozenUsage,
     Usage,
@@ -38,32 +39,68 @@ def _quotas_snapshot(cfg: PerModelConfig) -> dict[tuple[str, int], float]:
     return {(q.metric, q.per_seconds): q.limit for q in cfg.quotas}
 
 
-def _project_refund_usage(
+def _reservation_bucket_ids(cfg: PerModelConfig) -> frozenset[BucketId]:
+    """Bucket ids captured at reservation time for later scoped refunds."""
+    return frozenset((q.metric, int(q.per_seconds)) for q in cfg.quotas)
+
+
+def _project_refund_scope(
     reserved_usage: FrozenUsage,
     actual_usage: FrozenUsage,
-    active_metric_names: set[str] | frozenset[str] | None,
-) -> tuple[FrozenUsage, FrozenUsage]:
+    reservation_bucket_ids: frozenset[BucketId] | None,
+    active_bucket_ids: set[BucketId] | frozenset[BucketId] | None,
+) -> tuple[FrozenUsage, FrozenUsage, frozenset[BucketId] | None]:
     """
-    Shape refund data to the backend's current metric set.
+    Shape refund data to the buckets that still correspond to the reservation.
 
-    Callable configs can rebuild a model-family backend with a different
-    metric set after a reservation was created. Surviving metrics keep their
-    original refund values, removed metrics are dropped, and newly added
-    metrics are filled with zero so backend validation still succeeds.
+    Callable configs can rebuild a model-family backend with a different bucket
+    set after a reservation was created. Surviving bucket ids keep their
+    original refund values, removed bucket ids are dropped, and legacy
+    reservations without bucket ids fall back to metric-name projection.
     """
-    if active_metric_names is None:
-        return reserved_usage, actual_usage
+    if active_bucket_ids is None:
+        return reserved_usage, actual_usage, reservation_bucket_ids
 
-    if set(reserved_usage) == set(active_metric_names):
-        return reserved_usage, actual_usage
+    active_bucket_ids = frozenset(active_bucket_ids)
+
+    if reservation_bucket_ids is None:
+        active_metric_names = frozenset(metric for metric, _ in active_bucket_ids)
+        if set(reserved_usage) == set(active_metric_names):
+            return reserved_usage, actual_usage, active_bucket_ids
+        return (
+            frozendict(
+                {metric: reserved_usage.get(metric, 0.0) for metric in active_metric_names}
+            ),
+            frozendict(
+                {metric: actual_usage.get(metric, 0.0) for metric in active_metric_names}
+            ),
+            active_bucket_ids,
+        )
+
+    surviving_bucket_ids = frozenset(
+        bucket_id for bucket_id in reservation_bucket_ids if bucket_id in active_bucket_ids
+    )
+    if not surviving_bucket_ids:
+        return frozendict(), frozendict(), surviving_bucket_ids
+
+    surviving_metric_names = frozenset(metric for metric, _ in surviving_bucket_ids)
+    if set(reserved_usage) == set(surviving_metric_names):
+        return reserved_usage, actual_usage, surviving_bucket_ids
 
     return (
         frozendict(
-            {metric: reserved_usage.get(metric, 0.0) for metric in active_metric_names}
+            {
+                metric: reserved_usage.get(metric, 0.0)
+                for metric in surviving_metric_names
+            }
         ),
         frozendict(
-            {metric: actual_usage.get(metric, 0.0) for metric in active_metric_names}
+            {
+                metric: actual_usage.get(metric, 0.0)
+                for metric in surviving_metric_names
+            }
         ),
+        surviving_bucket_ids,
     )
 
 
@@ -169,6 +206,7 @@ class SyncRateLimiter:
         return CapacityReservation(
             usage=usage,
             model_family=limit_config.get_model_family(),
+            bucket_ids=_reservation_bucket_ids(limit_config),
         )
 
     def refund_capacity(
@@ -252,16 +290,29 @@ class SyncRateLimiter:
             raise ValueError(
                 f"Backend not found for model family {reservation.model_family}",
             )
-        active_metric_names = None
+        active_bucket_ids = None
         snapshot = self._model_family_to_quotas.get(reservation.model_family)
         if snapshot is not None:
-            active_metric_names = frozenset(metric for metric, _ in snapshot)
-        reserved_usage, actual_usage = _project_refund_usage(
+            active_bucket_ids = frozenset(snapshot)
+        reserved_usage, actual_usage, refund_bucket_ids = _project_refund_scope(
             reservation.get_usage(),
             actual_usage,
-            active_metric_names,
+            reservation.bucket_ids,
+            active_bucket_ids,
         )
-        backend.refund_capacity(reserved_usage, actual_usage)
+        if not reserved_usage:
+            return
+        if refund_bucket_ids is None or refund_bucket_ids == active_bucket_ids:
+            backend.refund_capacity(
+                reserved_usage,
+                actual_usage,
+            )
+            return
+        backend.refund_capacity_for_buckets(
+            reserved_usage,
+            actual_usage,
+            bucket_ids=refund_bucket_ids,
+        )
 
     def _get_backend(self, cfg: PerModelConfig) -> SyncRateLimiterBackend:
         if not cfg.model_family:

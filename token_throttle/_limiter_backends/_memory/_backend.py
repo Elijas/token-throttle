@@ -15,6 +15,7 @@ from token_throttle._interfaces._interfaces import (
 from token_throttle._interfaces._models import Capacities, FrozenUsage
 from token_throttle._validation import (
     validate_backend_refund_usage,
+    validate_backend_refund_usage_for_bucket_ids,
     validate_backend_usage,
     validate_timeout,
 )
@@ -91,6 +92,11 @@ class MemoryBackend(RateLimiterBackend):
                 fresh_start_buckets.append(bucket)
             caps[(bucket.usage_metric, int(bucket.per_seconds))] = result.amount
         return frozendict(caps), fresh_start_buckets
+
+    def _bucket_ids(self) -> frozenset[tuple[str, int]]:
+        return frozenset(
+            (bucket.usage_metric, int(bucket.per_seconds)) for bucket in self._buckets
+        )
 
     def _set_capacities(
         self,
@@ -253,34 +259,56 @@ class MemoryBackend(RateLimiterBackend):
         deadline = None if timeout is None else time.monotonic() + timeout
         has_waited = False
         first_failed_pre: Capacities = frozendict()
-        start_time = time.monotonic()
+        wait_started_at: float | None = None
+        wait_start_callback_overhead = 0.0
         postconsumption: Capacities = frozendict()
         fresh: list[MemoryBucket] = []
+        preconsumption: Capacities = frozendict()
+        current_time = time.time()
+        consumed_monotonic = time.monotonic()
 
-        async with self._condition:
-            while True:
-                current_time = time.time()
-                preconsumption, fresh = self._get_capacities(current_time)
-                ok, postconsumption = self._try_consume_locked(
-                    usage,
-                    preconsumption,
-                    current_time,
-                )
+        while True:
+            should_fire_wait_start = False
+            async with self._condition:
+                while True:
+                    current_time = time.time()
+                    preconsumption, fresh = self._get_capacities(current_time)
+                    ok, postconsumption = self._try_consume_locked(
+                        usage,
+                        preconsumption,
+                        current_time,
+                    )
+                    if ok:
+                        consumed_monotonic = time.monotonic()
+                        break
+                    if deadline is not None and time.monotonic() >= deadline:
+                        raise TimeoutError("Timed out waiting for capacity")
+                    if not has_waited:
+                        has_waited = True
+                        first_failed_pre = preconsumption
+                        wait_started_at = time.monotonic()
+                        should_fire_wait_start = True
+                        break
+                    computed = self._compute_sleep(usage, preconsumption)
+                    if deadline is not None:
+                        computed = min(computed, max(0, deadline - time.monotonic()))
+                    with contextlib.suppress(TimeoutError):
+                        await asyncio.wait_for(
+                            self._condition.wait(),
+                            timeout=max(0.001, computed),
+                        )
                 if ok:
                     break
-                if deadline is not None and time.monotonic() >= deadline:
-                    raise TimeoutError("Timed out waiting for capacity")
-                if not has_waited:
-                    has_waited = True
-                    first_failed_pre = preconsumption
-                computed = self._compute_sleep(usage, preconsumption)
-                if deadline is not None:
-                    computed = min(computed, max(0, deadline - time.monotonic()))
-                with contextlib.suppress(TimeoutError):
-                    await asyncio.wait_for(
-                        self._condition.wait(),
-                        timeout=max(0.001, computed),
-                    )
+
+            if should_fire_wait_start and self._callbacks and self._callbacks.on_wait_start:
+                callback_started = time.monotonic()
+                await self._invoke_callback_safe(
+                    self._callbacks.on_wait_start,
+                    model_family=self._limit_config.get_model_family(),
+                    preconsumption_capacities=first_failed_pre,
+                    usage=usage,
+                )
+                wait_start_callback_overhead += time.monotonic() - callback_started
 
         # All callbacks fired outside the lock.  If CancelledError arrives
         # during any callback await, refund the consumed capacity so it is
@@ -296,19 +324,17 @@ class MemoryBackend(RateLimiterBackend):
                     usage=usage,
                     current_time=current_time,
                 )
-            if has_waited and self._callbacks and self._callbacks.on_wait_start:
-                await self._invoke_callback_safe(
-                    self._callbacks.on_wait_start,
-                    model_family=self._limit_config.get_model_family(),
-                    preconsumption_capacities=first_failed_pre,
-                    usage=usage,
-                )
             if (
                 has_waited
                 and self._callbacks
                 and self._callbacks.after_wait_end_consumption
             ):
-                wait_time_s = time.monotonic() - start_time
+                wait_time_s = max(
+                    0.0,
+                    consumed_monotonic
+                    - (wait_started_at or consumed_monotonic)
+                    - wait_start_callback_overhead,
+                )
                 await self._invoke_callback_safe(
                     self._callbacks.after_wait_end_consumption,
                     model_family=self._limit_config.get_model_family(),
@@ -358,17 +384,37 @@ class MemoryBackend(RateLimiterBackend):
         reserved_usage: FrozenUsage,
         actual_usage: FrozenUsage,
     ) -> None:
+        await self.refund_capacity_for_buckets(
+            reserved_usage,
+            actual_usage,
+            bucket_ids=self._bucket_ids(),
+        )
+
+    async def refund_capacity_for_buckets(
+        self,
+        reserved_usage: FrozenUsage,
+        actual_usage: FrozenUsage,
+        *,
+        bucket_ids: set[tuple[str, int]] | frozenset[tuple[str, int]] | None = None,
+    ) -> None:
         """
         Refund unused capacity back to the rate limiter based on actual usage.
 
         Handles both positive refunds (used less than reserved) and negative
         refunds (used more than reserved, i.e. overuse).
         """
-        validate_backend_refund_usage(
+        backend_bucket_ids = self._bucket_ids()
+        refund_bucket_ids = (
+            backend_bucket_ids if bucket_ids is None else frozenset(bucket_ids)
+        )
+        validate_backend_refund_usage_for_bucket_ids(
             reserved_usage,
             actual_usage,
-            self._usage_metric_names,
+            refund_bucket_ids,
+            backend_bucket_ids,
         )
+        if not refund_bucket_ids:
+            return
         # Calculate refund amounts per metric
         refund_usage_: dict[str, float] = {}
         for metric, reserved_amount in reserved_usage.items():
@@ -399,27 +445,26 @@ class MemoryBackend(RateLimiterBackend):
                 prerefund_capacities,
             )
             for cap_metric, per_seconds in prerefund_capacities:
-                for usage_metric, refund_amount in refund_usage.items():
-                    if cap_metric != usage_metric:
-                        continue
-                    bucket = next(
-                        (
-                            b
-                            for b in self._buckets
-                            if b.usage_metric == usage_metric
-                            and b.per_seconds == per_seconds
-                        ),
-                        None,
-                    )
-                    if bucket is None:  # pragma: no cover
-                        raise ValueError(
-                            f"Bucket '{usage_metric}/{per_seconds}s' not found",
-                        )
-                    updated_capacities_[(usage_metric, int(per_seconds))] = min(
-                        updated_capacities_[(usage_metric, int(per_seconds))]
-                        + refund_amount,
-                        bucket.max_capacity,
-                    )
+                bucket_id = (cap_metric, int(per_seconds))
+                if bucket_id not in refund_bucket_ids:
+                    continue
+                refund_amount = refund_usage.get(cap_metric)
+                if refund_amount is None:
+                    continue
+                bucket = next(
+                    (
+                        b
+                        for b in self._buckets
+                        if b.usage_metric == cap_metric and b.per_seconds == per_seconds
+                    ),
+                    None,
+                )
+                if bucket is None:  # pragma: no cover
+                    raise ValueError(f"Bucket '{cap_metric}/{per_seconds}s' not found")
+                updated_capacities_[(cap_metric, int(per_seconds))] = min(
+                    updated_capacities_[(cap_metric, int(per_seconds))] + refund_amount,
+                    bucket.max_capacity,
+                )
             updated_capacities = frozendict(updated_capacities_)
 
             self._set_capacities(updated_capacities, current_time, allow_negative=True)
@@ -489,14 +534,14 @@ class MemoryBackend(RateLimiterBackend):
                     bucket.set_max_capacity(float(quota.limit))
                 prepared_buckets.append(bucket)
 
-            new_backend.install_reconfigured_state(
+            self.install_reconfigured_state(
                 condition=self._condition,
                 buckets=prepared_buckets,
                 cfg=cfg,
             )
             self._condition.notify_all()
 
-        return new_backend
+        return self
 
     def install_reconfigured_state(
         self,

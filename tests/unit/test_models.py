@@ -272,6 +272,23 @@ class TestCapacityReservation:
         with pytest.raises(TypeError):
             reservation.usage["requests"] = 2.0
 
+    def test_bucket_ids_are_normalized(self):
+        reservation = CapacityReservation(
+            usage={"requests": 1.0},
+            model_family="gpt-4o",
+            bucket_ids=[("requests", 60.0)],
+        )
+
+        assert reservation.bucket_ids == frozenset({("requests", 60)})
+
+    def test_invalid_bucket_ids_are_rejected(self):
+        with pytest.raises(ValidationError, match="bucket_id per_seconds"):
+            CapacityReservation(
+                usage={"requests": 1.0},
+                model_family="gpt-4o",
+                bucket_ids=[("requests", 0)],
+            )
+
     def test_frozen_immutability(self):
         reservation = CapacityReservation(
             usage={"requests": 1.0},

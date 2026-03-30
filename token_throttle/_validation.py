@@ -11,6 +11,7 @@ from token_throttle._interfaces._callable_utils import (
 )
 from token_throttle._interfaces._interfaces import PerModelConfig, PerModelConfigGetter
 from token_throttle._interfaces._models import (
+    BucketId,
     CapacityReservation,
     FrozenUsage,
     Usage,
@@ -194,6 +195,37 @@ def validate_backend_refund_usage(
         backend_metric_names,
         mapping_label="reserved_usage",
         expected_keys_label="backend metric keys",
+        value_label="Reserved usage value",
+    )
+    validate_refund_usage(actual_usage, set(reserved_usage))
+
+
+def validate_backend_refund_usage_for_bucket_ids(
+    reserved_usage: Usage,
+    actual_usage: Usage,
+    bucket_ids: AbstractSet[BucketId],
+    backend_bucket_ids: AbstractSet[BucketId],
+) -> None:
+    """Validate backend refund inputs for a specific subset of buckets."""
+    if not bucket_ids:
+        if reserved_usage or actual_usage:
+            raise ValueError(
+                "bucket_ids cannot be empty when refund usage is non-empty"
+            )
+        return
+
+    missing_bucket_ids = set(bucket_ids) - set(backend_bucket_ids)
+    if missing_bucket_ids:
+        raise ValueError(
+            f"Refund bucket ids {sorted(missing_bucket_ids)} not found in backend"
+        )
+
+    metric_names = {metric for metric, _ in bucket_ids}
+    _validate_usage_mapping(
+        reserved_usage,
+        metric_names,
+        mapping_label="reserved_usage",
+        expected_keys_label="refund bucket metric keys",
         value_label="Reserved usage value",
     )
     validate_refund_usage(actual_usage, set(reserved_usage))
