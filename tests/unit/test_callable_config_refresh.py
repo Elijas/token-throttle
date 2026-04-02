@@ -372,9 +372,7 @@ class TestCallableConfigWindowChangeHandling:
             await limiter.acquire_capacity({"tokens": 50}, "test-model", timeout=0.6)
             return asyncio.get_running_loop().time() - started_at
 
-        waiter = asyncio.create_task(
-            waiter()
-        )
+        waiter = asyncio.create_task(waiter())
         await asyncio.sleep(0.05)
 
         current_window = 3600
@@ -738,9 +736,7 @@ class TestCallableConfigMetricSetRebuildIntegrity:
                     ]
                 )
             else:
-                quotas = UsageQuotas(
-                    [Quota(metric="tokens", limit=100, per_seconds=1)]
-                )
+                quotas = UsageQuotas([Quota(metric="tokens", limit=100, per_seconds=1)])
             return PerModelConfig(quotas=quotas, model_family="test-family")
 
         builder = BlockingPrepareMemoryBackendBuilder()

@@ -373,7 +373,7 @@ class TestSyncCallableConfigWindowChangeHandling:
             try:
                 started_at = time.monotonic()
                 limiter.acquire_capacity({"tokens": 50}, "test-model", timeout=0.6)
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 result["error"] = exc
             else:
                 result["elapsed"] = time.monotonic() - started_at
@@ -727,9 +727,7 @@ class TestSyncCallableConfigMetricSetRebuildIntegrity:
                     ]
                 )
             else:
-                quotas = UsageQuotas(
-                    [Quota(metric="tokens", limit=100, per_seconds=1)]
-                )
+                quotas = UsageQuotas([Quota(metric="tokens", limit=100, per_seconds=1)])
             return PerModelConfig(quotas=quotas, model_family="test-family")
 
         builder = BlockingPrepareSyncMemoryBackendBuilder()

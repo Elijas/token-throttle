@@ -3,7 +3,10 @@
 import asyncio
 import threading
 
+import pytest
 from frozendict import frozendict
+
+pytest.importorskip("redis", reason="redis package not installed")
 
 import token_throttle._limiter_backends._redis._backend as async_backend_module
 import token_throttle._limiter_backends._redis._sync_backend as sync_backend_module
@@ -104,7 +107,9 @@ async def test_async_check_and_consume_uses_one_bucket_snapshot_during_reconfigu
         )
         return AsyncNoopContextManager()
 
-    async def fake_get_capacities_unsafe(*, pipeline=None, current_time=None, buckets=None):
+    async def fake_get_capacities_unsafe(
+        *, pipeline=None, current_time=None, buckets=None
+    ):
         entered_get_capacities.set()
         await allow_get_capacities.wait()
         effective_buckets = backend.sorted_buckets if buckets is None else buckets
@@ -222,7 +227,7 @@ def test_sync_check_and_consume_uses_one_bucket_snapshot_during_reconfigure(
     def worker() -> None:
         try:
             backend._check_and_consume_capacity(frozendict({"tokens": 1.0}))
-        except BaseException as exc:  # noqa: BLE001
+        except BaseException as exc:
             errors.append(exc)
 
     thread = threading.Thread(target=worker)
