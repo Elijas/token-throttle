@@ -372,3 +372,14 @@ def resolve_config(
             f"cfg must resolve to PerModelConfig (got {type(r).__name__})"
         )
     return r if r.model_family else r.model_copy(update={"model_family": model_name})
+
+
+def resolve_usage_counter_result(usage_counter, /, **request) -> FrozenUsage:
+    """Run a usage_counter and reject awaitable return values with a clear error."""
+    result = usage_counter(**request)
+    if inspect.isawaitable(result):
+        close_awaitable_if_possible(result)
+        raise ValueError(
+            "usage_counter must be a synchronous callable returning a usage mapping"
+        )
+    return frozen_usage(result)

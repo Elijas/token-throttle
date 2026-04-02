@@ -30,6 +30,7 @@ from token_throttle._validation import (
     validate_metric,
     validate_per_seconds,
     validate_refund_usage,
+    resolve_usage_counter_result,
     validate_timeout,
 )
 
@@ -183,7 +184,7 @@ class SyncRateLimiter:
             raise ValueError("limit_config.usage_counter cannot be None")
 
         usage = merge_extra_usage(
-            frozen_usage(limit_config.usage_counter(**kwargs)),
+            resolve_usage_counter_result(limit_config.usage_counter, **kwargs),
             extra_usage,
         )
         return self._acquire_capacity(usage, limit_config, timeout=timeout)
