@@ -1,5 +1,7 @@
 """Tests for all ValueError paths in SyncRateLimiter.acquire_capacity and refund_capacity."""
 
+import gc
+import warnings
 from collections import UserDict
 from unittest.mock import MagicMock
 
@@ -379,6 +381,31 @@ class TestAcquireCapacityForRequestValidation:
                 extra_usage={"tokens": 1},
                 model="gpt-4",
             )
+
+    def test_usage_counter_returning_awaitable_raises_clear_error_without_leak(self):
+        async def async_counter(**_kwargs):
+            return {"tokens": 100.0, "requests": 1.0}
+
+        def fake_counter(**_kwargs):
+            return async_counter(**_kwargs)
+
+        builder, _ = make_mock_backend_builder()
+        config = make_limited_config(usage_counter=fake_counter)
+        limiter = SyncRateLimiter(config, backend=builder)
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            with pytest.raises(
+                ValueError,
+                match=(
+                    "usage_counter must be a synchronous callable returning "
+                    "a usage mapping"
+                ),
+            ):
+                limiter.acquire_capacity_for_request(model="gpt-4")
+            gc.collect()
+
+        assert not any("was never awaited" in str(item.message) for item in caught)
 
     def test_unlimited_config_returns_unlimited_reservation(self):
         builder, _ = make_mock_backend_builder()
