@@ -114,14 +114,59 @@ class RedisBackend(RateLimiterBackend):
         # backend can safely point at the same buckets.
         return True
 
+    def _snapshot_buckets(self) -> tuple[RedisBucket, ...]:
+        return tuple(getattr(self, "sorted_buckets", ()))
+
+    def _validation_metric_names(
+        self,
+        buckets: tuple[RedisBucket, ...] | list[RedisBucket] | None = None,
+    ) -> set[str]:
+        target_buckets = self._snapshot_buckets() if buckets is None else tuple(buckets)
+        if target_buckets:
+            return self._usage_metric_names_for(target_buckets)
+        return set(getattr(self, "_usage_metric_names", set()))
+
+    @staticmethod
+    def _usage_metric_names_for(
+        buckets: tuple[RedisBucket, ...] | list[RedisBucket],
+    ) -> set[str]:
+        return {bucket.usage_metric for bucket in buckets}
+
+    @staticmethod
+    def _find_bucket(
+        buckets: tuple[RedisBucket, ...] | list[RedisBucket],
+        metric: str,
+        per_seconds: int,
+    ) -> RedisBucket | None:
+        return next(
+            (
+                bucket
+                for bucket in buckets
+                if bucket.usage_metric == metric
+                and int(bucket.per_seconds) == int(per_seconds)
+            ),
+            None,
+        )
+
+    @staticmethod
+    def _combined_bucket_snapshot(
+        *bucket_groups: tuple[RedisBucket, ...] | list[RedisBucket],
+    ) -> tuple[RedisBucket, ...]:
+        buckets_by_key: dict[str, RedisBucket] = {}
+        for bucket_group in bucket_groups:
+            for bucket in bucket_group:
+                buckets_by_key[bucket.full_redis_key] = bucket
+        return tuple(sorted(buckets_by_key.values(), key=lambda bucket: bucket.full_redis_key))
+
     async def _lock(
         self,
         *,
         timeout: float,
         blocking_timeout: float | None = None,
+        buckets: tuple[RedisBucket, ...] | list[RedisBucket] | None = None,
     ) -> AsyncExitStack:
         """
-        Acquire distributed Redis locks for all buckets in key-sorted order.
+        Acquire distributed Redis locks for a fixed bucket snapshot.
 
         Returns an ``AsyncExitStack`` that holds the acquired locks.  Use as::
 
@@ -132,14 +177,14 @@ class RedisBackend(RateLimiterBackend):
         (via ``stack.aclose()``) so we never leak partially-acquired locks.
         """
         stack = AsyncExitStack()
+        target_buckets = self.sorted_buckets if buckets is None else buckets
         loop = asyncio.get_running_loop()
         stop_trying_at = (
             None if blocking_timeout is None else loop.time() + blocking_timeout
         )
 
-        # sorted_buckets is sorted once in __init__ and never mutated.
         try:
-            for bucket in self.sorted_buckets:
+            for bucket in target_buckets:
                 remaining = (
                     None
                     if stop_trying_at is None
@@ -160,27 +205,28 @@ class RedisBackend(RateLimiterBackend):
         self,
         pipeline: redis.asyncio.client.Pipeline | None = None,
         current_time: float | None = None,
+        *,
+        buckets: tuple[RedisBucket, ...] | list[RedisBucket] | None = None,
     ) -> CapacitiesGetterResult:
         """Get capacities for all buckets."""
         if pipeline is None:
             pipeline = self._redis.pipeline()
+        target_buckets = self.sorted_buckets if buckets is None else buckets
 
         if current_time is None:
             current_time = await async_server_time(self._redis)
 
-        # sorted_buckets is sorted once in __init__ and never mutated, so the
-        # deadlock-prevention ordering invariant holds for the lifetime of the backend.
-        for bucket in self.sorted_buckets:
+        for bucket in target_buckets:
             await bucket.get_capacity(pipeline=pipeline, current_time=current_time)
 
         # Include max_capacity in the pipeline to avoid extra round-trips
-        for bucket in self.sorted_buckets:
+        for bucket in target_buckets:
             pipeline.get(bucket._max_capacity_key)  # noqa: SLF001
 
         # Execute the pipeline to get all results
         results = await pipeline.execute()
 
-        num_buckets = len(self.sorted_buckets)
+        num_buckets = len(target_buckets)
         expected_results = num_buckets * _PIPELINE_CMDS_PER_BUCKET + num_buckets
         if len(results) != expected_results:
             raise RuntimeError(
@@ -195,7 +241,7 @@ class RedisBackend(RateLimiterBackend):
         # Usage class.
         new_capacities: dict[tuple[str, int], float] = {}
         fresh_start_buckets: list[RedisBucket] = []
-        for i, bucket in enumerate(self.sorted_buckets):
+        for i, bucket in enumerate(target_buckets):
             idx = i * _PIPELINE_CMDS_PER_BUCKET
             last_checked = results[idx]
             capacity = results[idx + 1]
@@ -226,6 +272,7 @@ class RedisBackend(RateLimiterBackend):
         current_time: float | None = None,
         *,
         allow_negative: bool = False,
+        buckets: tuple[RedisBucket, ...] | list[RedisBucket] | None = None,
     ) -> None:
         """
         Set capacities for all buckets. Caller must hold the distributed lock.
@@ -235,18 +282,16 @@ class RedisBackend(RateLimiterBackend):
         """
         if pipeline is None:
             pipeline = self._redis.pipeline()
+        target_buckets = self.sorted_buckets if buckets is None else buckets
 
         if current_time is None:
             current_time = await async_server_time(self._redis)
 
         for (usage_metric, per_seconds), amount in new_capacities.items():
-            bucket = next(
-                (
-                    b
-                    for b in self.sorted_buckets
-                    if b.usage_metric == usage_metric and b.per_seconds == per_seconds
-                ),
-                None,
+            bucket = self._find_bucket(
+                target_buckets,
+                usage_metric,
+                per_seconds,
             )
             if bucket is None:
                 raise ValueError(f"Bucket '{usage_metric}/{per_seconds}s' not found")
@@ -259,22 +304,65 @@ class RedisBackend(RateLimiterBackend):
             )
         await pipeline.execute()
 
-    def _bucket_ids(self) -> frozenset[tuple[str, int]]:
+    def _bucket_ids(
+        self,
+        buckets: tuple[RedisBucket, ...] | list[RedisBucket] | None = None,
+    ) -> frozenset[tuple[str, int]]:
+        target_buckets = self.sorted_buckets if buckets is None else buckets
         return frozenset(
             (bucket.usage_metric, int(bucket.per_seconds))
-            for bucket in self.sorted_buckets
+            for bucket in target_buckets
         )
+
+    def _normalize_check_result(
+        self,
+        result: tuple[bool, Capacities, Capacities, float | None]
+        | tuple[bool, Capacities, Capacities, float | None, tuple[RedisBucket, ...]],
+    ) -> tuple[bool, Capacities, Capacities, float | None, tuple[RedisBucket, ...]]:
+        if len(result) == 4:
+            available, preconsumption, postconsumption, consumed_monotonic = result
+            return (
+                available,
+                preconsumption,
+                postconsumption,
+                consumed_monotonic,
+                self._snapshot_buckets(),
+            )
+        if len(result) == 5:
+            available, preconsumption, postconsumption, consumed_monotonic, buckets = result
+            return (
+                available,
+                preconsumption,
+                postconsumption,
+                consumed_monotonic,
+                tuple(buckets),
+            )
+        raise RuntimeError(
+            "_check_and_consume_capacity() must return 4 or 5 values",
+        )
+
+    def _compute_sleep_for_wait(
+        self,
+        usage: FrozenUsage,
+        preconsumption: Capacities,
+        *,
+        buckets: tuple[RedisBucket, ...],
+    ) -> float:
+        if buckets:
+            return self._compute_sleep(usage, preconsumption, buckets=buckets)
+        return self._compute_sleep(usage, preconsumption)
 
     async def _check_and_consume_capacity(
         self,
         usage_: FrozenUsage,
         *,
         lock_blocking_timeout: float | None = None,
-    ) -> tuple[bool, Capacities, Capacities, float | None]:
+    ) -> tuple[bool, Capacities, Capacities, float | None, tuple[RedisBucket, ...]]:
         """Check if there's enough capacity and consume it if available."""
         usage: FrozenUsage = frozendict(
             {metric: float(amount) for metric, amount in usage_.items()},
         )
+        buckets = self._snapshot_buckets()
         preconsumption_capacities: Capacities = frozendict()
         # Empty on the failure path; callers only read postconsumption on success.
         postconsumption_capacities: Capacities = frozendict()
@@ -286,6 +374,7 @@ class RedisBackend(RateLimiterBackend):
             async with await self._lock(
                 timeout=LOCK_TIMEOUT_SECONDS,
                 blocking_timeout=lock_blocking_timeout,
+                buckets=buckets,
             ):
                 # Pipeline is reused: _get_capacities_unsafe executes it (clearing
                 # the command buffer), then _set_capacities_unsafe adds new commands
@@ -299,12 +388,13 @@ class RedisBackend(RateLimiterBackend):
                 ) = await self._get_capacities_unsafe(
                     pipeline=pipeline,
                     current_time=current_time,
+                    buckets=buckets,
                 )
 
                 # Fail fast: if usage exceeds any bucket's max_capacity, it can
                 # never be satisfied (capacity is capped at max_capacity).
                 for usage_metric_name, usage_amount in usage.items():
-                    for bucket in self.sorted_buckets:
+                    for bucket in buckets:
                         if bucket.usage_metric != usage_metric_name:
                             continue
                         # Uses cached max_capacity — refreshed by get_max_capacity() in _refresh_capacity
@@ -327,6 +417,7 @@ class RedisBackend(RateLimiterBackend):
                                 preconsumption_capacities,
                                 postconsumption_capacities,
                                 consumed_monotonic,
+                                buckets,
                             )
 
                 postconsumption_dict = {}
@@ -357,6 +448,7 @@ class RedisBackend(RateLimiterBackend):
                     postconsumption_capacities,
                     pipeline=pipeline,
                     current_time=current_time,
+                    buckets=buckets,
                 )
             await self._fresh_start_buckets_callback(fresh_start_buckets)
             if self._callbacks and self._callbacks.on_capacity_consumed:
@@ -371,7 +463,7 @@ class RedisBackend(RateLimiterBackend):
         except asyncio.CancelledError:
             if consumed:
                 try:  # noqa: SIM105
-                    await self._refund_cancelled_consumption(usage)
+                    await self._refund_cancelled_consumption(usage, buckets=buckets)
                 except BaseException:  # noqa: BLE001, S110
                     # Best-effort: shield ensures background completion.
                     # Swallow so CancelledError always propagates for
@@ -383,6 +475,7 @@ class RedisBackend(RateLimiterBackend):
             preconsumption_capacities,
             postconsumption_capacities,
             consumed_monotonic,
+            buckets,
         )
 
     async def consume_capacity(self, usage: FrozenUsage) -> None:
@@ -392,7 +485,8 @@ class RedisBackend(RateLimiterBackend):
         Capacity may go negative by design (speedometer pattern); this tracks
         overshoot rather than blocking.
         """
-        validate_backend_usage(usage, self._usage_metric_names)
+        buckets = self._snapshot_buckets()
+        validate_backend_usage(usage, self._validation_metric_names(buckets))
         usage = frozendict(
             {metric: float(amount) for metric, amount in usage.items()},
         )
@@ -400,7 +494,7 @@ class RedisBackend(RateLimiterBackend):
         postconsumption_capacities: Capacities = frozendict()
         current_time: float = 0.0
         fresh_start_buckets: list[RedisBucket] = []
-        async with await self._lock(timeout=LOCK_TIMEOUT_SECONDS):
+        async with await self._lock(timeout=LOCK_TIMEOUT_SECONDS, buckets=buckets):
             pipeline = self._redis.pipeline()
             current_time = await async_server_time(self._redis)
 
@@ -410,10 +504,11 @@ class RedisBackend(RateLimiterBackend):
             ) = await self._get_capacities_unsafe(
                 pipeline=pipeline,
                 current_time=current_time,
+                buckets=buckets,
             )
 
             for usage_metric_name, usage_amount in usage.items():
-                for bucket in self.sorted_buckets:
+                for bucket in buckets:
                     if bucket.usage_metric != usage_metric_name:
                         continue
                     if usage_amount > bucket.max_capacity:
@@ -450,6 +545,7 @@ class RedisBackend(RateLimiterBackend):
                 pipeline=pipeline,
                 current_time=current_time,
                 allow_negative=True,
+                buckets=buckets,
             )
         await self._fresh_start_buckets_callback(fresh_start_buckets)
         if self._callbacks and self._callbacks.on_capacity_consumed:
@@ -469,7 +565,7 @@ class RedisBackend(RateLimiterBackend):
         timeout: float | None = None,
     ) -> None:
         """Wait until all buckets have the required capacity."""
-        validate_backend_usage(usage, self._usage_metric_names)
+        validate_backend_usage(usage, self._validation_metric_names())
         timeout = validate_timeout(timeout)
         usage = frozendict({metric: float(amount) for metric, amount in usage.items()})
         deadline = None if timeout is None else time.monotonic() + timeout
@@ -486,9 +582,12 @@ class RedisBackend(RateLimiterBackend):
                     preconsumption,
                     postconsumption,
                     consumed_monotonic,
-                ) = await self._check_and_consume_capacity(
-                    usage,
-                    lock_blocking_timeout=remaining,
+                    buckets,
+                ) = self._normalize_check_result(
+                    await self._check_and_consume_capacity(
+                        usage,
+                        lock_blocking_timeout=remaining,
+                    )
                 )
             except redis.exceptions.LockError as exc:
                 if deadline is None:  # pragma: no cover
@@ -517,7 +616,7 @@ class RedisBackend(RateLimiterBackend):
                             )
                 except asyncio.CancelledError:
                     try:  # noqa: SIM105
-                        await self._refund_cancelled_consumption(usage)
+                        await self._refund_cancelled_consumption(usage, buckets=buckets)
                     except BaseException:  # noqa: BLE001, S110
                         # Best-effort: shield ensures background completion.
                         # Swallow so CancelledError always propagates for
@@ -544,7 +643,11 @@ class RedisBackend(RateLimiterBackend):
                         time.monotonic() - callback_started
                     )
 
-            computed = self._compute_sleep(usage, preconsumption)
+            computed = self._compute_sleep_for_wait(
+                usage,
+                preconsumption,
+                buckets=buckets,
+            )
             effective = min(computed, self.MAX_CROSS_WORKER_POLL)
             if deadline is not None:
                 effective = min(effective, max(0, deadline - time.monotonic()))
@@ -555,9 +658,16 @@ class RedisBackend(RateLimiterBackend):
                         timeout=max(0.001, effective),
                     )
 
-    def _compute_sleep(self, usage: FrozenUsage, preconsumption: Capacities) -> float:
+    def _compute_sleep(
+        self,
+        usage: FrozenUsage,
+        preconsumption: Capacities,
+        *,
+        buckets: tuple[RedisBucket, ...] | list[RedisBucket] | None = None,
+    ) -> float:
         """Compute max wait across all buckets based on deficit / rate."""
         max_wait = 0.0
+        target_buckets = self.sorted_buckets if buckets is None else buckets
         for (metric, per_seconds), current_cap in preconsumption.items():
             if metric not in usage:
                 continue
@@ -565,13 +675,10 @@ class RedisBackend(RateLimiterBackend):
             deficit = needed - current_cap
             if deficit <= 0:
                 continue
-            bucket = next(
-                (
-                    b
-                    for b in self.sorted_buckets
-                    if b.usage_metric == metric and b.per_seconds == per_seconds
-                ),
-                None,
+            bucket = self._find_bucket(
+                target_buckets,
+                metric,
+                per_seconds,
             )
             if bucket is None:
                 raise ValueError(
@@ -654,7 +761,8 @@ class RedisBackend(RateLimiterBackend):
             2. Update the timestamp to N=10
 
         """
-        backend_bucket_ids = self._bucket_ids()
+        buckets = self._snapshot_buckets()
+        backend_bucket_ids = self._bucket_ids(buckets)
         refund_bucket_ids = (
             backend_bucket_ids if bucket_ids is None else frozenset(bucket_ids)
         )
@@ -688,7 +796,7 @@ class RedisBackend(RateLimiterBackend):
         refund_usage: frozendict[str, float] = frozendict(refund_usage_)
 
         fresh_start_buckets: list[RedisBucket] = []
-        async with await self._lock(timeout=LOCK_TIMEOUT_SECONDS):
+        async with await self._lock(timeout=LOCK_TIMEOUT_SECONDS, buckets=buckets):
             pipeline = self._redis.pipeline()
             current_time = await async_server_time(self._redis)
 
@@ -699,6 +807,7 @@ class RedisBackend(RateLimiterBackend):
             ) = await self._get_capacities_unsafe(
                 pipeline=pipeline,
                 current_time=current_time,
+                buckets=buckets,
             )
 
             # Apply refund amounts to current capacity
@@ -715,14 +824,10 @@ class RedisBackend(RateLimiterBackend):
                 refund_amount = refund_usage.get(capability_usage_metric)
                 if refund_amount is None:
                     continue
-                bucket = next(
-                    (
-                        b
-                        for b in self.sorted_buckets
-                        if b.usage_metric == capability_usage_metric
-                        and b.per_seconds == per_seconds
-                    ),
-                    None,
+                bucket = self._find_bucket(
+                    buckets,
+                    capability_usage_metric,
+                    per_seconds,
                 )
                 if bucket is None:
                     raise ValueError(
@@ -746,6 +851,7 @@ class RedisBackend(RateLimiterBackend):
                 pipeline=pipeline,
                 current_time=current_time,
                 allow_negative=True,
+                buckets=buckets,
             )
         async with self._local_condition:
             self._local_condition.notify_all()
@@ -767,17 +873,15 @@ class RedisBackend(RateLimiterBackend):
         per_seconds: int,
         value: float,
     ) -> None:
-        bucket = next(
-            (
-                b
-                for b in self.sorted_buckets
-                if b.usage_metric == metric and int(b.per_seconds) == per_seconds
-            ),
-            None,
+        buckets = self._snapshot_buckets()
+        bucket = self._find_bucket(
+            buckets,
+            metric,
+            per_seconds,
         )
         if bucket is None:
             raise ValueError(f"Bucket '{metric}/{per_seconds}s' not found")
-        async with await self._lock(timeout=LOCK_TIMEOUT_SECONDS):
+        async with await self._lock(timeout=LOCK_TIMEOUT_SECONDS, buckets=buckets):
             await bucket.set_max_capacity(value)
         async with self._local_condition:
             self._local_condition.notify_all()
@@ -790,10 +894,30 @@ class RedisBackend(RateLimiterBackend):
         if not isinstance(new_backend, RedisBackend):
             raise TypeError("RedisBackend can only reconfigure into another RedisBackend")
 
-        self.install_reconfigured_state(
-            buckets=list(new_backend.sorted_buckets),
-            cfg=cfg,
-        )
+        current_buckets = self._snapshot_buckets()
+        new_buckets = tuple(new_backend.sorted_buckets)
+        reconfigure_buckets = self._combined_bucket_snapshot(current_buckets, new_buckets)
+
+        async with await self._lock(
+            timeout=LOCK_TIMEOUT_SECONDS,
+            buckets=reconfigure_buckets,
+        ):
+            for quota in cfg.quotas:
+                bucket = self._find_bucket(
+                    new_buckets,
+                    quota.metric,
+                    int(quota.per_seconds),
+                )
+                if bucket is None:  # pragma: no cover
+                    raise ValueError(
+                        f"Bucket '{quota.metric}/{quota.per_seconds}s' not found",
+                    )
+                await bucket.set_max_capacity(float(quota.limit))
+
+            self.install_reconfigured_state(
+                buckets=list(new_buckets),
+                cfg=cfg,
+            )
         async with self._local_condition:
             self._local_condition.notify_all()
         return self
@@ -819,7 +943,12 @@ class RedisBackend(RateLimiterBackend):
                 stacklevel=3,
             )
 
-    async def _refund_cancelled_consumption(self, usage: FrozenUsage) -> None:
+    async def _refund_cancelled_consumption(
+        self,
+        usage: FrozenUsage,
+        *,
+        buckets: tuple[RedisBucket, ...] | list[RedisBucket] | None = None,
+    ) -> None:
         """
         Refund capacity consumed before a CancelledError hit callbacks.
 
@@ -828,26 +957,34 @@ class RedisBackend(RateLimiterBackend):
         ensures the refund completes even if the task is re-cancelled.
         Fires no callbacks to avoid recursion and another cancellation window.
         """
+        target_buckets = self._snapshot_buckets() if buckets is None else tuple(buckets)
 
         async def _do_refund() -> None:
-            async with await self._lock(timeout=LOCK_TIMEOUT_SECONDS):
+            async with await self._lock(
+                timeout=LOCK_TIMEOUT_SECONDS,
+                buckets=target_buckets,
+            ):
                 pipeline = self._redis.pipeline()
                 current_time = await async_server_time(self._redis)
                 capacities, _ = await self._get_capacities_unsafe(
                     pipeline=pipeline,
                     current_time=current_time,
+                    buckets=target_buckets,
                 )
                 refunded: dict[tuple[str, int], float] = dict(capacities)
                 for (cap_metric, per_seconds), cap_amount in capacities.items():
                     for usage_metric, usage_amount in usage.items():
                         if cap_metric != usage_metric:
                             continue
-                        bucket = next(
-                            b
-                            for b in self.sorted_buckets
-                            if b.usage_metric == cap_metric
-                            and b.per_seconds == per_seconds
+                        bucket = self._find_bucket(
+                            target_buckets,
+                            cap_metric,
+                            per_seconds,
                         )
+                        if bucket is None:  # pragma: no cover
+                            raise ValueError(
+                                f"Bucket '{cap_metric}/{per_seconds}s' not found",
+                            )
                         refunded[(cap_metric, per_seconds)] = min(
                             cap_amount + usage_amount,
                             bucket.max_capacity,
@@ -857,6 +994,7 @@ class RedisBackend(RateLimiterBackend):
                     pipeline=pipeline,
                     current_time=current_time,
                     allow_negative=True,
+                    buckets=target_buckets,
                 )
             async with self._local_condition:
                 self._local_condition.notify_all()
