@@ -199,6 +199,7 @@ target-version = "py312"
     "PLR0912", # Too many branches
 ]
 "token_throttle/_interfaces/_interfaces.py" = [
+    "ARG002",    # bucket_ids is part of interface contract, unused in default implementations
     "TC001",     # Pydantic models need these imports at runtime
     "ASYNC109",  # timeout is part of the public API, not an asyncio.timeout() replacement
 ]
@@ -210,6 +211,7 @@ target-version = "py312"
 ]
 "token_throttle/_limiter_backends/_memory/_backend.py" = [
     "ASYNC109",  # timeout is a public API parameter, not asyncio.timeout()
+    "PLR0915",   # await_for_capacity is inherently complex (capacity polling + reconfiguration)
 ]
 "token_throttle/_limiter_backends/_redis/_backend.py" = [
     "ASYNC109",  # timeout is a public API parameter, not asyncio.timeout()
@@ -222,6 +224,7 @@ target-version = "py312"
     "ANN201",  # Missing return type annotation for public function
     "ARG001",  # Unused function argument (callback stubs matching protocol signatures)
     "ARG002",  # Unused method argument (fixtures injected by pytest)
+    "ASYNC109", # timeout param in test fakes mirrors real API signature
     "BLE001",  # Blind exception catch (intentional in concurrent test harnesses)
     "D213",    # Multi-line docstring summary should start at the second line
     "ERA001",  # Commented-out code (invariant formulas documented as comments)
