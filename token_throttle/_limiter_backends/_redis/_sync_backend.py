@@ -113,21 +113,66 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         # backend can safely point at the same buckets.
         return True
 
+    def _snapshot_buckets(self) -> tuple[SyncRedisBucket, ...]:
+        return tuple(getattr(self, "sorted_buckets", ()))
+
+    def _validation_metric_names(
+        self,
+        buckets: tuple[SyncRedisBucket, ...] | list[SyncRedisBucket] | None = None,
+    ) -> set[str]:
+        target_buckets = self._snapshot_buckets() if buckets is None else tuple(buckets)
+        if target_buckets:
+            return self._usage_metric_names_for(target_buckets)
+        return set(getattr(self, "_usage_metric_names", set()))
+
+    @staticmethod
+    def _usage_metric_names_for(
+        buckets: tuple[SyncRedisBucket, ...] | list[SyncRedisBucket],
+    ) -> set[str]:
+        return {bucket.usage_metric for bucket in buckets}
+
+    @staticmethod
+    def _find_bucket(
+        buckets: tuple[SyncRedisBucket, ...] | list[SyncRedisBucket],
+        metric: str,
+        per_seconds: int,
+    ) -> SyncRedisBucket | None:
+        return next(
+            (
+                bucket
+                for bucket in buckets
+                if bucket.usage_metric == metric
+                and int(bucket.per_seconds) == int(per_seconds)
+            ),
+            None,
+        )
+
+    @staticmethod
+    def _combined_bucket_snapshot(
+        *bucket_groups: tuple[SyncRedisBucket, ...] | list[SyncRedisBucket],
+    ) -> tuple[SyncRedisBucket, ...]:
+        buckets_by_key: dict[str, SyncRedisBucket] = {}
+        for bucket_group in bucket_groups:
+            for bucket in bucket_group:
+                buckets_by_key[bucket.full_redis_key] = bucket
+        return tuple(sorted(buckets_by_key.values(), key=lambda bucket: bucket.full_redis_key))
+
     def _lock(
         self,
         *,
         timeout: float,
         blocking_timeout: float | None = None,
+        buckets: tuple[SyncRedisBucket, ...] | list[SyncRedisBucket] | None = None,
     ) -> ExitStack:
-        """Acquire locks for all buckets in a consistent order."""
+        """Acquire locks for a fixed bucket snapshot in a consistent order."""
         stack = ExitStack()
+        target_buckets = self.sorted_buckets if buckets is None else buckets
         stop_trying_at = (
             None if blocking_timeout is None else time.monotonic() + blocking_timeout
         )
 
-        # sorted_buckets is sorted once in __init__ and never mutated.
         try:
-            for bucket in self.sorted_buckets:
+            for bucket in target_buckets:
                 remaining = (
                     None
                     if stop_trying_at is None
@@ -148,27 +193,28 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         self,
         pipeline: redis.client.Pipeline | None = None,
         current_time: float | None = None,
+        *,
+        buckets: tuple[SyncRedisBucket, ...] | list[SyncRedisBucket] | None = None,
     ) -> SyncCapacitiesGetterResult:
         """Get capacities for all buckets."""
         if pipeline is None:
             pipeline = self._redis.pipeline()
+        target_buckets = self.sorted_buckets if buckets is None else buckets
 
         if current_time is None:
             current_time = sync_server_time(self._redis)
 
-        # sorted_buckets is sorted once in __init__ and never mutated, so the
-        # deadlock-prevention ordering invariant holds for the lifetime of the backend.
-        for bucket in self.sorted_buckets:
+        for bucket in target_buckets:
             bucket.get_capacity(pipeline=pipeline, current_time=current_time)
 
         # Include max_capacity in the pipeline to avoid extra round-trips
-        for bucket in self.sorted_buckets:
+        for bucket in target_buckets:
             pipeline.get(bucket._max_capacity_key)  # noqa: SLF001
 
         # Execute the pipeline to get all results
         results = pipeline.execute()
 
-        num_buckets = len(self.sorted_buckets)
+        num_buckets = len(target_buckets)
         expected_results = num_buckets * _PIPELINE_CMDS_PER_BUCKET + num_buckets
         if len(results) != expected_results:
             raise RuntimeError(
@@ -179,7 +225,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
 
         new_capacities: dict[tuple[str, int], float] = {}
         fresh_start_buckets: list[SyncRedisBucket] = []
-        for i, bucket in enumerate(self.sorted_buckets):
+        for i, bucket in enumerate(target_buckets):
             idx = i * _PIPELINE_CMDS_PER_BUCKET
             last_checked = results[idx]
             capacity = results[idx + 1]
@@ -210,6 +256,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         current_time: float | None = None,
         *,
         allow_negative: bool = False,
+        buckets: tuple[SyncRedisBucket, ...] | list[SyncRedisBucket] | None = None,
     ) -> None:
         """
         Set capacities for all buckets. Caller must hold the distributed lock.
@@ -219,18 +266,16 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         """
         if pipeline is None:
             pipeline = self._redis.pipeline()
+        target_buckets = self.sorted_buckets if buckets is None else buckets
 
         if current_time is None:
             current_time = sync_server_time(self._redis)
 
         for (usage_metric, per_seconds), amount in new_capacities.items():
-            bucket = next(
-                (
-                    b
-                    for b in self.sorted_buckets
-                    if b.usage_metric == usage_metric and b.per_seconds == per_seconds
-                ),
-                None,
+            bucket = self._find_bucket(
+                target_buckets,
+                usage_metric,
+                per_seconds,
             )
             if bucket is None:
                 raise ValueError(f"Bucket '{usage_metric}/{per_seconds}s' not found")
@@ -243,22 +288,77 @@ class SyncRedisBackend(SyncRateLimiterBackend):
             )
         pipeline.execute()
 
-    def _bucket_ids(self) -> frozenset[tuple[str, int]]:
+    def _bucket_ids(
+        self,
+        buckets: tuple[SyncRedisBucket, ...] | list[SyncRedisBucket] | None = None,
+    ) -> frozenset[tuple[str, int]]:
+        target_buckets = self.sorted_buckets if buckets is None else buckets
         return frozenset(
             (bucket.usage_metric, int(bucket.per_seconds))
-            for bucket in self.sorted_buckets
+            for bucket in target_buckets
         )
+
+    def _normalize_check_result(
+        self,
+        result: tuple[bool, Capacities, Capacities, float | None]
+        | tuple[
+            bool,
+            Capacities,
+            Capacities,
+            float | None,
+            tuple[SyncRedisBucket, ...],
+        ],
+    ) -> tuple[
+        bool,
+        Capacities,
+        Capacities,
+        float | None,
+        tuple[SyncRedisBucket, ...],
+    ]:
+        if len(result) == 4:
+            available, preconsumption, postconsumption, consumed_monotonic = result
+            return (
+                available,
+                preconsumption,
+                postconsumption,
+                consumed_monotonic,
+                self._snapshot_buckets(),
+            )
+        if len(result) == 5:
+            available, preconsumption, postconsumption, consumed_monotonic, buckets = result
+            return (
+                available,
+                preconsumption,
+                postconsumption,
+                consumed_monotonic,
+                tuple(buckets),
+            )
+        raise RuntimeError(
+            "_check_and_consume_capacity() must return 4 or 5 values",
+        )
+
+    def _compute_sleep_for_wait(
+        self,
+        usage: FrozenUsage,
+        preconsumption: Capacities,
+        *,
+        buckets: tuple[SyncRedisBucket, ...],
+    ) -> float:
+        if buckets:
+            return self._compute_sleep(usage, preconsumption, buckets=buckets)
+        return self._compute_sleep(usage, preconsumption)
 
     def _check_and_consume_capacity(
         self,
         usage_: FrozenUsage,
         *,
         lock_blocking_timeout: float | None = None,
-    ) -> tuple[bool, Capacities, Capacities, float | None]:
+    ) -> tuple[bool, Capacities, Capacities, float | None, tuple[SyncRedisBucket, ...]]:
         """Check if there's enough capacity and consume it if available."""
         usage: FrozenUsage = frozendict(
             {metric: float(amount) for metric, amount in usage_.items()},
         )
+        buckets = self._snapshot_buckets()
         preconsumption_capacities: Capacities = frozendict()
         # Empty on the failure path; callers only read postconsumption on success.
         postconsumption_capacities: Capacities = frozendict()
@@ -268,6 +368,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         with self._lock(
             timeout=LOCK_TIMEOUT_SECONDS,
             blocking_timeout=lock_blocking_timeout,
+            buckets=buckets,
         ):
             # Pipeline is reused: _get_capacities_unsafe executes it (clearing
             # the command buffer), then _set_capacities_unsafe adds new commands
@@ -279,13 +380,14 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                 self._get_capacities_unsafe(
                     pipeline=pipeline,
                     current_time=current_time,
+                    buckets=buckets,
                 )
             )
 
             # Fail fast: if usage exceeds any bucket's max_capacity, it can
             # never be satisfied (capacity is capped at max_capacity).
             for usage_metric_name, usage_amount in usage.items():
-                for bucket in self.sorted_buckets:
+                for bucket in buckets:
                     if bucket.usage_metric != usage_metric_name:
                         continue
                     # Uses cached max_capacity — refreshed by get_max_capacity() in _refresh_capacity
@@ -308,6 +410,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                             preconsumption_capacities,
                             postconsumption_capacities,
                             consumed_monotonic,
+                            buckets,
                         )
 
             postconsumption_dict = {}
@@ -337,6 +440,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                 postconsumption_capacities,
                 pipeline=pipeline,
                 current_time=current_time,
+                buckets=buckets,
             )
         self._fresh_start_buckets_callback(fresh_start_buckets)
         if self._callbacks and self._callbacks.on_capacity_consumed:
@@ -353,6 +457,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
             preconsumption_capacities,
             postconsumption_capacities,
             consumed_monotonic,
+            buckets,
         )
 
     def consume_capacity(self, usage: FrozenUsage) -> None:
@@ -362,7 +467,8 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         Capacity may go negative by design (speedometer pattern); this tracks
         overshoot rather than blocking.
         """
-        validate_backend_usage(usage, self._usage_metric_names)
+        buckets = self._snapshot_buckets()
+        validate_backend_usage(usage, self._validation_metric_names(buckets))
         usage = frozendict(
             {metric: float(amount) for metric, amount in usage.items()},
         )
@@ -370,7 +476,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         postconsumption_capacities: Capacities = frozendict()
         current_time: float = 0.0
         fresh_start_buckets: list[SyncRedisBucket] = []
-        with self._lock(timeout=LOCK_TIMEOUT_SECONDS):
+        with self._lock(timeout=LOCK_TIMEOUT_SECONDS, buckets=buckets):
             pipeline = self._redis.pipeline()
             current_time = sync_server_time(self._redis)
 
@@ -378,11 +484,12 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                 self._get_capacities_unsafe(
                     pipeline=pipeline,
                     current_time=current_time,
+                    buckets=buckets,
                 )
             )
 
             for usage_metric_name, usage_amount in usage.items():
-                for bucket in self.sorted_buckets:
+                for bucket in buckets:
                     if bucket.usage_metric != usage_metric_name:
                         continue
                     if usage_amount > bucket.max_capacity:
@@ -419,6 +526,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                 pipeline=pipeline,
                 current_time=current_time,
                 allow_negative=True,
+                buckets=buckets,
             )
         self._fresh_start_buckets_callback(fresh_start_buckets)
         if self._callbacks and self._callbacks.on_capacity_consumed:
@@ -438,7 +546,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         timeout: float | None = None,
     ) -> None:
         """Wait until all buckets have the required capacity."""
-        validate_backend_usage(usage, self._usage_metric_names)
+        validate_backend_usage(usage, self._validation_metric_names())
         timeout = validate_timeout(timeout)
         usage = frozendict({metric: float(amount) for metric, amount in usage.items()})
         deadline = None if timeout is None else time.monotonic() + timeout
@@ -450,7 +558,13 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                 None if deadline is None else max(0.0, deadline - time.monotonic())
             )
             try:
-                available, preconsumption, postconsumption, consumed_monotonic = (
+                (
+                    available,
+                    preconsumption,
+                    postconsumption,
+                    consumed_monotonic,
+                    buckets,
+                ) = self._normalize_check_result(
                     self._check_and_consume_capacity(
                         usage,
                         lock_blocking_timeout=remaining,
@@ -497,16 +611,27 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                         time.monotonic() - callback_started
                     )
 
-            computed = self._compute_sleep(usage, preconsumption)
+            computed = self._compute_sleep_for_wait(
+                usage,
+                preconsumption,
+                buckets=buckets,
+            )
             effective = min(computed, self.MAX_CROSS_WORKER_POLL)
             if deadline is not None:
                 effective = min(effective, max(0, deadline - time.monotonic()))
             with self._local_condition:
                 self._local_condition.wait(timeout=max(0.001, effective))
 
-    def _compute_sleep(self, usage: FrozenUsage, preconsumption: Capacities) -> float:
+    def _compute_sleep(
+        self,
+        usage: FrozenUsage,
+        preconsumption: Capacities,
+        *,
+        buckets: tuple[SyncRedisBucket, ...] | list[SyncRedisBucket] | None = None,
+    ) -> float:
         """Compute max wait across all buckets based on deficit / rate."""
         max_wait = 0.0
+        target_buckets = self.sorted_buckets if buckets is None else buckets
         for (metric, per_seconds), current_cap in preconsumption.items():
             if metric not in usage:
                 continue
@@ -514,13 +639,10 @@ class SyncRedisBackend(SyncRateLimiterBackend):
             deficit = needed - current_cap
             if deficit <= 0:
                 continue
-            bucket = next(
-                (
-                    b
-                    for b in self.sorted_buckets
-                    if b.usage_metric == metric and b.per_seconds == per_seconds
-                ),
-                None,
+            bucket = self._find_bucket(
+                target_buckets,
+                metric,
+                per_seconds,
             )
             if bucket is None:
                 raise ValueError(
@@ -549,7 +671,8 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         bucket_ids: set[tuple[str, int]] | frozenset[tuple[str, int]] | None = None,
     ) -> None:
         """Refund unused capacity back to the rate limiter based on actual usage."""
-        backend_bucket_ids = self._bucket_ids()
+        buckets = self._snapshot_buckets()
+        backend_bucket_ids = self._bucket_ids(buckets)
         refund_bucket_ids = (
             backend_bucket_ids if bucket_ids is None else frozenset(bucket_ids)
         )
@@ -583,7 +706,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         refund_usage: frozendict[str, float] = frozendict(refund_usage_)
 
         fresh_start_buckets: list[SyncRedisBucket] = []
-        with self._lock(timeout=LOCK_TIMEOUT_SECONDS):
+        with self._lock(timeout=LOCK_TIMEOUT_SECONDS, buckets=buckets):
             pipeline = self._redis.pipeline()
             current_time = sync_server_time(self._redis)
 
@@ -591,6 +714,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
             prerefund_capacities, fresh_start_buckets = self._get_capacities_unsafe(
                 pipeline=pipeline,
                 current_time=current_time,
+                buckets=buckets,
             )
 
             # Apply refund amounts to current capacity
@@ -607,14 +731,10 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                 refund_amount = refund_usage.get(capability_usage_metric)
                 if refund_amount is None:
                     continue
-                bucket = next(
-                    (
-                        b
-                        for b in self.sorted_buckets
-                        if b.usage_metric == capability_usage_metric
-                        and b.per_seconds == per_seconds
-                    ),
-                    None,
+                bucket = self._find_bucket(
+                    buckets,
+                    capability_usage_metric,
+                    per_seconds,
                 )
                 if bucket is None:
                     raise ValueError(
@@ -638,6 +758,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                 pipeline=pipeline,
                 current_time=current_time,
                 allow_negative=True,
+                buckets=buckets,
             )
         with self._local_condition:
             self._local_condition.notify_all()
@@ -659,17 +780,15 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         per_seconds: int,
         value: float,
     ) -> None:
-        bucket = next(
-            (
-                b
-                for b in self.sorted_buckets
-                if b.usage_metric == metric and int(b.per_seconds) == per_seconds
-            ),
-            None,
+        buckets = self._snapshot_buckets()
+        bucket = self._find_bucket(
+            buckets,
+            metric,
+            per_seconds,
         )
         if bucket is None:
             raise ValueError(f"Bucket '{metric}/{per_seconds}s' not found")
-        with self._lock(timeout=LOCK_TIMEOUT_SECONDS):
+        with self._lock(timeout=LOCK_TIMEOUT_SECONDS, buckets=buckets):
             bucket.set_max_capacity(value)
         with self._local_condition:
             self._local_condition.notify_all()
@@ -684,10 +803,27 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                 "SyncRedisBackend can only reconfigure into another SyncRedisBackend"
             )
 
-        self.install_reconfigured_state(
-            buckets=list(new_backend.sorted_buckets),
-            cfg=cfg,
-        )
+        current_buckets = self._snapshot_buckets()
+        new_buckets = tuple(new_backend.sorted_buckets)
+        reconfigure_buckets = self._combined_bucket_snapshot(current_buckets, new_buckets)
+
+        with self._lock(timeout=LOCK_TIMEOUT_SECONDS, buckets=reconfigure_buckets):
+            for quota in cfg.quotas:
+                bucket = self._find_bucket(
+                    new_buckets,
+                    quota.metric,
+                    int(quota.per_seconds),
+                )
+                if bucket is None:  # pragma: no cover
+                    raise ValueError(
+                        f"Bucket '{quota.metric}/{quota.per_seconds}s' not found",
+                    )
+                bucket.set_max_capacity(float(quota.limit))
+
+            self.install_reconfigured_state(
+                buckets=list(new_buckets),
+                cfg=cfg,
+            )
         with self._local_condition:
             self._local_condition.notify_all()
         return self
