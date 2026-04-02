@@ -25,13 +25,13 @@ from token_throttle._validation import (
     is_unlimited_reservation,
     merge_extra_usage,
     resolve_config,
+    resolve_usage_counter_result,
     validate_acquire_usage,
     validate_extra_usage,
     validate_max_capacity_value,
     validate_metric,
     validate_per_seconds,
     validate_refund_usage,
-    resolve_usage_counter_result,
     validate_timeout,
 )
 
@@ -71,16 +71,24 @@ def _project_refund_scope(
             return reserved_usage, actual_usage, active_bucket_ids
         return (
             frozendict(
-                {metric: reserved_usage.get(metric, 0.0) for metric in active_metric_names}
+                {
+                    metric: reserved_usage.get(metric, 0.0)
+                    for metric in active_metric_names
+                }
             ),
             frozendict(
-                {metric: actual_usage.get(metric, 0.0) for metric in active_metric_names}
+                {
+                    metric: actual_usage.get(metric, 0.0)
+                    for metric in active_metric_names
+                }
             ),
             active_bucket_ids,
         )
 
     surviving_bucket_ids = frozenset(
-        bucket_id for bucket_id in reservation_bucket_ids if bucket_id in active_bucket_ids
+        bucket_id
+        for bucket_id in reservation_bucket_ids
+        if bucket_id in active_bucket_ids
     )
     if not surviving_bucket_ids:
         return frozendict(), frozendict(), surviving_bucket_ids
@@ -97,10 +105,7 @@ def _project_refund_scope(
             }
         ),
         frozendict(
-            {
-                metric: actual_usage.get(metric, 0.0)
-                for metric in surviving_metric_names
-            }
+            {metric: actual_usage.get(metric, 0.0) for metric in surviving_metric_names}
         ),
         surviving_bucket_ids,
     )

@@ -14,7 +14,6 @@ from token_throttle._interfaces._interfaces import (
 )
 from token_throttle._interfaces._models import Capacities, FrozenUsage
 from token_throttle._validation import (
-    validate_backend_refund_usage,
     validate_backend_refund_usage_for_bucket_ids,
     validate_backend_usage,
     validate_timeout,
@@ -300,7 +299,11 @@ class MemoryBackend(RateLimiterBackend):
                 if ok:
                     break
 
-            if should_fire_wait_start and self._callbacks and self._callbacks.on_wait_start:
+            if (
+                should_fire_wait_start
+                and self._callbacks
+                and self._callbacks.on_wait_start
+            ):
                 callback_started = time.monotonic()
                 await self._invoke_callback_safe(
                     self._callbacks.on_wait_start,

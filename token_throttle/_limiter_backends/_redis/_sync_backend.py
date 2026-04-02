@@ -24,7 +24,6 @@ from token_throttle._interfaces._interfaces import (
 )
 from token_throttle._interfaces._models import Capacities, FrozenUsage
 from token_throttle._validation import (
-    validate_backend_refund_usage,
     validate_backend_refund_usage_for_bucket_ids,
     validate_backend_usage,
     validate_timeout,
@@ -155,7 +154,9 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         for bucket_group in bucket_groups:
             for bucket in bucket_group:
                 buckets_by_key[bucket.full_redis_key] = bucket
-        return tuple(sorted(buckets_by_key.values(), key=lambda bucket: bucket.full_redis_key))
+        return tuple(
+            sorted(buckets_by_key.values(), key=lambda bucket: bucket.full_redis_key)
+        )
 
     def _lock(
         self,
@@ -294,8 +295,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
     ) -> frozenset[tuple[str, int]]:
         target_buckets = self.sorted_buckets if buckets is None else buckets
         return frozenset(
-            (bucket.usage_metric, int(bucket.per_seconds))
-            for bucket in target_buckets
+            (bucket.usage_metric, int(bucket.per_seconds)) for bucket in target_buckets
         )
 
     def _normalize_check_result(
@@ -315,7 +315,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         float | None,
         tuple[SyncRedisBucket, ...],
     ]:
-        if len(result) == 4:
+        if len(result) == 4:  # noqa: PLR2004
             available, preconsumption, postconsumption, consumed_monotonic = result
             return (
                 available,
@@ -324,8 +324,10 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                 consumed_monotonic,
                 self._snapshot_buckets(),
             )
-        if len(result) == 5:
-            available, preconsumption, postconsumption, consumed_monotonic, buckets = result
+        if len(result) == 5:  # noqa: PLR2004
+            available, preconsumption, postconsumption, consumed_monotonic, buckets = (
+                result
+            )
             return (
                 available,
                 preconsumption,
@@ -607,9 +609,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                         preconsumption_capacities=preconsumption,
                         usage=usage,
                     )
-                    wait_start_callback_overhead += (
-                        time.monotonic() - callback_started
-                    )
+                    wait_start_callback_overhead += time.monotonic() - callback_started
 
             computed = self._compute_sleep_for_wait(
                 usage,
@@ -805,7 +805,9 @@ class SyncRedisBackend(SyncRateLimiterBackend):
 
         current_buckets = self._snapshot_buckets()
         new_buckets = tuple(new_backend.sorted_buckets)
-        reconfigure_buckets = self._combined_bucket_snapshot(current_buckets, new_buckets)
+        reconfigure_buckets = self._combined_bucket_snapshot(
+            current_buckets, new_buckets
+        )
 
         with self._lock(timeout=LOCK_TIMEOUT_SECONDS, buckets=reconfigure_buckets):
             for quota in cfg.quotas:

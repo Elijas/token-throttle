@@ -25,7 +25,6 @@ from token_throttle._interfaces._interfaces import (
 )
 from token_throttle._interfaces._models import Capacities, FrozenUsage
 from token_throttle._validation import (
-    validate_backend_refund_usage,
     validate_backend_refund_usage_for_bucket_ids,
     validate_backend_usage,
     validate_timeout,
@@ -156,7 +155,9 @@ class RedisBackend(RateLimiterBackend):
         for bucket_group in bucket_groups:
             for bucket in bucket_group:
                 buckets_by_key[bucket.full_redis_key] = bucket
-        return tuple(sorted(buckets_by_key.values(), key=lambda bucket: bucket.full_redis_key))
+        return tuple(
+            sorted(buckets_by_key.values(), key=lambda bucket: bucket.full_redis_key)
+        )
 
     async def _lock(
         self,
@@ -310,8 +311,7 @@ class RedisBackend(RateLimiterBackend):
     ) -> frozenset[tuple[str, int]]:
         target_buckets = self.sorted_buckets if buckets is None else buckets
         return frozenset(
-            (bucket.usage_metric, int(bucket.per_seconds))
-            for bucket in target_buckets
+            (bucket.usage_metric, int(bucket.per_seconds)) for bucket in target_buckets
         )
 
     def _normalize_check_result(
@@ -319,7 +319,7 @@ class RedisBackend(RateLimiterBackend):
         result: tuple[bool, Capacities, Capacities, float | None]
         | tuple[bool, Capacities, Capacities, float | None, tuple[RedisBucket, ...]],
     ) -> tuple[bool, Capacities, Capacities, float | None, tuple[RedisBucket, ...]]:
-        if len(result) == 4:
+        if len(result) == 4:  # noqa: PLR2004
             available, preconsumption, postconsumption, consumed_monotonic = result
             return (
                 available,
@@ -328,8 +328,10 @@ class RedisBackend(RateLimiterBackend):
                 consumed_monotonic,
                 self._snapshot_buckets(),
             )
-        if len(result) == 5:
-            available, preconsumption, postconsumption, consumed_monotonic, buckets = result
+        if len(result) == 5:  # noqa: PLR2004
+            available, preconsumption, postconsumption, consumed_monotonic, buckets = (
+                result
+            )
             return (
                 available,
                 preconsumption,
@@ -599,7 +601,10 @@ class RedisBackend(RateLimiterBackend):
                         wait_time_s = max(
                             0.0,
                             (consumed_monotonic or time.monotonic())
-                            - (wait_started_at or (consumed_monotonic or time.monotonic()))
+                            - (
+                                wait_started_at
+                                or (consumed_monotonic or time.monotonic())
+                            )
                             - wait_start_callback_overhead,
                         )
                         if (
@@ -639,9 +644,7 @@ class RedisBackend(RateLimiterBackend):
                         preconsumption_capacities=preconsumption,
                         usage=usage,
                     )
-                    wait_start_callback_overhead += (
-                        time.monotonic() - callback_started
-                    )
+                    wait_start_callback_overhead += time.monotonic() - callback_started
 
             computed = self._compute_sleep_for_wait(
                 usage,
@@ -743,6 +746,9 @@ class RedisBackend(RateLimiterBackend):
                             of the operation
             actual_usage: The actual usage consumed by the end of the operation
                         (may be more or less than reserved_usage)
+            bucket_ids: If provided, only refund to buckets matching these
+                        (metric, per_seconds) pairs. Used during reconfiguration
+                        to refund only to surviving buckets.
 
         Example:
             TIME N=0: Reserve 100 tokens (assumes all consumed immediately)
@@ -892,11 +898,15 @@ class RedisBackend(RateLimiterBackend):
         cfg: PerModelConfig,
     ) -> RateLimiterBackend:
         if not isinstance(new_backend, RedisBackend):
-            raise TypeError("RedisBackend can only reconfigure into another RedisBackend")
+            raise TypeError(
+                "RedisBackend can only reconfigure into another RedisBackend"
+            )
 
         current_buckets = self._snapshot_buckets()
         new_buckets = tuple(new_backend.sorted_buckets)
-        reconfigure_buckets = self._combined_bucket_snapshot(current_buckets, new_buckets)
+        reconfigure_buckets = self._combined_bucket_snapshot(
+            current_buckets, new_buckets
+        )
 
         async with await self._lock(
             timeout=LOCK_TIMEOUT_SECONDS,

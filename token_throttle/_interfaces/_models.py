@@ -179,15 +179,13 @@ class CapacityReservation(BaseModel):
 
         normalized: set[BucketId] = set()
         for item in value:
-            if not isinstance(item, tuple) or len(item) != 2:
-                raise ValueError(
-                    "Each bucket_id must be a (metric, per_seconds) pair"
-                )
+            if not isinstance(item, tuple) or len(item) != 2:  # noqa: PLR2004
+                raise ValueError("Each bucket_id must be a (metric, per_seconds) pair")
             metric, per_seconds = item
             if not isinstance(metric, str) or not metric:
                 raise ValueError("bucket_id metric must be a non-empty string")
             if isinstance(per_seconds, bool):
-                raise ValueError("bucket_id per_seconds must not be a boolean")
+                raise TypeError("bucket_id per_seconds must not be a boolean")
             try:
                 parsed_per_seconds = float(per_seconds)
             except (TypeError, ValueError) as exc:
