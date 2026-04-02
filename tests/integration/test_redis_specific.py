@@ -3,16 +3,21 @@
 import asyncio
 import re
 import time
+import warnings
 
 import pytest
 
 from token_throttle._interfaces._interfaces import PerModelConfig
 from token_throttle._interfaces._models import Quota, UsageQuotas
-from token_throttle._limiter_backends._redis._backend import RedisBackend
+from token_throttle._limiter_backends._redis._backend import (
+    RedisBackend,
+    RedisBackendBuilder,
+)
 from token_throttle._limiter_backends._redis._bucket import (
     CalculatedCapacity,
     RedisBucket,
 )
+from token_throttle._rate_limiter import RateLimiter
 
 
 def make_bucket(
@@ -177,3 +182,44 @@ class TestRedisBackendSortedLocking:
         # Verify the "a_requests" bucket comes before "z_tokens"
         assert "a_requests" in keys[0]
         assert "z_tokens" in keys[1]
+
+
+@pytest.mark.redis
+class TestRedisCallableConfigRefresh:
+    async def test_metric_set_reconfigure_rewrites_surviving_max_capacity(
+        self,
+        redis_client,
+    ):
+        phase = 0
+
+        def config_getter(_model_name: str) -> PerModelConfig:
+            nonlocal phase
+            if phase == 0:
+                quotas = UsageQuotas(
+                    [Quota(metric="tokens", limit=100, per_seconds=60)]
+                )
+            else:
+                quotas = UsageQuotas(
+                    [
+                        Quota(metric="tokens", limit=50, per_seconds=60),
+                        Quota(metric="requests", limit=10, per_seconds=60),
+                    ]
+                )
+            return PerModelConfig(quotas=quotas, model_family="callable-refresh-redis")
+
+        limiter = RateLimiter(config_getter, backend=RedisBackendBuilder(redis_client))
+
+        reservation = await limiter.acquire_capacity({"tokens": 1}, "test-model")
+        await limiter.refund_capacity({"tokens": 0}, reservation)
+
+        await limiter.set_max_capacity("test-model", "tokens", 60, 80)
+
+        phase = 1
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            with pytest.raises(ValueError, match=r"exceeds bucket max capacity"):
+                await limiter.acquire_capacity(
+                    {"tokens": 60, "requests": 1},
+                    "test-model",
+                    timeout=0,
+                )

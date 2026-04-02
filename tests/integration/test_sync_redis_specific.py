@@ -6,12 +6,16 @@ via Redis keys).
 """
 
 import time
+import warnings
+
+import pytest
 
 from token_throttle._interfaces._interfaces import PerModelConfig
 from token_throttle._interfaces._models import Quota, UsageQuotas, frozen_usage
 from token_throttle._limiter_backends._redis._sync_backend import (
     SyncRedisBackendBuilder,
 )
+from token_throttle._sync_rate_limiter import SyncRateLimiter
 
 
 def test_dynamic_max_capacity_change(sync_redis_client):
@@ -57,3 +61,41 @@ def test_dynamic_max_capacity_change(sync_redis_client):
     assert elapsed >= 0.08, (
         f"Expected wait after exhausting dynamic capacity, got {elapsed:.3f} s"
     )
+
+
+@pytest.mark.redis
+def test_metric_set_reconfigure_rewrites_surviving_max_capacity(sync_redis_client):
+    phase = 0
+
+    def config_getter(_model_name: str) -> PerModelConfig:
+        nonlocal phase
+        if phase == 0:
+            quotas = UsageQuotas([Quota(metric="tokens", limit=100, per_seconds=60)])
+        else:
+            quotas = UsageQuotas(
+                [
+                    Quota(metric="tokens", limit=50, per_seconds=60),
+                    Quota(metric="requests", limit=10, per_seconds=60),
+                ]
+            )
+        return PerModelConfig(quotas=quotas, model_family="callable-refresh-sync-redis")
+
+    limiter = SyncRateLimiter(
+        config_getter,
+        backend=SyncRedisBackendBuilder(sync_redis_client),
+    )
+
+    reservation = limiter.acquire_capacity({"tokens": 1}, "test-model")
+    limiter.refund_capacity({"tokens": 0}, reservation)
+
+    limiter.set_max_capacity("test-model", "tokens", 60, 80)
+
+    phase = 1
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        with pytest.raises(ValueError, match=r"exceeds bucket max capacity"):
+            limiter.acquire_capacity(
+                {"tokens": 60, "requests": 1},
+                "test-model",
+                timeout=0,
+            )
