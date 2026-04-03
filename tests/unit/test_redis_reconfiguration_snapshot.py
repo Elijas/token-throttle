@@ -244,3 +244,157 @@ def test_sync_check_and_consume_uses_one_bucket_snapshot_during_reconfigure(
         "new:requests",
         "old:tokens",
     ]
+
+
+async def test_async_waiter_fails_cleanly_when_metric_is_removed(monkeypatch):
+    cfg_old = make_config(Quota(metric="tokens", limit=10, per_seconds=60))
+    cfg_new = make_config(Quota(metric="requests", limit=10, per_seconds=60))
+
+    backend = RedisBackend(
+        buckets=[FakeAsyncBucket("old:tokens", "tokens", 60, 10.0)],
+        redis=FakeAsyncRedis(),
+        limit_config=cfg_old,
+        sleep_interval=5.0,
+    )
+    new_backend = RedisBackend(
+        buckets=[FakeAsyncBucket("new:requests", "requests", 60, 10.0)],
+        redis=FakeAsyncRedis(),
+        limit_config=cfg_new,
+        sleep_interval=5.0,
+    )
+
+    call_count = 0
+    entered_wait = asyncio.Event()
+
+    async def fake_lock(*, timeout, blocking_timeout=None, buckets=None):
+        return AsyncNoopContextManager()
+
+    async def fake_get_capacities_unsafe(
+        *, pipeline=None, current_time=None, buckets=None
+    ):
+        nonlocal call_count
+        call_count += 1
+        effective_buckets = backend.sorted_buckets if buckets is None else buckets
+        current_capacity = 0.0 if call_count == 1 else 10.0
+        capacities = frozendict(
+            {
+                (bucket.usage_metric, int(bucket.per_seconds)): current_capacity
+                for bucket in effective_buckets
+            }
+        )
+        return async_backend_module.CapacitiesGetterResult(capacities, [])
+
+    async def fake_set_capacities_unsafe(
+        new_capacities,
+        pipeline=None,
+        current_time=None,
+        *,
+        allow_negative=False,
+        buckets=None,
+    ) -> None:
+        return None
+
+    async def fake_server_time(_redis) -> float:
+        return 0.0
+
+    monkeypatch.setattr(backend, "_lock", fake_lock)
+    monkeypatch.setattr(backend, "_get_capacities_unsafe", fake_get_capacities_unsafe)
+    monkeypatch.setattr(backend, "_set_capacities_unsafe", fake_set_capacities_unsafe)
+    monkeypatch.setattr(async_backend_module, "async_server_time", fake_server_time)
+
+    original_wait = backend._local_condition.wait
+
+    async def wrapped_wait():
+        entered_wait.set()
+        return await original_wait()
+
+    monkeypatch.setattr(backend._local_condition, "wait", wrapped_wait)
+
+    task = asyncio.create_task(
+        backend.await_for_capacity(frozendict({"tokens": 1.0}), timeout=1.0)
+    )
+    await entered_wait.wait()
+    await backend.prepare_reconfigured_backend(new_backend, cfg_new)
+    async with backend._local_condition:
+        backend._local_condition.notify_all()
+
+    with pytest.raises(ValueError, match="no longer active"):
+        await task
+
+
+def test_sync_waiter_fails_cleanly_when_metric_is_removed(monkeypatch):
+    cfg_old = make_config(Quota(metric="tokens", limit=10, per_seconds=60))
+    cfg_new = make_config(Quota(metric="requests", limit=10, per_seconds=60))
+
+    backend = SyncRedisBackend(
+        buckets=[FakeSyncBucket("old:tokens", "tokens", 60, 10.0)],
+        redis=FakeSyncRedis(),
+        limit_config=cfg_old,
+        sleep_interval=5.0,
+    )
+    new_backend = SyncRedisBackend(
+        buckets=[FakeSyncBucket("new:requests", "requests", 60, 10.0)],
+        redis=FakeSyncRedis(),
+        limit_config=cfg_new,
+        sleep_interval=5.0,
+    )
+
+    call_count = 0
+    entered_wait = threading.Event()
+    result: dict[str, BaseException] = {}
+
+    def fake_lock(*, timeout, blocking_timeout=None, buckets=None):
+        return SyncNoopContextManager()
+
+    def fake_get_capacities_unsafe(*, pipeline=None, current_time=None, buckets=None):
+        nonlocal call_count
+        call_count += 1
+        effective_buckets = backend.sorted_buckets if buckets is None else buckets
+        current_capacity = 0.0 if call_count == 1 else 10.0
+        capacities = frozendict(
+            {
+                (bucket.usage_metric, int(bucket.per_seconds)): current_capacity
+                for bucket in effective_buckets
+            }
+        )
+        return sync_backend_module.SyncCapacitiesGetterResult(capacities, [])
+
+    def fake_set_capacities_unsafe(
+        new_capacities,
+        pipeline=None,
+        current_time=None,
+        *,
+        allow_negative=False,
+        buckets=None,
+    ) -> None:
+        return None
+
+    monkeypatch.setattr(backend, "_lock", fake_lock)
+    monkeypatch.setattr(backend, "_get_capacities_unsafe", fake_get_capacities_unsafe)
+    monkeypatch.setattr(backend, "_set_capacities_unsafe", fake_set_capacities_unsafe)
+    monkeypatch.setattr(sync_backend_module, "sync_server_time", lambda _redis: 0.0)
+
+    original_wait = backend._local_condition.wait
+
+    def wrapped_wait(timeout=None):
+        entered_wait.set()
+        return original_wait(timeout)
+
+    monkeypatch.setattr(backend._local_condition, "wait", wrapped_wait)
+
+    def worker() -> None:
+        try:
+            backend.wait_for_capacity(frozendict({"tokens": 1.0}), timeout=1.0)
+        except BaseException as exc:
+            result["error"] = exc
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+    assert entered_wait.wait(timeout=2.0)
+    backend.prepare_reconfigured_backend(new_backend, cfg_new)
+    with backend._local_condition:
+        backend._local_condition.notify_all()
+    thread.join(timeout=2.0)
+
+    assert isinstance(result.get("error"), ValueError)
+    assert "no longer active" in str(result["error"])
