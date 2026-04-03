@@ -74,6 +74,11 @@ class MemoryBackend(RateLimiterBackend):
         self._callbacks = callbacks
         self._limit_config = limit_config
         self._usage_metric_names: set[str] = {bucket.usage_metric for bucket in buckets}
+        # Keep retired buckets around so a later metric re-add can resume from
+        # the last known capacity instead of starting full again.
+        self._bucket_registry: dict[tuple[str, int], MemoryBucket] = {
+            (bucket.usage_metric, int(bucket.per_seconds)): bucket for bucket in buckets
+        }
 
     def supports_metric_set_change(self) -> bool:
         return True
@@ -96,6 +101,19 @@ class MemoryBackend(RateLimiterBackend):
         return frozenset(
             (bucket.usage_metric, int(bucket.per_seconds)) for bucket in self._buckets
         )
+
+    @staticmethod
+    def _ensure_usage_metrics_are_active(
+        usage: FrozenUsage,
+        active_metric_names: set[str],
+    ) -> None:
+        missing_metrics = sorted(set(usage) - active_metric_names)
+        if missing_metrics:
+            raise ValueError(
+                "Usage metrics "
+                f"{missing_metrics} are no longer active after backend reconfiguration. "
+                f"Active metrics are {sorted(active_metric_names)}."
+            )
 
     def _set_capacities(
         self,
@@ -130,6 +148,9 @@ class MemoryBackend(RateLimiterBackend):
         current_time: float,
     ) -> tuple[bool, Capacities]:
         """Check and consume atomically. Caller MUST hold self._condition."""
+        active_metric_names = {metric for metric, _ in preconsumption}
+        self._ensure_usage_metrics_are_active(usage, active_metric_names)
+
         # Fail fast: if usage exceeds any bucket's max_capacity, it can
         # never be satisfied (capacity is capped at max_capacity).
         for usage_metric, usage_amount in usage.items():
@@ -151,25 +172,15 @@ class MemoryBackend(RateLimiterBackend):
                     return False, frozendict()
 
         # Sufficient capacity — subtract usage from each matching bucket.
-        postconsumption_dict: dict[tuple[str, int], float] = {}
+        postconsumption_dict: dict[tuple[str, int], float] = dict(preconsumption)
         for (
             cap_metric,
             per_seconds,
         ), cap_amount in preconsumption.items():
-            for usage_metric, usage_amount in usage.items():
-                if cap_metric != usage_metric:
-                    continue
-                postconsumption_dict[(cap_metric, per_seconds)] = (
-                    cap_amount - usage_amount
-                )
-        # Invariant: validate_acquire_usage() guarantees usage keys == quota
-        # keys, so every capacity bucket must have a matching usage entry.
-        if len(postconsumption_dict) != len(preconsumption):  # pragma: no cover
-            raise RuntimeError(
-                f"postconsumption covers {len(postconsumption_dict)} buckets but "
-                f"preconsumption has {len(preconsumption)} — "
-                f"validate_acquire_usage() should prevent this"
-            )
+            usage_amount = usage.get(cap_metric)
+            if usage_amount is None:
+                continue
+            postconsumption_dict[(cap_metric, per_seconds)] = cap_amount - usage_amount
         postconsumption = frozendict(postconsumption_dict)
         self._set_capacities(postconsumption, current_time)
         return True, postconsumption
@@ -190,6 +201,10 @@ class MemoryBackend(RateLimiterBackend):
             preconsumption_capacities, fresh_start_buckets = self._get_capacities(
                 current_time,
             )
+            active_metric_names = {
+                metric for metric, _ in preconsumption_capacities
+            }
+            self._ensure_usage_metrics_are_active(usage, active_metric_names)
 
             # stacklevel=2 points to the backend caller, not the user's code.
             # The correct user-facing level varies by call path (3-5 frames up)
@@ -207,24 +222,18 @@ class MemoryBackend(RateLimiterBackend):
                             stacklevel=2,
                         )
 
-            postconsumption_dict: dict[tuple[str, int], float] = {}
+            postconsumption_dict: dict[tuple[str, int], float] = dict(
+                preconsumption_capacities
+            )
             for (
                 cap_metric,
                 per_seconds,
             ), cap_amount in preconsumption_capacities.items():
-                for usage_metric, usage_amount in usage.items():
-                    if cap_metric != usage_metric:
-                        continue
-                    postconsumption_dict[(cap_metric, per_seconds)] = (
-                        cap_amount - usage_amount
-                    )
-            if len(postconsumption_dict) != len(
-                preconsumption_capacities
-            ):  # pragma: no cover
-                raise RuntimeError(
-                    f"postconsumption covers {len(postconsumption_dict)} buckets but "
-                    f"preconsumption has {len(preconsumption_capacities)} — "
-                    f"validate_backend_usage() should prevent this"
+                usage_amount = usage.get(cap_metric)
+                if usage_amount is None:
+                    continue
+                postconsumption_dict[(cap_metric, per_seconds)] = (
+                    cap_amount - usage_amount
                 )
             postconsumption_capacities = frozendict(postconsumption_dict)
             self._set_capacities(
@@ -516,7 +525,9 @@ class MemoryBackend(RateLimiterBackend):
                 "MemoryBackend can only reconfigure into another MemoryBackend"
             )
 
-        existing_buckets = {
+        existing_buckets = dict(
+            getattr(self, "_bucket_registry", {})
+        ) or {
             (bucket.usage_metric, int(bucket.per_seconds)): bucket
             for bucket in self._buckets
         }
@@ -536,6 +547,9 @@ class MemoryBackend(RateLimiterBackend):
                 else:
                     bucket.set_max_capacity(float(quota.limit))
                 prepared_buckets.append(bucket)
+                existing_buckets[bucket_id] = bucket
+
+            self._bucket_registry = existing_buckets
 
             self.install_reconfigured_state(
                 condition=self._condition,
@@ -556,6 +570,14 @@ class MemoryBackend(RateLimiterBackend):
         self._condition = condition
         self._buckets = buckets
         self._usage_metric_names = {bucket.usage_metric for bucket in buckets}
+        if not hasattr(self, "_bucket_registry"):
+            self._bucket_registry = {}
+        self._bucket_registry.update(
+            {
+                (bucket.usage_metric, int(bucket.per_seconds)): bucket
+                for bucket in buckets
+            }
+        )
         self._limit_config = cfg
 
     async def _invoke_callback_safe(self, callback, **kwargs) -> None:

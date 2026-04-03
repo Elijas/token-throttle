@@ -131,6 +131,19 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         return {bucket.usage_metric for bucket in buckets}
 
     @staticmethod
+    def _ensure_usage_metrics_are_active(
+        usage: FrozenUsage,
+        active_metric_names: set[str],
+    ) -> None:
+        missing_metrics = sorted(set(usage) - active_metric_names)
+        if missing_metrics:
+            raise ValueError(
+                "Usage metrics "
+                f"{missing_metrics} are no longer active after backend reconfiguration. "
+                f"Active metrics are {sorted(active_metric_names)}."
+            )
+
+    @staticmethod
     def _find_bucket(
         buckets: tuple[SyncRedisBucket, ...] | list[SyncRedisBucket],
         metric: str,
@@ -385,6 +398,10 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                     buckets=buckets,
                 )
             )
+            active_metric_names = {
+                metric for metric, _ in preconsumption_capacities
+            }
+            self._ensure_usage_metrics_are_active(usage, active_metric_names)
 
             # Fail fast: if usage exceeds any bucket's max_capacity, it can
             # never be satisfied (capacity is capped at max_capacity).
@@ -415,26 +432,16 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                             buckets,
                         )
 
-            postconsumption_dict = {}
+            postconsumption_dict = dict(preconsumption_capacities)
             for (
                 capacity_metric_name,
                 per_seconds,
             ), capacity_amount in preconsumption_capacities.items():
-                for usage_metric_name, usage_amount in usage.items():
-                    if capacity_metric_name != usage_metric_name:
-                        continue
-                    postconsumption_dict[(capacity_metric_name, per_seconds)] = (
-                        capacity_amount - usage_amount
-                    )
-            # Invariant: validate_acquire_usage() guarantees usage keys == quota
-            # keys, so every capacity bucket must have a matching usage entry.
-            if len(postconsumption_dict) != len(
-                preconsumption_capacities
-            ):  # pragma: no cover
-                raise RuntimeError(
-                    f"postconsumption covers {len(postconsumption_dict)} buckets but "
-                    f"preconsumption has {len(preconsumption_capacities)} — "
-                    f"validate_acquire_usage() should prevent this"
+                usage_amount = usage.get(capacity_metric_name)
+                if usage_amount is None:
+                    continue
+                postconsumption_dict[(capacity_metric_name, per_seconds)] = (
+                    capacity_amount - usage_amount
                 )
             postconsumption_capacities = frozendict(postconsumption_dict)
             consumed_monotonic = time.monotonic()
@@ -489,6 +496,8 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                     buckets=buckets,
                 )
             )
+            active_metric_names = {metric for metric, _ in preconsumption_capacities}
+            self._ensure_usage_metrics_are_active(usage, active_metric_names)
 
             for usage_metric_name, usage_amount in usage.items():
                 for bucket in buckets:
@@ -503,24 +512,16 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                             stacklevel=2,
                         )
 
-            postconsumption_dict = {}
+            postconsumption_dict = dict(preconsumption_capacities)
             for (
                 capacity_metric_name,
                 per_seconds,
             ), capacity_amount in preconsumption_capacities.items():
-                for usage_metric_name, usage_amount in usage.items():
-                    if capacity_metric_name != usage_metric_name:
-                        continue
-                    postconsumption_dict[(capacity_metric_name, per_seconds)] = (
-                        capacity_amount - usage_amount
-                    )
-            if len(postconsumption_dict) != len(
-                preconsumption_capacities
-            ):  # pragma: no cover
-                raise RuntimeError(
-                    f"postconsumption covers {len(postconsumption_dict)} buckets but "
-                    f"preconsumption has {len(preconsumption_capacities)} — "
-                    f"validate_backend_usage() should prevent this"
+                usage_amount = usage.get(capacity_metric_name)
+                if usage_amount is None:
+                    continue
+                postconsumption_dict[(capacity_metric_name, per_seconds)] = (
+                    capacity_amount - usage_amount
                 )
             postconsumption_capacities = frozendict(postconsumption_dict)
             self._set_capacities_unsafe(
