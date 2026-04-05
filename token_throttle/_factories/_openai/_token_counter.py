@@ -151,38 +151,35 @@ def count_structured_input_tokens(
     input_: object,
 ) -> int:
     """Count tokens for OpenAI Responses-style structured input payloads."""
-    if isinstance(input_, dict):
-        if _looks_like_message(input_):
-            return count_chat_input_tokens(encoding, messages=[input_])
-        return _count_text_fragments(
-            encoding,
-            input_,
-            invalid_error=(
-                "The value of 'input' must be of type str or a list/dict of "
-                "structured input items"
-            ),
-        )
-    if isinstance(input_, list):
-        if not all(isinstance(item, dict) for item in input_):
-            raise ValueError(
-                "The value of 'input' must be of type str or a list/dict of "
-                "structured input items"
-            )
-        items = cast("list[dict[str, object]]", input_)
-        if all(_looks_like_message(item) for item in items):
-            return count_chat_input_tokens(encoding, messages=items)
-        return _count_text_fragments(
-            encoding,
-            items,
-            invalid_error=(
-                "The value of 'input' must be of type str or a list/dict of "
-                "structured input items"
-            ),
-        )
-    raise ValueError(
+    invalid_error = (
         "The value of 'input' must be of type str or a list/dict of "
         "structured input items"
     )
+    if isinstance(input_, dict):
+        if _looks_like_message(input_):
+            return count_chat_input_tokens(encoding, messages=[input_])
+        return _count_text_fragments(encoding, input_, invalid_error=invalid_error)
+    if isinstance(input_, list):
+        if not all(isinstance(item, dict) for item in input_):
+            raise ValueError(invalid_error)
+        items = cast("list[dict[str, object]]", input_)
+        message_items = [item for item in items if _looks_like_message(item)]
+        if len(message_items) == len(items):
+            return count_chat_input_tokens(encoding, messages=items)
+        if not message_items:
+            return _count_text_fragments(encoding, items, invalid_error=invalid_error)
+        structured_items = [item for item in items if not _looks_like_message(item)]
+        # Mixed responses-style input lists need chat framing for message items
+        # and plain fragment counting for non-message structured items.
+        return count_chat_input_tokens(
+            encoding,
+            messages=message_items,
+        ) + _count_text_fragments(
+            encoding,
+            structured_items,
+            invalid_error=invalid_error,
+        )
+    raise ValueError(invalid_error)
 
 
 def _looks_like_message(value: dict[str, object]) -> bool:

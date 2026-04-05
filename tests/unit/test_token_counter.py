@@ -78,6 +78,46 @@ class TestOpenAIUsageCounterWithInput:
         )
         assert result == frozendict({"tokens": 12, "requests": 1})
 
+    def test_input_mixed_message_and_structured_item_preserves_message_overhead(self):
+        counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
+        message_item = {"role": "user", "content": "hi"}
+        structured_item = {
+            "type": "function_call_output",
+            "call_id": "abc",
+            "output": "ok",
+        }
+
+        message_tokens = counter("gpt-4", input=[message_item])["tokens"]
+        structured_tokens = counter("gpt-4", input=[structured_item])["tokens"]
+        result = counter("gpt-4", input=[message_item, structured_item])
+
+        assert result == frozendict(
+            {"tokens": message_tokens + structured_tokens, "requests": 1}
+        )
+
+    def test_input_mixed_multiple_messages_and_structured_item_counts_once(self):
+        counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
+        message_items = [
+            {"role": "system", "content": "a"},
+            {"role": "user", "content": "hi"},
+        ]
+        structured_item = {
+            "type": "function_call_output",
+            "call_id": "abc",
+            "output": "ok",
+        }
+
+        message_tokens = counter("gpt-4", input=message_items)["tokens"]
+        structured_tokens = counter("gpt-4", input=[structured_item])["tokens"]
+        result = counter(
+            "gpt-4",
+            input=[message_items[0], structured_item, message_items[1]],
+        )
+
+        assert result == frozendict(
+            {"tokens": message_tokens + structured_tokens, "requests": 1}
+        )
+
     def test_input_reserves_max_output_tokens(self):
         counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
         result = counter("gpt-4", input="hi", max_output_tokens=50)
