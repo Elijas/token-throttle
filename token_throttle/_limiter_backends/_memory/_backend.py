@@ -314,13 +314,29 @@ class MemoryBackend(RateLimiterBackend):
                 and self._callbacks.on_wait_start
             ):
                 callback_started = time.monotonic()
-                await self._invoke_callback_safe(
-                    self._callbacks.on_wait_start,
-                    model_family=self._limit_config.get_model_family(),
-                    preconsumption_capacities=first_failed_pre,
-                    usage=usage,
-                )
+                if deadline is None:
+                    await self._invoke_callback_safe(
+                        self._callbacks.on_wait_start,
+                        model_family=self._limit_config.get_model_family(),
+                        preconsumption_capacities=first_failed_pre,
+                        usage=usage,
+                    )
+                else:
+                    remaining = deadline - callback_started
+                    if remaining <= 0:
+                        raise TimeoutError("Timed out waiting for capacity")
+                    await asyncio.wait_for(
+                        self._invoke_callback_safe(
+                            self._callbacks.on_wait_start,
+                            model_family=self._limit_config.get_model_family(),
+                            preconsumption_capacities=first_failed_pre,
+                            usage=usage,
+                        ),
+                        timeout=remaining,
+                    )
                 wait_start_callback_overhead += time.monotonic() - callback_started
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise TimeoutError("Timed out waiting for capacity")
 
         # All callbacks fired outside the lock.  If CancelledError arrives
         # during any callback await, refund the consumed capacity so it is

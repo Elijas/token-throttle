@@ -604,6 +604,8 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                 wait_started_at = time.monotonic()
                 if self._callbacks and self._callbacks.on_wait_start:
                     callback_started = time.monotonic()
+                    if deadline is not None and callback_started >= deadline:
+                        raise TimeoutError("Timed out waiting for capacity")
                     self._invoke_callback_safe(
                         self._callbacks.on_wait_start,
                         model_family=self._limit_config.get_model_family(),
@@ -611,6 +613,8 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                         usage=usage,
                     )
                     wait_start_callback_overhead += time.monotonic() - callback_started
+                    if deadline is not None and time.monotonic() >= deadline:
+                        raise TimeoutError("Timed out waiting for capacity")
 
             computed = self._compute_sleep_for_wait(
                 usage,

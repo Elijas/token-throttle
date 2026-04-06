@@ -222,13 +222,17 @@ class RedisBucket:
         allow_negative: False for acquire (blocking guarantees non-negative),
         True for consume_capacity (speedometer overshoot) and refund_capacity
         (must preserve negative debt for natural refill recovery).
+        execute=False requires an explicit pipeline so the caller can execute
+        the queued writes later.
         """
-        if current_time is None:
-            current_time = await async_server_time(self._redis)
-
         own_pipeline = pipeline is None
+        if own_pipeline and not execute:
+            raise ValueError("execute=False requires an explicit pipeline")
         if own_pipeline:
             pipeline = self._redis.pipeline()
+
+        if current_time is None:
+            current_time = await async_server_time(self._redis)
 
         new_capacity = new_capacity if allow_negative else max(0, new_capacity)
         pipeline.set(self._last_checked_key, current_time)
