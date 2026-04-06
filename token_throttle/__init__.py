@@ -69,9 +69,10 @@ _LAZY_IMPORTS: dict[str, str] = {
     "CapacitiesGetterResult": "token_throttle._limiter_backends._redis._backend",
     "RedisBackend": "token_throttle._limiter_backends._redis._backend",
     "RedisBackendBuilder": "token_throttle._limiter_backends._redis._backend",
-    # openai factory (imports redis at module level)
+    # openai redis factory (imports redis at module level)
     "create_openai_redis_rate_limiter": "token_throttle._factories._openai._openai_rate_limiter",
-    "openai_model_family_getter": "token_throttle._factories._openai._openai_rate_limiter",
+    # redis-independent openai helper
+    "openai_model_family_getter": "token_throttle._factories._openai._model_family",
     # openai token counter (tiktoken lazy inside, but part of optional openai extra)
     "EncodingGetter": "token_throttle._factories._openai._token_counter",
     "OpenAIUsageCounter": "token_throttle._factories._openai._token_counter",
@@ -105,7 +106,6 @@ _REDIS_ALL = [
     "SyncRedisBackendBuilder",
     "SyncRedisBucket",
     "create_openai_redis_rate_limiter",
-    "openai_model_family_getter",
 ]
 
 __all__ = [
@@ -151,6 +151,7 @@ __all__ = [
     "count_chat_input_tokens",
     "create_logging_callbacks",
     "create_loguru_callbacks",
+    "openai_model_family_getter",
     "create_sync_logging_callbacks",
     "create_sync_loguru_callbacks",
     "frozen_usage",

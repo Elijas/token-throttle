@@ -16,7 +16,6 @@ _REDIS_EXPORTS = {
     "SyncRedisBackendBuilder",
     "SyncRedisBucket",
     "create_openai_redis_rate_limiter",
-    "openai_model_family_getter",
 }
 
 
@@ -43,6 +42,11 @@ def test_dir_contains_public_names():
     assert "SyncRateLimiter" in d
     assert "MemoryBackendBuilder" in d
     assert "Quota" in d
+
+
+def test_openai_model_family_getter_is_always_exported():
+    """The regex helper is redis-independent and should always be public."""
+    assert "openai_model_family_getter" in token_throttle.__all__
 
 
 def test_getattr_raises_for_unknown_name():

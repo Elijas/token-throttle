@@ -1,5 +1,3 @@
-import re
-
 try:
     import redis.asyncio as redis
 except ImportError as exc:
@@ -8,6 +6,7 @@ except ImportError as exc:
         'Install it with: pip install "token-throttle[redis]"'
     ) from exc
 
+from token_throttle._factories._openai._model_family import openai_model_family_getter
 from token_throttle._factories._openai._token_counter import OpenAIUsageCounter
 from token_throttle._interfaces._callbacks import (
     RateLimiterCallbacks,
@@ -17,18 +16,6 @@ from token_throttle._interfaces._interfaces import PerModelConfig
 from token_throttle._interfaces._models import Quota, SecondsIn, UsageQuotas
 from token_throttle._limiter_backends._redis._backend import RedisBackendBuilder
 from token_throttle._rate_limiter import RateLimiter
-
-
-def openai_model_family_getter(model: str, /) -> str:
-    # Strip provider prefix if present, then collapse date/snapshot suffixes.
-    # Matches -MMDD (e.g. -0613) and -YYYY-MM-DD (e.g. -2024-04-09),
-    # with optional -preview before and/or after the date component.
-    # Single/triple-digit version numbers (-1, -002) are preserved.
-    model = model.removeprefix("openai/")
-    result = re.sub(r"((-preview)?-\d{4}(-\d{2}){0,2}(-preview)?|-preview)$", "", model)
-    return result or model
-
-
 def create_openai_redis_rate_limiter(
     redis_client: redis.Redis,
     *,
