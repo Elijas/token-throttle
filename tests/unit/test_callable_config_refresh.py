@@ -202,6 +202,65 @@ class TestCallableConfigMetricSetChange:
             with pytest.raises(ValueError, match=r"exceeds.*max.capacity"):
                 await limiter.acquire_capacity({"requests": 10}, "test-model")
 
+    async def test_refund_refreshes_backend_before_metric_drop_is_applied(self):
+        """Refunds must not credit metrics removed by the latest callable config."""
+        state = "both"
+
+        def config_getter(model_name: str) -> PerModelConfig:
+            quotas = [Quota(metric="requests", limit=1, per_seconds=3600)]
+            if state == "both":
+                quotas.append(Quota(metric="tokens", limit=10, per_seconds=3600))
+            return PerModelConfig(quotas=UsageQuotas(quotas), model_family="test-family")
+
+        limiter = RateLimiter(config_getter, backend=MemoryBackendBuilder())
+
+        reservation = await limiter.acquire_capacity(
+            {"requests": 1, "tokens": 10},
+            "test-model",
+        )
+
+        state = "requests"
+        await limiter.refund_capacity({"requests": 1, "tokens": 0}, reservation)
+        await limiter.record_usage({"requests": 0}, "test-model")
+
+        state = "both"
+        with warnings.catch_warnings(record=True):
+            warnings.simplefilter("always")
+            await limiter.record_usage({"requests": 0, "tokens": 0}, "test-model")
+
+        with pytest.raises(TimeoutError):
+            await limiter.acquire_capacity(
+                {"requests": 0, "tokens": 10},
+                "test-model",
+                timeout=0,
+            )
+
+    async def test_set_max_capacity_refreshes_backend_after_metric_expansion(self):
+        """set_max_capacity must rebuild cached backends before mutating new buckets."""
+        use_expanded = False
+
+        def config_getter(model_name: str) -> PerModelConfig:
+            quotas = [Quota(metric="requests", limit=10, per_seconds=60)]
+            if use_expanded:
+                quotas.append(Quota(metric="tokens", limit=100, per_seconds=60))
+            return PerModelConfig(quotas=UsageQuotas(quotas), model_family="test-family")
+
+        limiter = RateLimiter(config_getter, backend=MemoryBackendBuilder())
+        await limiter.acquire_capacity({"requests": 1}, "test-model")
+
+        use_expanded = True
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            await limiter.set_max_capacity("test-model", "tokens", 60, 200)
+
+        assert any("changed metric set" in str(item.message) for item in caught)
+
+        reservation = await limiter.acquire_capacity(
+            {"requests": 0, "tokens": 150},
+            "test-model",
+        )
+        assert reservation.usage["tokens"] == 150
+
 
 class TestCallableConfigMetricSetStateTransfer:
     """When metric set changes, consumption state for surviving metrics must be preserved."""

@@ -24,7 +24,14 @@ _UNLIMITED_FLAG = "__rate_limiting_disabled__"
 
 
 def is_unlimited_reservation(reservation: CapacityReservation) -> bool:
-    return reservation.model_family == _UNLIMITED_FLAG and not reservation.usage
+    return bool(
+        reservation.is_unlimited
+        or (
+            reservation.model_family == _UNLIMITED_FLAG
+            and not reservation.usage
+            and reservation.bucket_ids is None
+        )
+    )
 
 
 def extract_usage_from_response(response: object) -> object:
@@ -270,6 +277,37 @@ def merge_extra_usage(
     extra_usage: Mapping[str, object] | None,
 ) -> FrozenUsage:
     """Merge extra usage values into counted usage with consistent numeric checks."""
+    return _merge_extra_usage(
+        usage,
+        extra_usage,
+        allow_new_keys=False,
+    )
+
+
+def merge_extra_usage_unrestricted(
+    usage: FrozenUsage,
+    extra_usage: Mapping[str, object] | None,
+) -> FrozenUsage:
+    """
+    Merge extra usage values while allowing new metrics.
+
+    Used by unlimited configs so disabling the limiter is a drop-in no-op even
+    when callers pass metrics not produced by a usage_counter.
+    """
+    return _merge_extra_usage(
+        usage,
+        extra_usage,
+        allow_new_keys=True,
+    )
+
+
+def _merge_extra_usage(
+    usage: FrozenUsage,
+    extra_usage: Mapping[str, object] | None,
+    *,
+    allow_new_keys: bool,
+) -> FrozenUsage:
+    """Merge extra usage values into counted usage with consistent numeric checks."""
     if extra_usage is None:
         return usage
     if not isinstance(extra_usage, Mapping):
@@ -281,7 +319,7 @@ def merge_extra_usage(
 
     merged_usage = dict(usage)
     for metric, raw_amount in extra_usage.items():
-        if metric not in merged_usage:
+        if not allow_new_keys and metric not in merged_usage:
             raise ValueError(
                 f"Usage key '{metric}' not found in usage counter",
             )
@@ -301,7 +339,7 @@ def merge_extra_usage(
             )
         if amount < 0:
             raise ValueError(f"Usage value for {metric} must be non-negative")
-        merged_usage[metric] += amount
+        merged_usage[metric] = merged_usage.get(metric, 0.0) + amount
     return frozen_usage(merged_usage)
 
 

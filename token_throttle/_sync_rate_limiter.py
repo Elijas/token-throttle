@@ -23,6 +23,7 @@ from token_throttle._validation import (
     extract_usage_from_response,
     is_unlimited_reservation,
     merge_extra_usage,
+    merge_extra_usage_unrestricted,
     resolve_config,
     resolve_usage_counter_result,
     validate_acquire_usage,
@@ -126,6 +127,7 @@ class SyncRateLimiter:
         self._callbacks = callbacks
         self._config_getter = lambda model_name: resolve_config(cfg, model_name)
         self._model_family_to_backend: dict[str, SyncRateLimiterBackend] = {}
+        self._model_family_to_model_name: dict[str, str] = {}
         self._model_family_to_quotas: dict[str, dict[tuple[str, int], float]] = {}
 
     def acquire_capacity(
@@ -154,13 +156,9 @@ class SyncRateLimiter:
         usage = frozen_usage(usage)
         limit_config = self._config_getter(model)
         if limit_config.is_unlimited:
-            if usage:
-                raise ValueError("Usage must be empty for unlimited capacity")
-            return CapacityReservation(
-                usage={},
-                model_family=_UNLIMITED_FLAG,
-            )
+            return self._unlimited_reservation(usage, model)
         return self._acquire_capacity(
+            model,
             usage, limit_config, _block=_block, timeout=timeout
         )
 
@@ -179,12 +177,11 @@ class SyncRateLimiter:
 
         limit_config = self._config_getter(model)
         if limit_config.is_unlimited:
-            if extra_usage:
-                raise ValueError("extra_usage must be empty for unlimited capacity")
-            return CapacityReservation(
-                usage={},
-                model_family=_UNLIMITED_FLAG,
-            )
+            usage = frozendict()
+            if limit_config.usage_counter is not None:
+                usage = resolve_usage_counter_result(limit_config.usage_counter, **kwargs)
+            usage = merge_extra_usage_unrestricted(usage, extra_usage)
+            return self._unlimited_reservation(usage, model)
         if limit_config.usage_counter is None:
             raise ValueError("limit_config.usage_counter cannot be None")
 
@@ -192,10 +189,11 @@ class SyncRateLimiter:
             resolve_usage_counter_result(limit_config.usage_counter, **kwargs),
             extra_usage,
         )
-        return self._acquire_capacity(usage, limit_config, timeout=timeout)
+        return self._acquire_capacity(model, usage, limit_config, timeout=timeout)
 
     def _acquire_capacity(
         self,
+        model: str,
         usage: FrozenUsage,
         limit_config: PerModelConfig,
         *,
@@ -209,10 +207,13 @@ class SyncRateLimiter:
             backend.wait_for_capacity(usage, timeout=timeout)
         else:
             backend.consume_capacity(usage)
+        model_family = limit_config.get_model_family()
+        self._model_family_to_model_name[model_family] = model
         return CapacityReservation(
             usage=usage,
-            model_family=limit_config.get_model_family(),
+            model_family=model_family,
             bucket_ids=_reservation_bucket_ids(limit_config),
+            model=model,
         )
 
     def refund_capacity(
@@ -221,10 +222,6 @@ class SyncRateLimiter:
         reservation: CapacityReservation,
     ) -> None:
         if is_unlimited_reservation(reservation):
-            if actual_usage:
-                raise ValueError(
-                    "Usage must be empty for unlimited capacity reservations",
-                )
             return
         validate_refund_usage(actual_usage, set(reservation.usage))
         self._refund_capacity(actual_usage, reservation)
@@ -277,12 +274,14 @@ class SyncRateLimiter:
         if limit_config.is_unlimited:
             raise ValueError("Cannot set max capacity: model has unlimited quotas")
         model_family = limit_config.get_model_family()
+        self._model_family_to_model_name[model_family] = model
         backend = self._model_family_to_backend.get(model_family)
         if backend is None:
             raise ValueError(
                 f"No backend for model family '{model_family}'. "
                 "Call acquire_capacity or record_usage first."
             )
+        backend = self._get_backend(limit_config)
         backend.set_max_capacity(metric, per_seconds, value)
 
     def _refund_capacity(
@@ -291,11 +290,12 @@ class SyncRateLimiter:
         reservation: CapacityReservation,
     ) -> None:
         actual_usage = frozen_usage(actual_usage)
-        backend = self._model_family_to_backend.get(reservation.model_family)
-        if backend is None:
+        if reservation.model_family not in self._model_family_to_backend:
             raise ValueError(
                 f"Backend not found for model family {reservation.model_family}",
             )
+        self._refresh_backend_for_reservation(reservation)
+        backend = self._model_family_to_backend[reservation.model_family]
         active_bucket_ids = None
         snapshot = self._model_family_to_quotas.get(reservation.model_family)
         if snapshot is not None:
@@ -319,6 +319,35 @@ class SyncRateLimiter:
             actual_usage,
             bucket_ids=refund_bucket_ids,
         )
+
+    def _unlimited_reservation(
+        self,
+        usage: FrozenUsage,
+        model: str,
+    ) -> CapacityReservation:
+        return CapacityReservation(
+            usage=usage,
+            model_family=_UNLIMITED_FLAG,
+            model=model,
+            is_unlimited=True,
+        )
+
+    def _refresh_backend_for_reservation(
+        self,
+        reservation: CapacityReservation,
+    ) -> None:
+        model_name = reservation.model or self._model_family_to_model_name.get(
+            reservation.model_family
+        )
+        if model_name is None:
+            return
+
+        limit_config = self._config_getter(model_name)
+        if limit_config.is_unlimited:
+            return
+        if limit_config.get_model_family() != reservation.model_family:
+            return
+        self._get_backend(limit_config)
 
     def _get_backend(self, cfg: PerModelConfig) -> SyncRateLimiterBackend:
         if not cfg.model_family:

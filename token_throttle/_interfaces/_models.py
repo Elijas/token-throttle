@@ -150,6 +150,8 @@ class CapacityReservation(BaseModel):
     usage: FrozenUsage
     model_family: str
     bucket_ids: frozenset[BucketId] | None = None
+    model: str | None = None
+    is_unlimited: bool = False
     model_config = ConfigDict(arbitrary_types_allowed=True, frozen=True)
 
     @field_validator("usage", mode="before")

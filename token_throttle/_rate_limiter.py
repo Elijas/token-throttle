@@ -24,6 +24,7 @@ from token_throttle._validation import (
     extract_usage_from_response,
     is_unlimited_reservation,
     merge_extra_usage,
+    merge_extra_usage_unrestricted,
     resolve_config,
     resolve_usage_counter_result,
     validate_acquire_usage,
@@ -140,6 +141,7 @@ class RateLimiter(BaseRateLimiter):
         self._callbacks = callbacks
         self._config_getter = lambda model_name: resolve_config(cfg, model_name)
         self._model_family_to_backend: dict[str, RateLimiterBackend] = {}
+        self._model_family_to_model_name: dict[str, str] = {}
         self._model_family_to_quotas: dict[str, dict[tuple[str, int], float]] = {}
 
     async def acquire_capacity(
@@ -168,13 +170,9 @@ class RateLimiter(BaseRateLimiter):
         usage = frozen_usage(usage)
         limit_config = self._config_getter(model)
         if limit_config.is_unlimited:
-            if usage:
-                raise ValueError("Usage must be empty for unlimited capacity")
-            return CapacityReservation(
-                usage={},
-                model_family=_UNLIMITED_FLAG,
-            )
+            return self._unlimited_reservation(usage, model)
         return await self._acquire_capacity(
+            model,
             usage, limit_config, _block=_block, timeout=timeout
         )
 
@@ -193,12 +191,11 @@ class RateLimiter(BaseRateLimiter):
 
         limit_config = self._config_getter(model)
         if limit_config.is_unlimited:
-            if extra_usage:
-                raise ValueError("extra_usage must be empty for unlimited capacity")
-            return CapacityReservation(
-                usage={},
-                model_family=_UNLIMITED_FLAG,
-            )
+            usage = frozendict()
+            if limit_config.usage_counter is not None:
+                usage = resolve_usage_counter_result(limit_config.usage_counter, **kwargs)
+            usage = merge_extra_usage_unrestricted(usage, extra_usage)
+            return self._unlimited_reservation(usage, model)
         if limit_config.usage_counter is None:
             raise ValueError("limit_config.usage_counter cannot be None")
 
@@ -206,10 +203,11 @@ class RateLimiter(BaseRateLimiter):
             resolve_usage_counter_result(limit_config.usage_counter, **kwargs),
             extra_usage,
         )
-        return await self._acquire_capacity(usage, limit_config, timeout=timeout)
+        return await self._acquire_capacity(model, usage, limit_config, timeout=timeout)
 
     async def _acquire_capacity(
         self,
+        model: str,
         usage: FrozenUsage,
         limit_config: PerModelConfig,
         *,
@@ -223,10 +221,13 @@ class RateLimiter(BaseRateLimiter):
             await backend.await_for_capacity(usage, timeout=timeout)
         else:
             await backend.consume_capacity(usage)
+        model_family = limit_config.get_model_family()
+        self._model_family_to_model_name[model_family] = model
         return CapacityReservation(
             usage=usage,
-            model_family=limit_config.get_model_family(),
+            model_family=model_family,
             bucket_ids=_reservation_bucket_ids(limit_config),
+            model=model,
         )
 
     async def refund_capacity(
@@ -235,10 +236,6 @@ class RateLimiter(BaseRateLimiter):
         reservation: CapacityReservation,
     ) -> None:
         if is_unlimited_reservation(reservation):
-            if actual_usage:
-                raise ValueError(
-                    "Usage must be empty for unlimited capacity reservations",
-                )
             return
         validate_refund_usage(actual_usage, set(reservation.usage))
         await self._refund_capacity(
@@ -294,12 +291,14 @@ class RateLimiter(BaseRateLimiter):
         if limit_config.is_unlimited:
             raise ValueError("Cannot set max capacity: model has unlimited quotas")
         model_family = limit_config.get_model_family()
+        self._model_family_to_model_name[model_family] = model
         backend = self._model_family_to_backend.get(model_family)
         if backend is None:
             raise ValueError(
                 f"No backend for model family '{model_family}'. "
                 "Call acquire_capacity or record_usage first."
             )
+        backend = await self._get_backend(limit_config)
         await backend.set_max_capacity(metric, per_seconds, value)
 
     async def _refund_capacity(
@@ -308,11 +307,12 @@ class RateLimiter(BaseRateLimiter):
         reservation: CapacityReservation,
     ) -> None:
         actual_usage = frozen_usage(actual_usage)
-        backend = self._model_family_to_backend.get(reservation.model_family)
-        if backend is None:
+        if reservation.model_family not in self._model_family_to_backend:
             raise ValueError(
                 f"Backend not found for model family {reservation.model_family}",
             )
+        await self._refresh_backend_for_reservation(reservation)
+        backend = self._model_family_to_backend[reservation.model_family]
         active_bucket_ids = None
         snapshot = self._model_family_to_quotas.get(reservation.model_family)
         if snapshot is not None:
@@ -336,6 +336,35 @@ class RateLimiter(BaseRateLimiter):
             actual_usage,
             bucket_ids=refund_bucket_ids,
         )
+
+    def _unlimited_reservation(
+        self,
+        usage: FrozenUsage,
+        model: str,
+    ) -> CapacityReservation:
+        return CapacityReservation(
+            usage=usage,
+            model_family=_UNLIMITED_FLAG,
+            model=model,
+            is_unlimited=True,
+        )
+
+    async def _refresh_backend_for_reservation(
+        self,
+        reservation: CapacityReservation,
+    ) -> None:
+        model_name = reservation.model or self._model_family_to_model_name.get(
+            reservation.model_family
+        )
+        if model_name is None:
+            return
+
+        limit_config = self._config_getter(model_name)
+        if limit_config.is_unlimited:
+            return
+        if limit_config.get_model_family() != reservation.model_family:
+            return
+        await self._get_backend(limit_config)
 
     async def _get_backend(self, cfg: PerModelConfig) -> RateLimiterBackend:
         if not cfg.model_family:

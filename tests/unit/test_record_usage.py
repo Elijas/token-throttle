@@ -111,13 +111,14 @@ class TestRecordUsageUnlimited:
 
         assert reservation.model_family == _UNLIMITED_FLAG
         assert dict(reservation.usage) == {}
+        assert reservation.is_unlimited is True
 
-    async def test_unlimited_with_nonempty_usage_raises(self):
+    async def test_unlimited_with_nonempty_usage_returns_unlimited_reservation(self):
         builder, _ = make_mock_backend_builder()
         limiter = RateLimiter(make_unlimited_config(), backend=builder)
 
-        with pytest.raises(
-            ValueError,
-            match="Usage must be empty for unlimited capacity",
-        ):
-            await limiter.record_usage({"tokens": 5}, model="gpt-4")
+        reservation = await limiter.record_usage({"tokens": 5}, model="gpt-4")
+
+        assert reservation.model_family == _UNLIMITED_FLAG
+        assert dict(reservation.usage) == {"tokens": 5.0}
+        assert reservation.is_unlimited is True

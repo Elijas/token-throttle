@@ -66,14 +66,15 @@ class TestAcquireCapacityValidation:
         with pytest.raises(ValueError, match="model_name cannot be empty"):
             limiter.acquire_capacity({"tokens": 1, "requests": 1}, model="")
 
-    def test_unlimited_config_with_nonempty_usage_raises(self):
+    def test_unlimited_config_with_nonempty_usage_returns_unlimited_reservation(self):
         builder, _ = make_mock_backend_builder()
         limiter = SyncRateLimiter(make_unlimited_config(), backend=builder)
 
-        with pytest.raises(
-            ValueError, match="Usage must be empty for unlimited capacity"
-        ):
-            limiter.acquire_capacity({"tokens": 5}, model="gpt-4")
+        reservation = limiter.acquire_capacity({"tokens": 5}, model="gpt-4")
+
+        assert reservation.model_family == _UNLIMITED_FLAG
+        assert dict(reservation.usage) == {"tokens": 5.0}
+        assert reservation.is_unlimited is True
 
     def test_unlimited_config_with_empty_usage_returns_unlimited_reservation(self):
         builder, _ = make_mock_backend_builder()
@@ -83,6 +84,7 @@ class TestAcquireCapacityValidation:
 
         assert reservation.model_family == _UNLIMITED_FLAG
         assert dict(reservation.usage) == {}
+        assert reservation.is_unlimited is True
 
     def test_mismatched_usage_keys_vs_quota_keys_raises(self):
         builder, _ = make_mock_backend_builder()
@@ -132,23 +134,29 @@ class TestAcquireCapacityValidation:
 class TestRefundCapacityValidation:
     """Tests for ValueError paths in refund_capacity."""
 
-    def test_unlimited_reservation_with_nonempty_usage_raises(self):
+    def test_unlimited_reservation_with_nonempty_usage_is_noop(self):
         builder, _ = make_mock_backend_builder()
         limiter = SyncRateLimiter(make_unlimited_config(), backend=builder)
 
-        reservation = CapacityReservation(usage={}, model_family=_UNLIMITED_FLAG)
+        reservation = CapacityReservation(
+            usage={"tokens": 5},
+            model_family=_UNLIMITED_FLAG,
+            is_unlimited=True,
+        )
 
-        with pytest.raises(
-            ValueError,
-            match="Usage must be empty for unlimited capacity reservations",
-        ):
-            limiter.refund_capacity({"tokens": 5}, reservation)
+        result = limiter.refund_capacity({"tokens": 5}, reservation)
+
+        assert result is None
 
     def test_unlimited_reservation_with_empty_usage_is_noop(self):
         builder, _ = make_mock_backend_builder()
         limiter = SyncRateLimiter(make_unlimited_config(), backend=builder)
 
-        reservation = CapacityReservation(usage={}, model_family=_UNLIMITED_FLAG)
+        reservation = CapacityReservation(
+            usage={},
+            model_family=_UNLIMITED_FLAG,
+            is_unlimited=True,
+        )
 
         result = limiter.refund_capacity({}, reservation)
 
@@ -415,17 +423,19 @@ class TestAcquireCapacityForRequestValidation:
 
         assert reservation.model_family == _UNLIMITED_FLAG
         assert dict(reservation.usage) == {}
+        assert reservation.is_unlimited is True
 
-    def test_unlimited_config_with_extra_usage_raises(self):
+    def test_unlimited_config_with_extra_usage_returns_unlimited_reservation(self):
         builder, _ = make_mock_backend_builder()
         limiter = SyncRateLimiter(make_unlimited_config(), backend=builder)
 
-        with pytest.raises(
-            ValueError, match="extra_usage must be empty for unlimited capacity"
-        ):
-            limiter.acquire_capacity_for_request(
-                model="gpt-4", extra_usage={"tokens": 10}
-            )
+        reservation = limiter.acquire_capacity_for_request(
+            model="gpt-4", extra_usage={"tokens": 10}
+        )
+
+        assert reservation.model_family == _UNLIMITED_FLAG
+        assert dict(reservation.usage) == {"tokens": 10.0}
+        assert reservation.is_unlimited is True
 
     def test_unlimited_config_with_empty_extra_usage_succeeds(self):
         builder, _ = make_mock_backend_builder()
@@ -435,6 +445,31 @@ class TestAcquireCapacityForRequestValidation:
             model="gpt-4", extra_usage={}
         )
         assert reservation.model_family == _UNLIMITED_FLAG
+        assert reservation.is_unlimited is True
+
+    def test_unlimited_config_with_counter_and_extra_usage_accepts_new_keys(self):
+        def fake_counter(**_kwargs):
+            return {"tokens": 100.0, "requests": 1.0}
+
+        builder, _ = make_mock_backend_builder()
+        limiter = SyncRateLimiter(
+            make_limited_config(usage_counter=fake_counter).model_copy(
+                update={"quotas": UsageQuotas.unlimited()}
+            ),
+            backend=builder,
+        )
+
+        reservation = limiter.acquire_capacity_for_request(
+            model="gpt-4",
+            extra_usage={"images": 2, "tokens": 5},
+        )
+
+        assert dict(reservation.usage) == {
+            "tokens": 105.0,
+            "requests": 1.0,
+            "images": 2.0,
+        }
+        assert reservation.is_unlimited is True
 
 
 class TestRefundCapacityFromResponseValidation:
@@ -444,7 +479,11 @@ class TestRefundCapacityFromResponseValidation:
         builder, _ = make_mock_backend_builder()
         limiter = SyncRateLimiter(make_unlimited_config(), backend=builder)
 
-        reservation = CapacityReservation(usage={}, model_family=_UNLIMITED_FLAG)
+        reservation = CapacityReservation(
+            usage={},
+            model_family=_UNLIMITED_FLAG,
+            is_unlimited=True,
+        )
 
         result = limiter.refund_capacity_from_response(reservation)
 
@@ -940,5 +979,7 @@ class TestRecordUsage:
     def test_record_usage_unlimited_is_noop(self):
         builder, _ = make_mock_backend_builder()
         limiter = SyncRateLimiter(make_unlimited_config(), backend=builder)
-        reservation = limiter.record_usage({}, model="gpt-4")
+        reservation = limiter.record_usage({"tokens": 5}, model="gpt-4")
         assert reservation.model_family == _UNLIMITED_FLAG
+        assert dict(reservation.usage) == {"tokens": 5.0}
+        assert reservation.is_unlimited is True
