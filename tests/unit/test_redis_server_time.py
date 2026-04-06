@@ -134,6 +134,18 @@ class TestAsyncBucketUsesServerTime:
 
         mock_redis.time.assert_not_called()
 
+    async def test_set_capacity_execute_false_requires_pipeline(
+        self, bucket, mock_redis
+    ):
+        """Standalone execute=False would otherwise discard queued writes."""
+        with pytest.raises(
+            ValueError, match="execute=False requires an explicit pipeline"
+        ):
+            await bucket.set_capacity(5.0, execute=False)
+
+        mock_redis.time.assert_not_called()
+        mock_redis.pipeline.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # Sync bucket integration — standalone paths use Redis server time
@@ -184,3 +196,13 @@ class TestSyncBucketUsesServerTime:
         bucket.get_capacity(pipeline=pipeline, current_time=999.0)
 
         mock_redis.time.assert_not_called()
+
+    def test_set_capacity_execute_false_requires_pipeline(self, bucket, mock_redis):
+        """Standalone execute=False would otherwise discard queued writes."""
+        with pytest.raises(
+            ValueError, match="execute=False requires an explicit pipeline"
+        ):
+            bucket.set_capacity(5.0, execute=False)
+
+        mock_redis.time.assert_not_called()
+        mock_redis.pipeline.assert_not_called()

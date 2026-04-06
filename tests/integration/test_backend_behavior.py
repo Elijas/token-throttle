@@ -123,6 +123,35 @@ async def test_await_for_capacity_with_wait(backend_builder):
     assert elapsed < 2.0
 
 
+async def test_await_for_capacity_timeout_limits_on_wait_start_callback(
+    backend_builder,
+):
+    """A slow wait-start callback must not extend the timeout indefinitely."""
+
+    async def slow_wait_start(**_kwargs):
+        await asyncio.sleep(1.0)
+
+    config = _make_config(limit=100, per_seconds=1)
+    backend = backend_builder.build(
+        config,
+        callbacks=RateLimiterCallbacks(on_wait_start=slow_wait_start),
+    )
+
+    await backend.await_for_capacity(frozen_usage({"requests": 100}))
+
+    start = time.monotonic()
+    with pytest.raises(TimeoutError):
+        await backend.await_for_capacity(
+            frozen_usage({"requests": 10}),
+            timeout=0.05,
+        )
+    elapsed = time.monotonic() - start
+
+    assert elapsed < 0.5, (
+        f"Timeout should not wait for the full callback ({elapsed:.3f}s)"
+    )
+
+
 # ---------------------------------------------------------------------------
 # 3. All-or-nothing: one metric insufficient -> none consumed
 # ---------------------------------------------------------------------------

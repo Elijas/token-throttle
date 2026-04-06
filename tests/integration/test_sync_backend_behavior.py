@@ -123,6 +123,27 @@ def test_wait_for_capacity_with_wait(builder):
     assert elapsed < 2.0
 
 
+def test_wait_for_capacity_timeout_expires_after_wait_start_callback(builder):
+    """A slow wait-start callback must not allow a post-timeout acquire."""
+
+    def slow_wait_start(**_kwargs):
+        time.sleep(0.25)
+
+    config = _make_config(limit=100, per_seconds=1)
+    backend = builder.build(
+        config,
+        callbacks=SyncRateLimiterCallbacks(on_wait_start=slow_wait_start),
+    )
+
+    backend.wait_for_capacity(frozen_usage({"requests": 100}))
+
+    with pytest.raises(TimeoutError):
+        backend.wait_for_capacity(
+            frozen_usage({"requests": 10}),
+            timeout=0.05,
+        )
+
+
 # ---------------------------------------------------------------------------
 # 3. All-or-nothing: one metric insufficient -> none consumed
 # ---------------------------------------------------------------------------
