@@ -223,3 +223,37 @@ class TestRedisCallableConfigRefresh:
                     "test-model",
                     timeout=0,
                 )
+
+    async def test_metric_set_reconfigure_preserves_runtime_override_when_static_unchanged(
+        self,
+        redis_client,
+    ):
+        phase = 0
+
+        def config_getter(_model_name: str) -> PerModelConfig:
+            nonlocal phase
+            quotas = [Quota(metric="tokens", limit=100, per_seconds=60)]
+            if phase == 1:
+                quotas.append(Quota(metric="requests", limit=10, per_seconds=60))
+            return PerModelConfig(
+                quotas=UsageQuotas(quotas),
+                model_family="callable-refresh-redis-preserve",
+            )
+
+        limiter = RateLimiter(config_getter, backend=RedisBackendBuilder(redis_client))
+
+        await limiter.acquire_capacity({"tokens": 0}, "test-model")
+        await limiter.set_max_capacity("test-model", "tokens", 60, 20)
+
+        with pytest.raises(ValueError, match=r"exceeds bucket max capacity"):
+            await limiter.acquire_capacity({"tokens": 30}, "test-model", timeout=0)
+
+        phase = 1
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            with pytest.raises(ValueError, match=r"exceeds bucket max capacity"):
+                await limiter.acquire_capacity(
+                    {"tokens": 30, "requests": 0},
+                    "test-model",
+                    timeout=0,
+                )

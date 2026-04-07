@@ -261,6 +261,35 @@ class TestCallableConfigMetricSetChange:
         )
         assert reservation.usage["tokens"] == 150
 
+    async def test_metric_expansion_preserves_runtime_max_capacity_when_static_unchanged(
+        self,
+    ):
+        """Metric-set rebuilds must keep live set_max_capacity overrides when quota limits stay the same."""
+        use_expanded = False
+
+        def config_getter(model_name: str) -> PerModelConfig:
+            quotas = [Quota(metric="tokens", limit=100, per_seconds=60)]
+            if use_expanded:
+                quotas.append(Quota(metric="requests", limit=10, per_seconds=60))
+            return PerModelConfig(quotas=UsageQuotas(quotas), model_family="test-family")
+
+        limiter = RateLimiter(config_getter, backend=MemoryBackendBuilder())
+        await limiter.acquire_capacity({"tokens": 0}, "test-model")
+
+        await limiter.set_max_capacity("test-model", "tokens", 60, 20)
+        with pytest.raises(ValueError, match=r"exceeds.*max.capacity"):
+            await limiter.acquire_capacity({"tokens": 30}, "test-model", timeout=0)
+
+        use_expanded = True
+        with warnings.catch_warnings(record=True):
+            warnings.simplefilter("always")
+            with pytest.raises(ValueError, match=r"exceeds.*max.capacity"):
+                await limiter.acquire_capacity(
+                    {"tokens": 30, "requests": 0},
+                    "test-model",
+                    timeout=0,
+                )
+
 
 class TestCallableConfigMetricSetStateTransfer:
     """When metric set changes, consumption state for surviving metrics must be preserved."""

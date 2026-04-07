@@ -46,6 +46,11 @@ def _reservation_bucket_ids(cfg: PerModelConfig) -> frozenset[BucketId]:
     return frozenset((q.metric, int(q.per_seconds)) for q in cfg.quotas)
 
 
+def _resolved_model_family(cfg: PerModelConfig) -> str:
+    """Stable routing key used to detect unsupported model remaps."""
+    return _UNLIMITED_FLAG if cfg.is_unlimited else cfg.get_model_family()
+
+
 def _project_refund_scope(
     reserved_usage: FrozenUsage,
     actual_usage: FrozenUsage,
@@ -129,6 +134,10 @@ class SyncRateLimiter:
         self._model_family_to_backend: dict[str, SyncRateLimiterBackend] = {}
         self._model_family_to_model_name: dict[str, str] = {}
         self._model_family_to_quotas: dict[str, dict[tuple[str, int], float]] = {}
+        self._model_name_to_model_family: dict[str, str] = {}
+        self._model_family_to_runtime_max_capacity: dict[
+            str, dict[BucketId, float]
+        ] = {}
 
     def acquire_capacity(
         self, usage: Usage, model: str, *, timeout: float | None = None
@@ -155,12 +164,17 @@ class SyncRateLimiter:
     ) -> CapacityReservation:
         usage = frozen_usage(usage)
         limit_config = self._config_getter(model)
+        resolved_model_family = self._validated_model_family(model, limit_config)
         if limit_config.is_unlimited:
-            return self._unlimited_reservation(usage, model)
-        return self._acquire_capacity(
+            reservation = self._unlimited_reservation(usage, model)
+            self._remember_model_family(model, resolved_model_family)
+            return reservation
+        reservation = self._acquire_capacity(
             model,
             usage, limit_config, _block=_block, timeout=timeout
         )
+        self._remember_model_family(model, resolved_model_family)
+        return reservation
 
     def acquire_capacity_for_request(
         self,
@@ -176,12 +190,15 @@ class SyncRateLimiter:
         model = kwargs["model"]
 
         limit_config = self._config_getter(model)
+        resolved_model_family = self._validated_model_family(model, limit_config)
         if limit_config.is_unlimited:
             usage = frozendict()
             if limit_config.usage_counter is not None:
                 usage = resolve_usage_counter_result(limit_config.usage_counter, **kwargs)
             usage = merge_extra_usage_unrestricted(usage, extra_usage)
-            return self._unlimited_reservation(usage, model)
+            reservation = self._unlimited_reservation(usage, model)
+            self._remember_model_family(model, resolved_model_family)
+            return reservation
         if limit_config.usage_counter is None:
             raise ValueError("limit_config.usage_counter cannot be None")
 
@@ -189,7 +206,9 @@ class SyncRateLimiter:
             resolve_usage_counter_result(limit_config.usage_counter, **kwargs),
             extra_usage,
         )
-        return self._acquire_capacity(model, usage, limit_config, timeout=timeout)
+        reservation = self._acquire_capacity(model, usage, limit_config, timeout=timeout)
+        self._remember_model_family(model, resolved_model_family)
+        return reservation
 
     def _acquire_capacity(
         self,
@@ -271,6 +290,7 @@ class SyncRateLimiter:
         per_seconds = validate_per_seconds(per_seconds)
         value = validate_max_capacity_value(value)
         limit_config = self._config_getter(model)
+        resolved_model_family = self._validated_model_family(model, limit_config)
         if limit_config.is_unlimited:
             raise ValueError("Cannot set max capacity: model has unlimited quotas")
         model_family = limit_config.get_model_family()
@@ -283,6 +303,8 @@ class SyncRateLimiter:
             )
         backend = self._get_backend(limit_config)
         backend.set_max_capacity(metric, per_seconds, value)
+        self._remember_runtime_max_capacity(model_family, metric, per_seconds, value)
+        self._remember_model_family(model, resolved_model_family)
 
     def _refund_capacity(
         self,
@@ -408,6 +430,12 @@ class SyncRateLimiter:
             )
             backend = self._backend.build(cfg, callbacks=self._callbacks)
             backend = old_backend.prepare_reconfigured_backend(backend, cfg)
+            self._restore_runtime_max_capacity(
+                model_family,
+                old_snapshot=old_snapshot,
+                new_snapshot=new_snapshot,
+                backend=backend,
+            )
 
             self._model_family_to_backend[model_family] = backend
             self._model_family_to_quotas[model_family] = new_snapshot
@@ -415,9 +443,98 @@ class SyncRateLimiter:
 
         # Only limits changed — update in place via set_max_capacity
         backend = self._model_family_to_backend[model_family]
+        changed_bucket_ids: set[BucketId] = set()
         for bucket_id, new_limit in new_snapshot.items():
             if new_limit != old_snapshot[bucket_id]:
                 metric, per_seconds = bucket_id
                 backend.set_max_capacity(metric, per_seconds, new_limit)
+                changed_bucket_ids.add(bucket_id)
+        self._clear_runtime_max_capacity(model_family, changed_bucket_ids)
         self._model_family_to_quotas[model_family] = new_snapshot
         return backend
+
+    def _validated_model_family(
+        self,
+        model: str,
+        limit_config: PerModelConfig,
+    ) -> str:
+        resolved_model_family = _resolved_model_family(limit_config)
+        previous_model_family = self._model_name_to_model_family.get(model)
+        if (
+            previous_model_family is not None
+            and previous_model_family != resolved_model_family
+        ):
+            raise ValueError(
+                f"Config for model '{model}' changed model_family from "
+                f"'{previous_model_family}' to '{resolved_model_family}'. "
+                "Model routing must stay stable for a limiter instance; "
+                "create a new SyncRateLimiter instead."
+            )
+        return resolved_model_family
+
+    def _remember_model_family(
+        self,
+        model: str,
+        model_family: str,
+    ) -> None:
+        self._model_name_to_model_family[model] = model_family
+
+    def _remember_runtime_max_capacity(
+        self,
+        model_family: str,
+        metric: str,
+        per_seconds: int,
+        value: float,
+    ) -> None:
+        overrides = self._model_family_to_runtime_max_capacity.setdefault(
+            model_family,
+            {},
+        )
+        overrides[(metric, int(per_seconds))] = value
+
+    def _clear_runtime_max_capacity(
+        self,
+        model_family: str,
+        bucket_ids: set[BucketId],
+    ) -> None:
+        if not bucket_ids:
+            return
+        overrides = self._model_family_to_runtime_max_capacity.get(model_family)
+        if not overrides:
+            return
+        for bucket_id in bucket_ids:
+            overrides.pop(bucket_id, None)
+        if not overrides:
+            self._model_family_to_runtime_max_capacity.pop(model_family, None)
+
+    def _restore_runtime_max_capacity(
+        self,
+        model_family: str,
+        *,
+        old_snapshot: dict[BucketId, float],
+        new_snapshot: dict[BucketId, float],
+        backend: SyncRateLimiterBackend,
+    ) -> None:
+        overrides = self._model_family_to_runtime_max_capacity.get(model_family)
+        if not overrides:
+            return
+
+        restored_overrides: dict[BucketId, float] = {}
+        for bucket_id, value in overrides.items():
+            if bucket_id not in new_snapshot:
+                continue
+            if bucket_id not in old_snapshot:
+                continue
+            if old_snapshot[bucket_id] != new_snapshot[bucket_id]:
+                continue
+
+            metric, per_seconds = bucket_id
+            backend.set_max_capacity(metric, per_seconds, value)
+            restored_overrides[bucket_id] = value
+
+        if restored_overrides:
+            self._model_family_to_runtime_max_capacity[model_family] = (
+                restored_overrides
+            )
+        else:
+            self._model_family_to_runtime_max_capacity.pop(model_family, None)

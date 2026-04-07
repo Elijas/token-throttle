@@ -66,6 +66,21 @@ class TestAcquireCapacityValidation:
         with pytest.raises(ValueError, match="model_name cannot be empty"):
             await limiter.acquire_capacity({"tokens": 1, "requests": 1}, model="")
 
+    async def test_same_model_cannot_change_model_family(self):
+        builder, _ = make_mock_backend_builder()
+        model_family = "family-a"
+
+        def config_getter(_model_name: str) -> PerModelConfig:
+            return make_limited_config(model_family=model_family)
+
+        limiter = RateLimiter(config_getter, backend=builder)
+
+        await limiter.acquire_capacity({"tokens": 1, "requests": 1}, model="gpt-4")
+
+        model_family = "family-b"
+        with pytest.raises(ValueError, match="changed model_family"):
+            await limiter.acquire_capacity({"tokens": 1, "requests": 1}, model="gpt-4")
+
     async def test_unlimited_config_with_nonempty_usage_returns_unlimited_reservation(
         self,
     ):

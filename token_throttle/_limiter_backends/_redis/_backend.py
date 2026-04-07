@@ -18,6 +18,9 @@ except ImportError as exc:
 from frozendict import frozendict
 
 from token_throttle._interfaces._callbacks import RateLimiterCallbacks
+from token_throttle._interfaces._callable_utils import (
+    suppress_current_task_cancellation,
+)
 from token_throttle._interfaces._interfaces import (
     PerModelConfig,
     RateLimiterBackend,
@@ -503,63 +506,73 @@ class RedisBackend(RateLimiterBackend):
         postconsumption_capacities: Capacities = frozendict()
         current_time: float = 0.0
         fresh_start_buckets: list[RedisBucket] = []
-        async with await self._lock(timeout=LOCK_TIMEOUT_SECONDS, buckets=buckets):
-            pipeline = self._redis.pipeline()
-            current_time = await async_server_time(self._redis)
+        consumed = False
+        try:
+            async with await self._lock(timeout=LOCK_TIMEOUT_SECONDS, buckets=buckets):
+                pipeline = self._redis.pipeline()
+                current_time = await async_server_time(self._redis)
 
-            (
-                preconsumption_capacities,
-                fresh_start_buckets,
-            ) = await self._get_capacities_unsafe(
-                pipeline=pipeline,
-                current_time=current_time,
-                buckets=buckets,
-            )
-            active_metric_names = {metric for metric, _ in preconsumption_capacities}
-            self._ensure_usage_metrics_are_active(usage, active_metric_names)
-
-            for usage_metric_name, usage_amount in usage.items():
-                for bucket in buckets:
-                    if bucket.usage_metric != usage_metric_name:
-                        continue
-                    if usage_amount > bucket.max_capacity:
-                        warnings.warn(
-                            f"record_usage value for {usage_metric_name} ({usage_amount}) exceeds "
-                            f"bucket max capacity ({bucket.max_capacity}). "
-                            f"Capacity will go deeply negative.",
-                            RuntimeWarning,
-                            stacklevel=2,
-                        )
-
-            postconsumption_dict = dict(preconsumption_capacities)
-            for (
-                capacity_metric_name,
-                per_seconds,
-            ), capacity_amount in preconsumption_capacities.items():
-                usage_amount = usage.get(capacity_metric_name)
-                if usage_amount is None:
-                    continue
-                postconsumption_dict[(capacity_metric_name, per_seconds)] = (
-                    capacity_amount - usage_amount
+                (
+                    preconsumption_capacities,
+                    fresh_start_buckets,
+                ) = await self._get_capacities_unsafe(
+                    pipeline=pipeline,
+                    current_time=current_time,
+                    buckets=buckets,
                 )
-            postconsumption_capacities = frozendict(postconsumption_dict)
-            await self._set_capacities_unsafe(
-                postconsumption_capacities,
-                pipeline=pipeline,
-                current_time=current_time,
-                allow_negative=True,
-                buckets=buckets,
-            )
-        await self._fresh_start_buckets_callback(fresh_start_buckets)
-        if self._callbacks and self._callbacks.on_capacity_consumed:
-            await self._invoke_callback_safe(
-                self._callbacks.on_capacity_consumed,
-                model_family=self._limit_config.get_model_family(),
-                preconsumption_capacities=preconsumption_capacities,
-                postconsumption_capacities=postconsumption_capacities,
-                usage=usage,
-                current_time=current_time,
-            )
+                active_metric_names = {
+                    metric for metric, _ in preconsumption_capacities
+                }
+                self._ensure_usage_metrics_are_active(usage, active_metric_names)
+
+                for usage_metric_name, usage_amount in usage.items():
+                    for bucket in buckets:
+                        if bucket.usage_metric != usage_metric_name:
+                            continue
+                        if usage_amount > bucket.max_capacity:
+                            warnings.warn(
+                                f"record_usage value for {usage_metric_name} ({usage_amount}) exceeds "
+                                f"bucket max capacity ({bucket.max_capacity}). "
+                                f"Capacity will go deeply negative.",
+                                RuntimeWarning,
+                                stacklevel=2,
+                            )
+
+                postconsumption_dict = dict(preconsumption_capacities)
+                for (
+                    capacity_metric_name,
+                    per_seconds,
+                ), capacity_amount in preconsumption_capacities.items():
+                    usage_amount = usage.get(capacity_metric_name)
+                    if usage_amount is None:
+                        continue
+                    postconsumption_dict[(capacity_metric_name, per_seconds)] = (
+                        capacity_amount - usage_amount
+                    )
+                postconsumption_capacities = frozendict(postconsumption_dict)
+                await self._set_capacities_unsafe(
+                    postconsumption_capacities,
+                    pipeline=pipeline,
+                    current_time=current_time,
+                    allow_negative=True,
+                    buckets=buckets,
+                )
+                consumed = True
+            await self._fresh_start_buckets_callback(fresh_start_buckets)
+            if self._callbacks and self._callbacks.on_capacity_consumed:
+                await self._invoke_callback_safe(
+                    self._callbacks.on_capacity_consumed,
+                    model_family=self._limit_config.get_model_family(),
+                    preconsumption_capacities=preconsumption_capacities,
+                    postconsumption_capacities=postconsumption_capacities,
+                    usage=usage,
+                    current_time=current_time,
+                )
+        except asyncio.CancelledError:
+            if not consumed:
+                raise
+            suppress_current_task_cancellation()
+            return
 
     async def await_for_capacity(
         self,

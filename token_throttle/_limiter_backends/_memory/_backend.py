@@ -7,6 +7,9 @@ from typing import ClassVar
 from frozendict import frozendict
 
 from token_throttle._interfaces._callbacks import RateLimiterCallbacks
+from token_throttle._interfaces._callable_utils import (
+    suppress_current_task_cancellation,
+)
 from token_throttle._interfaces._interfaces import (
     PerModelConfig,
     RateLimiterBackend,
@@ -243,16 +246,20 @@ class MemoryBackend(RateLimiterBackend):
             )
 
         # Callbacks fired outside the lock
-        await self._fresh_start_buckets_callback(fresh_start_buckets)
-        if self._callbacks and self._callbacks.on_capacity_consumed:
-            await self._invoke_callback_safe(
-                self._callbacks.on_capacity_consumed,
-                model_family=self._limit_config.get_model_family(),
-                preconsumption_capacities=preconsumption_capacities,
-                postconsumption_capacities=postconsumption_capacities,
-                usage=usage,
-                current_time=current_time,
-            )
+        try:
+            await self._fresh_start_buckets_callback(fresh_start_buckets)
+            if self._callbacks and self._callbacks.on_capacity_consumed:
+                await self._invoke_callback_safe(
+                    self._callbacks.on_capacity_consumed,
+                    model_family=self._limit_config.get_model_family(),
+                    preconsumption_capacities=preconsumption_capacities,
+                    postconsumption_capacities=postconsumption_capacities,
+                    usage=usage,
+                    current_time=current_time,
+                )
+        except asyncio.CancelledError:
+            suppress_current_task_cancellation()
+            return
 
     async def await_for_capacity(
         self,
