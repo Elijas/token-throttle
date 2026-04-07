@@ -301,14 +301,14 @@ class TestRedisCancellationDebtPreservation:
 
 @pytest.mark.redis
 class TestRedisConsumeCapacityNoRefundOnCancellation:
-    """consume_capacity (record_usage / speedometer) does NOT refund on CancelledError.
+    """consume_capacity must not refund after capacity has already been recorded.
 
     Mirrors test_cancellation_memory.py:TestConsumeCapacityNoRefundOnCancellation.
-    This documents the intentional asymmetry: await_for_capacity DOES refund,
-    but consume_capacity does NOT — the usage already occurred.
+    The async path now suppresses callback-time cancellation after mutation so
+    higher-level record_usage() calls can still return a reservation.
     """
 
-    async def test_consume_capacity_cancelled_during_callback_does_not_refund(
+    async def test_consume_capacity_cancelled_during_callback_returns_without_refund(
         self,
         redis_client,
     ):
@@ -341,8 +341,7 @@ class TestRedisConsumeCapacityNoRefundOnCancellation:
 
         # Cancel during the callback — capacity is already consumed
         task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
+        await asyncio.wait_for(task, timeout=5.0)
 
         # Capacity should be ~30 (50 - 20), NOT refunded back to ~50
         cap_after = await _get_redis_capacity(backend)

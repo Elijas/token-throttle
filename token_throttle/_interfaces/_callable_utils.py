@@ -1,3 +1,4 @@
+import asyncio
 import inspect
 
 
@@ -13,3 +14,12 @@ def close_awaitable_if_possible(value: object) -> None:
     close = getattr(value, "close", None)
     if callable(close):
         close()
+
+
+def suppress_current_task_cancellation() -> None:
+    """Clear pending cancellation requests on the current task, if any."""
+    task = asyncio.current_task()
+    if task is None:
+        return
+    while task.cancelling():
+        task.uncancel()

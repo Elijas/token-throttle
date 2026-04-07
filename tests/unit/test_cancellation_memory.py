@@ -23,6 +23,7 @@ from token_throttle._limiter_backends._memory._backend import MemoryBackendBuild
 from token_throttle._limiter_backends._memory._sync_backend import (
     SyncMemoryBackendBuilder,
 )
+from token_throttle._rate_limiter import RateLimiter
 
 # Slow refill so natural recovery is negligible during tests.
 # 100 tokens / 3600s = 0.028 tokens/sec — max ~0.3 tokens in a 10s test window.
@@ -619,20 +620,18 @@ class TestDoubleCancellationNoCapacityLeak:
 
 class TestConsumeCapacityNoRefundOnCancellation:
     """
-    consume_capacity (the record_usage / speedometer path) intentionally does
-    NOT refund capacity on CancelledError.  This is the opposite of
-    await_for_capacity, which DOES refund.
+    consume_capacity (the record_usage / speedometer path) must not refund
+    after capacity has already been recorded, even if cancellation hits a
+    later callback.
 
-    The asymmetry exists because consume_capacity records actual usage that
-    already occurred — refunding would inflate capacity and violate rate limits.
+    The async path now suppresses callback-time cancellation after mutation so
+    higher-level record_usage() calls can still return a reservation.
     """
 
-    async def test_consume_capacity_cancelled_during_callback_does_not_refund(self):
-        """CancelledError during consume_capacity callback must NOT restore capacity.
-
-        This documents the intentional asymmetry vs await_for_capacity, which
-        DOES refund on CancelledError (Group 4 tests above).
-        """
+    async def test_consume_capacity_cancelled_during_callback_returns_without_refund(
+        self,
+    ):
+        """Cancellation during a post-consume callback must keep the recorded usage."""
         gate = asyncio.Event()
         entered_callback = asyncio.Event()
 
@@ -662,8 +661,7 @@ class TestConsumeCapacityNoRefundOnCancellation:
 
         # Cancel during the callback — capacity is already consumed
         task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
+        await asyncio.wait_for(task, timeout=2.0)
 
         # Capacity should be ~30 (50 - 20), NOT refunded back to ~50
         cap_after = _get_bucket_capacity(backend)
@@ -672,6 +670,41 @@ class TestConsumeCapacityNoRefundOnCancellation:
             f"Expected ~30, got {cap_after}. "
             f"If ~50, capacity was erroneously refunded."
         )
+
+
+class TestRateLimiterRecordUsageCancellation:
+    """RateLimiter.record_usage must still hand back a reservation after callback-time cancellation."""
+
+    async def test_record_usage_cancelled_during_callback_returns_reservation(self):
+        entered_callback = asyncio.Event()
+
+        async def slow_callback(**_kwargs):
+            entered_callback.set()
+            await asyncio.sleep(10)
+
+        limiter = RateLimiter(
+            _make_config(limit=100),
+            backend=MemoryBackendBuilder(),
+            callbacks=RateLimiterCallbacks(on_capacity_consumed=slow_callback),
+        )
+
+        task = asyncio.create_task(
+            limiter.record_usage({"requests": 20.0}, model="test-model")
+        )
+        await asyncio.wait_for(entered_callback.wait(), timeout=2.0)
+
+        task.cancel()
+        reservation = await asyncio.wait_for(task, timeout=2.0)
+
+        assert reservation.usage == frozendict({"requests": 20.0})
+
+        backend = limiter._model_family_to_backend["test"]
+        cap_after_record = _get_bucket_capacity(backend)
+        assert cap_after_record == pytest.approx(80.0, abs=1.0)
+
+        await limiter.refund_capacity({"requests": 5.0}, reservation)
+        cap_after_refund = _get_bucket_capacity(backend)
+        assert cap_after_refund == pytest.approx(95.0, abs=1.0)
 
 
 # ---------------------------------------------------------------------------
