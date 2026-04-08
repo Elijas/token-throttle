@@ -59,6 +59,9 @@ class TestModelFamilyGetter:
     def test_strips_iso_date_gpt4o_mini(self):
         assert openai_model_family_getter("gpt-4o-mini-2024-07-18") == "gpt-4o-mini"
 
+    def test_strips_yyyymmdd_date_gpt4o(self):
+        assert openai_model_family_getter("gpt-4o-20241203") == "gpt-4o"
+
     def test_strips_iso_date_o1(self):
         assert openai_model_family_getter("o1-2024-12-17") == "o1"
 
@@ -130,6 +133,9 @@ class TestModelFamilyGetter:
             openai_model_family_getter("gpt-4-turbo-2024-04-09-preview")
             == "gpt-4-turbo"
         )
+
+    def test_strips_yyyymmdd_preview_suffix(self):
+        assert openai_model_family_getter("gpt-4o-20241203-preview") == "gpt-4o"
 
     # --- -preview before date suffix (e.g. o1-preview-2024-09-12) ---
 
