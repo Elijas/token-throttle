@@ -170,7 +170,9 @@ class TestBackendCaching:
         builder.build.assert_called_once()
         assert mock_backend.await_for_capacity.await_count == 1
 
-    async def test_same_model_family_allows_global_quota_refresh_when_models_agree(self):
+    async def test_same_model_family_allows_global_quota_refresh_when_models_agree(
+        self,
+    ):
         builder, mock_backend = make_mock_backend_builder()
         current_limit = 10
 

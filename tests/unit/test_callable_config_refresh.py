@@ -210,7 +210,9 @@ class TestCallableConfigMetricSetChange:
             quotas = [Quota(metric="requests", limit=1, per_seconds=3600)]
             if state == "both":
                 quotas.append(Quota(metric="tokens", limit=10, per_seconds=3600))
-            return PerModelConfig(quotas=UsageQuotas(quotas), model_family="test-family")
+            return PerModelConfig(
+                quotas=UsageQuotas(quotas), model_family="test-family"
+            )
 
         limiter = RateLimiter(config_getter, backend=MemoryBackendBuilder())
 
@@ -243,7 +245,9 @@ class TestCallableConfigMetricSetChange:
             quotas = [Quota(metric="requests", limit=10, per_seconds=60)]
             if use_expanded:
                 quotas.append(Quota(metric="tokens", limit=100, per_seconds=60))
-            return PerModelConfig(quotas=UsageQuotas(quotas), model_family="test-family")
+            return PerModelConfig(
+                quotas=UsageQuotas(quotas), model_family="test-family"
+            )
 
         limiter = RateLimiter(config_getter, backend=MemoryBackendBuilder())
         await limiter.acquire_capacity({"requests": 1}, "test-model")
@@ -271,7 +275,9 @@ class TestCallableConfigMetricSetChange:
             quotas = [Quota(metric="tokens", limit=100, per_seconds=60)]
             if use_expanded:
                 quotas.append(Quota(metric="requests", limit=10, per_seconds=60))
-            return PerModelConfig(quotas=UsageQuotas(quotas), model_family="test-family")
+            return PerModelConfig(
+                quotas=UsageQuotas(quotas), model_family="test-family"
+            )
 
         limiter = RateLimiter(config_getter, backend=MemoryBackendBuilder())
         await limiter.acquire_capacity({"tokens": 0}, "test-model")

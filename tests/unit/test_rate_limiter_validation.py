@@ -357,7 +357,9 @@ class TestAcquireCapacityForRequestValidation:
         assert dict(reservation.usage) == {}
         assert reservation.is_unlimited is True
 
-    async def test_unlimited_config_with_extra_usage_returns_unlimited_reservation(self):
+    async def test_unlimited_config_with_extra_usage_returns_unlimited_reservation(
+        self,
+    ):
         builder, _ = make_mock_backend_builder()
         limiter = RateLimiter(make_unlimited_config(), backend=builder)
 

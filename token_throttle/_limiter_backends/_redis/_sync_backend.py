@@ -398,9 +398,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                     buckets=buckets,
                 )
             )
-            active_metric_names = {
-                metric for metric, _ in preconsumption_capacities
-            }
+            active_metric_names = {metric for metric, _ in preconsumption_capacities}
             self._ensure_usage_metrics_are_active(usage, active_metric_names)
 
             # Fail fast: if usage exceeds any bucket's max_capacity, it can

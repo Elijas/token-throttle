@@ -87,8 +87,7 @@ def _describe_config_signature(
     if is_unlimited:
         return "unlimited"
     return ", ".join(
-        f"{metric}/{per_seconds}s={limit}"
-        for metric, per_seconds, limit in snapshot
+        f"{metric}/{per_seconds}s={limit}" for metric, per_seconds, limit in snapshot
     )
 
 
@@ -225,8 +224,7 @@ class RateLimiter(BaseRateLimiter):
             self._remember_model_family(model, resolved_model_family)
             return reservation
         reservation = await self._acquire_capacity(
-            model,
-            usage, limit_config, _block=_block, timeout=timeout
+            model, usage, limit_config, _block=_block, timeout=timeout
         )
         self._remember_model_family(model, resolved_model_family)
         return reservation
@@ -250,7 +248,9 @@ class RateLimiter(BaseRateLimiter):
         if limit_config.is_unlimited:
             usage = frozendict()
             if limit_config.usage_counter is not None:
-                usage = resolve_usage_counter_result(limit_config.usage_counter, **kwargs)
+                usage = resolve_usage_counter_result(
+                    limit_config.usage_counter, **kwargs
+                )
             usage = merge_extra_usage_unrestricted(usage, extra_usage)
             reservation = self._unlimited_reservation(usage, model)
             self._remember_model_family(model, resolved_model_family)
@@ -553,12 +553,16 @@ class RateLimiter(BaseRateLimiter):
         current_signature = _config_signature(limit_config)
         conflicts: list[tuple[str, str]] = []
 
-        for known_model, known_family in sorted(self._model_name_to_model_family.items()):
+        for known_model, known_family in sorted(
+            self._model_name_to_model_family.items()
+        ):
             if known_family != model_family or known_model == model:
                 continue
 
             known_config = self._config_getter(known_model)
-            known_resolved_family = self._validated_model_family(known_model, known_config)
+            known_resolved_family = self._validated_model_family(
+                known_model, known_config
+            )
             if known_resolved_family != model_family:
                 continue
 

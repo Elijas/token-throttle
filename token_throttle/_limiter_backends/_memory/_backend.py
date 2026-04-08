@@ -204,9 +204,7 @@ class MemoryBackend(RateLimiterBackend):
             preconsumption_capacities, fresh_start_buckets = self._get_capacities(
                 current_time,
             )
-            active_metric_names = {
-                metric for metric, _ in preconsumption_capacities
-            }
+            active_metric_names = {metric for metric, _ in preconsumption_capacities}
             self._ensure_usage_metrics_are_active(usage, active_metric_names)
 
             # stacklevel=2 points to the backend caller, not the user's code.
@@ -548,9 +546,7 @@ class MemoryBackend(RateLimiterBackend):
                 "MemoryBackend can only reconfigure into another MemoryBackend"
             )
 
-        existing_buckets = dict(
-            getattr(self, "_bucket_registry", {})
-        ) or {
+        existing_buckets = dict(getattr(self, "_bucket_registry", {})) or {
             (bucket.usage_metric, int(bucket.per_seconds)): bucket
             for bucket in self._buckets
         }
