@@ -135,6 +135,8 @@ def get_config(model_name: str) -> PerModelConfig:
 limiter = RateLimiter(get_config, backend=RedisBackendBuilder(redis_client))
 ```
 
+Models that share a `model_family` must also share the same live quota definition. If two model names need different limits, give them different `model_family` values instead of reusing one family name.
+
 ### Backends
 
 ```python

@@ -38,7 +38,7 @@ class PerModelConfig(BaseModel):
 
     model_family: str | None = Field(
         default=None,
-        description="Optional identifier for rate limiting purposes. Multiple model versions can share the same model_family to count against the same quota. Defaults to the model name if not specified.",
+        description="Optional identifier for rate limiting purposes. Multiple model versions can share the same model_family to count against the same quota, but all models that resolve to the same model_family must expose identical quotas and unlimited-vs-limited behavior within a limiter instance. Defaults to the model name if not specified.",
     )
 
     @field_validator("model_family", mode="before")

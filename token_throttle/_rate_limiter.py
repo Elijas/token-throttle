@@ -58,6 +58,40 @@ def _resolved_model_family(cfg: PerModelConfig) -> str:
     return cfg.get_model_family()
 
 
+def _config_signature(
+    cfg: PerModelConfig,
+) -> tuple[bool, tuple[tuple[str, int, float], ...]]:
+    """
+    Stable family-level config fingerprint.
+
+    ``model_family`` groups models onto the same backend, so every model that
+    resolves to the same family must expose identical quota structure and
+    unlimited-vs-limited behavior.
+    """
+    if cfg.is_unlimited:
+        return True, ()
+
+    snapshot = tuple(
+        sorted(
+            (metric, per_seconds, float(limit))
+            for (metric, per_seconds), limit in _quotas_snapshot(cfg).items()
+        )
+    )
+    return False, snapshot
+
+
+def _describe_config_signature(
+    signature: tuple[bool, tuple[tuple[str, int, float], ...]],
+) -> str:
+    is_unlimited, snapshot = signature
+    if is_unlimited:
+        return "unlimited"
+    return ", ".join(
+        f"{metric}/{per_seconds}s={limit}"
+        for metric, per_seconds, limit in snapshot
+    )
+
+
 def _project_refund_scope(
     reserved_usage: FrozenUsage,
     actual_usage: FrozenUsage,
@@ -185,6 +219,7 @@ class RateLimiter(BaseRateLimiter):
         usage = frozen_usage(usage)
         limit_config = self._config_getter(model)
         resolved_model_family = self._validated_model_family(model, limit_config)
+        self._validate_shared_model_family_config(model, limit_config)
         if limit_config.is_unlimited:
             reservation = self._unlimited_reservation(usage, model)
             self._remember_model_family(model, resolved_model_family)
@@ -211,6 +246,7 @@ class RateLimiter(BaseRateLimiter):
 
         limit_config = self._config_getter(model)
         resolved_model_family = self._validated_model_family(model, limit_config)
+        self._validate_shared_model_family_config(model, limit_config)
         if limit_config.is_unlimited:
             usage = frozendict()
             if limit_config.usage_counter is not None:
@@ -319,6 +355,7 @@ class RateLimiter(BaseRateLimiter):
         value = validate_max_capacity_value(value)
         limit_config = self._config_getter(model)
         resolved_model_family = self._validated_model_family(model, limit_config)
+        self._validate_shared_model_family_config(model, limit_config)
         if limit_config.is_unlimited:
             raise ValueError("Cannot set max capacity: model has unlimited quotas")
         model_family = limit_config.get_model_family()
@@ -506,6 +543,46 @@ class RateLimiter(BaseRateLimiter):
         model_family: str,
     ) -> None:
         self._model_name_to_model_family[model] = model_family
+
+    def _validate_shared_model_family_config(
+        self,
+        model: str,
+        limit_config: PerModelConfig,
+    ) -> None:
+        model_family = limit_config.get_model_family()
+        current_signature = _config_signature(limit_config)
+        conflicts: list[tuple[str, str]] = []
+
+        for known_model, known_family in sorted(self._model_name_to_model_family.items()):
+            if known_family != model_family or known_model == model:
+                continue
+
+            known_config = self._config_getter(known_model)
+            known_resolved_family = self._validated_model_family(known_model, known_config)
+            if known_resolved_family != model_family:
+                continue
+
+            known_signature = _config_signature(known_config)
+            if known_signature != current_signature:
+                conflicts.append(
+                    (known_model, _describe_config_signature(known_signature))
+                )
+
+        if not conflicts:
+            return
+
+        conflicts_desc = "; ".join(
+            f"{conflict_model} -> {conflict_signature}"
+            for conflict_model, conflict_signature in conflicts
+        )
+        raise ValueError(
+            f"Config for model_family '{model_family}' is inconsistent across "
+            f"models. Model '{model}' resolves to "
+            f"{_describe_config_signature(current_signature)}, but {conflicts_desc}. "
+            "Models sharing a model_family must return identical quotas and "
+            "unlimited behavior for a limiter instance. Use different "
+            "model_family values for different limits."
+        )
 
     def _remember_runtime_max_capacity(
         self,

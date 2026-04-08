@@ -148,6 +148,49 @@ class TestBackendCaching:
         backend_a.wait_for_capacity.assert_called_once()
         backend_b.wait_for_capacity.assert_called_once()
 
+    def test_same_model_family_with_different_quotas_raises(self):
+        builder, mock_backend = make_mock_backend_builder()
+
+        def config_getter(model_name: str) -> PerModelConfig:
+            limit = 100 if model_name == "large" else 1
+            return PerModelConfig(
+                quotas=UsageQuotas(
+                    [Quota(metric="requests", limit=limit, per_seconds=60)]
+                ),
+                model_family="shared-family",
+            )
+
+        limiter = SyncRateLimiter(config_getter, backend=builder)
+
+        limiter.acquire_capacity({"requests": 1}, model="large")
+
+        with pytest.raises(ValueError, match="inconsistent across models"):
+            limiter.acquire_capacity({"requests": 1}, model="small")
+
+        builder.build.assert_called_once()
+        assert mock_backend.wait_for_capacity.call_count == 1
+
+    def test_same_model_family_allows_global_quota_refresh_when_models_agree(self):
+        builder, mock_backend = make_mock_backend_builder()
+        current_limit = 10
+
+        def config_getter(model_name: str) -> PerModelConfig:
+            return PerModelConfig(
+                quotas=UsageQuotas(
+                    [Quota(metric="requests", limit=current_limit, per_seconds=60)]
+                ),
+                model_family="shared-family",
+            )
+
+        limiter = SyncRateLimiter(config_getter, backend=builder)
+
+        limiter.acquire_capacity({"requests": 1}, model="a")
+
+        current_limit = 20
+        limiter.acquire_capacity({"requests": 1}, model="b")
+
+        mock_backend.set_max_capacity.assert_called_once_with("requests", 60, 20)
+
 
 class TestAcquireCapacityForRequestMerge:
     """Tests for acquire_capacity_for_request merging usage_counter + extra_usage."""
