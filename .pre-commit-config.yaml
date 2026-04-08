@@ -1,0 +1,13 @@
+# Run with: prek run --all-files
+# Install git hook: prek install
+#
+# Pinned to match the ruff version resolved in uv.lock. When bumping the
+# lockfile's ruff, update this rev in the same commit so local hooks and
+# CI stay in sync. `prek auto-update` will bump to the latest release.
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.5
+    hooks:
+      - id: ruff-check
+        args: [--fix]
+      - id: ruff-format
