@@ -6,10 +6,10 @@ from typing import ClassVar
 
 from frozendict import frozendict
 
-from token_throttle._interfaces._callbacks import RateLimiterCallbacks
 from token_throttle._interfaces._callable_utils import (
     suppress_current_task_cancellation,
 )
+from token_throttle._interfaces._callbacks import RateLimiterCallbacks
 from token_throttle._interfaces._interfaces import (
     PerModelConfig,
     RateLimiterBackend,

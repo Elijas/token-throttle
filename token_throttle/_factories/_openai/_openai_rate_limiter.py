@@ -16,6 +16,8 @@ from token_throttle._interfaces._interfaces import PerModelConfig
 from token_throttle._interfaces._models import Quota, SecondsIn, UsageQuotas
 from token_throttle._limiter_backends._redis._backend import RedisBackendBuilder
 from token_throttle._rate_limiter import RateLimiter
+
+
 def create_openai_redis_rate_limiter(
     redis_client: redis.Redis,
     *,

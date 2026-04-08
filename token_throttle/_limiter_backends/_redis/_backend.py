@@ -17,10 +17,10 @@ except ImportError as exc:
     ) from exc
 from frozendict import frozendict
 
-from token_throttle._interfaces._callbacks import RateLimiterCallbacks
 from token_throttle._interfaces._callable_utils import (
     suppress_current_task_cancellation,
 )
+from token_throttle._interfaces._callbacks import RateLimiterCallbacks
 from token_throttle._interfaces._interfaces import (
     PerModelConfig,
     RateLimiterBackend,
@@ -389,7 +389,14 @@ class RedisBackend(RateLimiterBackend):
             except asyncio.CancelledError:
                 if task.done():
                     break
-            except BaseException:
+            except BaseException:  # noqa: BLE001
+                # Best-effort observation of a shielded task's final outcome.
+                # The caller has already received CancelledError; we only need
+                # to report task state so the caller can decide whether to
+                # refund capacity. Any further exception (including
+                # SystemExit/KeyboardInterrupt from a subsequent cancel of the
+                # shield) terminates observation without altering the caller's
+                # cancellation flow.
                 break
         return task.done() and not task.cancelled() and task.exception() is None
 

@@ -151,11 +151,11 @@ __all__ = [
     "count_chat_input_tokens",
     "create_logging_callbacks",
     "create_loguru_callbacks",
-    "openai_model_family_getter",
     "create_sync_logging_callbacks",
     "create_sync_loguru_callbacks",
     "frozen_usage",
     "get_encoding",
+    "openai_model_family_getter",
 ]
 
 if _HAS_REDIS:

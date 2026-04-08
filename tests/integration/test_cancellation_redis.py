@@ -485,9 +485,9 @@ class TestRedisPipelineExecuteCancellationRefundsCapacity:
         )
         await asyncio.wait_for(entered_post_write.wait(), timeout=5.0)
 
+        task.cancel()
+        release_post_write.set()
         with pytest.raises(asyncio.CancelledError):
-            task.cancel()
-            release_post_write.set()
             await task
 
         cap_after = await _get_redis_capacity(backend)

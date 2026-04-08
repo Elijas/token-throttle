@@ -214,8 +214,12 @@ target-version = "py312"
     "ASYNC109",  # timeout is a public API parameter, not asyncio.timeout()
     "PLR0915",   # await_for_capacity is inherently complex (capacity polling + reconfiguration)
 ]
+"token_throttle/_limiter_backends/_memory/_sync_backend.py" = [
+    "PLR0915",   # wait_for_capacity is inherently complex (capacity polling + reconfiguration)
+]
 "token_throttle/_limiter_backends/_redis/_backend.py" = [
     "ASYNC109",  # timeout is a public API parameter, not asyncio.timeout()
+    "PLR0915",   # await_for_capacity is inherently complex (capacity polling + reconfiguration)
 ]
 "token_throttle/_rate_limiter.py" = [
     "ASYNC109",  # timeout is a public API parameter, not asyncio.timeout()
