@@ -403,19 +403,13 @@ class TestRedisDoubleCancellationNoCapacityLeak:
 
 
 @pytest.mark.redis
-class TestRedisPipelineExecuteCancellationRefundsCapacity:
-    """CancelledError during pipeline.execute() in _set_capacities_unsafe refunds capacity.
+class TestRedisPreCommitCancellationDoesNotOverRefund:
+    """CancelledError before the Redis write commits must not create capacity."""
 
-    Regression: consumed=True was set AFTER _set_capacities_unsafe, so a
-    CancelledError during the pipeline read-responses phase left capacity
-    consumed server-side with no refund (consumed stayed False).
-    """
-
-    async def test_cancellation_during_pipeline_execute_refunds_capacity(
+    async def test_cancellation_before_capacity_write_does_not_mint_tokens(
         self,
         redis_client,
     ):
-        """CancelledError after _set_capacities_unsafe completes triggers refund."""
         builder = RedisBackendBuilder(redis_client)
         config = _make_config(limit=100)
         backend = builder.build(config)
@@ -425,28 +419,76 @@ class TestRedisPipelineExecuteCancellationRefundsCapacity:
         cap_before = await _get_redis_capacity(backend)
         assert cap_before == pytest.approx(10.0, abs=1.0)
 
-        # Monkeypatch _set_capacities_unsafe to call the real impl then raise
-        # CancelledError — simulates cancellation arriving during
-        # pipeline.execute()'s response-read phase.  Fires only once so the
-        # shielded refund can use the real method.
+        # Cancel before the write executes. Restore the real method first so a
+        # regression-triggered refund path does not recurse through the stub.
         real_set = backend._set_capacities_unsafe
-        fire_once = True
 
         async def cancelling_set(*args, **kwargs):
-            nonlocal fire_once
-            await real_set(*args, **kwargs)
-            if fire_once:
-                fire_once = False
-                backend._set_capacities_unsafe = real_set
-                raise asyncio.CancelledError
+            backend._set_capacities_unsafe = real_set
+            raise asyncio.CancelledError
 
         backend._set_capacities_unsafe = cancelling_set
 
         with pytest.raises(asyncio.CancelledError):
             await backend.await_for_capacity(frozendict({"requests": 5.0}), timeout=0)
 
-        # Give the shielded refund time to complete
+        # Give any shielded cleanup path time to complete.
         await asyncio.sleep(0.5)
+
+        cap_after = await _get_redis_capacity(backend)
+        assert cap_after == pytest.approx(cap_before, abs=1.0), (
+            f"Capacity was minted! Expected ~{cap_before}, got {cap_after}. "
+            f"If ~15, the cancellation path refunded capacity that was never consumed."
+        )
+
+
+@pytest.mark.redis
+class TestRedisPipelineExecuteCancellationRefundsCapacity:
+    """CancelledError during pipeline.execute() in _set_capacities_unsafe refunds capacity.
+
+    Regression: once the Redis write has committed, cancellation of the outer
+    waiter must still refund capacity even if the shielded write task has not
+    quite returned control to await_for_capacity() yet.
+    """
+
+    async def test_cancellation_during_pipeline_execute_refunds_capacity(
+        self,
+        redis_client,
+    ):
+        """CancelledError after the write commits still triggers refund."""
+        builder = RedisBackendBuilder(redis_client)
+        config = _make_config(limit=100)
+        backend = builder.build(config)
+
+        # Consume 90, leaving 10
+        await backend.await_for_capacity(frozendict({"requests": 90.0}))
+        cap_before = await _get_redis_capacity(backend)
+        assert cap_before == pytest.approx(10.0, abs=1.0)
+
+        # Monkeypatch _set_capacities_unsafe to commit the Redis write, then
+        # pause before returning so the OUTER task can be cancelled while the
+        # shielded write task is still finishing.
+        real_set = backend._set_capacities_unsafe
+        entered_post_write = asyncio.Event()
+        release_post_write = asyncio.Event()
+
+        async def delaying_set(*args, **kwargs):
+            await real_set(*args, **kwargs)
+            backend._set_capacities_unsafe = real_set
+            entered_post_write.set()
+            await release_post_write.wait()
+
+        backend._set_capacities_unsafe = delaying_set
+
+        task = asyncio.create_task(
+            backend.await_for_capacity(frozendict({"requests": 5.0}), timeout=0)
+        )
+        await asyncio.wait_for(entered_post_write.wait(), timeout=5.0)
+
+        with pytest.raises(asyncio.CancelledError):
+            task.cancel()
+            release_post_write.set()
+            await task
 
         cap_after = await _get_redis_capacity(backend)
         assert cap_after == pytest.approx(cap_before, abs=1.0), (

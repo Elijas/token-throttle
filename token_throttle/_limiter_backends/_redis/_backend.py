@@ -370,6 +370,29 @@ class RedisBackend(RateLimiterBackend):
             return self._compute_sleep(usage, preconsumption, buckets=buckets)
         return self._compute_sleep(usage, preconsumption)
 
+    async def _wait_for_task_outcome_while_cancelled(
+        self,
+        task: asyncio.Task[None],
+    ) -> bool:
+        """
+        Wait for a shielded write task to settle after outer-task cancellation.
+
+        The caller has already received ``CancelledError``.  We still need the
+        write task's final outcome to decide whether capacity was actually
+        recorded (and therefore must be refunded or preserved) before we
+        propagate cancellation.
+        """
+        while True:
+            try:
+                await asyncio.shield(task)
+                break
+            except asyncio.CancelledError:
+                if task.done():
+                    break
+            except BaseException:
+                break
+        return task.done() and not task.cancelled() and task.exception() is None
+
     async def _check_and_consume_capacity(
         self,
         usage_: FrozenUsage,
@@ -454,14 +477,23 @@ class RedisBackend(RateLimiterBackend):
                         capacity_amount - usage_amount
                     )
                 postconsumption_capacities = frozendict(postconsumption_dict)
+                write_task = asyncio.create_task(
+                    self._set_capacities_unsafe(
+                        postconsumption_capacities,
+                        pipeline=pipeline,
+                        current_time=current_time,
+                        buckets=buckets,
+                    )
+                )
+                try:
+                    await asyncio.shield(write_task)
+                except asyncio.CancelledError:
+                    consumed = await self._wait_for_task_outcome_while_cancelled(
+                        write_task
+                    )
+                    raise
                 consumed = True
                 consumed_monotonic = time.monotonic()
-                await self._set_capacities_unsafe(
-                    postconsumption_capacities,
-                    pipeline=pipeline,
-                    current_time=current_time,
-                    buckets=buckets,
-                )
             await self._fresh_start_buckets_callback(fresh_start_buckets)
             if self._callbacks and self._callbacks.on_capacity_consumed:
                 await self._invoke_callback_safe(
@@ -550,13 +582,25 @@ class RedisBackend(RateLimiterBackend):
                         capacity_amount - usage_amount
                     )
                 postconsumption_capacities = frozendict(postconsumption_dict)
-                await self._set_capacities_unsafe(
-                    postconsumption_capacities,
-                    pipeline=pipeline,
-                    current_time=current_time,
-                    allow_negative=True,
-                    buckets=buckets,
+                write_task = asyncio.create_task(
+                    self._set_capacities_unsafe(
+                        postconsumption_capacities,
+                        pipeline=pipeline,
+                        current_time=current_time,
+                        allow_negative=True,
+                        buckets=buckets,
+                    )
                 )
+                try:
+                    await asyncio.shield(write_task)
+                except asyncio.CancelledError:
+                    consumed = await self._wait_for_task_outcome_while_cancelled(
+                        write_task
+                    )
+                    if not consumed:
+                        raise
+                    suppress_current_task_cancellation()
+                    return
                 consumed = True
             await self._fresh_start_buckets_callback(fresh_start_buckets)
             if self._callbacks and self._callbacks.on_capacity_consumed:
