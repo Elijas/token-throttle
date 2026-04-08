@@ -81,6 +81,37 @@ class TestAcquireCapacityValidation:
         with pytest.raises(ValueError, match="changed model_family"):
             limiter.acquire_capacity({"tokens": 1, "requests": 1}, model="gpt-4")
 
+    def test_same_model_can_toggle_unlimited_without_changing_model_family(self):
+        builder, mock_backend = make_mock_backend_builder()
+        use_unlimited = True
+
+        def config_getter(_model_name: str) -> PerModelConfig:
+            if use_unlimited:
+                return PerModelConfig(
+                    quotas=UsageQuotas.unlimited(),
+                    model_family="family-a",
+                )
+            return make_limited_config(model_family="family-a")
+
+        limiter = SyncRateLimiter(config_getter, backend=builder)
+
+        first = limiter.acquire_capacity({}, model="gpt-4")
+        assert first.is_unlimited is True
+
+        use_unlimited = False
+        second = limiter.acquire_capacity(
+            {"tokens": 1, "requests": 1},
+            model="gpt-4",
+        )
+
+        use_unlimited = True
+        third = limiter.acquire_capacity({}, model="gpt-4")
+
+        assert second.model_family == "family-a"
+        assert third.is_unlimited is True
+        builder.build.assert_called_once()
+        mock_backend.wait_for_capacity.assert_called_once()
+
     def test_unlimited_config_with_nonempty_usage_returns_unlimited_reservation(self):
         builder, _ = make_mock_backend_builder()
         limiter = SyncRateLimiter(make_unlimited_config(), backend=builder)

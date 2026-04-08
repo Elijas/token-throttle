@@ -47,8 +47,14 @@ def _reservation_bucket_ids(cfg: PerModelConfig) -> frozenset[BucketId]:
 
 
 def _resolved_model_family(cfg: PerModelConfig) -> str:
-    """Stable routing key used to detect unsupported model remaps."""
-    return _UNLIMITED_FLAG if cfg.is_unlimited else cfg.get_model_family()
+    """
+    Stable routing key used to detect unsupported model remaps.
+
+    Unlimited configs still keep their resolved ``model_family`` so a callable
+    config can toggle limiting on and off without looking like a backend route
+    change.
+    """
+    return cfg.get_model_family()
 
 
 def _project_refund_scope(
