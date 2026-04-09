@@ -198,8 +198,9 @@ class SyncRedisBucket:
         allow_negative: False for acquire (blocking guarantees non-negative),
         True for consume_capacity (speedometer overshoot) and refund_capacity
         (must preserve negative debt for natural refill recovery).
-        execute=False requires an explicit pipeline so the caller can execute
-        the queued writes later.
+        When execute=True (default), queued writes are executed immediately,
+        including on a caller-supplied pipeline. Pass execute=False with an
+        explicit pipeline to batch the writes yourself.
         """
         own_pipeline = pipeline is None
         if own_pipeline and not execute:
@@ -214,7 +215,7 @@ class SyncRedisBucket:
         pipeline.set(self._last_checked_key, current_time)
         pipeline.set(self._capacity_key, new_capacity)
 
-        if execute and own_pipeline:
+        if execute:
             pipeline.execute()
 
     def calculate_capacity(

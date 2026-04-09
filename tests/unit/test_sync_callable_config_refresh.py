@@ -7,6 +7,7 @@ import warnings
 
 import pytest
 
+from token_throttle._interfaces._callbacks import SyncRateLimiterCallbacks
 from token_throttle._interfaces._interfaces import (
     PerModelConfig,
     SyncRateLimiterBackend,
@@ -297,6 +298,59 @@ class TestSyncCallableConfigMetricSetChange:
                     "test-model",
                     timeout=0,
                 )
+
+    def test_runtime_max_capacity_stays_visible_while_metric_set_rebuilds(self):
+        """Waiters must not observe the stale static quota during a rebuild."""
+        use_expanded = False
+        wait_started = threading.Event()
+
+        def config_getter(model_name: str) -> PerModelConfig:
+            quotas = [Quota(metric="tokens", limit=100, per_seconds=1)]
+            if use_expanded:
+                quotas.append(Quota(metric="requests", limit=10, per_seconds=60))
+            return PerModelConfig(
+                quotas=UsageQuotas(quotas), model_family="test-family"
+            )
+
+        def on_wait_start(**_kwargs) -> None:
+            wait_started.set()
+
+        limiter = SyncRateLimiter(
+            config_getter,
+            backend=DelayedPrepareSyncMemoryBackendBuilder(sleep_interval=0.01),
+            callbacks=SyncRateLimiterCallbacks(on_wait_start=on_wait_start),
+        )
+        limiter.acquire_capacity({"tokens": 100}, "test-model")
+        limiter.set_max_capacity("test-model", "tokens", 1, 200)
+
+        result: dict[str, object] = {}
+
+        def waiter() -> None:
+            try:
+                result["reservation"] = limiter.acquire_capacity(
+                    {"tokens": 150},
+                    "test-model",
+                    timeout=1.0,
+                )
+            except Exception as exc:
+                result["error"] = exc
+
+        thread = threading.Thread(target=waiter)
+        thread.start()
+        assert wait_started.wait(timeout=0.2)
+
+        use_expanded = True
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            limiter.acquire_capacity(
+                {"tokens": 0, "requests": 0},
+                "test-model",
+            )
+
+        thread.join(timeout=2.0)
+        assert not thread.is_alive()
+        assert "error" not in result
+        assert result["reservation"].usage["tokens"] == 150
 
 
 class TestSyncCallableConfigMetricSetStateTransfer:
@@ -688,6 +742,40 @@ class BlockingPrepareSyncMemoryBackendBuilder(SyncMemoryBackendBuilder):
             callbacks=callbacks,
             prepare_started=self.prepare_started,
             release_prepare=self.release_prepare,
+        )
+
+
+class DelayedPrepareSyncMemoryBackend(SyncMemoryBackend):
+    """Keep the post-prepare state visible long enough to expose rebuild races."""
+
+    def prepare_reconfigured_backend(
+        self,
+        new_backend: SyncRateLimiterBackend,
+        cfg: PerModelConfig,
+    ) -> SyncRateLimiterBackend:
+        backend = super().prepare_reconfigured_backend(new_backend, cfg)
+        time.sleep(0.05)
+        return backend
+
+
+class DelayedPrepareSyncMemoryBackendBuilder(SyncMemoryBackendBuilder):
+    """Build backends that pause after installing rebuilt bucket state."""
+
+    def build(self, cfg, *, callbacks=None):
+        buckets = [
+            MemoryBucket(
+                metric=quota.metric,
+                per_seconds=quota.per_seconds,
+                limit=float(quota.limit),
+                model_family=cfg.get_model_family(),
+            )
+            for quota in cfg.quotas
+        ]
+        return DelayedPrepareSyncMemoryBackend(
+            buckets=buckets,
+            limit_config=cfg,
+            sleep_interval=self._sleep_interval,
+            callbacks=callbacks,
         )
 
 

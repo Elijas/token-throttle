@@ -5,6 +5,7 @@ import warnings
 
 import pytest
 
+from token_throttle._interfaces._callbacks import RateLimiterCallbacks
 from token_throttle._interfaces._interfaces import (
     PerModelConfig,
     RateLimiterBackend,
@@ -295,6 +296,46 @@ class TestCallableConfigMetricSetChange:
                     "test-model",
                     timeout=0,
                 )
+
+    async def test_runtime_max_capacity_stays_visible_while_metric_set_rebuilds(self):
+        """Waiters must not observe the stale static quota during a rebuild."""
+        use_expanded = False
+        wait_started = asyncio.Event()
+
+        def config_getter(model_name: str) -> PerModelConfig:
+            quotas = [Quota(metric="tokens", limit=100, per_seconds=1)]
+            if use_expanded:
+                quotas.append(Quota(metric="requests", limit=10, per_seconds=60))
+            return PerModelConfig(
+                quotas=UsageQuotas(quotas), model_family="test-family"
+            )
+
+        async def on_wait_start(**_kwargs) -> None:
+            wait_started.set()
+
+        limiter = RateLimiter(
+            config_getter,
+            backend=DelayedPrepareMemoryBackendBuilder(sleep_interval=0.01),
+            callbacks=RateLimiterCallbacks(on_wait_start=on_wait_start),
+        )
+        await limiter.acquire_capacity({"tokens": 100}, "test-model")
+        await limiter.set_max_capacity("test-model", "tokens", 1, 200)
+
+        waiter = asyncio.create_task(
+            limiter.acquire_capacity({"tokens": 150}, "test-model", timeout=1.0)
+        )
+        await asyncio.wait_for(wait_started.wait(), timeout=0.2)
+
+        use_expanded = True
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            await limiter.acquire_capacity(
+                {"tokens": 0, "requests": 0},
+                "test-model",
+            )
+
+        reservation = await waiter
+        assert reservation.usage["tokens"] == 150
 
 
 class TestCallableConfigMetricSetStateTransfer:
@@ -690,6 +731,40 @@ class BlockingPrepareMemoryBackendBuilder(MemoryBackendBuilder):
             callbacks=callbacks,
             prepare_started=self.prepare_started,
             release_prepare=self.release_prepare,
+        )
+
+
+class DelayedPrepareMemoryBackend(MemoryBackend):
+    """Keep the post-prepare state visible long enough to expose rebuild races."""
+
+    async def prepare_reconfigured_backend(
+        self,
+        new_backend: RateLimiterBackend,
+        cfg: PerModelConfig,
+    ) -> RateLimiterBackend:
+        backend = await super().prepare_reconfigured_backend(new_backend, cfg)
+        await asyncio.sleep(0.05)
+        return backend
+
+
+class DelayedPrepareMemoryBackendBuilder(MemoryBackendBuilder):
+    """Build backends that pause after installing rebuilt bucket state."""
+
+    def build(self, cfg, *, callbacks=None):
+        buckets = [
+            MemoryBucket(
+                metric=quota.metric,
+                per_seconds=quota.per_seconds,
+                limit=float(quota.limit),
+                model_family=cfg.get_model_family(),
+            )
+            for quota in cfg.quotas
+        ]
+        return DelayedPrepareMemoryBackend(
+            buckets=buckets,
+            limit_config=cfg,
+            sleep_interval=self._sleep_interval,
+            callbacks=callbacks,
         )
 
 

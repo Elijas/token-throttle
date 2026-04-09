@@ -146,6 +146,18 @@ class TestAsyncBucketUsesServerTime:
         mock_redis.time.assert_not_called()
         mock_redis.pipeline.assert_not_called()
 
+    async def test_set_capacity_with_explicit_pipeline_executes_by_default(
+        self, bucket, mock_redis
+    ):
+        """Explicit pipelines should still execute unless execute=False is passed."""
+        pipeline = MagicMock()
+        pipeline.execute = AsyncMock(return_value=[None, None])
+
+        await bucket.set_capacity(5.0, pipeline=pipeline, current_time=999.0)
+
+        pipeline.execute.assert_awaited_once()
+        mock_redis.time.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # Sync bucket integration — standalone paths use Redis server time
@@ -206,3 +218,14 @@ class TestSyncBucketUsesServerTime:
 
         mock_redis.time.assert_not_called()
         mock_redis.pipeline.assert_not_called()
+
+    def test_set_capacity_with_explicit_pipeline_executes_by_default(
+        self, bucket, mock_redis
+    ):
+        """Explicit pipelines should still execute unless execute=False is passed."""
+        pipeline = MagicMock()
+
+        bucket.set_capacity(5.0, pipeline=pipeline, current_time=999.0)
+
+        pipeline.execute.assert_called_once()
+        mock_redis.time.assert_not_called()

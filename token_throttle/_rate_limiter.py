@@ -15,7 +15,9 @@ from token_throttle._interfaces._models import (
     BucketId,
     CapacityReservation,
     FrozenUsage,
+    Quota,
     Usage,
+    UsageQuotas,
     frozen_usage,
 )
 from token_throttle._validation import (
@@ -89,6 +91,42 @@ def _describe_config_signature(
     return ", ".join(
         f"{metric}/{per_seconds}s={limit}" for metric, per_seconds, limit in snapshot
     )
+
+
+def _cfg_with_preserved_runtime_max_capacity(
+    cfg: PerModelConfig,
+    *,
+    old_snapshot: dict[BucketId, float],
+    runtime_overrides: dict[BucketId, float] | None,
+) -> PerModelConfig:
+    """
+    Apply surviving runtime max-capacity overrides to a rebuild config.
+
+    Metric-set rebuilds reconstruct buckets from ``quota.limit``. If a bucket
+    still has a live ``set_max_capacity()`` override that should survive the
+    rebuild, bake that value into the config used for the rebuild so waiters
+    never observe the stale static limit between prepare/install and restore.
+    """
+    if not runtime_overrides:
+        return cfg
+
+    rebuilt_quotas: list[Quota] = []
+    updated = False
+    for quota in cfg.quotas:
+        bucket_id = (quota.metric, int(quota.per_seconds))
+        override = runtime_overrides.get(bucket_id)
+        if override is None or old_snapshot.get(bucket_id) != float(quota.limit):
+            rebuilt_quotas.append(quota)
+            continue
+        if float(quota.limit) == float(override):
+            rebuilt_quotas.append(quota)
+            continue
+        rebuilt_quotas.append(quota.model_copy(update={"limit": float(override)}))
+        updated = True
+
+    if not updated:
+        return cfg
+    return cfg.model_copy(update={"quotas": UsageQuotas(rebuilt_quotas)})
 
 
 def _project_refund_scope(
@@ -493,8 +531,17 @@ class RateLimiter(BaseRateLimiter):
                 UserWarning,
                 stacklevel=2,
             )
-            backend = self._backend.build(cfg, callbacks=self._callbacks)
-            backend = await old_backend.prepare_reconfigured_backend(backend, cfg)
+            rebuild_cfg = _cfg_with_preserved_runtime_max_capacity(
+                cfg,
+                old_snapshot=old_snapshot,
+                runtime_overrides=self._model_family_to_runtime_max_capacity.get(
+                    model_family
+                ),
+            )
+            backend = self._backend.build(rebuild_cfg, callbacks=self._callbacks)
+            backend = await old_backend.prepare_reconfigured_backend(
+                backend, rebuild_cfg
+            )
             await self._restore_runtime_max_capacity(
                 model_family,
                 old_snapshot=old_snapshot,
