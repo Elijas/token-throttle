@@ -61,6 +61,16 @@ class OpenAIUsageCounter:
                     + reserved_output_tokens
                 )
                 return frozendict({"tokens": tokens, "requests": 1})
+            # OpenAI Embeddings also accepts pre-tokenized payloads such as
+            # input=[1, 2, 3] or input=[[1, 2], [3, 4]].
+            pretokenized_tokens = _count_pretokenized_input_tokens(input_)
+            if pretokenized_tokens is not None:
+                return frozendict(
+                    {
+                        "tokens": pretokenized_tokens + reserved_output_tokens,
+                        "requests": 1,
+                    }
+                )
             tokens = (
                 count_structured_input_tokens(encoding, input_) + reserved_output_tokens
             )
@@ -204,6 +214,22 @@ def _parse_non_negative_int(value: object, field_name: str) -> int:
     if not math.isfinite(parsed) or parsed < 0 or not parsed.is_integer():
         raise ValueError(f"'{field_name}' must be a finite non-negative integer")
     return int(parsed)
+
+
+def _is_token_id(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _count_pretokenized_input_tokens(input_: object) -> int | None:
+    if not isinstance(input_, list):
+        return None
+    if all(_is_token_id(token) for token in input_):
+        return len(input_)
+    if all(isinstance(item, list) for item in input_) and all(
+        _is_token_id(token) for item in input_ for token in item
+    ):
+        return sum(len(item) for item in input_)
+    return None
 
 
 def _unsupported_content_part_error(part_type: str) -> ValueError:

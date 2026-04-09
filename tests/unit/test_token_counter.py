@@ -140,6 +140,28 @@ class TestOpenAIUsageCounterWithInput:
             )
 
 
+class TestOpenAIUsageCounterWithPretokenizedInput:
+    """Embeddings-style token-id arrays should count without text encoding."""
+
+    def test_input_token_id_list_counts_items(self):
+        counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
+        result = counter("text-embedding-3-small", input=[101, 102, 103])
+        assert result == frozendict({"tokens": 3, "requests": 1})
+
+    def test_input_nested_token_id_lists_counts_all_items(self):
+        counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
+        result = counter(
+            "text-embedding-3-small",
+            input=[[101, 102], [201, 202, 203]],
+        )
+        assert result == frozendict({"tokens": 5, "requests": 1})
+
+    def test_input_token_ids_reject_boolean_values(self):
+        counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
+        with pytest.raises(ValueError, match="must be of type str"):
+            counter("text-embedding-3-small", input=[True, 102])
+
+
 class TestOpenAIUsageCounterWithInputs:
     """Tests for OpenAIUsageCounter with the 'inputs' keyword."""
 
