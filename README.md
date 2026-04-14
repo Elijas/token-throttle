@@ -142,6 +142,11 @@ Models that share a `model_family` must also share the same live quota definitio
 `instructions`, tool/function definitions, and structured output schemas.
 Image/audio/file inputs are still unsupported; pass usage manually for those.
 
+Custom `usage_counter` callables receive the same kwargs you pass to
+`acquire_capacity_for_request()`. They can accept `**request` for the whole
+payload or only the named request fields they use; fixed-signature counters do
+not need to accept unrelated kwargs like `model`.
+
 ### Backends
 
 ```python
