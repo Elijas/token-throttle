@@ -183,6 +183,21 @@ class RateLimiterBackend(ABC):
         so that a full refill still takes exactly one time window.
         """
 
+    async def apply_configured_max_capacity(
+        self,
+        metric: str,
+        per_seconds: int,
+        value: float,
+    ) -> None:
+        """
+        Apply a config-driven max-capacity update.
+
+        Distinct from :meth:`set_max_capacity`, which is the explicit runtime
+        override API. Backends that do not need separate persistence semantics
+        can keep the default behaviour and delegate to :meth:`set_max_capacity`.
+        """
+        await self.set_max_capacity(metric, per_seconds, value)
+
     def supports_metric_set_change(self) -> bool:
         """
         Whether the backend can safely handle callable config metric-set changes.
@@ -289,6 +304,20 @@ class SyncRateLimiterBackend(ABC):
         value: float,
     ) -> None:
         """Dynamically change the max capacity for a specific bucket."""
+
+    def apply_configured_max_capacity(
+        self,
+        metric: str,
+        per_seconds: int,
+        value: float,
+    ) -> None:
+        """
+        Synchronous counterpart of ``apply_configured_max_capacity``.
+
+        The default falls back to ``set_max_capacity()`` for backwards
+        compatibility with custom backends.
+        """
+        self.set_max_capacity(metric, per_seconds, value)
 
     def supports_metric_set_change(self) -> bool:
         """

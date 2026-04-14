@@ -559,7 +559,11 @@ class RateLimiter(BaseRateLimiter):
         for bucket_id, new_limit in new_snapshot.items():
             if new_limit != old_snapshot[bucket_id]:
                 metric, per_seconds = bucket_id
-                await backend.set_max_capacity(metric, per_seconds, new_limit)
+                await backend.apply_configured_max_capacity(
+                    metric,
+                    per_seconds,
+                    new_limit,
+                )
                 changed_bucket_ids.add(bucket_id)
         self._clear_runtime_max_capacity(model_family, changed_bucket_ids)
         self._model_family_to_quotas[model_family] = new_snapshot

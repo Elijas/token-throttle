@@ -41,7 +41,7 @@ def test_dynamic_max_capacity_change(sync_redis_client):
 
     # Reduce max_capacity for requests from 10 to 3 via Redis directly.
     sync_redis_client.set(
-        "rate_limiting:dynamic_sync:requests:1:max_capacity",
+        "rate_limiting:dynamic_sync:requests:1:max_capacity_override",
         3,
     )
 

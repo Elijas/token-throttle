@@ -14,6 +14,7 @@ def make_mock_backend_builder():
     mock_backend = AsyncMock()
     mock_backend.await_for_capacity.return_value = None
     mock_backend.refund_capacity.return_value = None
+    mock_backend.apply_configured_max_capacity.return_value = None
 
     mock_builder = MagicMock()
     mock_builder.build.return_value = mock_backend
@@ -191,7 +192,9 @@ class TestBackendCaching:
         current_limit = 20
         await limiter.acquire_capacity({"requests": 1}, model="b")
 
-        mock_backend.set_max_capacity.assert_awaited_once_with("requests", 60, 20)
+        mock_backend.apply_configured_max_capacity.assert_awaited_once_with(
+            "requests", 60, 20
+        )
 
 
 class TestAcquireCapacityForRequestMerge:
