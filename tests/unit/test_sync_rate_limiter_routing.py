@@ -233,3 +233,21 @@ class TestAcquireCapacityForRequestMerge:
         called_usage = mock_backend.wait_for_capacity.call_args[0][0]
         assert float(called_usage["tokens"]) == pytest.approx(100.0)
         assert float(called_usage["requests"]) == pytest.approx(1.0)
+
+    def test_fixed_signature_counter_ignores_unrequested_kwargs(self):
+        builder, mock_backend = make_mock_backend_builder()
+
+        def fake_counter(messages):
+            return {"tokens": float(len(messages[0]["content"])), "requests": 1.0}
+
+        config = make_limited_config(usage_counter=fake_counter)
+        limiter = SyncRateLimiter(config, backend=builder)
+
+        limiter.acquire_capacity_for_request(
+            model="gpt-4",
+            messages=[{"role": "user", "content": "hello"}],
+        )
+
+        called_usage = mock_backend.wait_for_capacity.call_args[0][0]
+        assert float(called_usage["tokens"]) == pytest.approx(5.0)
+        assert float(called_usage["requests"]) == pytest.approx(1.0)

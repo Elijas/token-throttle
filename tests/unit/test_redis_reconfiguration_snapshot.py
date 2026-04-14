@@ -35,6 +35,10 @@ class FakeAsyncBucket:
         self._max_capacity_default = max_capacity
         self._rate_per_sec = max_capacity / per_seconds
 
+    @property
+    def configured_max_capacity(self) -> float:
+        return self._max_capacity_default
+
     async def set_max_capacity(self, value: float) -> None:
         self.max_capacity = value
         self._rate_per_sec = value / self.per_seconds
@@ -56,6 +60,10 @@ class FakeSyncBucket:
         self.max_capacity = max_capacity
         self._max_capacity_default = max_capacity
         self._rate_per_sec = max_capacity / per_seconds
+
+    @property
+    def configured_max_capacity(self) -> float:
+        return self._max_capacity_default
 
     def set_max_capacity(self, value: float) -> None:
         self.max_capacity = value

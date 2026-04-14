@@ -64,6 +64,18 @@ class TestPerModelConfig:
         )
         assert config.usage_counter is my_counter
 
+    def test_usage_counter_accepts_fixed_signature_callable(self):
+        def my_counter(messages) -> frozendict:
+            return frozendict({"requests": float(len(messages))})
+
+        quotas = UsageQuotas([Quota(metric="requests", limit=100.0)])
+        config = PerModelConfig(
+            quotas=quotas,
+            model_family="test",
+            usage_counter=my_counter,
+        )
+        assert config.usage_counter is my_counter
+
     def test_usage_counter_rejects_async_callable(self):
         async def my_counter(**_request) -> frozendict:
             return frozendict({"requests": 1.0})

@@ -150,6 +150,46 @@ class TestOpenAIUsageCounterWithInput:
                 input=[{"image_url": "https://example.com/a"}],
             )
 
+    def test_input_function_call_output_allows_nested_image_url_fields(self):
+        counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
+
+        result = counter(
+            "gpt-4",
+            input=[
+                {
+                    "type": "function_call_output",
+                    "call_id": "abc",
+                    "output": {
+                        "image_url": "https://example.com/a.png",
+                        "status": "ok",
+                    },
+                }
+            ],
+        )
+
+        assert result["requests"] == 1
+        assert result["tokens"] > 0
+
+    def test_input_function_call_output_allows_nested_file_fields(self):
+        counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
+
+        result = counter(
+            "gpt-4",
+            input=[
+                {
+                    "type": "function_call_output",
+                    "call_id": "abc",
+                    "output": {
+                        "file": "report.pdf",
+                        "status": "ok",
+                    },
+                }
+            ],
+        )
+
+        assert result["requests"] == 1
+        assert result["tokens"] > 0
+
 
 class TestOpenAIUsageCounterWithPretokenizedInput:
     """Embeddings-style token-id arrays should count without text encoding."""
