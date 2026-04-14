@@ -123,6 +123,17 @@ class TestOpenAIUsageCounterWithInput:
         result = counter("gpt-4", input="hi", max_output_tokens=50)
         assert result == frozendict({"tokens": 52, "requests": 1})
 
+    def test_input_instructions_are_counted(self):
+        counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
+        base = counter("gpt-4", input="hi")
+        instructions = "system prompt here"
+
+        result = counter("gpt-4", input="hi", instructions=instructions)
+
+        assert result == frozendict(
+            {"tokens": base["tokens"] + len(instructions), "requests": 1}
+        )
+
     def test_input_image_part_raises_value_error(self):
         counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
         with pytest.raises(ValueError, match="input_image"):
@@ -300,6 +311,92 @@ class TestOpenAIUsageCounterWithMessages:
                 }
             ],
         )
+        assert result["requests"] == 1
+        assert result["tokens"] > base["tokens"]
+
+    def test_messages_tools_are_counted(self):
+        counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
+        base = counter("gpt-4", messages=[{"role": "user", "content": "hi"}])
+
+        result = counter(
+            "gpt-4",
+            messages=[{"role": "user", "content": "hi"}],
+            tools=[
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "lookup",
+                        "description": "Find matching records",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "q": {
+                                    "type": "string",
+                                    "description": "Search query",
+                                }
+                            },
+                        },
+                    },
+                }
+            ],
+        )
+
+        assert result["requests"] == 1
+        assert result["tokens"] > base["tokens"]
+
+    def test_messages_response_format_is_counted(self):
+        counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
+        base = counter("gpt-4", messages=[{"role": "user", "content": "hi"}])
+
+        result = counter(
+            "gpt-4",
+            messages=[{"role": "user", "content": "hi"}],
+            response_format={
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "answer",
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "summary": {
+                                "type": "string",
+                                "description": "Brief answer",
+                            }
+                        },
+                    },
+                },
+            },
+        )
+
+        assert result["requests"] == 1
+        assert result["tokens"] > base["tokens"]
+
+    def test_messages_tools_allow_schema_fields_named_image_url(self):
+        counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
+        base = counter("gpt-4", messages=[{"role": "user", "content": "hi"}])
+
+        result = counter(
+            "gpt-4",
+            messages=[{"role": "user", "content": "hi"}],
+            tools=[
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "save_image",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "image_url": {
+                                    "type": "string",
+                                    "description": "Remote image URL",
+                                }
+                            },
+                        },
+                    },
+                }
+            ],
+        )
+
         assert result["requests"] == 1
         assert result["tokens"] > base["tokens"]
 

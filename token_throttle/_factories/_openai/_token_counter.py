@@ -15,6 +15,13 @@ _OUTPUT_BUDGET_KEYS = (
     "max_tokens",
 )
 _REQUEST_PAYLOAD_KEYS = ("input", "inputs", "messages")
+_REQUEST_CONTEXT_KEYS = (
+    "instructions",
+    "tools",
+    "functions",
+    "response_format",
+    "text",
+)
 _UNSUPPORTED_CONTENT_PART_TYPES = frozenset(
     {
         "input_audio",
@@ -46,11 +53,16 @@ class OpenAIUsageCounter:
         encoding = self._get_encoding(model)
         reserved_output_tokens = _get_reserved_output_tokens(request)
         payload_key = _get_request_payload_key(request)
+        request_context_tokens = _count_request_context_tokens(encoding, request)
 
         if payload_key == "input":
             input_ = request["input"]
             if isinstance(input_, str):
-                tokens = len(encoding.encode(input_)) + reserved_output_tokens
+                tokens = (
+                    len(encoding.encode(input_))
+                    + request_context_tokens
+                    + reserved_output_tokens
+                )
                 return frozendict({"tokens": tokens, "requests": 1})
             # List of strings — valid for OpenAI Embeddings API (e.g. input=["hello", "world"]).
             # NOTE: the `inputs` (plural) branch below handles the same shape under a
@@ -58,6 +70,7 @@ class OpenAIUsageCounter:
             if isinstance(input_, list) and all(isinstance(i, str) for i in input_):
                 tokens = (
                     sum(len(encoding.encode(i)) for i in input_)
+                    + request_context_tokens
                     + reserved_output_tokens
                 )
                 return frozendict({"tokens": tokens, "requests": 1})
@@ -67,12 +80,18 @@ class OpenAIUsageCounter:
             if pretokenized_tokens is not None:
                 return frozendict(
                     {
-                        "tokens": pretokenized_tokens + reserved_output_tokens,
+                        "tokens": (
+                            pretokenized_tokens
+                            + request_context_tokens
+                            + reserved_output_tokens
+                        ),
                         "requests": 1,
                     }
                 )
             tokens = (
-                count_structured_input_tokens(encoding, input_) + reserved_output_tokens
+                count_structured_input_tokens(encoding, input_)
+                + request_context_tokens
+                + reserved_output_tokens
             )
             return frozendict({"tokens": tokens, "requests": 1})
 
@@ -83,7 +102,9 @@ class OpenAIUsageCounter:
             ):
                 raise ValueError("'inputs' must be a list of strings")
             tokens = (
-                sum(len(encoding.encode(i)) for i in inputs) + reserved_output_tokens
+                sum(len(encoding.encode(i)) for i in inputs)
+                + request_context_tokens
+                + reserved_output_tokens
             )
             return frozendict({"tokens": tokens, "requests": 1})
 
@@ -98,6 +119,7 @@ class OpenAIUsageCounter:
                     encoding,
                     messages=cast("list[dict[str, object]]", messages),
                 )
+                + request_context_tokens
                 + reserved_output_tokens
             )
             return frozendict({"tokens": tokens, "requests": 1})
@@ -204,6 +226,64 @@ def _get_reserved_output_tokens(request: dict[str, object]) -> int:
             continue
         budgets.append(_parse_non_negative_int(raw_value, key))
     return max(budgets, default=0)
+
+
+def _count_request_context_tokens(
+    encoding: "Encoding",
+    request: dict[str, object],
+) -> int:
+    total = 0
+    for key in _REQUEST_CONTEXT_KEYS:
+        raw_value = request.get(key)
+        if raw_value is None:
+            continue
+        total += _count_request_context_fragments(
+            encoding,
+            raw_value,
+            invalid_error=f"Unsupported value for request field '{key}'",
+        )
+    return total
+
+
+def _count_request_context_fragments(
+    encoding: "Encoding",
+    value: object,
+    *,
+    invalid_error: str,
+) -> int:
+    if value is None:
+        return 0
+    if isinstance(value, bool):
+        return len(encoding.encode(str(value).lower()))
+    if isinstance(value, str):
+        return len(encoding.encode(value))
+    if isinstance(value, int | float):
+        parsed = float(value)
+        if not math.isfinite(parsed):
+            raise ValueError(invalid_error)
+        return len(encoding.encode(str(value)))
+    if isinstance(value, list):
+        return sum(
+            _count_request_context_fragments(
+                encoding,
+                item,
+                invalid_error=invalid_error,
+            )
+            for item in value
+        )
+    if isinstance(value, dict):
+        if not all(isinstance(key, str) for key in value):
+            raise ValueError(invalid_error)
+        return sum(
+            len(encoding.encode(key))
+            + _count_request_context_fragments(
+                encoding,
+                nested_value,
+                invalid_error=invalid_error,
+            )
+            for key, nested_value in value.items()
+        )
+    raise ValueError(invalid_error)
 
 
 def _parse_non_negative_int(value: object, field_name: str) -> int:
