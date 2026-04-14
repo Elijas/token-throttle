@@ -973,6 +973,26 @@ class RedisBackend(RateLimiterBackend):
         async with self._local_condition:
             self._local_condition.notify_all()
 
+    async def apply_configured_max_capacity(
+        self,
+        metric: str,
+        per_seconds: int,
+        value: float,
+    ) -> None:
+        buckets = self._snapshot_buckets()
+        bucket = self._find_bucket(
+            buckets,
+            metric,
+            per_seconds,
+        )
+        if bucket is None:
+            raise ValueError(f"Bucket '{metric}/{per_seconds}s' not found")
+        async with await self._lock(timeout=LOCK_TIMEOUT_SECONDS, buckets=buckets):
+            await bucket.clear_max_capacity_override()
+            bucket.set_configured_max_capacity(value)
+        async with self._local_condition:
+            self._local_condition.notify_all()
+
     async def prepare_reconfigured_backend(
         self,
         new_backend: RateLimiterBackend,
@@ -1003,7 +1023,16 @@ class RedisBackend(RateLimiterBackend):
                     raise ValueError(
                         f"Bucket '{quota.metric}/{quota.per_seconds}s' not found",
                     )
-                await bucket.set_max_capacity(float(quota.limit))
+                current_bucket = self._find_bucket(
+                    current_buckets,
+                    quota.metric,
+                    int(quota.per_seconds),
+                )
+                if current_bucket is not None and float(
+                    current_bucket.configured_max_capacity
+                ) != float(quota.limit):
+                    await bucket.clear_max_capacity_override()
+                bucket.set_configured_max_capacity(float(quota.limit))
 
             self.install_reconfigured_state(
                 buckets=list(new_buckets),

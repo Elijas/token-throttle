@@ -5,6 +5,7 @@ enabling adaptive rate limiting scenarios where limits change dynamically.
 """
 
 import asyncio
+import json
 import time
 from unittest.mock import AsyncMock
 
@@ -108,6 +109,26 @@ class TestGetMaxCapacity:
         assert result == quota.limit
         assert result == 20.0
 
+    def test_ignores_legacy_max_capacity_key_from_previous_versions(
+        self, bucket, mock_redis, quota
+    ):
+        """Only the dedicated runtime-override key should affect fresh processes."""
+
+        def get_side_effect(key: str):
+            legacy_key = f"{bucket.full_redis_key}:max_capacity"
+            if key == legacy_key:
+                return b"5.0"
+            if key == bucket._max_capacity_key:
+                return None
+            return None
+
+        mock_redis.get.side_effect = get_side_effect
+
+        result = asyncio.run(bucket.get_max_capacity())
+
+        assert result == quota.limit
+        mock_redis.get.assert_called_once_with(bucket._max_capacity_key)
+
     def test_handles_invalid_redis_value(self, bucket, mock_redis, quota):
         """get_max_capacity() returns default for invalid Redis values."""
         mock_redis.get.return_value = b"not-a-number"
@@ -140,7 +161,13 @@ class TestSetMaxCapacity:
         """set_max_capacity() stores the value in Redis."""
         asyncio.run(bucket.set_max_capacity(5.0))
 
-        mock_redis.set.assert_called_once_with(bucket._max_capacity_key, 5.0)
+        mock_redis.set.assert_called_once()
+        key, payload = mock_redis.set.call_args.args
+        assert key == bucket._max_capacity_key
+        assert json.loads(payload) == {
+            "configured_max_capacity": 20.0,
+            "override_max_capacity": 5.0,
+        }
 
     def test_updates_cache_immediately(self, bucket, mock_redis):
         """set_max_capacity() updates local cache immediately."""
@@ -273,38 +300,58 @@ class TestUpdateMaxCapacityFromResult:
         """None input falls back to default max_capacity."""
         bucket.update_max_capacity_from_result(None)
 
-        assert bucket._max_capacity_cached == quota.limit
+        assert bucket._max_capacity_cached is None
+        assert bucket.max_capacity == quota.limit
         assert bucket._rate_per_sec == pytest.approx(float(quota.limit))
 
     def test_invalid_bytes_falls_back_to_default(self, bucket, quota):
         """Non-numeric bytes input falls back to default."""
         bucket.update_max_capacity_from_result(b"not-a-number")
 
-        assert bucket._max_capacity_cached == quota.limit
+        assert bucket._max_capacity_cached is None
+        assert bucket.max_capacity == quota.limit
 
     def test_nan_falls_back_to_default(self, bucket, quota):
         """NaN bytes input falls back to default."""
         bucket.update_max_capacity_from_result(b"nan")
 
-        assert bucket._max_capacity_cached == quota.limit
+        assert bucket._max_capacity_cached is None
+        assert bucket.max_capacity == quota.limit
 
     def test_inf_falls_back_to_default(self, bucket, quota):
         """Inf bytes input falls back to default."""
         bucket.update_max_capacity_from_result(b"inf")
 
-        assert bucket._max_capacity_cached == quota.limit
+        assert bucket._max_capacity_cached is None
+        assert bucket.max_capacity == quota.limit
 
     def test_negative_falls_back_to_default(self, bucket, quota):
         """Negative value falls back to default."""
         bucket.update_max_capacity_from_result(b"-5.0")
 
-        assert bucket._max_capacity_cached == quota.limit
+        assert bucket._max_capacity_cached is None
+        assert bucket.max_capacity == quota.limit
 
     def test_zero_falls_back_to_default(self, bucket, quota):
         """Zero value falls back to default (must be > 0)."""
         bucket.update_max_capacity_from_result(b"0")
 
-        assert bucket._max_capacity_cached == quota.limit
+        assert bucket._max_capacity_cached is None
+        assert bucket.max_capacity == quota.limit
+
+    def test_stale_override_metadata_for_old_config_is_ignored(self, bucket, quota):
+        """Fresh processes should ignore overrides written against an old static limit."""
+        payload = json.dumps(
+            {
+                "configured_max_capacity": 10.0,
+                "override_max_capacity": 5.0,
+            }
+        ).encode()
+
+        bucket.update_max_capacity_from_result(payload)
+
+        assert bucket._max_capacity_cached is None
+        assert bucket.max_capacity == quota.limit
 
     def test_rate_recalculation(self, bucket):
         """Rate is recalculated as new_value / per_seconds."""
@@ -331,13 +378,14 @@ class TestRedisKeyFormat:
     """Tests for Redis key format consistency."""
 
     def test_max_capacity_key_format(self, bucket):
-        """max_capacity key follows the expected format."""
-        expected = "rate_limiting:test/model:requests:1:max_capacity"
+        """Runtime override key follows the expected format."""
+        expected = "rate_limiting:test/model:requests:1:max_capacity_override"
         assert bucket._max_capacity_key == expected
 
     def test_key_format_matches_token_throttle_convention(self, mock_redis):
         """Key format matches the convention for external rate limit controllers."""
-        # External controllers set: rate_limiting:{client}:requests:1:max_capacity
+        # External controllers set:
+        # rate_limiting:{client}:requests:1:max_capacity_override
         # This test verifies our key matches that format
         quota = Quota(metric="requests", limit=20, per_seconds=1)
         config = PerModelConfig(
@@ -346,5 +394,5 @@ class TestRedisKeyFormat:
         )
         bucket = RedisBucket(quota, config, mock_redis)
 
-        expected = "rate_limiting:anthropic:requests:1:max_capacity"
+        expected = "rate_limiting:anthropic:requests:1:max_capacity_override"
         assert bucket._max_capacity_key == expected

@@ -1,3 +1,5 @@
+import contextlib
+import json
 import math
 import time
 
@@ -24,11 +26,12 @@ class SyncRedisBucket:
     """
     Token bucket implementation backed by Redis for distributed rate limiting (sync).
 
-    Redis Key Format:
-        rate_limiting:{model_family}:{metric}:{per_seconds}:max_capacity
+    Runtime override Redis Key Format:
+        rate_limiting:{model_family}:{metric}:{per_seconds}:max_capacity_override
 
     Uses the same key format as the async RedisBucket, so sync and async
-    backends can share the same Redis state.
+    backends can share the same Redis override state. Static quota limits come
+    from the current ``PerModelConfig`` in each process.
     """
 
     # Cache TTL for max_capacity reads (in seconds)
@@ -45,21 +48,29 @@ class SyncRedisBucket:
         self.full_redis_key = f"rate_limiting:{limit_config.model_family}:{self.usage_metric}:{int(self.per_seconds)}"
         self.model_family = limit_config.get_model_family()
 
-        # Default max_capacity from quota (used as fallback if Redis key doesn't exist)
+        # Default/configured max_capacity from quota (used when no runtime
+        # override is present in Redis).
         self._max_capacity_default = float(quota.limit)
-        # Cache for dynamic max_capacity from Redis
+        # Cache for a runtime override fetched from Redis.
         self._max_capacity_cached: float | None = None
+        self._max_capacity_cache_populated: bool = False
         self._max_capacity_cache_time: float = 0.0
 
         self._redis = redis_client
-        # Initialised from quota.limit; corrected on first _get_capacities_unsafe()
-        # call via update_max_capacity_from_result() before any calculate_capacity().
+        # Initialised from quota.limit; corrected on the first override refresh.
         self._rate_per_sec = float(quota.limit) / float(quota.per_seconds)
         # Keys for Redis
         self._last_checked_key = f"{self.full_redis_key}:last_checked"
         self._capacity_key = f"{self.full_redis_key}:capacity"
         self._lock_key = f"{self.full_redis_key}:lock"
-        self._max_capacity_key = f"{self.full_redis_key}:max_capacity"
+        self._max_capacity_key = f"{self.full_redis_key}:max_capacity_override"
+
+    @property
+    def configured_max_capacity(self) -> float:
+        """
+        Returns the configured max_capacity value from the current PerModelConfig.
+        """
+        return self._max_capacity_default
 
     @property
     def max_capacity(self) -> float:
@@ -69,75 +80,112 @@ class SyncRedisBucket:
         return self._max_capacity_default
 
     def get_max_capacity(self) -> float:
-        """Fetch max_capacity from Redis (if cache is stale) and return it."""
+        """Fetch the runtime override from Redis (if cache is stale) and return the effective max capacity."""
         current_time = time.time()
         cache_age = current_time - self._max_capacity_cache_time
 
-        # Return cached value if fresh
+        # Return cached override if fresh
         if (
-            self._max_capacity_cached is not None
-            and cache_age < self.MAX_CAPACITY_CACHE_TTL
-        ):
-            return self._max_capacity_cached
+            self._max_capacity_cached is not None or self._max_capacity_cache_populated
+        ) and cache_age < self.MAX_CAPACITY_CACHE_TTL:
+            return self.max_capacity
 
-        # Fetch from Redis
+        # Fetch runtime override from Redis
         stored_value = self._redis.get(self._max_capacity_key)
-
-        if stored_value is not None:
-            try:
-                parsed = float(stored_value)
-                new_value = (
-                    parsed
-                    if math.isfinite(parsed) and parsed > 0
-                    else self._max_capacity_default
-                )
-            except (TypeError, ValueError):
-                # Invalid value in Redis, fall back to default
-                new_value = self._max_capacity_default
-        else:
-            # Key doesn't exist, use default
-            new_value = self._max_capacity_default
-
-        if new_value != self._max_capacity_cached:
-            self._max_capacity_cached = new_value
-            self._rate_per_sec = new_value / float(self.per_seconds)
-
+        self.update_max_capacity_from_result(stored_value)
         self._max_capacity_cache_time = current_time
-        return self._max_capacity_cached
+        return self.max_capacity
+
+    def _set_cached_max_capacity_override(self, value: float | None) -> None:
+        self._max_capacity_cached = value
+        self._max_capacity_cache_populated = True
+        effective_limit = self.max_capacity
+        self._rate_per_sec = effective_limit / float(self.per_seconds)
+
+    @staticmethod
+    def _parse_positive_finite_value(raw_value: object) -> float | None:
+        try:
+            parsed = float(raw_value)
+        except (TypeError, ValueError):
+            return None
+        if not (math.isfinite(parsed) and parsed > 0):
+            return None
+        return parsed
+
+    def _deserialize_max_capacity_override(
+        self, raw_value: bytes | str | None
+    ) -> float | None:
+        if raw_value is None:
+            return None
+
+        decoded: object = raw_value
+        if isinstance(raw_value, bytes):
+            decoded = raw_value.decode()
+
+        if isinstance(decoded, str):
+            with contextlib.suppress(json.JSONDecodeError):
+                decoded = json.loads(decoded)
+
+        if isinstance(decoded, dict):
+            override_value = self._parse_positive_finite_value(
+                decoded.get(self._OVERRIDE_LIMIT_KEY)
+            )
+            if override_value is None:
+                return None
+
+            configured_value = decoded.get(self._CONFIGURED_LIMIT_KEY)
+            if configured_value is None:
+                return override_value
+
+            configured_limit = self._parse_positive_finite_value(configured_value)
+            if configured_limit is None:
+                return None
+            if configured_limit != self._max_capacity_default:
+                return None
+            return override_value
+
+        return self._parse_positive_finite_value(decoded)
 
     def update_max_capacity_from_result(self, raw_value: bytes | None) -> None:
-        """Update max_capacity cache from a pre-fetched pipeline result (no I/O)."""
-        if raw_value is not None:
-            try:
-                parsed = float(raw_value)
-                new_value = (
-                    parsed
-                    if math.isfinite(parsed) and parsed > 0
-                    else self._max_capacity_default
-                )
-            except (TypeError, ValueError):
-                new_value = self._max_capacity_default
-        else:
-            new_value = self._max_capacity_default
-
-        if new_value != self._max_capacity_cached:
-            self._max_capacity_cached = new_value
-            self._rate_per_sec = new_value / float(self.per_seconds)
-
+        """Update the runtime-override cache from a pre-fetched pipeline result."""
+        new_value = self._deserialize_max_capacity_override(raw_value)
+        self._set_cached_max_capacity_override(new_value)
         self._max_capacity_cache_time = time.time()
 
     def set_max_capacity(self, value: float) -> None:
-        """Set the max_capacity in Redis for dynamic rate limit adjustment."""
+        """Persist a runtime max-capacity override in Redis."""
         if isinstance(value, bool):
             raise ValueError("max_capacity must not be a boolean")  # noqa: TRY004
         if not (math.isfinite(value) and value > 0):
             raise ValueError("max_capacity must be finite and greater than 0")
 
-        self._redis.set(self._max_capacity_key, value)
-        # Update cache immediately
-        self._max_capacity_cached = value
+        payload = json.dumps(
+            {
+                self._CONFIGURED_LIMIT_KEY: self._max_capacity_default,
+                self._OVERRIDE_LIMIT_KEY: value,
+            }
+        )
+        self._redis.set(self._max_capacity_key, payload)
+        # Update runtime override cache immediately
+        self._set_cached_max_capacity_override(value)
         self._max_capacity_cache_time = time.time()
-        self._rate_per_sec = value / float(self.per_seconds)
+
+    def set_configured_max_capacity(self, value: float) -> None:
+        """Update the configured/static max capacity without persisting an override."""
+        if isinstance(value, bool):
+            raise ValueError("max_capacity must not be a boolean")  # noqa: TRY004
+        if not (math.isfinite(value) and value > 0):
+            raise ValueError("max_capacity must be finite and greater than 0")
+
+        self._max_capacity_default = value
+        if self._max_capacity_cached is None:
+            self._rate_per_sec = value / float(self.per_seconds)
+
+    def clear_max_capacity_override(self) -> None:
+        """Remove any persisted runtime override for this bucket."""
+        self._redis.delete(self._max_capacity_key)
+        self._set_cached_max_capacity_override(None)
+        self._max_capacity_cache_time = time.time()
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, SyncRedisBucket):
@@ -232,3 +280,6 @@ class SyncRedisBucket:
             rate_per_sec=self._rate_per_sec,
             bucket_id=self.full_redis_key,
         )
+
+    _OVERRIDE_LIMIT_KEY = "override_max_capacity"
+    _CONFIGURED_LIMIT_KEY = "configured_max_capacity"

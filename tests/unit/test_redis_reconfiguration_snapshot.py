@@ -32,11 +32,20 @@ class FakeAsyncBucket:
         self.usage_metric = metric
         self.per_seconds = per_seconds
         self.max_capacity = max_capacity
+        self._max_capacity_default = max_capacity
         self._rate_per_sec = max_capacity / per_seconds
 
     async def set_max_capacity(self, value: float) -> None:
         self.max_capacity = value
         self._rate_per_sec = value / self.per_seconds
+
+    def set_configured_max_capacity(self, value: float) -> None:
+        self._max_capacity_default = value
+        self.max_capacity = value
+        self._rate_per_sec = value / self.per_seconds
+
+    async def clear_max_capacity_override(self) -> None:
+        return None
 
 
 class FakeSyncBucket:
@@ -45,11 +54,20 @@ class FakeSyncBucket:
         self.usage_metric = metric
         self.per_seconds = per_seconds
         self.max_capacity = max_capacity
+        self._max_capacity_default = max_capacity
         self._rate_per_sec = max_capacity / per_seconds
 
     def set_max_capacity(self, value: float) -> None:
         self.max_capacity = value
         self._rate_per_sec = value / self.per_seconds
+
+    def set_configured_max_capacity(self, value: float) -> None:
+        self._max_capacity_default = value
+        self.max_capacity = value
+        self._rate_per_sec = value / self.per_seconds
+
+    def clear_max_capacity_override(self) -> None:
+        return None
 
 
 class AsyncNoopContextManager:
