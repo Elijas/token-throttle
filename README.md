@@ -127,7 +127,7 @@ def get_config(model_name: str) -> PerModelConfig:
                 Quota(metric="requests", limit=10_000, per_seconds=60),
                 Quota(metric="tokens", limit=2_000_000, per_seconds=60),
             ]),
-            usage_counter=OpenAIUsageCounter(),  # auto-counts tokens from messages
+            usage_counter=OpenAIUsageCounter(),  # text-only: counts payload + instructions/tools/schema + output budget
             model_family=openai_model_family_getter(model_name),
         )
     # ... other providers
@@ -136,6 +136,11 @@ limiter = RateLimiter(get_config, backend=RedisBackendBuilder(redis_client))
 ```
 
 Models that share a `model_family` must also share the same live quota definition. If two model names need different limits, give them different `model_family` values instead of reusing one family name.
+
+`OpenAIUsageCounter` handles text-only OpenAI requests. It counts `input`,
+`inputs`, or `messages`, plus prompt-bearing request context such as
+`instructions`, tool/function definitions, and structured output schemas.
+Image/audio/file inputs are still unsupported; pass usage manually for those.
 
 ### Backends
 
@@ -167,7 +172,9 @@ await limiter.set_max_capacity(
 ```
 
 For Redis backends the new limit is written to Redis, so all processes
-sharing the same Redis see the change within ~1 second.
+sharing the same Redis see the change within ~1 second. This persisted Redis
+value is an explicit runtime override; static quota changes from your config do
+not rewrite it automatically.
 
 ### Timeout
 
