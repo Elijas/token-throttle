@@ -414,10 +414,42 @@ def resolve_config(
 
 def resolve_usage_counter_result(usage_counter, /, **request) -> FrozenUsage:
     """Run a usage_counter and reject awaitable return values with a clear error."""
-    result = usage_counter(**request)
+    result = _call_usage_counter(usage_counter, request)
     if inspect.isawaitable(result):
         close_awaitable_if_possible(result)
         raise ValueError(
             "usage_counter must be a synchronous callable returning a usage mapping"
         )
     return frozen_usage(result)
+
+
+def _call_usage_counter(usage_counter, request: Mapping[str, object]) -> object:
+    """
+    Call a usage_counter with kwargs matched to its signature.
+
+    Counters that accept ``**kwargs`` receive the full request payload. Fixed-
+    signature counters receive only the named request fields they declare, so
+    callers do not need to accept unrelated kwargs like ``model``.
+    """
+    try:
+        signature = inspect.signature(usage_counter)
+    except (TypeError, ValueError):
+        return usage_counter(**request)
+
+    if any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in signature.parameters.values()
+    ):
+        return usage_counter(**request)
+
+    accepted_kwargs = {
+        name: request[name]
+        for name, parameter in signature.parameters.items()
+        if parameter.kind
+        in (
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY,
+        )
+        and name in request
+    }
+    return usage_counter(**accepted_kwargs)

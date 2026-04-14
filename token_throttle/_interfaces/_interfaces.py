@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
@@ -15,10 +16,7 @@ from token_throttle._interfaces._models import (
     UsageQuotas,
 )
 
-
-@runtime_checkable
-class UsageCounter(Protocol):
-    def __call__(self, **request) -> FrozenUsage: ...
+UsageCounter = Callable[..., FrozenUsage]
 
 
 class PerModelConfig(BaseModel):
@@ -33,7 +31,9 @@ class PerModelConfig(BaseModel):
     )
     usage_counter: UsageCounter | None = Field(
         default=None,
-        description="Optional function to count usage tokens.",
+        description=(
+            "Optional synchronous callable that derives usage from request kwargs."
+        ),
     )
 
     model_family: str | None = Field(

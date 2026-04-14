@@ -190,7 +190,12 @@ def count_structured_input_tokens(
     if isinstance(input_, dict):
         if _looks_like_message(input_):
             return count_chat_input_tokens(encoding, messages=[input_])
-        return _count_text_fragments(encoding, input_, invalid_error=invalid_error)
+        return _count_text_fragments(
+            encoding,
+            input_,
+            invalid_error=invalid_error,
+            content_part_context=True,
+        )
     if isinstance(input_, list):
         if not all(isinstance(item, dict) for item in input_):
             raise ValueError(invalid_error)
@@ -199,7 +204,12 @@ def count_structured_input_tokens(
         if len(message_items) == len(items):
             return count_chat_input_tokens(encoding, messages=items)
         if not message_items:
-            return _count_text_fragments(encoding, items, invalid_error=invalid_error)
+            return _count_text_fragments(
+                encoding,
+                items,
+                invalid_error=invalid_error,
+                content_part_context=True,
+            )
         structured_items = [item for item in items if not _looks_like_message(item)]
         # Mixed responses-style input lists need chat framing for message items
         # and plain fragment counting for non-message structured items.
@@ -210,6 +220,7 @@ def count_structured_input_tokens(
             encoding,
             structured_items,
             invalid_error=invalid_error,
+            content_part_context=True,
         )
     raise ValueError(invalid_error)
 
@@ -334,6 +345,7 @@ def _count_text_fragments(
     value: object,
     *,
     invalid_error: str,
+    content_part_context: bool = False,
 ) -> int:
     if value is None:
         return 0
@@ -351,15 +363,17 @@ def _count_text_fragments(
                 encoding,
                 item,
                 invalid_error=invalid_error,
+                content_part_context=content_part_context,
             )
             for item in value
         )
     if isinstance(value, dict):
         if not all(isinstance(key, str) for key in value):
             raise ValueError(invalid_error)
-        unsupported_part_name = _get_unsupported_content_part_name(value)
-        if unsupported_part_name is not None:
-            raise _unsupported_content_part_error(unsupported_part_name)
+        if content_part_context:
+            unsupported_part_name = _get_unsupported_content_part_name(value)
+            if unsupported_part_name is not None:
+                raise _unsupported_content_part_error(unsupported_part_name)
         part_type = value.get("type")
         if isinstance(part_type, str):
             if "text" in value:
@@ -372,14 +386,16 @@ def _count_text_fragments(
                     encoding,
                     value["content"],
                     invalid_error=invalid_error,
+                    content_part_context=content_part_context,
                 )
         return sum(
             _count_text_fragments(
                 encoding,
                 nested_value,
                 invalid_error=invalid_error,
+                content_part_context=content_part_context and nested_key == "content",
             )
-            for nested_value in value.values()
+            for nested_key, nested_value in value.items()
         )
     raise ValueError(invalid_error)
 
@@ -402,6 +418,7 @@ def count_chat_input_tokens(
                 encoding,
                 value,
                 invalid_error="All keys and values in messages must be of type str",
+                content_part_context=key == "content",
             )
 
             if key == "name":  # If there's a name, the role is omitted
