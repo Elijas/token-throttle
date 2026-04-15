@@ -831,8 +831,22 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         reconfigure_buckets = self._combined_bucket_snapshot(
             current_buckets, new_buckets
         )
+        removed_buckets = tuple(
+            bucket
+            for bucket in current_buckets
+            if self._find_bucket(
+                new_buckets,
+                bucket.usage_metric,
+                int(bucket.per_seconds),
+            )
+            is None
+        )
 
         with self._lock(timeout=LOCK_TIMEOUT_SECONDS, buckets=reconfigure_buckets):
+            for bucket in removed_buckets:
+                # Removed buckets lose any explicit runtime override so a later
+                # re-add starts from the callable config's static quota again.
+                bucket.clear_max_capacity_override()
             for quota in cfg.quotas:
                 bucket = self._find_bucket(
                     new_buckets,
