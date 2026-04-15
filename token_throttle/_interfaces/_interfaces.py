@@ -263,7 +263,19 @@ class SyncRateLimiterBackend(ABC):
     @abstractmethod
     def wait_for_capacity(
         self, usage: FrozenUsage, *, timeout: float | None = None
-    ) -> None: ...
+    ) -> None:
+        """
+        Wait until all buckets can satisfy *usage*, then consume atomically.
+
+        *timeout* controls how long capacity waiting may block:
+        - ``None`` (default): block indefinitely.
+        - ``0``: try-acquire — return immediately or raise ``TimeoutError``.
+        - ``N > 0``: wait up to *N* seconds, then raise ``TimeoutError``.
+
+        Sync callbacks run inline and cannot be preempted, so a slow callback
+        may extend wall-clock time beyond *timeout* even though the capacity
+        wait itself still times out once callback execution returns.
+        """
 
     @abstractmethod
     def consume_capacity(self, usage: FrozenUsage) -> None:

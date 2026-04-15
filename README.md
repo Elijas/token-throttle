@@ -181,6 +181,11 @@ sharing the same Redis see the change within ~1 second. This persisted Redis
 value is an explicit runtime override; static quota changes from your config do
 not rewrite it automatically.
 
+If a callable config removes a bucket and later re-adds it, the re-added
+bucket starts from the static quota in the current config. Runtime overrides
+from earlier `set_max_capacity()` calls do not survive a remove-and-readd;
+call `set_max_capacity()` again if you want the override restored.
+
 ### Timeout
 
 By default, `acquire_capacity` blocks until enough capacity is available.
@@ -204,6 +209,11 @@ reservation = await limiter.acquire_capacity(
     usage={"requests": 1, "tokens": 500},
     timeout=5.0,  # Raise TimeoutError after 5s
 )
+
+Async callbacks are awaited within the remaining timeout budget. Sync
+callbacks run inline and cannot be preempted, so a slow sync wait callback can
+push wall-clock time past the requested timeout before `TimeoutError` is
+raised.
 ```
 
 ## Sync API
