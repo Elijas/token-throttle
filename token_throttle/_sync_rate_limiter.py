@@ -193,6 +193,22 @@ def _project_refund_scope(
     )
 
 
+def _warn_refund_refresh_failed(
+    *,
+    model_name: str,
+    model_family: str,
+    exc: Exception,
+) -> None:
+    warnings.warn(
+        "Failed to refresh backend during refund for "
+        f"model '{model_name}' in model family '{model_family}' "
+        f"({type(exc).__name__}: {exc}). Proceeding with cached backend state "
+        "to avoid leaking reserved capacity.",
+        RuntimeWarning,
+        stacklevel=2,
+    )
+
+
 class SyncRateLimiter:
     """Synchronous counterpart of ``RateLimiter`` — same architecture and contract."""
 
@@ -447,12 +463,21 @@ class SyncRateLimiter:
         if model_name is None:
             return
 
-        limit_config = self._config_getter(model_name)
-        if limit_config.is_unlimited:
-            return
-        if limit_config.get_model_family() != reservation.model_family:
-            return
-        self._get_backend(limit_config)
+        try:
+            limit_config = self._config_getter(model_name)
+            if limit_config.is_unlimited:
+                return
+            if limit_config.get_model_family() != reservation.model_family:
+                return
+            self._get_backend(limit_config)
+        except (OSError, RuntimeError, ValueError, TypeError) as exc:
+            # Refund must use cached backend if config refresh fails.
+            # Catch common exceptions from user-provided config_getter and backend.
+            _warn_refund_refresh_failed(
+                model_name=model_name,
+                model_family=reservation.model_family,
+                exc=exc,
+            )
 
     def _get_backend(self, cfg: PerModelConfig) -> SyncRateLimiterBackend:
         if not cfg.model_family:
