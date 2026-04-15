@@ -137,3 +137,43 @@ def test_metric_set_reconfigure_preserves_runtime_override_when_static_unchanged
                 "test-model",
                 timeout=0,
             )
+
+
+@pytest.mark.redis
+def test_metric_remove_and_readd_drops_runtime_override(sync_redis_client):
+    phase = 0
+
+    def config_getter(_model_name: str) -> PerModelConfig:
+        nonlocal phase
+        if phase in {0, 2}:
+            quotas = UsageQuotas([Quota(metric="tokens", limit=100, per_seconds=3600)])
+        else:
+            quotas = UsageQuotas([Quota(metric="requests", limit=10, per_seconds=3600)])
+        return PerModelConfig(
+            quotas=quotas,
+            model_family="callable-refresh-sync-redis-readd",
+        )
+
+    limiter = SyncRateLimiter(
+        config_getter,
+        backend=SyncRedisBackendBuilder(sync_redis_client),
+    )
+
+    limiter.acquire_capacity({"tokens": 0}, "test-model")
+    limiter.set_max_capacity("test-model", "tokens", 3600, 20)
+
+    phase = 1
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        limiter.acquire_capacity({"requests": 0}, "test-model")
+
+    phase = 2
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        reservation = limiter.acquire_capacity(
+            {"tokens": 30},
+            "test-model",
+            timeout=0,
+        )
+
+    assert reservation.usage["tokens"] == 30

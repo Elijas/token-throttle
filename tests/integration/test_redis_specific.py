@@ -257,3 +257,45 @@ class TestRedisCallableConfigRefresh:
                     "test-model",
                     timeout=0,
                 )
+
+    async def test_metric_remove_and_readd_drops_runtime_override(
+        self,
+        redis_client,
+    ):
+        phase = 0
+
+        def config_getter(_model_name: str) -> PerModelConfig:
+            nonlocal phase
+            if phase in {0, 2}:
+                quotas = UsageQuotas(
+                    [Quota(metric="tokens", limit=100, per_seconds=3600)]
+                )
+            else:
+                quotas = UsageQuotas(
+                    [Quota(metric="requests", limit=10, per_seconds=3600)]
+                )
+            return PerModelConfig(
+                quotas=quotas,
+                model_family="callable-refresh-redis-readd",
+            )
+
+        limiter = RateLimiter(config_getter, backend=RedisBackendBuilder(redis_client))
+
+        await limiter.acquire_capacity({"tokens": 0}, "test-model")
+        await limiter.set_max_capacity("test-model", "tokens", 3600, 20)
+
+        phase = 1
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            await limiter.acquire_capacity({"requests": 0}, "test-model")
+
+        phase = 2
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            reservation = await limiter.acquire_capacity(
+                {"tokens": 30},
+                "test-model",
+                timeout=0,
+            )
+
+        assert reservation.usage["tokens"] == 30

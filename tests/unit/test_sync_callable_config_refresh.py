@@ -528,6 +528,41 @@ class TestSyncCallableConfigMetricSetStateTransfer:
                 limiter.acquire_capacity({"tokens": 50}, "test-model", timeout=0)
 
 
+class TestSyncCallableConfigRefundRefreshFallback:
+    """Refunds must use the cached backend when callable refresh fails."""
+
+    def test_refund_uses_cached_backend_when_refresh_fails(self):
+        refresh_broken = False
+
+        def config_getter(model_name: str) -> PerModelConfig:
+            if refresh_broken:
+                raise RuntimeError("config unavailable")
+            return PerModelConfig(
+                quotas=UsageQuotas(
+                    [Quota(metric="tokens", limit=100, per_seconds=3600)]
+                ),
+                model_family="test-family",
+            )
+
+        limiter = SyncRateLimiter(config_getter, backend=SyncMemoryBackendBuilder())
+
+        reservation = limiter.acquire_capacity({"tokens": 90}, "test-model")
+        backend = limiter._model_family_to_backend["test-family"]
+        refresh_broken = True
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            limiter.refund_capacity({"tokens": 0}, reservation)
+
+        assert any(
+            "Proceeding with cached backend state" in str(item.message)
+            for item in caught
+        )
+        with backend._condition:
+            capacities, _ = backend._get_capacities(time.time())
+        assert capacities[("tokens", 3600)] == pytest.approx(100.0)
+
+
 class TestSyncCallableConfigWindowChangeHandling:
     """Window-only changes must update blocked acquires and later refunds correctly."""
 

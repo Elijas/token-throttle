@@ -1,6 +1,7 @@
 """Tests for RateLimiter (async) callable config refresh (stale-callable-config fix)."""
 
 import asyncio
+import time
 import warnings
 
 import pytest
@@ -513,6 +514,41 @@ class TestCallableConfigMetricSetStateTransfer:
             warnings.simplefilter("ignore")
             with pytest.raises(TimeoutError):
                 await limiter.acquire_capacity({"tokens": 50}, "test-model", timeout=0)
+
+
+class TestCallableConfigRefundRefreshFallback:
+    """Refunds must use the cached backend when callable refresh fails."""
+
+    async def test_refund_uses_cached_backend_when_refresh_fails(self):
+        refresh_broken = False
+
+        def config_getter(model_name: str) -> PerModelConfig:
+            if refresh_broken:
+                raise RuntimeError("config unavailable")
+            return PerModelConfig(
+                quotas=UsageQuotas(
+                    [Quota(metric="tokens", limit=100, per_seconds=3600)]
+                ),
+                model_family="test-family",
+            )
+
+        limiter = RateLimiter(config_getter, backend=MemoryBackendBuilder())
+
+        reservation = await limiter.acquire_capacity({"tokens": 90}, "test-model")
+        backend = limiter._model_family_to_backend["test-family"]
+        refresh_broken = True
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            await limiter.refund_capacity({"tokens": 0}, reservation)
+
+        assert any(
+            "Proceeding with cached backend state" in str(item.message)
+            for item in caught
+        )
+        async with backend._condition:
+            capacities, _ = backend._get_capacities(time.time())
+        assert capacities[("tokens", 3600)] == pytest.approx(100.0)
 
 
 class TestCallableConfigWindowChangeHandling:

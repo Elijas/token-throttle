@@ -124,7 +124,7 @@ def test_wait_for_capacity_with_wait(builder):
 
 
 def test_wait_for_capacity_timeout_expires_after_wait_start_callback(builder):
-    """A slow wait-start callback must not allow a post-timeout acquire."""
+    """Sync wait callbacks are inline, so they may extend wall-clock past timeout."""
 
     def slow_wait_start(**_kwargs):
         time.sleep(0.25)
@@ -137,11 +137,18 @@ def test_wait_for_capacity_timeout_expires_after_wait_start_callback(builder):
 
     backend.wait_for_capacity(frozen_usage({"requests": 100}))
 
+    start = time.monotonic()
     with pytest.raises(TimeoutError):
         backend.wait_for_capacity(
             frozen_usage({"requests": 10}),
             timeout=0.05,
         )
+    elapsed = time.monotonic() - start
+
+    assert elapsed >= 0.25, (
+        "Sync callbacks are not preemptible, so callback time should be visible"
+    )
+    assert elapsed < 1.0
 
 
 # ---------------------------------------------------------------------------
