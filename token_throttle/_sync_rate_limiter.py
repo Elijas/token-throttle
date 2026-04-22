@@ -467,9 +467,12 @@ class SyncRateLimiter:
             if limit_config.get_model_family() != reservation.model_family:
                 return
             self._get_backend(limit_config)
-        except (OSError, RuntimeError, ValueError, TypeError) as exc:
-            # Refund must use cached backend if config refresh fails.
-            # Catch common exceptions from user-provided config_getter and backend.
+        except Exception as exc:  # noqa: BLE001
+            # Design intent: a refund must never be blocked by a transient
+            # failure of the user-supplied config_getter or backend. We fall
+            # back to cached backend state and emit a warning. BaseException
+            # (KeyboardInterrupt/SystemExit) is intentionally allowed to
+            # propagate — those are shutdown signals, not refresh failures.
             _warn_refund_refresh_failed(
                 model_name=model_name,
                 model_family=reservation.model_family,
