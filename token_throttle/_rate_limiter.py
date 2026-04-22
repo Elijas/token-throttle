@@ -635,6 +635,16 @@ class RateLimiter(BaseRateLimiter):
         model: str,
         limit_config: PerModelConfig,
     ) -> None:
+        # Best-effort detection, not a safety invariant. Two concurrent
+        # first-time acquires for different models in the same family can
+        # both observe an empty reverse-lookup map and pass validation
+        # because `_remember_model_family` runs only after the acquire's
+        # await resolves. Any subsequent acquire detects the conflict, and
+        # `_sync_backend_quotas` reconciles the shared backend's quotas on
+        # each call — so the system self-corrects rather than corrupting
+        # reservations. If you need hard enforcement, use distinct
+        # `model_family` values for models with differing quotas.
+        #
         # Complexity: O(M) in the number of known models on the first acquire
         # of a new `model` or after a config-signature change for this family
         # (we re-call config_getter for every sibling). On the steady-state

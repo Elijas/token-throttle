@@ -253,3 +253,21 @@ class TestAcquireCapacityForRequestMerge:
         called_usage = mock_backend.await_for_capacity.call_args[0][0]
         assert float(called_usage["tokens"]) == pytest.approx(5.0)
         assert float(called_usage["requests"]) == pytest.approx(1.0)
+
+    async def test_positional_only_required_param_raises_clear_error(self):
+        # Request data is passed as kwargs, so a required positional-only
+        # parameter can never receive its value. Surface that as a clear
+        # ValueError rather than an opaque "missing argument" TypeError.
+        builder, _ = make_mock_backend_builder()
+
+        def fake_counter(messages, /):
+            return {"tokens": 1.0, "requests": 1.0}
+
+        config = make_limited_config(usage_counter=fake_counter)
+        limiter = RateLimiter(config, backend=builder)
+
+        with pytest.raises(ValueError, match="positional-only parameter"):
+            await limiter.acquire_capacity_for_request(
+                model="gpt-4",
+                messages=[{"role": "user", "content": "hello"}],
+            )

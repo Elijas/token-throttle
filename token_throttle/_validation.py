@@ -24,6 +24,21 @@ _UNLIMITED_FLAG = "__rate_limiting_disabled__"
 
 
 def is_unlimited_reservation(reservation: CapacityReservation) -> bool:
+    """
+    True when a reservation represents a disabled/unlimited rate limit.
+
+    New code path: ``_unlimited_reservation`` sets ``is_unlimited=True`` on
+    every reservation it creates, so that's the authoritative signal.
+
+    Legacy path: reservations created before the ``is_unlimited`` field
+    existed carry only the sentinel ``model_family`` and an empty
+    ``usage`` / ``bucket_ids``. The extra-conservative fallback preserves
+    back-compat for those, but it intentionally does NOT match reservations
+    that have the sentinel family plus non-empty usage — those cannot be
+    produced by the current code and are likely hand-constructed. Callers
+    constructing ``CapacityReservation`` manually must set
+    ``is_unlimited=True`` for unlimited reservations.
+    """
     return bool(
         reservation.is_unlimited
         or (
@@ -430,6 +445,13 @@ def _call_usage_counter(usage_counter, request: Mapping[str, object]) -> object:
     Counters that accept ``**kwargs`` receive the full request payload. Fixed-
     signature counters receive only the named request fields they declare, so
     callers do not need to accept unrelated kwargs like ``model``.
+
+    The counter's parameters must be keyword-addressable. Positional-only
+    parameters (declared before ``/``) cannot receive request fields because
+    request data arrives as kwargs, so a required positional-only parameter
+    is rejected with a clear error rather than letting Python raise a
+    cryptic ``TypeError: missing 1 required positional argument`` from
+    inside the counter.
     """
     try:
         signature = inspect.signature(usage_counter)
@@ -441,6 +463,20 @@ def _call_usage_counter(usage_counter, request: Mapping[str, object]) -> object:
         for parameter in signature.parameters.values()
     ):
         return usage_counter(**request)
+
+    required_positional_only = [
+        name
+        for name, parameter in signature.parameters.items()
+        if parameter.kind == inspect.Parameter.POSITIONAL_ONLY
+        and parameter.default is inspect.Parameter.empty
+    ]
+    if required_positional_only:
+        raise ValueError(
+            f"usage_counter has required positional-only parameter(s) "
+            f"{required_positional_only}; request fields are passed as "
+            "keyword arguments, so counter parameters must be "
+            "POSITIONAL_OR_KEYWORD, KEYWORD_ONLY, or accept **kwargs."
+        )
 
     accepted_kwargs = {
         name: request[name]
