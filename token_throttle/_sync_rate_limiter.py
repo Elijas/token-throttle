@@ -612,6 +612,15 @@ class SyncRateLimiter:
         model: str,
         limit_config: PerModelConfig,
     ) -> None:
+        # Complexity: O(M) in the number of known models on the first acquire
+        # of a new `model` or after a config-signature change for this family
+        # (we re-call config_getter for every sibling). On the steady-state
+        # hot path the cache check below short-circuits to O(1). The
+        # aggregate worst case is O(M^2) across first-time acquires of M
+        # distinct models in one family; we accept that cost because
+        # validation must see every sibling's current signature to detect
+        # inconsistency, and M is bounded by the number of distinct model
+        # names a process ever uses.
         model_family = limit_config.get_model_family()
         current_signature = _config_signature(limit_config)
 
