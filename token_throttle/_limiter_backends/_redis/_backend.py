@@ -389,14 +389,14 @@ class RedisBackend(RateLimiterBackend):
             except asyncio.CancelledError:
                 if task.done():
                     break
-            except BaseException:  # noqa: BLE001
-                # Best-effort observation of a shielded task's final outcome.
-                # The caller has already received CancelledError; we only need
-                # to report task state so the caller can decide whether to
-                # refund capacity. Any further exception (including
-                # SystemExit/KeyboardInterrupt from a subsequent cancel of the
-                # shield) terminates observation without altering the caller's
-                # cancellation flow.
+            except Exception:  # noqa: BLE001
+                # Task raised a non-cancellation exception (e.g. Redis
+                # connection error). No Redis write succeeded, so reporting
+                # consumed=False below is correct and the caller will skip
+                # refund. SystemExit/KeyboardInterrupt are intentionally *not*
+                # caught here: swallowing them could let the shielded write
+                # complete in the background while the caller returns
+                # consumed=False, producing phantom consumption.
                 break
         return task.done() and not task.cancelled() and task.exception() is None
 
