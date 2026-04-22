@@ -381,6 +381,13 @@ class RedisBackend(RateLimiterBackend):
         write task's final outcome to decide whether capacity was actually
         recorded (and therefore must be refunded or preserved) before we
         propagate cancellation.
+
+        Implementation note — when the outer task is cancelling, each
+        ``await asyncio.shield(task)`` re-raises ``CancelledError`` rather than
+        blocking to completion. The loop iterates (yielding to the event loop
+        each time, so the shielded task makes progress) until ``task.done()``
+        becomes True. Total wait is therefore bounded by the inner task's own
+        duration — a single Redis pipeline write — not by the loop.
         """
         while True:
             try:
@@ -449,7 +456,9 @@ class RedisBackend(RateLimiterBackend):
                     for bucket in buckets:
                         if bucket.usage_metric != usage_metric_name:
                             continue
-                        # Uses cached max_capacity — refreshed by get_max_capacity() in _refresh_capacity
+                        # Uses cached max_capacity — refreshed from the pipeline
+                        # result by update_max_capacity_from_result() inside
+                        # _get_capacities_unsafe just above.
                         if usage_amount > bucket.max_capacity:
                             raise ValueError(
                                 f"Usage value for {usage_metric_name} ({usage_amount}) "
@@ -938,7 +947,7 @@ class RedisBackend(RateLimiterBackend):
                 updated_capacities_[(capability_usage_metric, int(per_seconds))] = min(
                     updated_capacities_[(capability_usage_metric, int(per_seconds))]
                     + refund_amount,
-                    bucket.max_capacity,  # cached — refreshed by get_max_capacity() in _refresh_capacity
+                    bucket.max_capacity,  # cached — refreshed from pipeline result in _get_capacities_unsafe
                 )
             updated_capacities = frozendict(updated_capacities_)
 

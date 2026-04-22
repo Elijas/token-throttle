@@ -407,7 +407,9 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                 for bucket in buckets:
                     if bucket.usage_metric != usage_metric_name:
                         continue
-                    # Uses cached max_capacity — refreshed by get_max_capacity() in _refresh_capacity
+                    # Uses cached max_capacity — refreshed from the pipeline
+                    # result by update_max_capacity_from_result() inside
+                    # _get_capacities_unsafe just above.
                     if usage_amount > bucket.max_capacity:
                         raise ValueError(
                             f"Usage value for {usage_metric_name} ({usage_amount}) "
@@ -751,7 +753,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                 updated_capacities_[(capability_usage_metric, int(per_seconds))] = min(
                     updated_capacities_[(capability_usage_metric, int(per_seconds))]
                     + refund_amount,
-                    bucket.max_capacity,  # cached — refreshed by get_max_capacity() in _refresh_capacity
+                    bucket.max_capacity,  # cached — refreshed from pipeline result in _get_capacities_unsafe
                 )
             updated_capacities = frozendict(updated_capacities_)
 

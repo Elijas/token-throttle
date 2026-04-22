@@ -405,15 +405,16 @@ class SyncRateLimiter:
         if limit_config.is_unlimited:
             raise ValueError("Cannot set max capacity: model has unlimited quotas")
         model_family = limit_config.get_model_family()
-        self._model_family_to_model_name[model_family] = model
-        backend = self._model_family_to_backend.get(model_family)
-        if backend is None:
+        if self._model_family_to_backend.get(model_family) is None:
             raise ValueError(
                 f"No backend for model family '{model_family}'. "
                 "Call acquire_capacity or record_usage first."
             )
         backend = self._get_backend(limit_config)
         backend.set_max_capacity(metric, per_seconds, value)
+        # State mutations last: only update caches once the backend call succeeded,
+        # so a failed set_max_capacity doesn't leave stale reverse-lookup entries.
+        self._model_family_to_model_name[model_family] = model
         self._remember_runtime_max_capacity(model_family, metric, per_seconds, value)
         self._remember_model_family(model, resolved_model_family)
 
