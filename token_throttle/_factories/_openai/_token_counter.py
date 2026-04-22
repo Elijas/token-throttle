@@ -421,8 +421,8 @@ def count_chat_input_tokens(
                 content_part_context=key == "content",
             )
 
-            if key == "name":  # If there's a name, the role is omitted
-                num_tokens -= 1
+            if key == "name":
+                num_tokens += 1
 
     num_tokens += 2  # <im_start>assistant
     return num_tokens

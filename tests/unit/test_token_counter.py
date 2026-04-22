@@ -542,24 +542,24 @@ class TestCountChatInputTokens:
         # 1 * 4 + 2 = 6
         assert result == 6
 
-    def test_name_key_subtracts_one_token(self):
-        """If a message has a 'name' key, it subtracts 1 token."""
+    def test_name_key_adds_one_token(self):
+        """If a message has a 'name' key, it adds 1 token."""
         mock_enc = _make_mock_encoding()
         messages = [{"role": "", "content": "", "name": ""}]
         result = count_chat_input_tokens(mock_enc, messages=messages)
         # 1 message * 4 overhead + 2 assistant prefix = 6
         # role "" = 0, content "" = 0, name "" = 0
-        # name key adjustment: -1
-        # total = 6 - 1 = 5
-        assert result == 5
+        # name key adjustment: +1
+        # total = 6 + 1 = 7
+        assert result == 7
 
     def test_name_key_with_content(self):
-        """Name key subtracts 1 token even when there's content in the name field."""
+        """Name key adds 1 token even when there's content in the name field."""
         mock_enc = _make_mock_encoding()
         messages = [{"role": "user", "content": "hi", "name": "bob"}]
         result = count_chat_input_tokens(mock_enc, messages=messages)
-        # 4 overhead + "user"=4 + "hi"=2 + "bob"=3 + name_adj=-1 + 2 assistant = 14
-        assert result == 14
+        # 4 overhead + "user"=4 + "hi"=2 + "bob"=3 + name_adj=+1 + 2 assistant = 16
+        assert result == 16
 
     def test_no_messages_returns_assistant_prefix_only(self):
         mock_enc = _make_mock_encoding()
