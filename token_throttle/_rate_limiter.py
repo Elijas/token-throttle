@@ -245,6 +245,9 @@ class RateLimiter(BaseRateLimiter):
         self._model_family_to_runtime_max_capacity: dict[
             str, dict[BucketId, float]
         ] = {}
+        self._model_family_to_validated_signature: dict[
+            str, tuple[bool, tuple[tuple[str, int, float], ...]]
+        ] = {}
 
     async def acquire_capacity(
         self, usage: Usage, model: str, *, timeout: float | None = None
@@ -449,12 +452,6 @@ class RateLimiter(BaseRateLimiter):
         )
         if not reserved_usage:
             return
-        if refund_bucket_ids is None or refund_bucket_ids == active_bucket_ids:
-            await backend.refund_capacity(
-                reserved_usage,
-                actual_usage,
-            )
-            return
         await backend.refund_capacity_for_buckets(
             reserved_usage,
             actual_usage,
@@ -627,6 +624,15 @@ class RateLimiter(BaseRateLimiter):
     ) -> None:
         model_family = limit_config.get_model_family()
         current_signature = _config_signature(limit_config)
+
+        cached = self._model_family_to_validated_signature.get(model_family)
+        if (
+            cached is not None
+            and cached == current_signature
+            and model in self._model_name_to_model_family
+        ):
+            return
+
         conflicts: list[tuple[str, str]] = []
 
         for known_model, known_family in sorted(
@@ -648,21 +654,21 @@ class RateLimiter(BaseRateLimiter):
                     (known_model, _describe_config_signature(known_signature))
                 )
 
-        if not conflicts:
-            return
+        if conflicts:
+            conflicts_desc = "; ".join(
+                f"{conflict_model} -> {conflict_signature}"
+                for conflict_model, conflict_signature in conflicts
+            )
+            raise ValueError(
+                f"Config for model_family '{model_family}' is inconsistent across "
+                f"models. Model '{model}' resolves to "
+                f"{_describe_config_signature(current_signature)}, but {conflicts_desc}. "
+                "Models sharing a model_family must return identical quotas and "
+                "unlimited behavior for a limiter instance. Use different "
+                "model_family values for different limits."
+            )
 
-        conflicts_desc = "; ".join(
-            f"{conflict_model} -> {conflict_signature}"
-            for conflict_model, conflict_signature in conflicts
-        )
-        raise ValueError(
-            f"Config for model_family '{model_family}' is inconsistent across "
-            f"models. Model '{model}' resolves to "
-            f"{_describe_config_signature(current_signature)}, but {conflicts_desc}. "
-            "Models sharing a model_family must return identical quotas and "
-            "unlimited behavior for a limiter instance. Use different "
-            "model_family values for different limits."
-        )
+        self._model_family_to_validated_signature[model_family] = current_signature
 
     def _remember_runtime_max_capacity(
         self,

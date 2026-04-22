@@ -3,7 +3,7 @@
 import gc
 import warnings
 from collections import UserDict
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import ANY, AsyncMock, MagicMock
 
 import pytest
 from pydantic import ValidationError
@@ -451,9 +451,10 @@ class TestRefundCapacityValidation:
 
         await limiter.refund_capacity({"tokens": 80, "requests": 1}, reservation)
 
-        mock_backend.refund_capacity.assert_awaited_once_with(
+        mock_backend.refund_capacity_for_buckets.assert_awaited_once_with(
             reservation.get_usage(),
             {"tokens": 80, "requests": 1},
+            bucket_ids=ANY,
         )
 
     async def test_mismatched_usage_keys_raises(self):
@@ -581,9 +582,10 @@ class TestRefundCapacityFromResponseValidation:
             response=FakeResponse(),
         )
 
-        mock_backend.refund_capacity.assert_awaited_once_with(
+        mock_backend.refund_capacity_for_buckets.assert_awaited_once_with(
             reservation.get_usage(),
             {"tokens": 80, "requests": 1},
+            bucket_ids=ANY,
         )
 
     async def test_pydantic_response_object(self):
@@ -604,7 +606,7 @@ class TestRefundCapacityFromResponseValidation:
         await limiter.refund_capacity_from_response(
             reservation, response=FakeResponse()
         )
-        mock_backend.refund_capacity.assert_awaited_once()
+        mock_backend.refund_capacity_for_buckets.assert_awaited_once()
 
     async def test_dict_response_object(self):
         """Response.usage is a dict (not object with attributes)."""
@@ -622,7 +624,7 @@ class TestRefundCapacityFromResponseValidation:
         await limiter.refund_capacity_from_response(
             reservation, response=FakeResponse()
         )
-        mock_backend.refund_capacity.assert_awaited_once()
+        mock_backend.refund_capacity_for_buckets.assert_awaited_once()
 
     async def test_response_dict_with_usage_key(self):
         builder, mock_backend = make_mock_backend_builder()
@@ -638,9 +640,10 @@ class TestRefundCapacityFromResponseValidation:
             response={"usage": {"total_tokens": 80}},
         )
 
-        mock_backend.refund_capacity.assert_awaited_once_with(
+        mock_backend.refund_capacity_for_buckets.assert_awaited_once_with(
             reservation.get_usage(),
             {"tokens": 80, "requests": 1},
+            bucket_ids=ANY,
         )
 
     async def test_response_dict_missing_usage_key_raises_value_error(self):
@@ -668,7 +671,7 @@ class TestRefundCapacityFromResponseValidation:
         await limiter.refund_capacity_from_response(
             reservation, usage={"total_tokens": 80}
         )
-        mock_backend.refund_capacity.assert_awaited_once()
+        mock_backend.refund_capacity_for_buckets.assert_awaited_once()
 
     async def test_kwargs_usage_mapping_path(self):
         builder, mock_backend = make_mock_backend_builder()
@@ -682,9 +685,10 @@ class TestRefundCapacityFromResponseValidation:
             reservation,
             usage=UserDict({"total_tokens": 80}),
         )
-        mock_backend.refund_capacity.assert_awaited_once_with(
+        mock_backend.refund_capacity_for_buckets.assert_awaited_once_with(
             reservation.get_usage(),
             {"tokens": 80, "requests": 1},
+            bucket_ids=ANY,
         )
 
     async def test_no_response_no_usage_raises(self):
@@ -895,7 +899,7 @@ class TestExtractTotalTokensValidation:
         await limiter.refund_capacity_from_response(
             reservation, usage={"total_tokens": "80"}
         )
-        mock_backend.refund_capacity.assert_awaited_once()
+        mock_backend.refund_capacity_for_buckets.assert_awaited_once()
 
     async def test_zero_total_tokens_is_valid(self):
         builder, mock_backend = make_mock_backend_builder()
@@ -908,7 +912,7 @@ class TestExtractTotalTokensValidation:
         await limiter.refund_capacity_from_response(
             reservation, usage={"total_tokens": 0}
         )
-        mock_backend.refund_capacity.assert_awaited_once()
+        mock_backend.refund_capacity_for_buckets.assert_awaited_once()
 
 
 class TestModelNameTypeValidation:

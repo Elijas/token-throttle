@@ -3,7 +3,7 @@
 import gc
 import warnings
 from collections import UserDict
-from unittest.mock import MagicMock
+from unittest.mock import ANY, MagicMock
 
 import pytest
 from pydantic import ValidationError
@@ -222,9 +222,10 @@ class TestRefundCapacityValidation:
 
         limiter.refund_capacity({"tokens": 80, "requests": 1}, reservation)
 
-        mock_backend.refund_capacity.assert_called_once_with(
+        mock_backend.refund_capacity_for_buckets.assert_called_once_with(
             reservation.get_usage(),
             {"tokens": 80, "requests": 1},
+            bucket_ids=ANY,
         )
 
     def test_mismatched_usage_keys_raises(self):
@@ -558,9 +559,10 @@ class TestRefundCapacityFromResponseValidation:
             response=FakeResponse(),
         )
 
-        mock_backend.refund_capacity.assert_called_once_with(
+        mock_backend.refund_capacity_for_buckets.assert_called_once_with(
             reservation.get_usage(),
             {"tokens": 80, "requests": 1},
+            bucket_ids=ANY,
         )
 
     def test_pydantic_response_object(self):
@@ -587,7 +589,7 @@ class TestRefundCapacityFromResponseValidation:
 
         limiter.refund_capacity_from_response(reservation, response=FakeResponse())
 
-        mock_backend.refund_capacity.assert_called_once()
+        mock_backend.refund_capacity_for_buckets.assert_called_once()
 
     def test_response_with_none_usage_raises(self):
         builder, _ = make_mock_backend_builder()
@@ -624,7 +626,7 @@ class TestRefundCapacityFromResponseValidation:
             usage={"total_tokens": 80},
         )
 
-        mock_backend.refund_capacity.assert_called_once()
+        mock_backend.refund_capacity_for_buckets.assert_called_once()
 
     def test_mapping_kwargs_usage(self):
         builder, mock_backend = make_mock_backend_builder()
@@ -645,9 +647,10 @@ class TestRefundCapacityFromResponseValidation:
             usage=UserDict({"total_tokens": 80}),
         )
 
-        mock_backend.refund_capacity.assert_called_once_with(
+        mock_backend.refund_capacity_for_buckets.assert_called_once_with(
             reservation.get_usage(),
             {"tokens": 80, "requests": 1},
+            bucket_ids=ANY,
         )
 
     def test_dict_response_object(self):
@@ -664,7 +667,7 @@ class TestRefundCapacityFromResponseValidation:
             usage = {"total_tokens": 80}  # noqa: RUF012
 
         limiter.refund_capacity_from_response(reservation, response=FakeResponse())
-        mock_backend.refund_capacity.assert_called_once()
+        mock_backend.refund_capacity_for_buckets.assert_called_once()
 
     def test_response_dict_with_usage_key(self):
         builder, mock_backend = make_mock_backend_builder()
@@ -680,9 +683,10 @@ class TestRefundCapacityFromResponseValidation:
             response={"usage": {"total_tokens": 80}},
         )
 
-        mock_backend.refund_capacity.assert_called_once_with(
+        mock_backend.refund_capacity_for_buckets.assert_called_once_with(
             reservation.get_usage(),
             {"tokens": 80, "requests": 1},
+            bucket_ids=ANY,
         )
 
     def test_response_dict_missing_usage_key_raises_value_error(self):
@@ -861,7 +865,7 @@ class TestExtractTotalTokensValidation:
             model_family="gpt-4",
         )
         limiter.refund_capacity_from_response(reservation, usage={"total_tokens": "80"})
-        mock_backend.refund_capacity.assert_called_once()
+        mock_backend.refund_capacity_for_buckets.assert_called_once()
 
     def test_zero_total_tokens_is_valid(self):
         builder, mock_backend = make_mock_backend_builder()
@@ -872,7 +876,7 @@ class TestExtractTotalTokensValidation:
             model_family="gpt-4",
         )
         limiter.refund_capacity_from_response(reservation, usage={"total_tokens": 0})
-        mock_backend.refund_capacity.assert_called_once()
+        mock_backend.refund_capacity_for_buckets.assert_called_once()
 
 
 class TestSetMaxCapacityValidation:
