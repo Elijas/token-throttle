@@ -361,6 +361,15 @@ class SyncRateLimiter:
         """
         if is_unlimited_reservation(reservation):
             return
+        reservation_metrics = set(reservation.usage)
+        expected_metrics = {"tokens", "requests"}
+        if reservation_metrics != expected_metrics:
+            raise ValueError(
+                f"refund_capacity_from_response requires metric names "
+                f"{sorted(expected_metrics)} (as set by the create_openai_* "
+                f"factories); got reservation with {sorted(reservation_metrics)}. "
+                "Use refund_capacity directly for custom metric names."
+            )
         if response is not None:
             # Pydantic model (OpenAI SDK v1+), raw response dict, or any object
             # with usage data.
