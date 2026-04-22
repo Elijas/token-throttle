@@ -256,6 +256,11 @@ class MemoryBackend(RateLimiterBackend):
                     current_time=current_time,
                 )
         except asyncio.CancelledError:
+            # Consumption was already applied to bucket state above; a
+            # cancel arriving now only interrupts *callback* delivery. See
+            # `suppress_current_task_cancellation` for the full
+            # speedometer rationale — rolling back a recorded measurement
+            # would understate real throughput.
             suppress_current_task_cancellation()
             return
 

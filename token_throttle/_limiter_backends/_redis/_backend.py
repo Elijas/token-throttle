@@ -606,6 +606,11 @@ class RedisBackend(RateLimiterBackend):
                     )
                     if not consumed:
                         raise
+                    # The shielded Redis write actually landed, so the
+                    # speedometer reading is already correct. See
+                    # `suppress_current_task_cancellation` docstring —
+                    # refunding now would roll back a recorded
+                    # measurement of real usage.
                     suppress_current_task_cancellation()
                     return
                 consumed = True
@@ -622,6 +627,11 @@ class RedisBackend(RateLimiterBackend):
         except asyncio.CancelledError:
             if not consumed:
                 raise
+            # Consumption has been durably recorded in Redis; the cancel
+            # arrived during post-consumption callbacks. See
+            # `suppress_current_task_cancellation` docstring — once the
+            # speedometer has been advanced, we don't unwind it just
+            # because the caller was cancelled.
             suppress_current_task_cancellation()
             return
 
