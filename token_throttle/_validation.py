@@ -458,12 +458,11 @@ def _call_usage_counter(usage_counter, request: Mapping[str, object]) -> object:
     except (TypeError, ValueError):
         return usage_counter(**request)
 
-    if any(
-        parameter.kind == inspect.Parameter.VAR_KEYWORD
-        for parameter in signature.parameters.values()
-    ):
-        return usage_counter(**request)
-
+    # Required positional-only check runs BEFORE the VAR_KEYWORD early-return:
+    # a counter like ``def counter(model, /, **kwargs)`` otherwise slipped
+    # through to ``usage_counter(**request)`` and raised Python's cryptic
+    # ``TypeError: missing 1 required positional argument`` — exactly the
+    # error this check was added to prevent.
     required_positional_only = [
         name
         for name, parameter in signature.parameters.items()
@@ -477,6 +476,12 @@ def _call_usage_counter(usage_counter, request: Mapping[str, object]) -> object:
             "keyword arguments, so counter parameters must be "
             "POSITIONAL_OR_KEYWORD, KEYWORD_ONLY, or accept **kwargs."
         )
+
+    if any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in signature.parameters.values()
+    ):
+        return usage_counter(**request)
 
     accepted_kwargs = {
         name: request[name]

@@ -271,3 +271,25 @@ class TestAcquireCapacityForRequestMerge:
                 model="gpt-4",
                 messages=[{"role": "user", "content": "hello"}],
             )
+
+    async def test_positional_only_required_param_with_var_keyword_raises_clear_error(
+        self,
+    ):
+        # Regression: the check for required positional-only parameters must
+        # run even when the counter also declares **kwargs. Otherwise a
+        # signature like ``def counter(model, /, **kwargs)`` bypasses the
+        # clean ValueError and surfaces Python's cryptic
+        # ``TypeError: missing 1 required positional argument``.
+        builder, _ = make_mock_backend_builder()
+
+        def fake_counter(model, /, **kwargs):
+            return {"tokens": 1.0, "requests": 1.0}
+
+        config = make_limited_config(usage_counter=fake_counter)
+        limiter = RateLimiter(config, backend=builder)
+
+        with pytest.raises(ValueError, match="positional-only parameter"):
+            await limiter.acquire_capacity_for_request(
+                model="gpt-4",
+                messages=[{"role": "user", "content": "hello"}],
+            )
