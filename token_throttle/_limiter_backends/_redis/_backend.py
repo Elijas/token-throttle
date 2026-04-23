@@ -561,95 +561,84 @@ class RedisBackend(RateLimiterBackend):
         postconsumption_capacities: Capacities = frozendict()
         current_time: float = 0.0
         fresh_start_buckets: list[RedisBucket] = []
-        consumed = False
-        try:
-            async with await self._lock(timeout=LOCK_TIMEOUT_SECONDS, buckets=buckets):
-                pipeline = self._redis.pipeline()
-                current_time = await async_server_time(self._redis)
+        async with await self._lock(timeout=LOCK_TIMEOUT_SECONDS, buckets=buckets):
+            pipeline = self._redis.pipeline()
+            current_time = await async_server_time(self._redis)
 
-                (
-                    preconsumption_capacities,
-                    fresh_start_buckets,
-                ) = await self._get_capacities_unsafe(
+            (
+                preconsumption_capacities,
+                fresh_start_buckets,
+            ) = await self._get_capacities_unsafe(
+                pipeline=pipeline,
+                current_time=current_time,
+                buckets=buckets,
+            )
+            active_metric_names = {metric for metric, _ in preconsumption_capacities}
+            self._ensure_usage_metrics_are_active(usage, active_metric_names)
+
+            for usage_metric_name, usage_amount in usage.items():
+                for bucket in buckets:
+                    if bucket.usage_metric != usage_metric_name:
+                        continue
+                    if usage_amount > bucket.max_capacity:
+                        warnings.warn(
+                            f"record_usage value for {usage_metric_name} ({usage_amount}) exceeds "
+                            f"bucket max capacity ({bucket.max_capacity}). "
+                            f"Capacity will go deeply negative.",
+                            RuntimeWarning,
+                            stacklevel=2,
+                        )
+
+            postconsumption_dict = dict(preconsumption_capacities)
+            for (
+                capacity_metric_name,
+                per_seconds,
+            ), capacity_amount in preconsumption_capacities.items():
+                usage_amount = usage.get(capacity_metric_name)
+                if usage_amount is None:
+                    continue
+                postconsumption_dict[(capacity_metric_name, per_seconds)] = (
+                    capacity_amount - usage_amount
+                )
+            postconsumption_capacities = frozendict(postconsumption_dict)
+            write_task = asyncio.create_task(
+                self._set_capacities_unsafe(
+                    postconsumption_capacities,
                     pipeline=pipeline,
                     current_time=current_time,
+                    allow_negative=True,
                     buckets=buckets,
                 )
-                active_metric_names = {
-                    metric for metric, _ in preconsumption_capacities
-                }
-                self._ensure_usage_metrics_are_active(usage, active_metric_names)
-
-                for usage_metric_name, usage_amount in usage.items():
-                    for bucket in buckets:
-                        if bucket.usage_metric != usage_metric_name:
-                            continue
-                        if usage_amount > bucket.max_capacity:
-                            warnings.warn(
-                                f"record_usage value for {usage_metric_name} ({usage_amount}) exceeds "
-                                f"bucket max capacity ({bucket.max_capacity}). "
-                                f"Capacity will go deeply negative.",
-                                RuntimeWarning,
-                                stacklevel=2,
-                            )
-
-                postconsumption_dict = dict(preconsumption_capacities)
-                for (
-                    capacity_metric_name,
-                    per_seconds,
-                ), capacity_amount in preconsumption_capacities.items():
-                    usage_amount = usage.get(capacity_metric_name)
-                    if usage_amount is None:
-                        continue
-                    postconsumption_dict[(capacity_metric_name, per_seconds)] = (
-                        capacity_amount - usage_amount
-                    )
-                postconsumption_capacities = frozendict(postconsumption_dict)
-                write_task = asyncio.create_task(
-                    self._set_capacities_unsafe(
-                        postconsumption_capacities,
-                        pipeline=pipeline,
-                        current_time=current_time,
-                        allow_negative=True,
-                        buckets=buckets,
-                    )
-                )
-                try:
-                    await asyncio.shield(write_task)
-                except asyncio.CancelledError:
-                    consumed = await self._wait_for_task_outcome_while_cancelled(
-                        write_task
-                    )
-                    if not consumed:
-                        raise
-                    # The shielded Redis write actually landed, so the
-                    # speedometer reading is already correct. See
-                    # `suppress_current_task_cancellation` docstring —
-                    # refunding now would roll back a recorded
-                    # measurement of real usage.
-                    suppress_current_task_cancellation()
-                    return
-                consumed = True
-            await self._fresh_start_buckets_callback(fresh_start_buckets)
-            if self._callbacks and self._callbacks.on_capacity_consumed:
-                await self._invoke_callback_safe(
-                    self._callbacks.on_capacity_consumed,
-                    model_family=self._limit_config.get_model_family(),
-                    preconsumption_capacities=preconsumption_capacities,
-                    postconsumption_capacities=postconsumption_capacities,
-                    usage=usage,
-                    current_time=current_time,
-                )
-        except asyncio.CancelledError:
-            if not consumed:
-                raise
-            # Consumption has been durably recorded in Redis; the cancel
-            # arrived during post-consumption callbacks. See
-            # `suppress_current_task_cancellation` docstring — once the
-            # speedometer has been advanced, we don't unwind it just
-            # because the caller was cancelled.
-            suppress_current_task_cancellation()
-            return
+            )
+            try:
+                await asyncio.shield(write_task)
+            except asyncio.CancelledError:
+                consumed = await self._wait_for_task_outcome_while_cancelled(write_task)
+                if not consumed:
+                    raise
+                # The shielded Redis write actually landed, so the
+                # speedometer reading is already correct. See
+                # `suppress_current_task_cancellation` docstring —
+                # refunding now would roll back a recorded
+                # measurement of real usage.
+                suppress_current_task_cancellation()
+                return
+        # Callbacks fire after the lock is released. Consumption is already
+        # durably recorded in Redis, so if CancelledError arrives during
+        # callbacks we let it propagate: the caller (e.g. asyncio.timeout)
+        # must be informed of the cancel, and Redis state is already
+        # correct (speedometer is advanced). Callbacks are best-effort via
+        # _invoke_callback_safe.
+        await self._fresh_start_buckets_callback(fresh_start_buckets)
+        if self._callbacks and self._callbacks.on_capacity_consumed:
+            await self._invoke_callback_safe(
+                self._callbacks.on_capacity_consumed,
+                model_family=self._limit_config.get_model_family(),
+                preconsumption_capacities=preconsumption_capacities,
+                postconsumption_capacities=postconsumption_capacities,
+                usage=usage,
+                current_time=current_time,
+            )
 
     async def await_for_capacity(
         self,

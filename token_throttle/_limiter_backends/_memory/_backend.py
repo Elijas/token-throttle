@@ -6,9 +6,6 @@ from typing import ClassVar
 
 from frozendict import frozendict
 
-from token_throttle._interfaces._callable_utils import (
-    suppress_current_task_cancellation,
-)
 from token_throttle._interfaces._callbacks import RateLimiterCallbacks
 from token_throttle._interfaces._interfaces import (
     PerModelConfig,
@@ -243,26 +240,22 @@ class MemoryBackend(RateLimiterBackend):
                 allow_negative=True,
             )
 
-        # Callbacks fired outside the lock
-        try:
-            await self._fresh_start_buckets_callback(fresh_start_buckets)
-            if self._callbacks and self._callbacks.on_capacity_consumed:
-                await self._invoke_callback_safe(
-                    self._callbacks.on_capacity_consumed,
-                    model_family=self._limit_config.get_model_family(),
-                    preconsumption_capacities=preconsumption_capacities,
-                    postconsumption_capacities=postconsumption_capacities,
-                    usage=usage,
-                    current_time=current_time,
-                )
-        except asyncio.CancelledError:
-            # Consumption was already applied to bucket state above; a
-            # cancel arriving now only interrupts *callback* delivery. See
-            # `suppress_current_task_cancellation` for the full
-            # speedometer rationale — rolling back a recorded measurement
-            # would understate real throughput.
-            suppress_current_task_cancellation()
-            return
+        # Callbacks fired outside the lock. Consumption has already been
+        # durably recorded in bucket state above, so if a CancelledError
+        # arrives during callbacks, we let it propagate: the caller
+        # (e.g. asyncio.timeout) must be informed of the cancel, and
+        # bucket state is already correct (speedometer is advanced).
+        # Callbacks themselves are best-effort via _invoke_callback_safe.
+        await self._fresh_start_buckets_callback(fresh_start_buckets)
+        if self._callbacks and self._callbacks.on_capacity_consumed:
+            await self._invoke_callback_safe(
+                self._callbacks.on_capacity_consumed,
+                model_family=self._limit_config.get_model_family(),
+                preconsumption_capacities=preconsumption_capacities,
+                postconsumption_capacities=postconsumption_capacities,
+                usage=usage,
+                current_time=current_time,
+            )
 
     async def await_for_capacity(
         self,

@@ -624,8 +624,9 @@ class TestConsumeCapacityNoRefundOnCancellation:
     after capacity has already been recorded, even if cancellation hits a
     later callback.
 
-    The async path now suppresses callback-time cancellation after mutation so
-    higher-level record_usage() calls can still return a reservation.
+    CancelledError is re-raised so callers (asyncio.timeout, TaskGroup)
+    observe the cancel, but the recorded consumption is preserved because
+    bucket state has already been mutated under the lock.
     """
 
     async def test_consume_capacity_cancelled_during_callback_returns_without_refund(
@@ -659,9 +660,12 @@ class TestConsumeCapacityNoRefundOnCancellation:
         )
         await asyncio.wait_for(entered_callback.wait(), timeout=2.0)
 
-        # Cancel during the callback — capacity is already consumed
+        # Cancel during the callback — CancelledError must propagate so
+        # the caller (asyncio.timeout, TaskGroup) sees it. Capacity is
+        # still consumed because mutation landed under the lock first.
         task.cancel()
-        await asyncio.wait_for(task, timeout=2.0)
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=2.0)
 
         # Capacity should be ~30 (50 - 20), NOT refunded back to ~50
         cap_after = _get_bucket_capacity(backend)
@@ -673,9 +677,9 @@ class TestConsumeCapacityNoRefundOnCancellation:
 
 
 class TestRateLimiterRecordUsageCancellation:
-    """RateLimiter.record_usage must still hand back a reservation after callback-time cancellation."""
+    """RateLimiter.record_usage propagates CancelledError but preserves recorded usage."""
 
-    async def test_record_usage_cancelled_during_callback_returns_reservation(self):
+    async def test_record_usage_cancelled_during_callback_propagates(self):
         entered_callback = asyncio.Event()
 
         async def slow_callback(**_kwargs):
@@ -694,17 +698,13 @@ class TestRateLimiterRecordUsageCancellation:
         await asyncio.wait_for(entered_callback.wait(), timeout=2.0)
 
         task.cancel()
-        reservation = await asyncio.wait_for(task, timeout=2.0)
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=2.0)
 
-        assert reservation.usage == frozendict({"requests": 20.0})
-
+        # Consumption is preserved (speedometer invariant).
         backend = limiter._model_family_to_backend["test"]
         cap_after_record = _get_bucket_capacity(backend)
         assert cap_after_record == pytest.approx(80.0, abs=1.0)
-
-        await limiter.refund_capacity({"requests": 5.0}, reservation)
-        cap_after_refund = _get_bucket_capacity(backend)
-        assert cap_after_refund == pytest.approx(95.0, abs=1.0)
 
 
 # ---------------------------------------------------------------------------
