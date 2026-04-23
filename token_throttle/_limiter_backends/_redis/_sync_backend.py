@@ -445,10 +445,16 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                 )
             postconsumption_capacities = frozendict(postconsumption_dict)
             consumed_monotonic = time.monotonic()
+            # `allow_negative=False` is correct here only because the
+            # `usage_amount > capacity_amount` gate above guarantees
+            # post = pre - usage >= 0. Keep this branch in sync with that
+            # gate; consume_capacity (speedometer) writes with
+            # `allow_negative=True` because it has no such guarantee.
             self._set_capacities_unsafe(
                 postconsumption_capacities,
                 pipeline=pipeline,
                 current_time=current_time,
+                allow_negative=False,
                 buckets=buckets,
             )
         self._fresh_start_buckets_callback(fresh_start_buckets)

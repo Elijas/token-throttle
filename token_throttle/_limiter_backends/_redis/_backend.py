@@ -493,11 +493,17 @@ class RedisBackend(RateLimiterBackend):
                         capacity_amount - usage_amount
                     )
                 postconsumption_capacities = frozendict(postconsumption_dict)
+                # `allow_negative=False` is correct here only because the
+                # `usage_amount > capacity_amount` gate above guarantees
+                # post = pre - usage >= 0. Keep this branch in sync with that
+                # gate; consume_capacity (speedometer) writes with
+                # `allow_negative=True` because it has no such guarantee.
                 write_task = asyncio.create_task(
                     self._set_capacities_unsafe(
                         postconsumption_capacities,
                         pipeline=pipeline,
                         current_time=current_time,
+                        allow_negative=False,
                         buckets=buckets,
                     )
                 )
