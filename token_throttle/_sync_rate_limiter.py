@@ -430,6 +430,14 @@ class SyncRateLimiter:
             )
         self._refresh_backend_for_reservation(reservation)
         backend = self._model_family_to_backend[reservation.model_family]
+        # If `_refresh_backend_for_reservation` swallowed an exception (it
+        # downgrades refresh failures to RuntimeWarning to keep refunds
+        # unblocked), the snapshot below may still describe the pre-refresh
+        # bucket set. A reservation made against a now-incompatible bucket
+        # set will then surface as a "Refund bucket ids ... not found in
+        # backend" ValueError from the backend's validation. That error
+        # appears alongside the earlier warning — they together describe
+        # the situation.
         active_bucket_ids = None
         snapshot = self._model_family_to_quotas.get(reservation.model_family)
         if snapshot is not None:
@@ -555,6 +563,17 @@ class SyncRateLimiter:
             )
             backend = self._backend.build(rebuild_cfg, callbacks=self._callbacks)
             backend = old_backend.prepare_reconfigured_backend(backend, rebuild_cfg)
+            # Race window (see async limiter for full discussion): between
+            # the in-place mutation inside `prepare_reconfigured_backend`
+            # and the snapshot dict update below, a concurrent fast-path
+            # `_get_backend` reader whose desired snapshot equals OLD will
+            # match the stale cache and receive the now-mutated backend,
+            # surfacing a "metrics not in backend metric keys" ValueError.
+            # We accept the race because invalidating the cache during the
+            # rebuild deadlocks legitimate old-config callers when
+            # `prepare_reconfigured_backend` blocks, and forcing the fast
+            # path to take the backend lock defeats its purpose. The window
+            # is bounded by `_restore_runtime_max_capacity`.
             self._restore_runtime_max_capacity(
                 model_family,
                 old_snapshot=old_snapshot,
@@ -652,9 +671,20 @@ class SyncRateLimiter:
                 continue
 
             known_config = self._config_getter(known_model)
-            known_resolved_family = self._validated_model_family(
-                known_model, known_config
-            )
+            try:
+                known_resolved_family = self._validated_model_family(
+                    known_model, known_config
+                )
+            except ValueError as exc:
+                # _validated_model_family raises if a sibling's resolved
+                # model_family drifted since registration. Re-raise with the
+                # caller's context so the user knows the failure surfaced
+                # while validating `model`, not while routing `known_model`.
+                raise ValueError(
+                    f"While validating shared-model_family config for "
+                    f"'{model}', detected a routing change in sibling "
+                    f"'{known_model}': {exc}"
+                ) from exc
             if known_resolved_family != model_family:
                 continue
 

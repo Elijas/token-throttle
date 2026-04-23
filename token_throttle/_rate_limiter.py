@@ -450,6 +450,14 @@ class RateLimiter(BaseRateLimiter):
             )
         await self._refresh_backend_for_reservation(reservation)
         backend = self._model_family_to_backend[reservation.model_family]
+        # If `_refresh_backend_for_reservation` swallowed an exception (it
+        # downgrades refresh failures to RuntimeWarning to keep refunds
+        # unblocked), the snapshot below may still describe the pre-refresh
+        # bucket set. A reservation made against a now-incompatible bucket
+        # set will then surface as a "Refund bucket ids ... not found in
+        # backend" ValueError from the backend's validation. That error
+        # appears alongside the earlier warning — they together describe
+        # the situation.
         active_bucket_ids = None
         snapshot = self._model_family_to_quotas.get(reservation.model_family)
         if snapshot is not None:
@@ -577,6 +585,25 @@ class RateLimiter(BaseRateLimiter):
             backend = await old_backend.prepare_reconfigured_backend(
                 backend, rebuild_cfg
             )
+            # Race window: between the in-place mutation finishing inside
+            # `prepare_reconfigured_backend` and the snapshot dict update
+            # below, the backend reference points at NEW bucket state while
+            # `_model_family_to_quotas[model_family]` still describes OLD
+            # state. A concurrent fast-path `_get_backend` reader whose
+            # desired snapshot equals OLD will match the stale cache and
+            # receive the (now-mutated) backend, then surface a confusing
+            # "metrics not in backend metric keys" ValueError from the
+            # backend's downstream `validate_backend_usage`.
+            #
+            # We accept this race because the cleaner fixes either (a)
+            # invalidate the cache for the entire rebuild — which deadlocks
+            # concurrent legitimate old-config callers when
+            # `prepare_reconfigured_backend` blocks (e.g. test gates,
+            # cross-worker prepare in distributed backends), or (b) require
+            # the fast path to acquire the backend's condition lock,
+            # eliminating its purpose as a fast path. The window is bounded
+            # by `_restore_runtime_max_capacity` (a few await checkpoints)
+            # and surfaces only as a clear validation error, not corruption.
             await self._restore_runtime_max_capacity(
                 model_family,
                 old_snapshot=old_snapshot,
@@ -674,9 +701,20 @@ class RateLimiter(BaseRateLimiter):
                 continue
 
             known_config = self._config_getter(known_model)
-            known_resolved_family = self._validated_model_family(
-                known_model, known_config
-            )
+            try:
+                known_resolved_family = self._validated_model_family(
+                    known_model, known_config
+                )
+            except ValueError as exc:
+                # _validated_model_family raises if a sibling's resolved
+                # model_family drifted since registration. Re-raise with the
+                # caller's context so the user knows the failure surfaced
+                # while validating `model`, not while routing `known_model`.
+                raise ValueError(
+                    f"While validating shared-model_family config for "
+                    f"'{model}', detected a routing change in sibling "
+                    f"'{known_model}': {exc}"
+                ) from exc
             if known_resolved_family != model_family:
                 continue
 
