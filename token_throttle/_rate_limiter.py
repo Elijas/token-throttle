@@ -415,7 +415,16 @@ class RateLimiter(BaseRateLimiter):
         per_seconds: int,
         value: float,
     ) -> None:
-        """Dynamically change the max capacity for a specific bucket."""
+        """
+        Dynamically change the max capacity for a specific bucket.
+
+        The override survives subsequent acquires/refunds and config refreshes
+        whose quota limits are unchanged. A metric-set change (the callable
+        config drops the bucket and later re-adds it) drops the override:
+        config-driven reconfiguration wins over runtime overrides, so a
+        re-added metric starts from the callable config's static ``quota.limit``
+        again. Re-call ``set_max_capacity`` after the re-add to reinstate.
+        """
         metric = validate_metric(metric)
         per_seconds = validate_per_seconds(per_seconds)
         value = validate_max_capacity_value(value)
