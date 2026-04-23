@@ -112,7 +112,7 @@ class TestDynamicMaxCapacity:
 
     def test_set_max_capacity_affects_fresh_start(self):
         bucket = make_bucket(limit=100, per_seconds=60)
-        bucket.set_max_capacity(50.0)
+        bucket.set_max_capacity(50.0, current_time=1000.0)
         result = bucket.get_capacity(current_time=1000.0)
         assert result.amount == 50.0
         assert result.is_fresh_start is True
@@ -120,7 +120,7 @@ class TestDynamicMaxCapacity:
     def test_set_max_capacity_affects_cap(self):
         bucket = make_bucket(limit=100, per_seconds=60)
         bucket.set_capacity(10.0, current_time=1000.0)
-        bucket.set_max_capacity(30.0)
+        bucket.set_max_capacity(30.0, current_time=1000.0)
         # rate = 30/60 = 0.5/s, time = 100s -> refill = 50, but capped at 30
         result = bucket.get_capacity(current_time=1100.0)
         assert result.amount == pytest.approx(30.0)
@@ -128,7 +128,7 @@ class TestDynamicMaxCapacity:
     def test_set_max_capacity_higher_than_default(self):
         bucket = make_bucket(limit=100, per_seconds=60)
         bucket.set_capacity(0.0, current_time=1000.0)
-        bucket.set_max_capacity(200.0)
+        bucket.set_max_capacity(200.0, current_time=1000.0)
         # rate = 200/60, time = 120s -> refill = 120 * (200/60) = 400
         # 0 + 400 = 400, capped at 200 (new max)
         result = bucket.get_capacity(current_time=1120.0)
@@ -143,7 +143,7 @@ class TestDynamicMaxCapacity:
         bucket = make_bucket(limit=100, per_seconds=100)
         # rate = 100/100 = 1.0/s
         bucket.set_capacity(0.0, current_time=1000.0)
-        bucket.set_max_capacity(50.0)
+        bucket.set_max_capacity(50.0, current_time=1000.0)
         # new rate should be 50/100 = 0.5/s
         assert bucket._rate_per_sec == pytest.approx(0.5)
         # After 10s: refill = 10 * 0.5 = 5.0 (well below cap of 50)
@@ -231,44 +231,44 @@ class TestSetMaxCapacity:
         with pytest.raises(
             ValueError, match="max_capacity must be finite and greater than 0"
         ):
-            bucket.set_max_capacity(0)
+            bucket.set_max_capacity(0, current_time=1000.0)
 
     def test_rejects_negative(self):
         bucket = make_bucket(limit=100, per_seconds=60)
         with pytest.raises(
             ValueError, match="max_capacity must be finite and greater than 0"
         ):
-            bucket.set_max_capacity(-5)
+            bucket.set_max_capacity(-5, current_time=1000.0)
 
     def test_rejects_nan(self):
         bucket = make_bucket(limit=100, per_seconds=60)
         with pytest.raises(
             ValueError, match="max_capacity must be finite and greater than 0"
         ):
-            bucket.set_max_capacity(float("nan"))
+            bucket.set_max_capacity(float("nan"), current_time=1000.0)
 
     def test_rejects_positive_inf(self):
         bucket = make_bucket(limit=100, per_seconds=60)
         with pytest.raises(
             ValueError, match="max_capacity must be finite and greater than 0"
         ):
-            bucket.set_max_capacity(float("inf"))
+            bucket.set_max_capacity(float("inf"), current_time=1000.0)
 
     def test_rejects_negative_inf(self):
         bucket = make_bucket(limit=100, per_seconds=60)
         with pytest.raises(
             ValueError, match="max_capacity must be finite and greater than 0"
         ):
-            bucket.set_max_capacity(float("-inf"))
+            bucket.set_max_capacity(float("-inf"), current_time=1000.0)
 
     def test_rejects_boolean(self):
         bucket = make_bucket(limit=100, per_seconds=60)
         with pytest.raises(ValueError, match="max_capacity must not be a boolean"):
-            bucket.set_max_capacity(True)
+            bucket.set_max_capacity(True, current_time=1000.0)
 
     def test_accepts_positive(self):
         bucket = make_bucket(limit=100, per_seconds=60)
-        bucket.set_max_capacity(50.0)
+        bucket.set_max_capacity(50.0, current_time=1000.0)
         assert bucket.max_capacity == 50.0
 
 

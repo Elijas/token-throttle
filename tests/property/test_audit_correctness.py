@@ -495,13 +495,18 @@ class MultiMetricMultiWindowMachine(RuleBasedStateMachine):
             (TOKENS_METRIC, T2_TOKENS_LONG_WINDOW),
         ]:
             old_readable = self._shadow_readable(key)
+            s = self.shadows[key]
+            if s["stored"] is not None and s["last_checked"] is not None:
+                time_passed = max(0.0, self.current_time - s["last_checked"])
+                s["stored"] = s["stored"] + time_passed * s["rate"]
+                s["last_checked"] = self.current_time
             self.backend.set_max_capacity(key[0], key[1], value)
-            self.shadows[key]["max"] = value
-            self.shadows[key]["rate"] = value / key[1]
+            s["max"] = value
+            s["rate"] = value / key[1]
             new_readable = self._shadow_readable(key)
             gain = new_readable - old_readable
             if gain > 0:
-                self.shadows[key]["baseline"] += gain
+                s["baseline"] += gain
 
     @rule(
         value=st.floats(
@@ -514,13 +519,18 @@ class MultiMetricMultiWindowMachine(RuleBasedStateMachine):
             (REQUESTS_METRIC, T2_REQUESTS_LONG_WINDOW),
         ]:
             old_readable = self._shadow_readable(key)
+            s = self.shadows[key]
+            if s["stored"] is not None and s["last_checked"] is not None:
+                time_passed = max(0.0, self.current_time - s["last_checked"])
+                s["stored"] = s["stored"] + time_passed * s["rate"]
+                s["last_checked"] = self.current_time
             self.backend.set_max_capacity(key[0], key[1], value)
-            self.shadows[key]["max"] = value
-            self.shadows[key]["rate"] = value / key[1]
+            s["max"] = value
+            s["rate"] = value / key[1]
             new_readable = self._shadow_readable(key)
             gain = new_readable - old_readable
             if gain > 0:
-                self.shadows[key]["baseline"] += gain
+                s["baseline"] += gain
 
     @invariant()
     def capacity_matches_shadow(self):
@@ -693,6 +703,10 @@ class SetMaxCapacityRefundInteractionMachine(RuleBasedStateMachine):
         if new_max <= 0:
             return
         old_readable = self._shadow_readable()
+        if self.shadow_stored is not None and self.shadow_last_checked is not None:
+            time_passed = max(0.0, self.current_time - self.shadow_last_checked)
+            self.shadow_stored = self.shadow_stored + time_passed * self.shadow_rate
+            self.shadow_last_checked = self.current_time
         self.backend.set_max_capacity(T3_METRIC, T3_WINDOW, new_max)
         self.shadow_max = new_max
         self.shadow_rate = new_max / T3_WINDOW
@@ -710,6 +724,10 @@ class SetMaxCapacityRefundInteractionMachine(RuleBasedStateMachine):
         # Bias toward raising: use max of value and current max
         new_max = max(value, self.shadow_max)
         old_readable = self._shadow_readable()
+        if self.shadow_stored is not None and self.shadow_last_checked is not None:
+            time_passed = max(0.0, self.current_time - self.shadow_last_checked)
+            self.shadow_stored = self.shadow_stored + time_passed * self.shadow_rate
+            self.shadow_last_checked = self.current_time
         self.backend.set_max_capacity(T3_METRIC, T3_WINDOW, new_max)
         self.shadow_max = new_max
         self.shadow_rate = new_max / T3_WINDOW

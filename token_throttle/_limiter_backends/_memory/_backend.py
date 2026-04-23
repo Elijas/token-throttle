@@ -538,7 +538,7 @@ class MemoryBackend(RateLimiterBackend):
         if bucket is None:
             raise ValueError(f"Bucket '{metric}/{per_seconds}s' not found")
         async with self._condition:
-            bucket.set_max_capacity(value)
+            bucket.set_max_capacity(value, time.time())
             self._condition.notify_all()
 
     async def prepare_reconfigured_backend(
@@ -557,6 +557,7 @@ class MemoryBackend(RateLimiterBackend):
         }
 
         async with self._condition:
+            current_time = time.time()
             prepared_buckets: list[MemoryBucket] = []
             for quota in cfg.quotas:
                 bucket_id = (quota.metric, int(quota.per_seconds))
@@ -569,7 +570,7 @@ class MemoryBackend(RateLimiterBackend):
                         model_family=cfg.get_model_family(),
                     )
                 else:
-                    bucket.set_max_capacity(float(quota.limit))
+                    bucket.set_max_capacity(float(quota.limit), current_time)
                 prepared_buckets.append(bucket)
                 existing_buckets[bucket_id] = bucket
 

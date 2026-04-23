@@ -211,6 +211,10 @@ class NegativeCapacitySetMaxMachine(RuleBasedStateMachine):
     @rule(value=m1_max_cap_values)
     def set_max_capacity(self, value):
         old_readable = self._shadow_readable()
+        if self.shadow_stored is not None and self.shadow_last_checked is not None:
+            time_passed = max(0.0, self.current_time - self.shadow_last_checked)
+            self.shadow_stored = self.shadow_stored + time_passed * self.shadow_rate
+            self.shadow_last_checked = self.current_time
         self.backend.set_max_capacity(METRIC, M1_WINDOW, value)
         self.shadow_max_capacity = value
         self.shadow_rate = value / M1_WINDOW
@@ -648,6 +652,10 @@ class FullLifecycleMachine(RuleBasedStateMachine):
     @rule(value=m3_max_cap_values)
     def set_max_capacity_short(self, value):
         old_readable = self._short_readable()
+        if self.short_stored is not None and self.short_last_checked is not None:
+            time_passed = max(0.0, self.current_time - self.short_last_checked)
+            self.short_stored = self.short_stored + time_passed * self.short_rate
+            self.short_last_checked = self.current_time
         self.backend.set_max_capacity(METRIC, SHORT_WINDOW, value)
         self.short_max = value
         self.short_rate = value / SHORT_WINDOW
@@ -659,6 +667,10 @@ class FullLifecycleMachine(RuleBasedStateMachine):
     @rule(value=m3_max_cap_values)
     def set_max_capacity_long(self, value):
         old_readable = self._long_readable()
+        if self.long_stored is not None and self.long_last_checked is not None:
+            time_passed = max(0.0, self.current_time - self.long_last_checked)
+            self.long_stored = self.long_stored + time_passed * self.long_rate
+            self.long_last_checked = self.current_time
         self.backend.set_max_capacity(METRIC, LONG_WINDOW, value)
         self.long_max = value
         self.long_rate = value / LONG_WINDOW

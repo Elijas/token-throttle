@@ -205,6 +205,12 @@ class TimeAdvancingAccountingMachine(RuleBasedStateMachine):
     @rule(value=max_cap_values)
     def set_max_capacity(self, value):
         old_readable = self._shadow_readable()
+        # Mirror the backend: anchor the stored value at the OLD rate (uncapped)
+        # before swapping, so the new rate isn't applied retroactively.
+        if self.shadow_stored is not None and self.shadow_last_checked is not None:
+            time_passed = max(0.0, self.current_time - self.shadow_last_checked)
+            self.shadow_stored = self.shadow_stored + time_passed * self.shadow_rate
+            self.shadow_last_checked = self.current_time
         self.backend.set_max_capacity(METRIC, WINDOW, value)
         self.shadow_max_capacity = value
         self.shadow_rate = value / WINDOW

@@ -1,4 +1,5 @@
 import math
+import warnings
 
 from token_throttle._capacity import CalculatedCapacity, calculate_capacity
 
@@ -55,17 +56,38 @@ class MemoryBucket:
         self.capacity = value if allow_negative else max(0.0, value)
         self.last_checked = current_time
 
-    def set_max_capacity(self, value: float) -> None:
+    def set_max_capacity(self, value: float, current_time: float) -> None:
         """
         Update max_capacity and recalculate refill rate.
 
-        Does NOT clamp ``self.capacity`` — ``calculate_capacity`` applies
-        ``min(max_capacity, …)`` on the next read, so any transient overshoot
-        is corrected without an extra write here.
+        Anchors the stored capacity at the OLD rate before swapping so the
+        new rate is not applied retroactively to time that elapsed under
+        the old rate. ``calculate_capacity`` integrates a single
+        ``rate_per_sec`` across ``[last_checked, current_time]``; any rate
+        change must therefore reset ``last_checked`` to ``now``.
+
+        The anchor is the *uncapped* old-rate integration — we preserve any
+        raw value above ``max_capacity`` (``calculate_capacity`` applies
+        ``min(max_capacity, …)`` at read time). This keeps lower-then-raise
+        cap sequences recoverable: overflow hidden under the low cap is
+        re-exposed when the cap rises.
         """
         if isinstance(value, bool):
             raise ValueError("max_capacity must not be a boolean")  # noqa: TRY004
         if not (math.isfinite(value) and value > 0):
             raise ValueError("max_capacity must be finite and greater than 0")
+        if self.last_checked is not None and self.capacity is not None:
+            time_passed = current_time - self.last_checked
+            if time_passed < 0:
+                warnings.warn(
+                    f"Negative time_passed ({time_passed:.4f}s) detected in bucket "
+                    f"'{self._bucket_id}' — likely NTP clock correction. "
+                    f"Clamping to 0.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                time_passed = 0.0
+            self.capacity = self.capacity + time_passed * self._rate_per_sec
+            self.last_checked = current_time
         self.max_capacity = value
         self._rate_per_sec = value / float(self.per_seconds)

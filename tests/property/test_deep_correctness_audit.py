@@ -277,6 +277,10 @@ class SpeedometerRefundLifecycleMachine(RuleBasedStateMachine):
     def set_max_capacity_short(self, value):
         """Set max capacity for short window only (Gap B)."""
         old_readable = self._short_readable()
+        if self.short_stored is not None and self.short_last_checked is not None:
+            time_passed = max(0.0, self.current_time - self.short_last_checked)
+            self.short_stored = self.short_stored + time_passed * self.short_rate
+            self.short_last_checked = self.current_time
         self.backend.set_max_capacity(METRIC, M1_SHORT_WINDOW, value)
         self.short_max = value
         self.short_rate = value / M1_SHORT_WINDOW
@@ -289,6 +293,10 @@ class SpeedometerRefundLifecycleMachine(RuleBasedStateMachine):
     def set_max_capacity_long(self, value):
         """Set max capacity for long window only (Gap B)."""
         old_readable = self._long_readable()
+        if self.long_stored is not None and self.long_last_checked is not None:
+            time_passed = max(0.0, self.current_time - self.long_last_checked)
+            self.long_stored = self.long_stored + time_passed * self.long_rate
+            self.long_last_checked = self.current_time
         self.backend.set_max_capacity(METRIC, M1_LONG_WINDOW, value)
         self.long_max = value
         self.long_rate = value / M1_LONG_WINDOW
@@ -507,6 +515,10 @@ class ConsumeSetMaxRefundChainMachine(RuleBasedStateMachine):
     @rule(value=m2_max_cap_values)
     def set_max_capacity(self, value):
         old_readable = self._shadow_readable()
+        if self.shadow_stored is not None and self.shadow_last_checked is not None:
+            time_passed = max(0.0, self.current_time - self.shadow_last_checked)
+            self.shadow_stored = self.shadow_stored + time_passed * self.shadow_rate
+            self.shadow_last_checked = self.current_time
         self.backend.set_max_capacity(METRIC, M2_WINDOW, value)
         self.shadow_max = value
         self.shadow_rate = value / M2_WINDOW
@@ -554,6 +566,10 @@ class ConsumeSetMaxRefundChainMachine(RuleBasedStateMachine):
 
         # 2. Set max capacity (changes the rules for the refund)
         old_readable = self._shadow_readable()
+        if self.shadow_stored is not None and self.shadow_last_checked is not None:
+            time_passed = max(0.0, self.current_time - self.shadow_last_checked)
+            self.shadow_stored = self.shadow_stored + time_passed * self.shadow_rate
+            self.shadow_last_checked = self.current_time
         self.backend.set_max_capacity(METRIC, M2_WINDOW, new_max)
         self.shadow_max = new_max
         self.shadow_rate = new_max / M2_WINDOW
@@ -780,6 +796,10 @@ class FractionalLimitsMachine(RuleBasedStateMachine):
     )
     def set_max_capacity(self, value):
         old_readable = self._shadow_readable()
+        if self.shadow_stored is not None and self.shadow_last_checked is not None:
+            time_passed = max(0.0, self.current_time - self.shadow_last_checked)
+            self.shadow_stored = self.shadow_stored + time_passed * self.shadow_rate
+            self.shadow_last_checked = self.current_time
         self.backend.set_max_capacity(METRIC, self.window, value)
         self.shadow_max = value
         self.shadow_rate = value / self.window
