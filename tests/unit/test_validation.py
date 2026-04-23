@@ -190,3 +190,12 @@ class TestResolveConfig:
     def test_rejects_getter_returning_wrong_type(self):
         with pytest.raises(ValueError, match="must resolve to PerModelConfig"):
             resolve_config(lambda _model_name: {"quotas": []}, "tokens")
+
+    @pytest.mark.parametrize("whitespace_name", [" ", "  ", "\t", "\n", " \t\n "])
+    def test_rejects_whitespace_only_model_name(self, whitespace_name):
+        # Whitespace-only names would silently become a whitespace-only
+        # model_family and let inconsistent callers end up on different
+        # backends without noticing. Fail fast instead.
+        cfg = PerModelConfig(quotas=UsageQuotas([Quota(metric="tokens", limit=1)]))
+        with pytest.raises(ValueError, match="whitespace-only"):
+            resolve_config(cfg, whitespace_name)

@@ -405,7 +405,7 @@ def resolve_config(
     Resolve a config (static or callable) and default model_family to model_name.
 
     Raises:
-        ValueError: If model_name is not a non-empty string.
+        ValueError: If model_name is not a non-empty, non-whitespace string.
 
     """
     if not isinstance(model_name, str):
@@ -414,6 +414,11 @@ def resolve_config(
         )
     if not model_name:
         raise ValueError("model_name cannot be empty")
+    # Whitespace-only names would silently default model_family to the same
+    # whitespace, causing two callers using e.g. "  " vs "   " to route to
+    # different backends without noticing.
+    if not model_name.strip():
+        raise ValueError(f"model_name cannot be whitespace-only (got {model_name!r})")
     if callable(cfg) and is_async_callable(cfg):
         raise ValueError("cfg must be a synchronous PerModelConfig getter")
     r = cfg(model_name) if callable(cfg) else cfg
