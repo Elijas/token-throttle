@@ -3,6 +3,7 @@ import contextlib
 import math
 import time
 import typing
+import uuid
 import warnings
 from contextlib import AsyncExitStack
 from typing import ClassVar
@@ -209,7 +210,35 @@ class RedisBackend(RateLimiterBackend):
                     else max(0.0, stop_trying_at - loop.time())
                 )
                 lock = bucket.lock(timeout=timeout)
-                acquired = await lock.acquire(blocking_timeout=remaining)
+                # Generate the token ourselves and pass it to acquire().
+                # This lets us run LUA_RELEASE directly with a known
+                # token if cancel arrives mid-acquire: redis-py's
+                # lock.release() first checks self.local.token, which is
+                # only assigned AFTER the SET NX succeeds. A cancel in
+                # that narrow window leaves the Redis key set but
+                # local.token=None, so release() raises LockError before
+                # ever talking to Redis and the lock leaks for its TTL.
+                token = uuid.uuid1().hex.encode()
+                try:
+                    acquired = await lock.acquire(
+                        blocking_timeout=remaining, token=token
+                    )
+                except BaseException:
+                    # Best-effort compensating release with our known
+                    # token. The LUA script is CAS: it only deletes if
+                    # stored value matches our token, so even if another
+                    # acquirer has since taken the lock we cannot release
+                    # theirs. asyncio.shield guards against re-cancel
+                    # during the release round-trip.
+                    with contextlib.suppress(Exception):
+                        await asyncio.shield(
+                            lock.lua_release(
+                                keys=[lock.name],
+                                args=[token],
+                                client=self._redis,
+                            )
+                        )
+                    raise
                 if not acquired:
                     _raise_lock_timeout_error()
                 stack.push_async_callback(lock.release)

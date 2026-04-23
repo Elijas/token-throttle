@@ -1,7 +1,9 @@
+import contextlib
 import math
 import threading
 import time
 import typing
+import uuid
 import warnings
 from contextlib import ExitStack
 from typing import ClassVar
@@ -194,7 +196,22 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                     else max(0.0, stop_trying_at - time.monotonic())
                 )
                 lock = bucket.lock(timeout=timeout)
-                acquired = lock.acquire(blocking_timeout=remaining)
+                # Generate the token ourselves so a best-effort CAS
+                # release after a KeyboardInterrupt-style cancel can run
+                # without relying on lock.local.token (which is only
+                # populated AFTER the SET NX succeeds; a cancel in that
+                # window would otherwise orphan the lock for its TTL).
+                token = uuid.uuid1().hex.encode()
+                try:
+                    acquired = lock.acquire(blocking_timeout=remaining, token=token)
+                except BaseException:
+                    # Best-effort CAS release; only deletes the key if
+                    # its value still matches our token.
+                    with contextlib.suppress(Exception):
+                        lock.lua_release(
+                            keys=[lock.name], args=[token], client=self._redis
+                        )
+                    raise
                 if not acquired:
                     _raise_lock_timeout_error()
                 stack.callback(lock.release)
