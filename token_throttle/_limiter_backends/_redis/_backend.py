@@ -55,6 +55,22 @@ def _raise_lock_timeout_error() -> typing.NoReturn:
     raise redis.exceptions.LockError("Unable to acquire lock within the time specified")
 
 
+class _RedisLockStack(AsyncExitStack):
+    """
+    AsyncExitStack that also holds the acquired Lock objects.
+
+    The parent ``_lock()`` needs to expose the concrete lock instances so
+    callers can call ``extend()`` on them right before long-running writes,
+    keeping the lock alive across GC pauses or connection stalls that
+    otherwise could let the lock's Redis TTL expire mid-operation and
+    allow two workers to both commit writes (lost-update race).
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.locks: list[redis.asyncio.lock.Lock] = []
+
+
 class RedisBackendBuilder(RateLimiterBackendBuilderInterface):
     def __init__(
         self,
@@ -183,19 +199,20 @@ class RedisBackend(RateLimiterBackend):
         timeout: float,
         blocking_timeout: float | None = None,
         buckets: tuple[RedisBucket, ...] | list[RedisBucket] | None = None,
-    ) -> AsyncExitStack:
+    ) -> _RedisLockStack:
         """
         Acquire distributed Redis locks for a fixed bucket snapshot.
 
-        Returns an ``AsyncExitStack`` that holds the acquired locks.  Use as::
+        Returns a ``_RedisLockStack`` that holds the acquired locks.  Use as::
 
-            async with await self._lock(timeout=LOCK_TIMEOUT_SECONDS):
+            async with await self._lock(timeout=LOCK_TIMEOUT_SECONDS) as stack:
                 ...  # all bucket locks held here
+                await self._extend_locks(stack)  # before long writes
 
         If acquiring lock N fails, locks 0..N-1 are released immediately
         (via ``stack.aclose()``) so we never leak partially-acquired locks.
         """
-        stack = AsyncExitStack()
+        stack = _RedisLockStack()
         target_buckets = self.sorted_buckets if buckets is None else buckets
         loop = asyncio.get_running_loop()
         stop_trying_at = (
@@ -241,12 +258,39 @@ class RedisBackend(RateLimiterBackend):
                     raise
                 if not acquired:
                     _raise_lock_timeout_error()
+                stack.locks.append(lock)
                 stack.push_async_callback(lock.release)
         except BaseException:
             await stack.aclose()
             raise
 
         return stack
+
+    @staticmethod
+    async def _extend_locks(stack: _RedisLockStack) -> None:
+        """
+        Reset each held lock's TTL to its configured timeout (LOCK_TIMEOUT_SECONDS).
+
+        Call this immediately before a long-running write (pipeline exec,
+        Lua script) so a GC pause / network stall earlier in the critical
+        section cannot let the lock's Redis TTL expire mid-operation,
+        which would let a second worker acquire the same lock and race
+        on the same write.
+
+        If the lock already expired (or was stolen by another worker),
+        ``LockNotOwnedError`` surfaces and we re-raise as ``LockError``
+        so the caller aborts the write rather than committing on top of
+        another worker's state. The caller's surrounding retry loop
+        (await_for_capacity, etc.) will observe the error and retry
+        cleanly.
+        """
+        for lock in stack.locks:
+            try:
+                await lock.reacquire()
+            except redis.exceptions.LockNotOwnedError as exc:
+                raise redis.exceptions.LockError(
+                    "Lock expired or was stolen mid-operation; aborting write."
+                ) from exc
 
     async def _get_capacities_unsafe(
         self,
@@ -460,7 +504,7 @@ class RedisBackend(RateLimiterBackend):
                 timeout=LOCK_TIMEOUT_SECONDS,
                 blocking_timeout=lock_blocking_timeout,
                 buckets=buckets,
-            ):
+            ) as lock_stack:
                 # Pipeline is reused: _get_capacities_unsafe executes it (clearing
                 # the command buffer), then _set_capacities_unsafe adds new commands
                 # and executes again.  Safe because redis-py clears the buffer on execute().
@@ -523,6 +567,11 @@ class RedisBackend(RateLimiterBackend):
                         capacity_amount - usage_amount
                     )
                 postconsumption_capacities = frozendict(postconsumption_dict)
+                # Extend lock TTL immediately before the write so a GC
+                # pause during get/check above cannot leave the write
+                # racing with another worker after the original TTL
+                # lapsed.
+                await self._extend_locks(lock_stack)
                 # `allow_negative=False` is correct here only because the
                 # `usage_amount > capacity_amount` gate above guarantees
                 # post = pre - usage >= 0. Keep this branch in sync with that
@@ -590,7 +639,9 @@ class RedisBackend(RateLimiterBackend):
         postconsumption_capacities: Capacities = frozendict()
         current_time: float = 0.0
         fresh_start_buckets: list[RedisBucket] = []
-        async with await self._lock(timeout=LOCK_TIMEOUT_SECONDS, buckets=buckets):
+        async with await self._lock(
+            timeout=LOCK_TIMEOUT_SECONDS, buckets=buckets
+        ) as lock_stack:
             pipeline = self._redis.pipeline()
             current_time = await async_server_time(self._redis)
 
@@ -630,6 +681,10 @@ class RedisBackend(RateLimiterBackend):
                     capacity_amount - usage_amount
                 )
             postconsumption_capacities = frozendict(postconsumption_dict)
+            # Extend lock TTL immediately before the write so a GC pause
+            # during get above cannot leave the write racing with another
+            # worker after the original TTL lapsed.
+            await self._extend_locks(lock_stack)
             write_task = asyncio.create_task(
                 self._set_capacities_unsafe(
                     postconsumption_capacities,
@@ -927,7 +982,9 @@ class RedisBackend(RateLimiterBackend):
         refund_usage: frozendict[str, float] = frozendict(refund_usage_)
 
         fresh_start_buckets: list[RedisBucket] = []
-        async with await self._lock(timeout=LOCK_TIMEOUT_SECONDS, buckets=buckets):
+        async with await self._lock(
+            timeout=LOCK_TIMEOUT_SECONDS, buckets=buckets
+        ) as lock_stack:
             pipeline = self._redis.pipeline()
             current_time = await async_server_time(self._redis)
 
@@ -976,6 +1033,8 @@ class RedisBackend(RateLimiterBackend):
                 )
             updated_capacities = frozendict(updated_capacities_)
 
+            # Extend lock TTL before committing the write, see _extend_locks.
+            await self._extend_locks(lock_stack)
             # Always update capacities in Redis with the current time
             await self._set_capacities_unsafe(
                 frozendict(updated_capacities),
@@ -1195,7 +1254,7 @@ class RedisBackend(RateLimiterBackend):
             async with await self._lock(
                 timeout=LOCK_TIMEOUT_SECONDS,
                 buckets=target_buckets,
-            ):
+            ) as lock_stack:
                 pipeline = self._redis.pipeline()
                 current_time = await async_server_time(self._redis)
                 capacities, _ = await self._get_capacities_unsafe(
@@ -1221,6 +1280,7 @@ class RedisBackend(RateLimiterBackend):
                             cap_amount + usage_amount,
                             bucket.max_capacity,
                         )
+                await self._extend_locks(lock_stack)
                 await self._set_capacities_unsafe(
                     frozendict(refunded),
                     pipeline=pipeline,

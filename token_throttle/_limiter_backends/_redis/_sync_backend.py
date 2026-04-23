@@ -52,6 +52,17 @@ def _raise_lock_timeout_error() -> typing.NoReturn:
     raise redis.exceptions.LockError("Unable to acquire lock within the time specified")
 
 
+class _SyncRedisLockStack(ExitStack):
+    """
+    ExitStack that also holds the acquired Lock objects so callers can
+    extend their TTLs before long-running writes (see _extend_locks).
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.locks: list[redis.lock.Lock] = []
+
+
 class SyncRedisBackendBuilder(SyncRateLimiterBackendBuilderInterface):
     def __init__(
         self,
@@ -180,9 +191,9 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         timeout: float,
         blocking_timeout: float | None = None,
         buckets: tuple[SyncRedisBucket, ...] | list[SyncRedisBucket] | None = None,
-    ) -> ExitStack:
+    ) -> _SyncRedisLockStack:
         """Acquire locks for a fixed bucket snapshot in a consistent order."""
-        stack = ExitStack()
+        stack = _SyncRedisLockStack()
         target_buckets = self.sorted_buckets if buckets is None else buckets
         stop_trying_at = (
             None if blocking_timeout is None else time.monotonic() + blocking_timeout
@@ -214,12 +225,27 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                     raise
                 if not acquired:
                     _raise_lock_timeout_error()
+                stack.locks.append(lock)
                 stack.callback(lock.release)
         except BaseException:
             stack.close()
             raise
 
         return stack
+
+    @staticmethod
+    def _extend_locks(stack: _SyncRedisLockStack) -> None:
+        """
+        Reset each held lock's TTL to LOCK_TIMEOUT_SECONDS; see the
+        async backend's ``_extend_locks`` for the rationale.
+        """
+        for lock in stack.locks:
+            try:
+                lock.reacquire()
+            except redis.exceptions.LockNotOwnedError as exc:
+                raise redis.exceptions.LockError(
+                    "Lock expired or was stolen mid-operation; aborting write."
+                ) from exc
 
     def _get_capacities_unsafe(
         self,
@@ -402,7 +428,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
             timeout=LOCK_TIMEOUT_SECONDS,
             blocking_timeout=lock_blocking_timeout,
             buckets=buckets,
-        ):
+        ) as lock_stack:
             # Pipeline is reused: _get_capacities_unsafe executes it (clearing
             # the command buffer), then _set_capacities_unsafe adds new commands
             # and executes again.  Safe because redis-py clears the buffer on execute().
@@ -463,6 +489,9 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                 )
             postconsumption_capacities = frozendict(postconsumption_dict)
             consumed_monotonic = time.monotonic()
+            # Extend lock TTL before write to guard against GC-pause
+            # induced lost-update races; see _extend_locks.
+            self._extend_locks(lock_stack)
             # `allow_negative=False` is correct here only because the
             # `usage_amount > capacity_amount` gate above guarantees
             # post = pre - usage >= 0. Keep this branch in sync with that
@@ -509,7 +538,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         postconsumption_capacities: Capacities = frozendict()
         current_time: float = 0.0
         fresh_start_buckets: list[SyncRedisBucket] = []
-        with self._lock(timeout=LOCK_TIMEOUT_SECONDS, buckets=buckets):
+        with self._lock(timeout=LOCK_TIMEOUT_SECONDS, buckets=buckets) as lock_stack:
             pipeline = self._redis.pipeline()
             current_time = sync_server_time(self._redis)
 
@@ -548,6 +577,8 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                     capacity_amount - usage_amount
                 )
             postconsumption_capacities = frozendict(postconsumption_dict)
+            # Extend lock TTL before write; see _extend_locks.
+            self._extend_locks(lock_stack)
             self._set_capacities_unsafe(
                 postconsumption_capacities,
                 pipeline=pipeline,
@@ -735,7 +766,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         refund_usage: frozendict[str, float] = frozendict(refund_usage_)
 
         fresh_start_buckets: list[SyncRedisBucket] = []
-        with self._lock(timeout=LOCK_TIMEOUT_SECONDS, buckets=buckets):
+        with self._lock(timeout=LOCK_TIMEOUT_SECONDS, buckets=buckets) as lock_stack:
             pipeline = self._redis.pipeline()
             current_time = sync_server_time(self._redis)
 
@@ -781,6 +812,8 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                 )
             updated_capacities = frozendict(updated_capacities_)
 
+            # Extend lock TTL before write; see _extend_locks.
+            self._extend_locks(lock_stack)
             # Always update capacities in Redis with the current time
             self._set_capacities_unsafe(
                 frozendict(updated_capacities),

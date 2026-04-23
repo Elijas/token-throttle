@@ -145,6 +145,11 @@ class FakeSyncBucket:
 
 
 class AsyncNoopContextManager:
+    def __init__(self):
+        # Matches the ``locks`` attribute on ``_RedisLockStack``; callers
+        # (e.g. ``_extend_locks``) iterate it to refresh TTLs.
+        self.locks: list = []
+
     async def __aenter__(self):
         return self
 
@@ -153,6 +158,9 @@ class AsyncNoopContextManager:
 
 
 class SyncNoopContextManager:
+    def __init__(self):
+        self.locks: list = []
+
     def __enter__(self):
         return self
 
