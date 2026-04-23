@@ -4,6 +4,7 @@ Tests for OpenAI token counting logic.
 Source: token_throttle/_factories/_openai/_token_counter.py
 """
 
+import json
 import sys
 from unittest.mock import MagicMock, patch
 
@@ -735,6 +736,135 @@ class TestOpenAIUsageCounterWithRealTiktoken:
         result = counter("openai/gpt-4", messages=messages)
         assert result["tokens"] > 0
         assert result["requests"] == 1
+
+
+class TestRequestContextJsonSerialization:
+    """tools/functions/response_format must be counted via JSON serialization
+    so that structural tokens ({, }, [, ], :, ",", spaces) are not dropped.
+    """
+
+    def test_tools_delta_matches_json_dumps(self):
+        """Regression for under-counting of ~65%: counter must include JSON
+        structural characters for tools schemas.
+        """
+        tiktoken = pytest.importorskip("tiktoken")
+        counter = OpenAIUsageCounter()
+        enc = tiktoken.encoding_for_model("gpt-4")
+
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "Get the weather",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                        "required": ["city"],
+                    },
+                },
+            }
+        ]
+        messages = [{"role": "user", "content": "hi"}]
+        base = counter(model="gpt-4", messages=messages)["tokens"]
+        with_tools = counter(model="gpt-4", messages=messages, tools=tools)["tokens"]
+        tools_delta = with_tools - base
+        json_tokens = len(enc.encode(json.dumps(tools)))
+
+        assert tools_delta >= json_tokens, (
+            f"counter under-counts tools: delta={tools_delta}, json={json_tokens}"
+        )
+        assert tools_delta - json_tokens <= 5
+
+    def test_response_format_delta_matches_json_dumps(self):
+        tiktoken = pytest.importorskip("tiktoken")
+        counter = OpenAIUsageCounter()
+        enc = tiktoken.encoding_for_model("gpt-4")
+
+        response_format = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "answer",
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "summary": {
+                            "type": "string",
+                            "description": "Brief answer",
+                        },
+                        "confidence": {
+                            "type": "number",
+                            "description": "Model confidence 0-1",
+                        },
+                    },
+                    "required": ["summary"],
+                },
+            },
+        }
+        messages = [{"role": "user", "content": "hi"}]
+        base = counter(model="gpt-4", messages=messages)["tokens"]
+        with_rf = counter(
+            model="gpt-4", messages=messages, response_format=response_format
+        )["tokens"]
+        rf_delta = with_rf - base
+        json_tokens = len(enc.encode(json.dumps(response_format)))
+
+        assert rf_delta >= json_tokens
+        assert rf_delta - json_tokens <= 5
+
+    def test_functions_delta_matches_json_dumps(self):
+        """'functions' (legacy key) should also be JSON-serialized."""
+        tiktoken = pytest.importorskip("tiktoken")
+        counter = OpenAIUsageCounter()
+        enc = tiktoken.encoding_for_model("gpt-4")
+
+        functions = [
+            {
+                "name": "lookup",
+                "description": "Find matching records",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"q": {"type": "string"}},
+                },
+            }
+        ]
+        messages = [{"role": "user", "content": "hi"}]
+        base = counter(model="gpt-4", messages=messages)["tokens"]
+        with_fns = counter(model="gpt-4", messages=messages, functions=functions)[
+            "tokens"
+        ]
+        fns_delta = with_fns - base
+        json_tokens = len(enc.encode(json.dumps(functions)))
+
+        assert fns_delta >= json_tokens
+        assert fns_delta - json_tokens <= 5
+
+    def test_instructions_plain_string_uses_fragment_path(self):
+        """`instructions` is typically a plain string; it must not gain extra
+        quote tokens from JSON serialization (regression guard for the
+        non-JSON path still being used for that field).
+        """
+        counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
+        base = counter("gpt-4", input="hi")
+        instructions = "system prompt here"
+
+        result = counter("gpt-4", input="hi", instructions=instructions)
+
+        assert result == frozendict(
+            {"tokens": base["tokens"] + len(instructions), "requests": 1}
+        )
+
+    def test_non_serializable_tool_value_raises_value_error(self):
+        """Non-JSON-serializable values raise ValueError (not TypeError from
+        deep inside json.dumps).
+        """
+        counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
+        with pytest.raises(ValueError, match="tools"):
+            counter(
+                "gpt-4",
+                messages=[{"role": "user", "content": "hi"}],
+                tools=[{"fn": object()}],
+            )
 
 
 class TestMalformedMessages:

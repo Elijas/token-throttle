@@ -1,3 +1,4 @@
+import json
 import math
 import typing
 from typing import Protocol, cast, runtime_checkable
@@ -22,6 +23,12 @@ _REQUEST_CONTEXT_KEYS = (
     "response_format",
     "text",
 )
+# Fields whose values are JSON schemas on the wire (tool/function definitions,
+# structured-output response schemas). Counting these via a recursive walk over
+# keys+values misses the JSON structural tokens ({, }, [, ], :, ",", whitespace)
+# which can be the majority of the wire-format cost. Serialize with json.dumps
+# and encode the full string so the counter matches what the API actually sees.
+_JSON_SERIALIZED_CONTEXT_KEYS = frozenset({"tools", "functions", "response_format"})
 _UNSUPPORTED_CONTENT_PART_TYPES = frozenset(
     {
         "input_audio",
@@ -248,12 +255,33 @@ def _count_request_context_tokens(
         raw_value = request.get(key)
         if raw_value is None:
             continue
-        total += _count_request_context_fragments(
-            encoding,
-            raw_value,
-            invalid_error=f"Unsupported value for request field '{key}'",
-        )
+        invalid_error = f"Unsupported value for request field '{key}'"
+        if key in _JSON_SERIALIZED_CONTEXT_KEYS:
+            total += _count_json_serialized_tokens(
+                encoding,
+                raw_value,
+                invalid_error=invalid_error,
+            )
+        else:
+            total += _count_request_context_fragments(
+                encoding,
+                raw_value,
+                invalid_error=invalid_error,
+            )
     return total
+
+
+def _count_json_serialized_tokens(
+    encoding: "Encoding",
+    value: object,
+    *,
+    invalid_error: str,
+) -> int:
+    try:
+        serialized = json.dumps(value)
+    except TypeError as exc:
+        raise ValueError(invalid_error) from exc
+    return len(encoding.encode(serialized))
 
 
 def _count_request_context_fragments(
