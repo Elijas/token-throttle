@@ -266,10 +266,10 @@ class TestOpenAIUsageCounterWithMessages:
         counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
         messages = [{"role": "user", "content": "hi"}]
         result = counter("gpt-4", messages=messages)
-        # 1 message: 4 overhead tokens
+        # 1 message: 3 overhead tokens
         # "role" value "user" = 4 tokens, "content" value "hi" = 2 tokens
-        # + 2 assistant prefix
-        # total = 4 + 4 + 2 + 2 = 12
+        # + 3 assistant prefix
+        # total = 3 + 4 + 2 + 3 = 12
         assert result["requests"] == 1
         assert isinstance(result["tokens"], int)
 
@@ -524,7 +524,7 @@ class TestCountChatInputTokens:
     """Tests for count_chat_input_tokens overhead and name key handling."""
 
     def test_per_message_overhead(self):
-        """Each message adds 4 overhead tokens, plus 2 for assistant prefix."""
+        """Each message adds 3 overhead tokens, plus 3 for assistant prefix."""
         mock_enc = _make_mock_encoding()
         # Two messages, each with empty role/content
         messages = [
@@ -532,15 +532,15 @@ class TestCountChatInputTokens:
             {"role": "", "content": ""},
         ]
         result = count_chat_input_tokens(mock_enc, messages=messages)
-        # 2 messages * 4 overhead + 2 assistant prefix = 10
+        # 2 messages * 3 overhead + 3 assistant prefix = 9
         # Each value is "" which encodes to 0 tokens
-        assert result == 10
+        assert result == 9
 
     def test_single_message_overhead(self):
         mock_enc = _make_mock_encoding()
         messages = [{"role": "", "content": ""}]
         result = count_chat_input_tokens(mock_enc, messages=messages)
-        # 1 * 4 + 2 = 6
+        # 1 * 3 + 3 = 6
         assert result == 6
 
     def test_name_key_adds_one_token(self):
@@ -548,7 +548,7 @@ class TestCountChatInputTokens:
         mock_enc = _make_mock_encoding()
         messages = [{"role": "", "content": "", "name": ""}]
         result = count_chat_input_tokens(mock_enc, messages=messages)
-        # 1 message * 4 overhead + 2 assistant prefix = 6
+        # 1 message * 3 overhead + 3 assistant prefix = 6
         # role "" = 0, content "" = 0, name "" = 0
         # name key adjustment: +1
         # total = 6 + 1 = 7
@@ -559,14 +559,14 @@ class TestCountChatInputTokens:
         mock_enc = _make_mock_encoding()
         messages = [{"role": "user", "content": "hi", "name": "bob"}]
         result = count_chat_input_tokens(mock_enc, messages=messages)
-        # 4 overhead + "user"=4 + "hi"=2 + "bob"=3 + name_adj=+1 + 2 assistant = 16
+        # 3 overhead + "user"=4 + "hi"=2 + "bob"=3 + name_adj=+1 + 3 assistant = 16
         assert result == 16
 
     def test_no_messages_returns_assistant_prefix_only(self):
         mock_enc = _make_mock_encoding()
         result = count_chat_input_tokens(mock_enc, messages=[])
-        # 0 messages overhead + 2 assistant prefix = 2
-        assert result == 2
+        # 0 messages overhead + 3 assistant prefix = 3
+        assert result == 3
 
     def test_token_counting_includes_values_not_keys(self):
         """Only message values are encoded, not the keys themselves."""
@@ -574,8 +574,52 @@ class TestCountChatInputTokens:
         # The key "role" is NOT encoded; only the value "user" is
         messages = [{"role": "user"}]
         result = count_chat_input_tokens(mock_enc, messages=messages)
-        # 4 overhead + len("user")=4 tokens + 2 assistant = 10
+        # 3 overhead + len("user")=4 tokens + 3 assistant = 10
         assert result == 10
+
+    @pytest.mark.parametrize("num_messages", [1, 2, 3, 10])
+    def test_matches_openai_cookbook_formula(self, num_messages):
+        """Matches the num_tokens_from_messages formula from the OpenAI
+        cookbook for gpt-4 / gpt-4o / gpt-3.5-turbo current models:
+          tokens_per_message = 3
+          tokens_per_name = 1
+          +3 for assistant priming
+        """
+        tiktoken = pytest.importorskip("tiktoken")
+        enc = tiktoken.encoding_for_model("gpt-4")
+        messages = [
+            {"role": "user", "content": f"message number {i}"}
+            for i in range(num_messages)
+        ]
+
+        result = count_chat_input_tokens(enc, messages=messages)
+
+        tokens_per_message = 3
+        cookbook = 3  # trailing assistant prime
+        for message in messages:
+            cookbook += tokens_per_message
+            for value in message.values():
+                cookbook += len(enc.encode(value))
+
+        assert result == cookbook
+
+    def test_cookbook_formula_with_name_field(self):
+        tiktoken = pytest.importorskip("tiktoken")
+        enc = tiktoken.encoding_for_model("gpt-4")
+        messages = [{"role": "user", "content": "hi", "name": "alice"}]
+
+        result = count_chat_input_tokens(enc, messages=messages)
+
+        # 3 per-message + values + 1 for name + 3 trailing
+        expected = (
+            3
+            + len(enc.encode("user"))
+            + len(enc.encode("hi"))
+            + len(enc.encode("alice"))
+            + 1
+            + 3
+        )
+        assert result == expected
 
 
 class TestCustomGetEncodingFunc:

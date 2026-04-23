@@ -439,7 +439,9 @@ def count_chat_input_tokens(
     for message in messages:
         if not all(isinstance(key, str) for key in message):
             raise ValueError("All message dict keys must be strings")
-        num_tokens += 4  # <im_start>{role/name}\n{content}<im_end>\n
+        # Per-message frame for current chat models (gpt-4, gpt-4o,
+        # gpt-3.5-turbo) from the OpenAI token-count cookbook.
+        num_tokens += 3
 
         for key, value in message.items():
             num_tokens += _count_text_fragments(
@@ -452,5 +454,6 @@ def count_chat_input_tokens(
             if key == "name":
                 num_tokens += 1
 
-    num_tokens += 2  # <im_start>assistant
+    # Trailing assistant prime: <|start|>assistant<|message|>.
+    num_tokens += 3
     return num_tokens
