@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import math
 import time
 import typing
 import warnings
@@ -979,6 +980,46 @@ class RedisBackend(RateLimiterBackend):
                 postrefund_capacities=updated_capacities,
             )
 
+    async def _snapshot_bucket_state(self, bucket: RedisBucket) -> None:
+        """
+        Freeze ``bucket`` in Redis at its accrued capacity under the CURRENT rate.
+
+        Call before any rate-changing mutation (set_max_capacity,
+        clear_max_capacity_override, set_configured_max_capacity when no
+        override is present). Caller MUST hold the bucket's distributed lock.
+
+        The anchor is the *uncapped* old-rate integration so that raw stored
+        values above ``max_capacity`` are preserved: reads apply
+        ``min(max_capacity, …)`` and a later cap raise can re-expose the
+        hidden overflow.
+        """
+        # Refresh the override cache so ``bucket._rate_per_sec`` reflects the
+        # current effective rate in Redis before we snapshot under it.
+        await bucket.get_max_capacity()
+        current_time = await async_server_time(self._redis)
+        pipeline = self._redis.pipeline()
+        pipeline.get(bucket._last_checked_key)  # noqa: SLF001
+        pipeline.get(bucket._capacity_key)  # noqa: SLF001
+        last_checked_raw, stored_raw = await pipeline.execute()
+        if last_checked_raw is None or stored_raw is None:
+            return  # fresh: no prior state to freeze.
+        try:
+            last_checked = float(last_checked_raw)
+            stored = float(stored_raw)
+        except (TypeError, ValueError):
+            return  # unparseable state — leave as-is; a later write will overwrite.
+        if not (math.isfinite(last_checked) and math.isfinite(stored)):
+            return
+        time_passed = current_time - last_checked
+        if time_passed < 0:
+            time_passed = 0.0  # clock skew — same clamp as calculate_capacity.
+        anchored = stored + time_passed * bucket._rate_per_sec  # noqa: SLF001
+        await bucket.set_capacity(
+            anchored,
+            current_time=current_time,
+            allow_negative=True,
+        )
+
     async def set_max_capacity(
         self,
         metric: str,
@@ -994,6 +1035,7 @@ class RedisBackend(RateLimiterBackend):
         if bucket is None:
             raise ValueError(f"Bucket '{metric}/{per_seconds}s' not found")
         async with await self._lock(timeout=LOCK_TIMEOUT_SECONDS, buckets=buckets):
+            await self._snapshot_bucket_state(bucket)
             await bucket.set_max_capacity(value)
         async with self._local_condition:
             self._local_condition.notify_all()
@@ -1013,6 +1055,7 @@ class RedisBackend(RateLimiterBackend):
         if bucket is None:
             raise ValueError(f"Bucket '{metric}/{per_seconds}s' not found")
         async with await self._lock(timeout=LOCK_TIMEOUT_SECONDS, buckets=buckets):
+            await self._snapshot_bucket_state(bucket)
             await bucket.clear_max_capacity_override()
             bucket.set_configured_max_capacity(value)
         async with self._local_condition:
@@ -1049,8 +1092,13 @@ class RedisBackend(RateLimiterBackend):
             buckets=reconfigure_buckets,
         ):
             for bucket in removed_buckets:
-                # Removed buckets lose any explicit runtime override so a later
+                # Snapshot first so the frozen capacity/last_checked in Redis
+                # reflect the bucket's state at the moment of removal. Without
+                # this, a later re-add with a different rate would retroactively
+                # integrate the new rate across the remove→re-add gap (and any
+                # time preceding it). Then clear the runtime override so the
                 # re-add starts from the callable config's static quota again.
+                await self._snapshot_bucket_state(bucket)
                 await bucket.clear_max_capacity_override()
             for quota in cfg.quotas:
                 bucket = self._find_bucket(
@@ -1066,6 +1114,13 @@ class RedisBackend(RateLimiterBackend):
                     current_buckets,
                     quota.metric,
                     int(quota.per_seconds),
+                )
+                # Snapshot the bucket under its current effective rate before
+                # any mutation could change it. Prefer current_bucket (its
+                # _max_capacity_default matches the stored override payload,
+                # so the override is accepted and yields the true active rate).
+                await self._snapshot_bucket_state(
+                    current_bucket if current_bucket is not None else bucket
                 )
                 if current_bucket is not None and float(
                     current_bucket.configured_max_capacity

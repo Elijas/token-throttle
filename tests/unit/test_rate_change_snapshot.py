@@ -1,5 +1,5 @@
 """
-Regression tests: rate changes (``set_max_capacity``,
+Regression tests: rate changes (``set_max_capacity``, ``apply_configured_max_capacity``,
 ``prepare_reconfigured_backend``) must NOT apply the new refill rate retroactively to
 time that elapsed under the old rate.
 
@@ -249,3 +249,196 @@ class TestPublicApiRateChangeSnapshot:
 
         with pytest.raises(TimeoutError):
             await limiter.acquire_capacity({"tokens": 500}, model="m1", timeout=0.0)
+
+
+# ---------------------------------------------------------------------------
+# Redis bucket: backend snapshot helper uses the OLD rate when freezing state
+# ---------------------------------------------------------------------------
+
+pytest.importorskip("redis", reason="redis package not installed")
+
+from token_throttle._limiter_backends._redis import _backend as _redis_be  # noqa: E402
+from token_throttle._limiter_backends._redis import _bucket as _redis_bkt  # noqa: E402
+from token_throttle._limiter_backends._redis import (  # noqa: E402
+    _sync_backend as _redis_sbe,
+)
+from token_throttle._limiter_backends._redis import (  # noqa: E402
+    _sync_bucket as _redis_sbkt,
+)
+from token_throttle._limiter_backends._redis._backend import RedisBackend  # noqa: E402
+from token_throttle._limiter_backends._redis._bucket import RedisBucket  # noqa: E402
+from token_throttle._limiter_backends._redis._sync_backend import (  # noqa: E402
+    SyncRedisBackend,
+)
+from token_throttle._limiter_backends._redis._sync_bucket import (  # noqa: E402
+    SyncRedisBucket,
+)
+
+
+class _AsyncPipeline:
+    def __init__(self, redis: "_AsyncRedisState") -> None:
+        self._redis = redis
+        self._ops: list[tuple[str, tuple]] = []
+
+    def get(self, key: str) -> None:
+        self._ops.append(("get", (key,)))
+
+    def set(self, key: str, value) -> None:
+        self._ops.append(("set", (key, value)))
+
+    def delete(self, key: str) -> None:
+        self._ops.append(("delete", (key,)))
+
+    async def execute(self) -> list:
+        results = []
+        for op, args in self._ops:
+            if op == "get":
+                results.append(self._redis.store.get(args[0]))
+            elif op == "set":
+                self._redis.store[args[0]] = args[1]
+                results.append(True)
+            elif op == "delete":
+                self._redis.store.pop(args[0], None)
+                results.append(1)
+            else:  # pragma: no cover
+                raise AssertionError(f"Unknown op {op}")
+        self._ops.clear()
+        return results
+
+
+class _AsyncRedisState:
+    def __init__(self) -> None:
+        self.store: dict[str, object] = {}
+
+    def pipeline(self) -> _AsyncPipeline:
+        return _AsyncPipeline(self)
+
+    async def get(self, key: str):
+        return self.store.get(key)
+
+    async def set(self, key: str, value) -> bool:
+        self.store[key] = value
+        return True
+
+    async def delete(self, key: str) -> int:
+        return 1 if self.store.pop(key, None) is not None else 0
+
+    async def time(self) -> tuple[int, int]:
+        # seconds=10_000 is arbitrary; server_time caller only uses relative delta.
+        return (10_000, 0)
+
+
+class _SyncPipeline:
+    def __init__(self, redis: "_SyncRedisState") -> None:
+        self._redis = redis
+        self._ops: list[tuple[str, tuple]] = []
+
+    def get(self, key: str) -> None:
+        self._ops.append(("get", (key,)))
+
+    def set(self, key: str, value) -> None:
+        self._ops.append(("set", (key, value)))
+
+    def delete(self, key: str) -> None:
+        self._ops.append(("delete", (key,)))
+
+    def execute(self) -> list:
+        results = []
+        for op, args in self._ops:
+            if op == "get":
+                results.append(self._redis.store.get(args[0]))
+            elif op == "set":
+                self._redis.store[args[0]] = args[1]
+                results.append(True)
+            elif op == "delete":
+                self._redis.store.pop(args[0], None)
+                results.append(1)
+            else:  # pragma: no cover
+                raise AssertionError(f"Unknown op {op}")
+        self._ops.clear()
+        return results
+
+
+class _SyncRedisState:
+    def __init__(self) -> None:
+        self.store: dict[str, object] = {}
+
+    def pipeline(self) -> _SyncPipeline:
+        return _SyncPipeline(self)
+
+    def get(self, key: str):
+        return self.store.get(key)
+
+    def set(self, key: str, value) -> bool:
+        self.store[key] = value
+        return True
+
+    def delete(self, key: str) -> int:
+        return 1 if self.store.pop(key, None) is not None else 0
+
+    def time(self) -> tuple[int, int]:
+        return (10_000, 0)
+
+
+def _make_redis_config(limit: float, per_seconds: int = 60) -> PerModelConfig:
+    return PerModelConfig(
+        model_family="m1",
+        quotas=UsageQuotas(
+            [Quota(metric="tokens", limit=limit, per_seconds=per_seconds)]
+        ),
+    )
+
+
+class TestRedisBackendSnapshotOnRateChange:
+    """
+    Redis snapshot logic lives in the backend's ``_snapshot_bucket_state``.
+    These tests verify that calling it before a rate change persists the
+    current capacity / last_checked under the OLD rate.
+    """
+
+    async def test_async_snapshot_writes_capacity_under_old_rate(self, monkeypatch):
+        async def fake_server_time(_redis):
+            return 60.0
+
+        monkeypatch.setattr(_redis_be, "async_server_time", fake_server_time)
+        monkeypatch.setattr(_redis_bkt, "async_server_time", fake_server_time)
+
+        redis_state = _AsyncRedisState()
+        cfg = _make_redis_config(limit=10, per_seconds=60)
+        bucket = RedisBucket(
+            quota=next(iter(cfg.quotas)), limit_config=cfg, redis_client=redis_state
+        )
+        backend = RedisBackend(buckets=[bucket], redis=redis_state, limit_config=cfg)
+
+        # Simulate: at T=0, capacity is 0 (fully drained). Rate is 10/60.
+        redis_state.store[bucket._last_checked_key] = 0.0
+        redis_state.store[bucket._capacity_key] = 0.0
+
+        await backend._snapshot_bucket_state(bucket)
+
+        stored_last = float(redis_state.store[bucket._last_checked_key])
+        stored_cap = float(redis_state.store[bucket._capacity_key])
+        assert stored_last == pytest.approx(60.0)
+        # Accrued under old rate 10/60 over 60s = 10, capped at old max 10.
+        assert stored_cap == pytest.approx(10.0)
+
+    def test_sync_snapshot_writes_capacity_under_old_rate(self, monkeypatch):
+        monkeypatch.setattr(_redis_sbe, "sync_server_time", lambda _redis: 60.0)
+        monkeypatch.setattr(_redis_sbkt, "sync_server_time", lambda _redis: 60.0)
+
+        redis_state = _SyncRedisState()
+        cfg = _make_redis_config(limit=10, per_seconds=60)
+        bucket = SyncRedisBucket(
+            quota=next(iter(cfg.quotas)), limit_config=cfg, redis_client=redis_state
+        )
+        backend = SyncRedisBackend(
+            buckets=[bucket], redis=redis_state, limit_config=cfg
+        )
+
+        redis_state.store[bucket._last_checked_key] = 0.0
+        redis_state.store[bucket._capacity_key] = 0.0
+
+        backend._snapshot_bucket_state(bucket)
+
+        assert float(redis_state.store[bucket._last_checked_key]) == pytest.approx(60.0)
+        assert float(redis_state.store[bucket._capacity_key]) == pytest.approx(10.0)

@@ -10,20 +10,44 @@ pytest.importorskip("redis", reason="redis package not installed")
 
 import token_throttle._limiter_backends._redis._backend as async_backend_module
 import token_throttle._limiter_backends._redis._sync_backend as sync_backend_module
+from token_throttle._capacity import CalculatedCapacity
 from token_throttle._interfaces._interfaces import PerModelConfig
 from token_throttle._interfaces._models import Quota, UsageQuotas
 from token_throttle._limiter_backends._redis._backend import RedisBackend
 from token_throttle._limiter_backends._redis._sync_backend import SyncRedisBackend
 
 
+class _NoopPipeline:
+    def get(self, key):  # pragma: no cover
+        pass
+
+    def set(self, key, value):  # pragma: no cover
+        pass
+
+    def delete(self, key):  # pragma: no cover
+        pass
+
+    async def execute(self):
+        # Fresh: last_checked + capacity both absent -> skips snapshot write.
+        return [None, None]
+
+    def execute_sync(self):  # pragma: no cover
+        return [None, None]
+
+
+class _SyncNoopPipeline(_NoopPipeline):
+    def execute(self):  # type: ignore[override]
+        return [None, None]
+
+
 class FakeAsyncRedis:
     def pipeline(self):
-        return object()
+        return _NoopPipeline()
 
 
 class FakeSyncRedis:
     def pipeline(self):
-        return object()
+        return _SyncNoopPipeline()
 
 
 class FakeAsyncBucket:
@@ -34,10 +58,31 @@ class FakeAsyncBucket:
         self.max_capacity = max_capacity
         self._max_capacity_default = max_capacity
         self._rate_per_sec = max_capacity / per_seconds
+        self._last_checked_key = f"{key}:last_checked"
+        self._capacity_key = f"{key}:capacity"
 
     @property
     def configured_max_capacity(self) -> float:
         return self._max_capacity_default
+
+    async def get_max_capacity(self) -> float:
+        return self.max_capacity
+
+    async def get_capacity(
+        self, pipeline=None, current_time: float | None = None
+    ) -> CalculatedCapacity:
+        return CalculatedCapacity(amount=self.max_capacity, is_fresh_start=True)
+
+    async def set_capacity(
+        self,
+        new_capacity: float,
+        pipeline=None,
+        current_time: float | None = None,
+        *,
+        execute: bool = True,
+        allow_negative: bool = False,
+    ) -> None:
+        return None
 
     async def set_max_capacity(self, value: float) -> None:
         self.max_capacity = value
@@ -60,10 +105,31 @@ class FakeSyncBucket:
         self.max_capacity = max_capacity
         self._max_capacity_default = max_capacity
         self._rate_per_sec = max_capacity / per_seconds
+        self._last_checked_key = f"{key}:last_checked"
+        self._capacity_key = f"{key}:capacity"
 
     @property
     def configured_max_capacity(self) -> float:
         return self._max_capacity_default
+
+    def get_max_capacity(self) -> float:
+        return self.max_capacity
+
+    def get_capacity(
+        self, pipeline=None, current_time: float | None = None
+    ) -> CalculatedCapacity:
+        return CalculatedCapacity(amount=self.max_capacity, is_fresh_start=True)
+
+    def set_capacity(
+        self,
+        new_capacity: float,
+        pipeline=None,
+        current_time: float | None = None,
+        *,
+        execute: bool = True,
+        allow_negative: bool = False,
+    ) -> None:
+        return None
 
     def set_max_capacity(self, value: float) -> None:
         self.max_capacity = value

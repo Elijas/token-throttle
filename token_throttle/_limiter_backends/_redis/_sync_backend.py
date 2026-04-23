@@ -1,3 +1,4 @@
+import math
 import threading
 import time
 import typing
@@ -785,6 +786,39 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                 postrefund_capacities=updated_capacities,
             )
 
+    def _snapshot_bucket_state(self, bucket: SyncRedisBucket) -> None:
+        """
+        Freeze ``bucket`` in Redis at its accrued capacity under the CURRENT rate.
+
+        Uncapped anchor (stored + elapsed*old_rate) preserves raw values above
+        ``max_capacity`` — reads apply ``min(max_capacity, …)`` and a later
+        cap raise can re-expose the hidden overflow.
+        """
+        bucket.get_max_capacity()
+        current_time = sync_server_time(self._redis)
+        pipeline = self._redis.pipeline()
+        pipeline.get(bucket._last_checked_key)  # noqa: SLF001
+        pipeline.get(bucket._capacity_key)  # noqa: SLF001
+        last_checked_raw, stored_raw = pipeline.execute()
+        if last_checked_raw is None or stored_raw is None:
+            return
+        try:
+            last_checked = float(last_checked_raw)
+            stored = float(stored_raw)
+        except (TypeError, ValueError):
+            return
+        if not (math.isfinite(last_checked) and math.isfinite(stored)):
+            return
+        time_passed = current_time - last_checked
+        if time_passed < 0:
+            time_passed = 0.0
+        anchored = stored + time_passed * bucket._rate_per_sec  # noqa: SLF001
+        bucket.set_capacity(
+            anchored,
+            current_time=current_time,
+            allow_negative=True,
+        )
+
     def set_max_capacity(
         self,
         metric: str,
@@ -800,6 +834,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         if bucket is None:
             raise ValueError(f"Bucket '{metric}/{per_seconds}s' not found")
         with self._lock(timeout=LOCK_TIMEOUT_SECONDS, buckets=buckets):
+            self._snapshot_bucket_state(bucket)
             bucket.set_max_capacity(value)
         with self._local_condition:
             self._local_condition.notify_all()
@@ -819,6 +854,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         if bucket is None:
             raise ValueError(f"Bucket '{metric}/{per_seconds}s' not found")
         with self._lock(timeout=LOCK_TIMEOUT_SECONDS, buckets=buckets):
+            self._snapshot_bucket_state(bucket)
             bucket.clear_max_capacity_override()
             bucket.set_configured_max_capacity(value)
         with self._local_condition:
@@ -852,8 +888,13 @@ class SyncRedisBackend(SyncRateLimiterBackend):
 
         with self._lock(timeout=LOCK_TIMEOUT_SECONDS, buckets=reconfigure_buckets):
             for bucket in removed_buckets:
-                # Removed buckets lose any explicit runtime override so a later
+                # Snapshot first so the frozen capacity/last_checked in Redis
+                # reflect the bucket's state at the moment of removal. Without
+                # this, a later re-add with a different rate would retroactively
+                # integrate the new rate across the remove→re-add gap (and any
+                # time preceding it). Then clear the runtime override so the
                 # re-add starts from the callable config's static quota again.
+                self._snapshot_bucket_state(bucket)
                 bucket.clear_max_capacity_override()
             for quota in cfg.quotas:
                 bucket = self._find_bucket(
@@ -869,6 +910,13 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                     current_buckets,
                     quota.metric,
                     int(quota.per_seconds),
+                )
+                # Snapshot before any mutation could change the effective rate.
+                # Prefer current_bucket (its _max_capacity_default matches the
+                # stored override payload, so the override is accepted and
+                # yields the true active rate).
+                self._snapshot_bucket_state(
+                    current_bucket if current_bucket is not None else bucket
                 )
                 if current_bucket is not None and float(
                     current_bucket.configured_max_capacity
