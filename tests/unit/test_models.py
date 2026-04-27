@@ -84,6 +84,15 @@ class TestQuota:
         assert q.per_seconds == 60
         assert isinstance(q.per_seconds, int)
 
+    @pytest.mark.parametrize(
+        "metric",
+        ["requests:per_min", "a:b", ":", "a:b:c"],
+        ids=["colon-mid", "single-colon", "bare-colon", "multi-colon"],
+    )
+    def test_rejects_metric_containing_colon(self, metric):
+        with pytest.raises(ValidationError, match="must not contain ':'"):
+            Quota(metric=metric, limit=100.0, per_seconds=60)
+
     def test_frozen_immutability(self):
         q = Quota(metric="requests", limit=100.0, per_seconds=60)
         with pytest.raises(ValidationError):

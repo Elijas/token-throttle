@@ -76,6 +76,16 @@ class TestPerModelConfig:
         )
         assert config.usage_counter is my_counter
 
+    @pytest.mark.parametrize(
+        "model_family",
+        ["openai:gpt-4", "a:b", ":", "a:b:c"],
+        ids=["colon-mid", "single-colon", "bare-colon", "multi-colon"],
+    )
+    def test_rejects_model_family_containing_colon(self, model_family):
+        quotas = UsageQuotas([Quota(metric="requests", limit=100.0)])
+        with pytest.raises(ValidationError, match="must not contain ':'"):
+            PerModelConfig(quotas=quotas, model_family=model_family)
+
     def test_usage_counter_rejects_async_callable(self):
         async def my_counter(**_request) -> frozendict:
             return frozendict({"requests": 1.0})

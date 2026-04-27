@@ -119,6 +119,10 @@ class TestValidateMetric:
         with pytest.raises(ValueError, match="metric must be a non-empty string"):
             validate_metric(None)
 
+    def test_rejects_metric_containing_colon(self):
+        with pytest.raises(ValueError, match="must not contain ':'"):
+            validate_metric("requests:per_min")
+
     def test_valid_metric_returns_string(self):
         assert validate_metric("tokens") == "tokens"
         assert validate_metric("requests") == "requests"
@@ -190,6 +194,18 @@ class TestResolveConfig:
     def test_rejects_getter_returning_wrong_type(self):
         with pytest.raises(ValueError, match="must resolve to PerModelConfig"):
             resolve_config(lambda _model_name: {"quotas": []}, "tokens")
+
+    def test_rejects_model_name_with_colon_when_defaulting_model_family(self):
+        cfg = PerModelConfig(quotas=UsageQuotas([Quota(metric="tokens", limit=1)]))
+        with pytest.raises(ValueError, match="must not contain ':'"):
+            resolve_config(cfg, "openai:gpt-4")
+
+    def test_rejects_explicit_model_family_with_colon(self):
+        with pytest.raises(Exception, match="must not contain ':'"):
+            PerModelConfig(
+                quotas=UsageQuotas([Quota(metric="tokens", limit=1)]),
+                model_family="openai:gpt-4",
+            )
 
     @pytest.mark.parametrize("whitespace_name", [" ", "  ", "\t", "\n", " \t\n "])
     def test_rejects_whitespace_only_model_name(self, whitespace_name):

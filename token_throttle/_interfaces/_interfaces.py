@@ -46,6 +46,10 @@ class PerModelConfig(BaseModel):
     def _reject_empty_string(cls, value: object) -> object:
         if isinstance(value, str) and not value:
             raise ValueError("model_family must not be an empty string")
+        if isinstance(value, str) and ":" in value:
+            raise ValueError(
+                "model_family must not contain ':' (used as Redis key separator)"
+            )
         return value
 
     @field_validator("usage_counter", mode="after")

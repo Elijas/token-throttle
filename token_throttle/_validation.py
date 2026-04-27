@@ -379,6 +379,8 @@ def validate_metric(metric: object) -> str:
         )
     if not metric:
         raise ValueError("metric must be a non-empty string")
+    if ":" in metric:
+        raise ValueError("metric must not contain ':' (used as Redis key separator)")
     return metric
 
 
@@ -429,7 +431,16 @@ def resolve_config(
         raise ValueError(  # noqa: TRY004
             f"cfg must resolve to PerModelConfig (got {type(r).__name__})"
         )
-    return r if r.model_family else r.model_copy(update={"model_family": model_name})
+    resolved = (
+        r if r.model_family else r.model_copy(update={"model_family": model_name})
+    )
+    model_family = resolved.get_model_family()
+    if ":" in model_family:
+        raise ValueError(
+            f"model_family must not contain ':' (used as Redis key separator); "
+            f"got {model_family!r}"
+        )
+    return resolved
 
 
 def resolve_usage_counter_result(usage_counter, /, **request) -> FrozenUsage:
