@@ -257,6 +257,8 @@ class SyncRedisBucket:
         if current_time is None:
             current_time = sync_server_time(self._redis)
 
+        if not math.isfinite(new_capacity):
+            raise ValueError(f"capacity must be finite (got {new_capacity!r})")
         new_capacity = new_capacity if allow_negative else max(0, new_capacity)
         pipeline.set(self._last_checked_key, current_time)
         pipeline.set(self._capacity_key, new_capacity)

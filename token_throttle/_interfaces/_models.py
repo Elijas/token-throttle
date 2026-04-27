@@ -54,6 +54,8 @@ class Quota(BaseModel):
     def _reject_empty_metric(cls, value: object) -> object:
         if isinstance(value, str) and not value:
             raise ValueError("metric must not be empty")
+        if isinstance(value, str) and not value.strip():
+            raise ValueError("metric must not be whitespace-only")
         if isinstance(value, str) and ":" in value:
             raise ValueError(
                 "metric must not contain ':' (used as Redis key separator)"

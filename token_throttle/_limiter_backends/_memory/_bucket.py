@@ -54,6 +54,8 @@ class MemoryBucket:
           must preserve negative debt so the token-bucket refill handles
           recovery naturally.
         """
+        if not math.isfinite(value):
+            raise ValueError(f"capacity must be finite (got {value!r})")
         self.capacity = value if allow_negative else max(0.0, value)
         self.last_checked = current_time
 

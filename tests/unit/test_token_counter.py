@@ -214,49 +214,13 @@ class TestOpenAIUsageCounterWithPretokenizedInput:
             counter("text-embedding-3-small", input=[True, 102])
 
 
-class TestOpenAIUsageCounterWithInputs:
-    """Tests for OpenAIUsageCounter with the 'inputs' keyword."""
+class TestOpenAIUsageCounterRejectsInputsPlural:
+    """'inputs' (plural) is not a real OpenAI API key — only 'input' (singular) is valid."""
 
-    def test_inputs_list_sums_tokens(self):
+    def test_inputs_alone_rejected(self):
         counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
-        result = counter("gpt-4", inputs=["hello", "world"])
-        # "hello" = 5 tokens, "world" = 5 tokens => total 10
-        assert result == frozendict({"tokens": 10, "requests": 1})
-
-    def test_inputs_single_item(self):
-        counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
-        result = counter("gpt-4", inputs=["abc"])
-        assert result == frozendict({"tokens": 3, "requests": 1})
-
-    def test_inputs_non_string_items_raises_value_error(self):
-        counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
-        with pytest.raises(ValueError, match="'inputs' must be a list of strings"):
-            counter("gpt-4", inputs=["hello", 42])
-
-    def test_inputs_bare_string_raises_value_error(self):
-        counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
-        with pytest.raises(ValueError, match="'inputs' must be a list of strings"):
-            counter("gpt-4", inputs="hello")
-
-    def test_inputs_integer_raises_value_error(self):
-        counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
-        with pytest.raises(ValueError, match="'inputs' must be a list of strings"):
-            counter("gpt-4", inputs=42)
-
-    def test_inputs_none_raises_value_error(self):
-        counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
-        with pytest.raises(ValueError, match="'inputs' must be a list of strings"):
-            counter("gpt-4", inputs=None)
-
-    def test_inputs_dict_raises_value_error(self):
-        counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
-        with pytest.raises(ValueError, match="'inputs' must be a list of strings"):
-            counter("gpt-4", inputs={"key": "value"})
-
-    def test_inputs_empty_list(self):
-        counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
-        result = counter("gpt-4", inputs=[])
-        assert result == frozendict({"tokens": 0, "requests": 1})
+        with pytest.raises(ValueError, match="must contain 'input' or 'messages'"):
+            counter("gpt-4", inputs=["hello", "world"])
 
 
 class TestOpenAIUsageCounterWithMessages:
@@ -480,44 +444,42 @@ class TestOpenAIUsageCounterWithMessages:
 class TestOpenAIUsageCounterMissingKeys:
     """Tests for missing required keys."""
 
-    def test_no_input_inputs_or_messages_raises(self):
+    def test_no_input_or_messages_raises(self):
         counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
         with pytest.raises(
-            ValueError, match="Request must contain 'input', 'inputs', or 'messages'"
+            ValueError, match="Request must contain 'input' or 'messages'"
         ):
             counter("gpt-4", something_else="foo")
 
     def test_empty_request_raises(self):
         counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
         with pytest.raises(
-            ValueError, match="Request must contain 'input', 'inputs', or 'messages'"
+            ValueError, match="Request must contain 'input' or 'messages'"
         ):
             counter("gpt-4")
 
+    def test_inputs_plural_not_recognised(self):
+        counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
+        with pytest.raises(
+            ValueError, match="Request must contain 'input' or 'messages'"
+        ):
+            counter("gpt-4", inputs=["hello", "world"])
+
 
 class TestOpenAIUsageCounterAmbiguousPayloads:
-    """Only one of input / inputs / messages may be supplied per request."""
+    """Only one of input / messages may be supplied per request."""
 
-    @pytest.mark.parametrize(
-        "request_kwargs",
-        [
-            {"input": "hi", "messages": [{"role": "user", "content": "hello"}]},
-            {"input": "hi", "inputs": ["hello"]},
-            {"inputs": ["hello"], "messages": [{"role": "user", "content": "hello"}]},
-            {
-                "input": "hi",
-                "inputs": ["hello"],
-                "messages": [{"role": "user", "content": "hello"}],
-            },
-        ],
-    )
-    def test_multiple_payload_keys_raise_value_error(self, request_kwargs):
+    def test_input_and_messages_raise_value_error(self):
         counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
         with pytest.raises(
             ValueError,
-            match="Exactly one of 'input', 'inputs', or 'messages' must be provided",
+            match="Exactly one of 'input' or 'messages' must be provided",
         ):
-            counter("gpt-4", **request_kwargs)
+            counter(
+                "gpt-4",
+                input="hi",
+                messages=[{"role": "user", "content": "hello"}],
+            )
 
 
 class TestCountChatInputTokens:
@@ -761,14 +723,11 @@ class TestOpenAIUsageCounterWithRealTiktoken:
         expected_tokens = len(enc.encode("hello world"))
         assert result["tokens"] == expected_tokens
 
-    def test_real_encoding_inputs_list(self):
-        tiktoken = pytest.importorskip("tiktoken")
+    def test_real_encoding_inputs_plural_rejected(self):
+        pytest.importorskip("tiktoken")
         counter = OpenAIUsageCounter()
-        result = counter("openai/gpt-4", inputs=["hello", "world"])
-        enc = tiktoken.get_encoding("cl100k_base")
-        expected = len(enc.encode("hello")) + len(enc.encode("world"))
-        assert result["tokens"] == expected
-        assert result["requests"] == 1
+        with pytest.raises(ValueError, match="must contain 'input' or 'messages'"):
+            counter("openai/gpt-4", inputs=["hello", "world"])
 
     def test_real_encoding_messages(self):
         pytest.importorskip("tiktoken")

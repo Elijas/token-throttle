@@ -382,19 +382,32 @@ def validate_metric(metric: object) -> str:
 
 
 def validate_per_seconds(per_seconds: object) -> int:
-    """Validate the per_seconds parameter for set_max_capacity."""
+    """
+    Validate the per_seconds parameter for set_max_capacity.
+
+    Accepts ``int`` directly.  Whole ``float`` values (e.g. ``60.0``) are
+    coerced to ``int`` for parity with Pydantic's lax-mode coercion on
+    ``Quota.per_seconds: int``.  All other types are rejected.
+    """
     if _is_bool_like(per_seconds):
         raise ValueError("per_seconds must not be a boolean")
-    if not isinstance(per_seconds, int | float):
-        raise ValueError(  # noqa: TRY004
-            f"per_seconds must be a positive integer (got {per_seconds!r})"
-        )
-    value = float(per_seconds)
-    if not math.isfinite(value) or value <= 0 or not value.is_integer():
-        raise ValueError(
-            f"per_seconds must be a positive integer (got {per_seconds!r})"
-        )
-    return int(value)
+    if isinstance(per_seconds, int):
+        if per_seconds <= 0:
+            raise ValueError(
+                f"per_seconds must be a positive integer (got {per_seconds!r})"
+            )
+        return per_seconds
+    if isinstance(per_seconds, float):
+        if (
+            not math.isfinite(per_seconds)
+            or per_seconds <= 0
+            or not per_seconds.is_integer()
+        ):
+            raise ValueError(
+                f"per_seconds must be a positive integer (got {per_seconds!r})"
+            )
+        return int(per_seconds)
+    raise ValueError(f"per_seconds must be a positive integer (got {per_seconds!r})")
 
 
 def resolve_config(

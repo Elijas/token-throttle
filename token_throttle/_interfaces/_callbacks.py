@@ -1,3 +1,4 @@
+import inspect
 import logging
 from typing import Protocol, runtime_checkable
 
@@ -26,6 +27,63 @@ def _probe_loguru():
 
 _stdlib_logger = logging.getLogger("token_throttle")
 
+_EXPECTED_CALLBACK_PARAMS: dict[str, frozenset[str]] = {
+    "on_wait_start": frozenset({"model_family", "usage", "preconsumption_capacities"}),
+    "after_wait_end_consumption": frozenset(
+        {
+            "model_family",
+            "usage",
+            "preconsumption_capacities",
+            "postconsumption_capacities",
+            "wait_time_s",
+        }
+    ),
+    "on_capacity_consumed": frozenset(
+        {
+            "model_family",
+            "preconsumption_capacities",
+            "postconsumption_capacities",
+            "usage",
+            "current_time",
+        }
+    ),
+    "on_capacity_refunded": frozenset(
+        {
+            "model_family",
+            "reserved_usage",
+            "actual_usage",
+            "refunded_usage",
+            "prerefund_capacities",
+            "postrefund_capacities",
+        }
+    ),
+    "on_missing_consumption_data": frozenset(
+        {"model_family", "usage_metric", "per_seconds"}
+    ),
+}
+
+
+def _validate_callback_signature(value: object, field_name: str) -> None:
+    expected = _EXPECTED_CALLBACK_PARAMS[field_name]
+    try:
+        sig = inspect.signature(value)
+    except (TypeError, ValueError):
+        return
+    if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
+        return
+    accepted = {
+        name
+        for name, p in sig.parameters.items()
+        if p.kind
+        in (inspect.Parameter.KEYWORD_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+    }
+    missing = expected - accepted
+    if missing:
+        raise ValueError(
+            f"{field_name} is missing required keyword parameters: {sorted(missing)}"
+        )
+
+
 _STDLIB_LEVEL_MAP: dict[str, int] = {
     "TRACE": logging.DEBUG,
     "DEBUG": logging.DEBUG,
@@ -46,6 +104,8 @@ def _log(level: str, message: str, **kwargs) -> None:
     their level parameter is truthy (see e.g. ``on_wait_start if wait_start
     else None`` guards), so ``_log`` is never reachable with ``level=None``.
     """
+    if not isinstance(level, str):
+        raise TypeError(f"_log level must be str, got {type(level).__name__}")
     loguru = _probe_loguru()
     if loguru is not None:
         loguru.log(level, message, **kwargs)
@@ -172,6 +232,8 @@ class RateLimiterCallbacks(BaseModel):
     ) -> object:
         if value is not None and not is_async_callable(value):
             raise ValueError(f"{info.field_name} must be an async callable")
+        if value is not None:
+            _validate_callback_signature(value, info.field_name)
         return value
 
 
@@ -282,6 +344,8 @@ class SyncRateLimiterCallbacks(BaseModel):
     ) -> object:
         if value is not None and is_async_callable(value):
             raise ValueError(f"{info.field_name} must be a synchronous callable")
+        if value is not None:
+            _validate_callback_signature(value, info.field_name)
         return value
 
 

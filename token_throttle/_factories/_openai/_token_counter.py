@@ -15,7 +15,7 @@ _OUTPUT_BUDGET_KEYS = (
     "max_completion_tokens",
     "max_tokens",
 )
-_REQUEST_PAYLOAD_KEYS = ("input", "inputs", "messages")
+_REQUEST_PAYLOAD_KEYS = ("input", "messages")
 _REQUEST_CONTEXT_KEYS = (
     "instructions",
     "tools",
@@ -34,8 +34,15 @@ _UNSUPPORTED_CONTENT_PART_TYPES = frozenset(
         "input_audio",
         "input_file",
         "input_image",
+        "computer_use_screenshot",
     },
 )
+# NOTE: Responses-API content-part types like "mcp_tool_result" and
+# "mcp_list_tools" are not denied here because their payloads can contain
+# countable text.  "reasoning" items likewise carry text summaries.  Only
+# types whose content is fundamentally non-textual (binary, image, audio)
+# belong in the deny set.  New non-text types should be added as the API
+# evolves.
 _UNSUPPORTED_CONTENT_FIELDS = (
     "audio",
     "audio_url",
@@ -72,8 +79,6 @@ class OpenAIUsageCounter:
                 )
                 return frozendict({"tokens": tokens, "requests": 1})
             # List of strings — valid for OpenAI Embeddings API (e.g. input=["hello", "world"]).
-            # NOTE: the `inputs` (plural) branch below handles the same shape under a
-            # nonstandard key; consider deprecating `inputs` in favour of this path.
             if isinstance(input_, list) and all(isinstance(i, str) for i in input_):
                 tokens = (
                     sum(len(encoding.encode(i)) for i in input_)
@@ -102,19 +107,6 @@ class OpenAIUsageCounter:
             )
             return frozendict({"tokens": tokens, "requests": 1})
 
-        if payload_key == "inputs":
-            inputs = request["inputs"]
-            if not isinstance(inputs, list) or not all(
-                isinstance(i, str) for i in inputs
-            ):
-                raise ValueError("'inputs' must be a list of strings")
-            tokens = (
-                sum(len(encoding.encode(i)) for i in inputs)
-                + request_context_tokens
-                + reserved_output_tokens
-            )
-            return frozendict({"tokens": tokens, "requests": 1})
-
         if payload_key == "messages":
             messages = request["messages"]
             if not isinstance(messages, list) or not all(
@@ -131,17 +123,15 @@ class OpenAIUsageCounter:
             )
             return frozendict({"tokens": tokens, "requests": 1})
 
-        raise ValueError("Request must contain 'input', 'inputs', or 'messages'")
+        raise ValueError("Request must contain 'input' or 'messages'")
 
 
 def _get_request_payload_key(request: dict[str, object]) -> str:
     payload_keys = [key for key in _REQUEST_PAYLOAD_KEYS if key in request]
     if not payload_keys:
-        raise ValueError("Request must contain 'input', 'inputs', or 'messages'")
+        raise ValueError("Request must contain 'input' or 'messages'")
     if len(payload_keys) > 1:
-        raise ValueError(
-            "Exactly one of 'input', 'inputs', or 'messages' must be provided"
-        )
+        raise ValueError("Exactly one of 'input' or 'messages' must be provided")
     return payload_keys[0]
 
 
@@ -342,6 +332,10 @@ def _parse_non_negative_int(value: object, field_name: str) -> int:
 
 
 def _is_token_id(value: object) -> bool:
+    # Ambiguity: any non-negative int matches. A list like [1, 2, 3] could be
+    # text content rather than pre-tokenized IDs. Without API-level context
+    # (e.g. an explicit "encoding" flag), there is no way to distinguish the
+    # two; this heuristic is the best available approach.
     return isinstance(value, int) and not _is_bool_like(value) and value >= 0
 
 
