@@ -1,4 +1,5 @@
 import math
+import uuid
 import warnings
 from collections import defaultdict
 from collections.abc import Iterator, Mapping
@@ -151,6 +152,7 @@ def frozen_usage(usage: Usage) -> FrozenUsage:
 
 
 class CapacityReservation(BaseModel):
+    reservation_id: str = Field(default_factory=lambda: uuid.uuid4().hex)
     usage: FrozenUsage
     model_family: str
     bucket_ids: frozenset[BucketId] | None = None

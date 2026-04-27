@@ -248,6 +248,11 @@ class RateLimiter(BaseRateLimiter):
         self._model_family_to_validated_signature: dict[
             str, tuple[bool, tuple[tuple[str, int, float], ...]]
         ] = {}
+        # Tracks reservation IDs that have already been refunded to prevent
+        # double-crediting. Grows monotonically; acceptable for typical
+        # lifetimes but may need a bounded structure for long-lived processes
+        # with millions of reservations.
+        self._refunded_reservation_ids: set[str] = set()
 
     async def acquire_capacity(
         self, usage: Usage, model: str, *, timeout: float | None = None
@@ -441,6 +446,16 @@ class RateLimiter(BaseRateLimiter):
         actual_usage: Usage,
         reservation: CapacityReservation,
     ) -> None:
+        if reservation.reservation_id in self._refunded_reservation_ids:
+            warnings.warn(
+                f"Reservation {reservation.reservation_id} has already been "
+                "refunded. Ignoring duplicate refund to prevent "
+                "double-crediting capacity.",
+                UserWarning,
+                stacklevel=3,
+            )
+            return
+        self._refunded_reservation_ids.add(reservation.reservation_id)
         actual_usage = frozen_usage(actual_usage)
         if reservation.model_family not in self._model_family_to_backend:
             raise ValueError(
