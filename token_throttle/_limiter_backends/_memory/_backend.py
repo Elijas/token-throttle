@@ -132,6 +132,8 @@ class MemoryBackend(RateLimiterBackend):
         allow_negative=True is required for consume_capacity (speedometer)
         and refund_capacity (preserves negative debt for natural refill).
         """
+        # O(N*M) linear scan per bucket -- acceptable because N (buckets)
+        # and M (usage metrics) are typically 2-5 in practice.
         for (usage_metric, per_seconds), amount in new_capacities.items():
             bucket = next(
                 (

@@ -159,4 +159,4 @@ __all__ = [
 ]
 
 if _HAS_REDIS:
-    __all__ += _REDIS_ALL  # noqa: PLE0605 - dynamic __all__ to avoid ImportError without redis
+    __all__ += _REDIS_ALL  # dynamic __all__ to avoid ImportError without redis  # noqa: PLE0605

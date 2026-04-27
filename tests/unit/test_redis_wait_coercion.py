@@ -60,6 +60,7 @@ def _make_sync_backend(
     backend._sleep_interval = 0.01
     backend.MAX_CROSS_WORKER_POLL = 1.0
     backend._local_condition = threading.Condition()
+    backend.sorted_buckets = []
     return backend
 
 

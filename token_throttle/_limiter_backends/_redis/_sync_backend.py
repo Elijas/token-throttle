@@ -127,7 +127,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         return True
 
     def _snapshot_buckets(self) -> tuple[SyncRedisBucket, ...]:
-        return tuple(getattr(self, "sorted_buckets", ()))
+        return tuple(self.sorted_buckets)
 
     def _validation_metric_names(
         self,
@@ -136,7 +136,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         target_buckets = self._snapshot_buckets() if buckets is None else tuple(buckets)
         if target_buckets:
             return self._usage_metric_names_for(target_buckets)
-        return set(getattr(self, "_usage_metric_names", set()))
+        return set(self._usage_metric_names)
 
     @staticmethod
     def _usage_metric_names_for(
@@ -212,7 +212,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                 # without relying on lock.local.token (which is only
                 # populated AFTER the SET NX succeeds; a cancel in that
                 # window would otherwise orphan the lock for its TTL).
-                token = uuid.uuid1().hex.encode()
+                token = uuid.uuid4().hex.encode()
                 try:
                     acquired = lock.acquire(blocking_timeout=remaining, token=token)
                 except BaseException:
@@ -877,6 +877,10 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         pipeline.get(bucket._capacity_key)  # noqa: SLF001
         last_checked_raw, stored_raw = pipeline.execute()
         if last_checked_raw is None or stored_raw is None:
+            # Partial state (one None) is treated the same as full absence:
+            # the bucket will start fresh on the next acquire. This is the
+            # correct fallback — anchoring with incomplete data would produce
+            # a wrong capacity value.
             return
         try:
             last_checked = float(last_checked_raw)

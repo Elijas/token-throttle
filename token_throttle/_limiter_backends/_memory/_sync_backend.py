@@ -196,6 +196,10 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
         fresh_start_buckets: list[MemoryBucket] = []
 
         with self._condition:
+            # time.time() (wall-clock) is intentional: the memory backend
+            # runs in a single process, so there is no cross-worker clock
+            # skew concern. monotonic() would avoid NTP jumps but would
+            # diverge from Redis server-time semantics.
             current_time = time.time()
             preconsumption_capacities, fresh_start_buckets = self._get_capacities(
                 current_time,

@@ -207,22 +207,6 @@ def validate_backend_usage(
     )
 
 
-def validate_backend_refund_usage(
-    reserved_usage: Usage,
-    actual_usage: Usage,
-    backend_metric_names: AbstractSet[str],
-) -> None:
-    """Validate direct backend refund inputs."""
-    _validate_usage_mapping(
-        reserved_usage,
-        backend_metric_names,
-        mapping_label="reserved_usage",
-        expected_keys_label="backend metric keys",
-        value_label="Reserved usage value",
-    )
-    validate_refund_usage(actual_usage, set(reserved_usage))
-
-
 def validate_backend_refund_usage_for_bucket_ids(
     reserved_usage: Usage,
     actual_usage: Usage,
@@ -339,18 +323,7 @@ def _merge_extra_usage(
             raise ValueError(
                 f"Usage key '{metric}' not found in usage counter",
             )
-        if _is_bool_like(raw_amount):
-            raise ValueError(f"Usage value for {metric} must not be a boolean")
-        try:
-            amount = float(raw_amount)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(
-                f"Usage value for {metric} must be a finite number (got {raw_amount!r})"
-            ) from exc
-        if not math.isfinite(amount):
-            raise ValueError(
-                f"Usage value for {metric} must be a finite number (got {raw_amount!r})"
-            )
+        amount = _coerce_usage_value(metric, raw_amount, label="Usage value")
         if amount < 0:
             raise ValueError(f"Usage value for {metric} must be non-negative")
         merged_usage[metric] = merged_usage.get(metric, 0.0) + amount
@@ -390,6 +363,10 @@ def validate_per_seconds(per_seconds: object) -> int:
     Accepts ``int`` directly.  Whole ``float`` values (e.g. ``60.0``) are
     coerced to ``int`` for parity with Pydantic's lax-mode coercion on
     ``Quota.per_seconds: int``.  All other types are rejected.
+
+    Note: the float path uses ``int()`` which silently truncates values
+    above 2^53, but any rate-limiting window that large is nonsensical.
+    The int path has no precision issue.
     """
     if _is_bool_like(per_seconds):
         raise ValueError("per_seconds must not be a boolean")
@@ -484,6 +461,10 @@ def _call_usage_counter(usage_counter, request: Mapping[str, object]) -> object:
     try:
         signature = inspect.signature(usage_counter)
     except (TypeError, ValueError):
+        # Builtin C functions (e.g. len) and some extension types don't
+        # expose an inspectable signature. Fall back to **kwargs
+        # invocation, which will raise TypeError if the counter doesn't
+        # accept keyword arguments.
         return usage_counter(**request)
 
     # Required positional-only check runs BEFORE the VAR_KEYWORD early-return:

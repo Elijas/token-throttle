@@ -392,7 +392,7 @@ class TestAcquireCapacityForRequestValidation:
         config = make_limited_config(usage_counter=fake_counter)
         limiter = SyncRateLimiter(config, backend=builder)
 
-        with pytest.raises(ValueError, match="must be a finite number"):
+        with pytest.raises(ValueError, match="must be finite"):
             limiter.acquire_capacity_for_request(
                 extra_usage={"tokens": object()},
                 model="gpt-4",

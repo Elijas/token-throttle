@@ -50,9 +50,9 @@ Matrix: Python 3.12 and 3.13. Redis 7 (alpine) as a GitHub service container.
 
 **If you adopt parallel test execution**, you'll need per-worker key prefixes or separate Redis DB numbers.
 
-### Sync concurrency test leaks a daemon thread
+### Sync concurrency test thread is joined
 
-`test_excess_acquires_must_wait` in `tests/integration/test_sync_concurrency.py` starts a daemon thread that is never joined. This is benign in isolation but can cause nondeterministic behavior in longer test runs.
+`test_excess_acquires_must_wait` in `tests/integration/test_sync_concurrency.py` starts a background thread but joins it with a 2-second timeout and asserts it exited cleanly. No daemon thread leak.
 
 ### `per_seconds` is constrained to integers
 
@@ -122,3 +122,7 @@ In the async Redis backend, `consume_capacity` shields the Redis write so that a
 ### Model-family caches grow without eviction
 
 `RateLimiter` and `SyncRateLimiter` maintain six per-model-family dicts (`_model_family_to_backend`, `_model_family_to_model_name`, etc.) that grow with each distinct model name seen. For bounded deployments (a handful of model families), this is fine. For applications that generate unbounded unique model names (e.g. per-user model aliases), consider using a single rate limiter per model family or periodically creating fresh limiter instances.
+
+### Float precision at extreme capacity limits
+
+All capacity values are Python `float` (IEEE 754 double). At limits above ~2^53, integer precision is lost: consecutive integers are indistinguishable, so `capacity - usage` may not change the stored value. This is a known limitation of the float64 representation and is acceptable for all real-world rate-limiting scenarios (token quotas are orders of magnitude below 2^53).

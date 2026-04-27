@@ -46,6 +46,8 @@ class PerModelConfig(BaseModel):
     def _reject_empty_string(cls, value: object) -> object:
         if isinstance(value, str) and not value:
             raise ValueError("model_family must not be an empty string")
+        if isinstance(value, str) and not value.strip():
+            raise ValueError("model_family must not be whitespace-only")
         if isinstance(value, str) and ":" in value:
             raise ValueError(
                 "model_family must not contain ':' (used as Redis key separator)"

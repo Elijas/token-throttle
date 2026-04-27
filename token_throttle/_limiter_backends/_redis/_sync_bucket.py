@@ -81,6 +81,8 @@ class SyncRedisBucket:
 
     def get_max_capacity(self) -> float:
         """Fetch the runtime override from Redis (if cache is stale) and return the effective max capacity."""
+        # time.time() is intentional: this TTL guards a per-process cache,
+        # not shared state, so local wall-clock is the correct reference.
         current_time = time.time()
         cache_age = current_time - self._max_capacity_cache_time
 
@@ -169,7 +171,14 @@ class SyncRedisBucket:
         self._max_capacity_cache_time = time.time()
 
     def set_configured_max_capacity(self, value: float) -> None:
-        """Update the configured/static max capacity without persisting an override."""
+        """
+        Update the configured/static max capacity without persisting an override.
+
+        Only updates ``_rate_per_sec`` when no runtime override is cached.
+        When an override is active, the override's rate takes precedence;
+        updating the rate here would cause capacity accrual at the wrong
+        rate until the next override refresh.
+        """
         if _is_bool_like(value):
             raise ValueError("max_capacity must not be a boolean")
         if not (math.isfinite(value) and value > 0):

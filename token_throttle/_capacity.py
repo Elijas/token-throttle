@@ -43,6 +43,9 @@ def calculate_capacity(  # noqa: PLR0913
         bucket_id: Identifier for the bucket (used in warning messages).
 
     """
+    # Partial state (one None, one non-None) is treated as a fresh start:
+    # anchoring with incomplete data would produce a wrong capacity value,
+    # so we reset to max_capacity. Any negative debt is intentionally lost.
     if last_checked is None or outdated_capacity is None:
         return CalculatedCapacity(amount=max_capacity, is_fresh_start=True)
 

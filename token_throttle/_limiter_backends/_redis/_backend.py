@@ -240,7 +240,7 @@ class RedisBackend(RateLimiterBackend):
                 # that narrow window leaves the Redis key set but
                 # local.token=None, so release() raises LockError before
                 # ever talking to Redis and the lock leaks for its TTL.
-                token = uuid.uuid1().hex.encode()
+                token = uuid.uuid4().hex.encode()
                 try:
                     acquired = await lock.acquire(
                         blocking_timeout=remaining, token=token
@@ -765,6 +765,9 @@ class RedisBackend(RateLimiterBackend):
                     )
                 )
             except redis.exceptions.LockError as exc:
+                # When deadline is None (no timeout), LockError propagates
+                # raw — this is intentional: an unbounded wait should not
+                # silently convert a lock failure into a timeout error.
                 if deadline is None:  # pragma: no cover
                     raise
                 raise TimeoutError("Timed out waiting for capacity") from exc
@@ -1100,7 +1103,11 @@ class RedisBackend(RateLimiterBackend):
         pipeline.get(bucket._capacity_key)  # noqa: SLF001
         last_checked_raw, stored_raw = await pipeline.execute()
         if last_checked_raw is None or stored_raw is None:
-            return  # fresh: no prior state to freeze.
+            # Partial state (one None) is treated the same as full absence:
+            # the bucket will start fresh on the next acquire. This is the
+            # correct fallback — anchoring with incomplete data would produce
+            # a wrong capacity value.
+            return
         try:
             last_checked = float(last_checked_raw)
             stored = float(stored_raw)

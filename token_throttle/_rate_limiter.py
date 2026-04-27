@@ -349,6 +349,8 @@ class RateLimiter(BaseRateLimiter):
         else:
             await backend.consume_capacity(usage)
         model_family = limit_config.get_model_family()
+        # Only registered after a successful acquire — failed acquires don't
+        # need refund routing, so skipping the cache on failure is intentional.
         self._model_family_to_model_name[model_family] = model
         return CapacityReservation(
             usage=usage,
@@ -542,8 +544,9 @@ class RateLimiter(BaseRateLimiter):
         new_snapshot = _quotas_snapshot(cfg)
 
         # Fast path: unchanged configs can reuse the cached backend without
-        # taking the limiter lock. Refresh/rebuild work is serialized below so
-        # concurrent callers cannot duplicate a rebuild.
+        # taking the limiter lock. The two dict reads are not atomic, but
+        # dict.__getitem__ is GIL-atomic in CPython; worst case is a
+        # spurious slow-path entry that re-checks under the lock.
         backend = self._model_family_to_backend.get(model_family)
         if (
             backend is not None
@@ -623,7 +626,11 @@ class RateLimiter(BaseRateLimiter):
             self._model_family_to_quotas[model_family] = new_snapshot
             return backend
 
-        # Only limits changed — update in place via set_max_capacity
+        # Only limits changed — update in place via set_max_capacity.
+        # This loop is not atomic across buckets: a concurrent reader may
+        # observe some buckets at the old limit and others at the new limit.
+        # Each apply_configured_max_capacity is individually atomic, so no
+        # bucket is left in an inconsistent state.
         backend = self._model_family_to_backend[model_family]
         changed_bucket_ids: set[BucketId] = set()
         for bucket_id, new_limit in new_snapshot.items():
@@ -694,6 +701,11 @@ class RateLimiter(BaseRateLimiter):
 
         conflicts: list[tuple[str, str]] = []
 
+        # config_getter is called unchecked here: if it raises, the error
+        # propagates to the caller. This is intentional — the model was
+        # previously registered successfully, so a config_getter failure
+        # now indicates a programming error or broken config, not a
+        # transient condition that should be papered over.
         for known_model, known_family in sorted(
             self._model_name_to_model_family.items()
         ):
