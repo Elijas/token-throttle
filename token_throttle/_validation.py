@@ -28,17 +28,19 @@ def is_unlimited_reservation(reservation: CapacityReservation) -> bool:
     """
     True when a reservation represents a disabled/unlimited rate limit.
 
-    New code path: ``_unlimited_reservation`` sets ``is_unlimited=True`` on
-    every reservation it creates, so that's the authoritative signal.
+    **Design intent:** ``is_unlimited=True`` is the authoritative signal and
+    bypasses metering regardless of the reservation's usage data. This is
+    deliberate — a hand-constructed reservation with ``is_unlimited=True``
+    and non-empty usage is treated as unlimited because the flag is the
+    single source of truth. Callers constructing ``CapacityReservation``
+    manually must set ``is_unlimited=True`` for unlimited reservations.
 
     Legacy path: reservations created before the ``is_unlimited`` field
     existed carry only the sentinel ``model_family`` and an empty
     ``usage`` / ``bucket_ids``. The extra-conservative fallback preserves
     back-compat for those, but it intentionally does NOT match reservations
     that have the sentinel family plus non-empty usage — those cannot be
-    produced by the current code and are likely hand-constructed. Callers
-    constructing ``CapacityReservation`` manually must set
-    ``is_unlimited=True`` for unlimited reservations.
+    produced by the current code and are likely hand-constructed.
     """
     return bool(
         reservation.is_unlimited

@@ -210,7 +210,15 @@ def _warn_refund_refresh_failed(
 
 
 class SyncRateLimiter:
-    """Synchronous counterpart of ``RateLimiter`` — same architecture and contract."""
+    """
+    Synchronous counterpart of ``RateLimiter`` — same architecture and contract.
+
+    Unlike ``RateLimiter`` (which extends ``BaseRateLimiter`` ABC),
+    ``SyncRateLimiter`` is a concrete class with no abstract base.
+    Adding a ``BaseSyncRateLimiter`` ABC would be a public API change;
+    the sync interface is instead documented by its method signatures
+    and the ``SyncRateLimiterBackend`` protocol it delegates to.
+    """
 
     def __init__(
         self,

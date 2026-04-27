@@ -40,6 +40,7 @@ Matrix: Python 3.12 and 3.13. Redis 7 (alpine) as a GitHub service container.
 - `create_logging_callbacks` / `create_sync_logging_callbacks` use this auto-detection (default for new code).
 - `create_loguru_callbacks` / `create_sync_loguru_callbacks` require loguru explicitly and raise `ImportError` if missing.
 - `_models.py` uses `warnings.warn()` for the empty-quota warning — no loguru dependency.
+- `_probe_loguru()` caches its result on first call. If loguru is not installed at import time, the `None` result is cached for the process lifetime. Installing loguru after the first probe will not be detected — restart the process to pick it up.
 
 ### Redis integration tests are not parallel-safe
 
@@ -109,3 +110,15 @@ Instead, each backend performs the over-limit check inside its lock against the 
 ### `on_missing_consumption_data` callback is delayed until first successful acquire
 
 When `_check_and_consume_capacity` returns `False` (insufficient capacity), it exits before calling `_fresh_start_buckets_callback`. The `on_missing_consumption_data` callback won't fire until the first *successful* capacity acquisition. This is by design — firing it on every 100ms poll iteration would be noisy. Since `last_checked` is never written on the insufficient-capacity path, the fresh-start condition persists and the callback fires exactly once when capacity is first successfully consumed.
+
+### Redis `consume_capacity` callbacks are best-effort after cancellation
+
+In the async Redis backend, `consume_capacity` shields the Redis write so that a task cancellation cannot leave the write half-applied. After `suppress_current_task_cancellation()` returns, callbacks (`on_capacity_consumed`, `on_missing_consumption_data`) still fire. If a *second* cancellation arrives during those callbacks, they are skipped. This is acceptable: the speedometer consumption is already durably recorded in Redis, and callbacks are best-effort via `_invoke_callback_safe`.
+
+### `SyncRateLimiter` has no abstract base class
+
+`RateLimiter` extends `BaseRateLimiter` (ABC); `SyncRateLimiter` does not extend any abstract base. Adding a `BaseSyncRateLimiter` would be a public API change. The sync interface is documented by its method signatures and mirrors the async API.
+
+### Model-family caches grow without eviction
+
+`RateLimiter` and `SyncRateLimiter` maintain six per-model-family dicts (`_model_family_to_backend`, `_model_family_to_model_name`, etc.) that grow with each distinct model name seen. For bounded deployments (a handful of model families), this is fine. For applications that generate unbounded unique model names (e.g. per-user model aliases), consider using a single rate limiter per model family or periodically creating fresh limiter instances.

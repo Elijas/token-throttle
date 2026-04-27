@@ -174,6 +174,13 @@ def _project_refund_scope(
         if bucket_id in active_bucket_ids
     )
     if not surviving_bucket_ids:
+        warnings.warn(
+            "Refund dropped: none of the reservation's bucket IDs exist in "
+            "the current backend (bucket set was reconfigured after the "
+            "reservation was created).",
+            RuntimeWarning,
+            stacklevel=3,
+        )
         return frozendict(), frozendict(), surviving_bucket_ids
 
     surviving_metric_names = frozenset(metric for metric, _ in surviving_bucket_ids)
