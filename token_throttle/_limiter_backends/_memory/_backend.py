@@ -56,6 +56,7 @@ class MemoryBackendBuilder(RateLimiterBackendBuilderInterface):
 
 class MemoryBackend(RateLimiterBackend):
     DEFAULT_SLEEP_INTERVAL: ClassVar[float] = 0.1
+    MAX_CROSS_WORKER_POLL: ClassVar[float] = 1.0
 
     def __init__(
         self,
@@ -74,8 +75,11 @@ class MemoryBackend(RateLimiterBackend):
         self._callbacks = callbacks
         self._limit_config = limit_config
         self._usage_metric_names: set[str] = {bucket.usage_metric for bucket in buckets}
-        # Keep retired buckets around so a later metric re-add can resume from
-        # the last known capacity instead of starting full again.
+        # Keep retired buckets so a later metric re-add can resume from the
+        # last known capacity instead of starting full again.  Growth is
+        # bounded by unique (metric, per_seconds) pairs ever configured, not
+        # by reconfiguration count — the dict is keyed by bucket ID and only
+        # stores the last state for each ID.
         self._bucket_registry: dict[tuple[str, int], MemoryBucket] = {
             (bucket.usage_metric, int(bucket.per_seconds)): bucket for bucket in buckets
         }
@@ -277,6 +281,7 @@ class MemoryBackend(RateLimiterBackend):
         preconsumption: Capacities = frozendict()
         current_time = time.time()
         consumed_monotonic = time.monotonic()
+        consumed_buckets: list[MemoryBucket] | None = None
 
         while True:
             should_fire_wait_start = False
@@ -291,6 +296,7 @@ class MemoryBackend(RateLimiterBackend):
                     )
                     if ok:
                         consumed_monotonic = time.monotonic()
+                        consumed_buckets = list(self._buckets)
                         break
                     if deadline is not None and time.monotonic() >= deadline:
                         raise TimeoutError("Timed out waiting for capacity")
@@ -300,7 +306,10 @@ class MemoryBackend(RateLimiterBackend):
                         wait_started_at = time.monotonic()
                         should_fire_wait_start = True
                         break
-                    computed = self._compute_sleep(usage, preconsumption)
+                    computed = min(
+                        self._compute_sleep(usage, preconsumption),
+                        self.MAX_CROSS_WORKER_POLL,
+                    )
                     if deadline is not None:
                         computed = min(computed, max(0, deadline - time.monotonic()))
                     with contextlib.suppress(TimeoutError):
@@ -376,11 +385,17 @@ class MemoryBackend(RateLimiterBackend):
                 )
         except asyncio.CancelledError:
             try:  # noqa: SIM105
-                await self._refund_cancelled_consumption(usage)
+                await self._refund_cancelled_consumption(
+                    usage, buckets=consumed_buckets
+                )
             except BaseException:  # noqa: BLE001, S110
-                # Best-effort: shield ensures background completion.
-                # Swallow so CancelledError always propagates for
-                # structured concurrency (TaskGroups).
+                # Best-effort refund: asyncio.shield() inside the refund
+                # ensures the coroutine runs to completion even under
+                # re-cancel.  BaseException (not just Exception) is caught
+                # because the shielded refund itself may raise CancelledError
+                # or unexpected errors from the condition lock.  Safe to
+                # swallow: the original CancelledError is re-raised below,
+                # preserving structured-concurrency (TaskGroup) semantics.
                 pass
             raise
 
@@ -545,12 +560,14 @@ class MemoryBackend(RateLimiterBackend):
                 "MemoryBackend can only reconfigure into another MemoryBackend"
             )
 
-        existing_buckets = dict(getattr(self, "_bucket_registry", {})) or {
-            (bucket.usage_metric, int(bucket.per_seconds)): bucket
-            for bucket in self._buckets
-        }
-
         async with self._condition:
+            if hasattr(self, "_bucket_registry"):
+                existing_buckets = dict(self._bucket_registry)
+            else:
+                existing_buckets = {
+                    (bucket.usage_metric, int(bucket.per_seconds)): bucket
+                    for bucket in self._buckets
+                }
             current_time = time.time()
             prepared_buckets: list[MemoryBucket] = []
             for quota in cfg.quotas:
@@ -612,14 +629,24 @@ class MemoryBackend(RateLimiterBackend):
                 stacklevel=3,
             )
 
-    async def _refund_cancelled_consumption(self, usage: FrozenUsage) -> None:
+    async def _refund_cancelled_consumption(
+        self,
+        usage: FrozenUsage,
+        *,
+        buckets: list[MemoryBucket] | None = None,
+    ) -> None:
         """
         Refund capacity consumed before a CancelledError hit callbacks.
 
         Uses asyncio.shield() because the refund must complete even if the
         task is re-cancelled (e.g. in structured concurrency / TaskGroups).
         Fires no callbacks to avoid recursion and another cancellation window.
+
+        ``buckets`` should be the snapshot captured at consumption time so
+        that a concurrent reconfiguration cannot redirect the refund to a
+        different bucket set.
         """
+        target_buckets = self._buckets if buckets is None else buckets
 
         async def _do_refund() -> None:
             async with self._condition:
@@ -631,11 +658,16 @@ class MemoryBackend(RateLimiterBackend):
                         if cap_metric != usage_metric:
                             continue
                         bucket = next(
-                            b
-                            for b in self._buckets
-                            if b.usage_metric == cap_metric
-                            and b.per_seconds == per_seconds
+                            (
+                                b
+                                for b in target_buckets
+                                if b.usage_metric == cap_metric
+                                and b.per_seconds == per_seconds
+                            ),
+                            None,
                         )
+                        if bucket is None:
+                            continue
                         refunded[(cap_metric, per_seconds)] = min(
                             cap_amount + usage_amount,
                             bucket.max_capacity,

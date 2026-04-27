@@ -225,6 +225,11 @@ class SyncRateLimiter:
         self._validation_lock = threading.Lock()
         self._callbacks = callbacks
         self._config_getter = lambda model_name: resolve_config(cfg, model_name)
+        # Dict mutations below happen both under self._lock and outside it
+        # (e.g. _acquire_capacity, set_max_capacity).  Single-key dict
+        # assignment is GIL-atomic in CPython, so these lock-free writes are
+        # safe on standard interpreters.  Freethreaded Python (PEP 703 /
+        # 3.13t) removes this guarantee and may require explicit locking.
         self._model_family_to_backend: dict[str, SyncRateLimiterBackend] = {}
         self._model_family_to_model_name: dict[str, str] = {}
         self._model_family_to_quotas: dict[str, dict[tuple[str, int], float]] = {}

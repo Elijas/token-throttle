@@ -55,6 +55,11 @@ def _raise_lock_timeout_error() -> typing.NoReturn:
     raise redis.exceptions.LockError("Unable to acquire lock within the time specified")
 
 
+async def _shielded_lock_release(lock: redis.asyncio.lock.Lock) -> None:
+    """Release a Redis lock, shielded so the round-trip finishes even under cancel."""
+    await asyncio.shield(lock.release())
+
+
 class _RedisLockStack(AsyncExitStack):
     """
     AsyncExitStack that also holds the acquired Lock objects.
@@ -259,7 +264,7 @@ class RedisBackend(RateLimiterBackend):
                 if not acquired:
                     _raise_lock_timeout_error()
                 stack.locks.append(lock)
-                stack.push_async_callback(lock.release)
+                stack.push_async_callback(_shielded_lock_release, lock)
         except BaseException:
             await stack.aclose()
             raise
@@ -705,6 +710,10 @@ class RedisBackend(RateLimiterBackend):
                 # `suppress_current_task_cancellation` docstring —
                 # refunding now would roll back a recorded
                 # measurement of real usage.
+                #
+                # Lock release during the `async with` exit is shielded
+                # (via _shielded_lock_release in _lock()), so a re-cancel
+                # between suppression and release will not leak the lock.
                 suppress_current_task_cancellation()
                 return
         # Callbacks fire after the lock is released. Consumption is already
@@ -1270,6 +1279,12 @@ class RedisBackend(RateLimiterBackend):
         await points (lock acquisition, pipeline get, pipeline set).  Shield
         ensures the refund completes even if the task is re-cancelled.
         Fires no callbacks to avoid recursion and another cancellation window.
+
+        Worst case: if the prior lock release was interrupted (cancel arrived
+        before the shielded release completed), the lock may still be held in
+        Redis.  Re-acquiring here then blocks for up to LOCK_TIMEOUT_SECONDS
+        (30 s) until the TTL expires.  This is inherent to the architecture —
+        the lock will eventually expire and the refund will proceed.
         """
         target_buckets = self._snapshot_buckets() if buckets is None else tuple(buckets)
 
