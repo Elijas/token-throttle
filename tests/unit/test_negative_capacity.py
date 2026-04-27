@@ -445,14 +445,14 @@ class TestNegativeRefundPushesCapacityNegative:
         cap = bucket.get_capacity(time.time())
         assert cap.amount == pytest.approx(0.0, abs=2.0)
 
-    async def test_async_large_negative_refund_goes_deeply_negative(self):
+    async def test_async_large_negative_refund_clamped_at_max_capacity(self):
         backend = _make_async_backend(limit=100, per_seconds=3600, sleep_interval=0.01)
         # Start at 100, consume 80 → 20
 
         await backend.consume_capacity(frozen_usage({"tokens": 80}))
 
-        # Negative refund: reserved=80, actual=200 → refund=-120
-        # 20 + (-120) = -100
+        # Negative refund: reserved=80, actual=200 → raw refund=-120
+        # Clamped to -max_capacity=-100, so 20 + (-100) = -80
         with pytest.warns(RuntimeWarning, match="exceeds reserved usage"):
             await backend.refund_capacity(
                 frozen_usage({"tokens": 80}),
@@ -461,12 +461,14 @@ class TestNegativeRefundPushesCapacityNegative:
 
         bucket = backend._buckets[0]
         cap = bucket.get_capacity(time.time())
-        assert cap.amount == pytest.approx(-100.0, abs=2.0)
+        assert cap.amount == pytest.approx(-80.0, abs=2.0)
 
-    def test_sync_negative_refund_goes_negative(self):
+    def test_sync_negative_refund_clamped_at_max_capacity(self):
         backend = _make_sync_backend(limit=100, per_seconds=3600, sleep_interval=0.01)
         backend.consume_capacity(frozen_usage({"tokens": 80}))
 
+        # Negative refund: reserved=80, actual=200 → raw refund=-120
+        # Clamped to -max_capacity=-100, so 20 + (-100) = -80
         with pytest.warns(RuntimeWarning, match="exceeds reserved usage"):
             backend.refund_capacity(
                 frozen_usage({"tokens": 80}),
@@ -475,7 +477,39 @@ class TestNegativeRefundPushesCapacityNegative:
 
         bucket = backend._buckets[0]
         cap = bucket.get_capacity(time.time())
-        assert cap.amount == pytest.approx(-100.0, abs=2.0)
+        assert cap.amount == pytest.approx(-80.0, abs=2.0)
+
+    async def test_async_huge_actual_usage_does_not_poison_bucket(self):
+        backend = _make_async_backend(limit=100, per_seconds=3600, sleep_interval=0.01)
+        await backend.consume_capacity(frozen_usage({"tokens": 50}))
+
+        # actual_usage=1e300 would previously drive capacity to -1e300
+        with pytest.warns(RuntimeWarning, match="exceeds reserved usage"):
+            await backend.refund_capacity(
+                frozen_usage({"tokens": 50}),
+                frozen_usage({"tokens": 1e300}),
+            )
+
+        bucket = backend._buckets[0]
+        cap = bucket.get_capacity(time.time())
+        # Clamped: refund = max(-1e300, -100) = -100, capacity = 50 + (-100) = -50
+        assert cap.amount == pytest.approx(-50.0, abs=2.0)
+        assert cap.amount >= -100.0
+
+    def test_sync_huge_actual_usage_does_not_poison_bucket(self):
+        backend = _make_sync_backend(limit=100, per_seconds=3600, sleep_interval=0.01)
+        backend.consume_capacity(frozen_usage({"tokens": 50}))
+
+        with pytest.warns(RuntimeWarning, match="exceeds reserved usage"):
+            backend.refund_capacity(
+                frozen_usage({"tokens": 50}),
+                frozen_usage({"tokens": 1e300}),
+            )
+
+        bucket = backend._buckets[0]
+        cap = bucket.get_capacity(time.time())
+        assert cap.amount == pytest.approx(-50.0, abs=2.0)
+        assert cap.amount >= -100.0
 
 
 # ---------------------------------------------------------------------------

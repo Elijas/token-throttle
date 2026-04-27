@@ -830,6 +830,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                 # Negative capacity is preserved so the token-bucket refill
                 # handles recovery — clamping to 0 here would erase debt
                 # from the record_usage (speedometer) path.
+                refund_amount = max(refund_amount, -bucket.max_capacity)
                 updated_capacities_[(capability_usage_metric, int(per_seconds))] = min(
                     updated_capacities_[(capability_usage_metric, int(per_seconds))]
                     + refund_amount,
