@@ -908,7 +908,8 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         )
         if bucket is None:
             raise ValueError(f"Bucket '{metric}/{per_seconds}s' not found")
-        with self._lock(timeout=LOCK_TIMEOUT_SECONDS, buckets=buckets):
+        with self._lock(timeout=LOCK_TIMEOUT_SECONDS, buckets=buckets) as lock_stack:
+            self._extend_locks(lock_stack)
             self._snapshot_bucket_state(bucket)
             bucket.set_max_capacity(value)
         with self._local_condition:
@@ -928,7 +929,8 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         )
         if bucket is None:
             raise ValueError(f"Bucket '{metric}/{per_seconds}s' not found")
-        with self._lock(timeout=LOCK_TIMEOUT_SECONDS, buckets=buckets):
+        with self._lock(timeout=LOCK_TIMEOUT_SECONDS, buckets=buckets) as lock_stack:
+            self._extend_locks(lock_stack)
             self._snapshot_bucket_state(bucket)
             bucket.clear_max_capacity_override()
             bucket.set_configured_max_capacity(value)
@@ -961,7 +963,9 @@ class SyncRedisBackend(SyncRateLimiterBackend):
             is None
         )
 
-        with self._lock(timeout=LOCK_TIMEOUT_SECONDS, buckets=reconfigure_buckets):
+        with self._lock(
+            timeout=LOCK_TIMEOUT_SECONDS, buckets=reconfigure_buckets
+        ) as lock_stack:
             for bucket in removed_buckets:
                 # Snapshot first so the frozen capacity/last_checked in Redis
                 # reflect the bucket's state at the moment of removal. Without
@@ -969,6 +973,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                 # integrate the new rate across the remove→re-add gap (and any
                 # time preceding it). Then clear the runtime override so the
                 # re-add starts from the callable config's static quota again.
+                self._extend_locks(lock_stack)
                 self._snapshot_bucket_state(bucket)
                 bucket.clear_max_capacity_override()
             for quota in cfg.quotas:
@@ -990,6 +995,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                 # Prefer current_bucket (its _max_capacity_default matches the
                 # stored override payload, so the override is accepted and
                 # yields the true active rate).
+                self._extend_locks(lock_stack)
                 self._snapshot_bucket_state(
                     current_bucket if current_bucket is not None else bucket
                 )
@@ -999,6 +1005,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                     bucket.clear_max_capacity_override()
                 bucket.set_configured_max_capacity(float(quota.limit))
 
+            self._extend_locks(lock_stack)
             self.install_reconfigured_state(
                 buckets=list(new_buckets),
                 cfg=cfg,

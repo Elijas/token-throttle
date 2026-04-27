@@ -1122,7 +1122,10 @@ class RedisBackend(RateLimiterBackend):
         )
         if bucket is None:
             raise ValueError(f"Bucket '{metric}/{per_seconds}s' not found")
-        async with await self._lock(timeout=LOCK_TIMEOUT_SECONDS, buckets=buckets):
+        async with await self._lock(
+            timeout=LOCK_TIMEOUT_SECONDS, buckets=buckets
+        ) as lock_stack:
+            await self._extend_locks(lock_stack)
             await self._snapshot_bucket_state(bucket)
             await bucket.set_max_capacity(value)
         async with self._local_condition:
@@ -1142,7 +1145,10 @@ class RedisBackend(RateLimiterBackend):
         )
         if bucket is None:
             raise ValueError(f"Bucket '{metric}/{per_seconds}s' not found")
-        async with await self._lock(timeout=LOCK_TIMEOUT_SECONDS, buckets=buckets):
+        async with await self._lock(
+            timeout=LOCK_TIMEOUT_SECONDS, buckets=buckets
+        ) as lock_stack:
+            await self._extend_locks(lock_stack)
             await self._snapshot_bucket_state(bucket)
             await bucket.clear_max_capacity_override()
             bucket.set_configured_max_capacity(value)
@@ -1178,7 +1184,7 @@ class RedisBackend(RateLimiterBackend):
         async with await self._lock(
             timeout=LOCK_TIMEOUT_SECONDS,
             buckets=reconfigure_buckets,
-        ):
+        ) as lock_stack:
             for bucket in removed_buckets:
                 # Snapshot first so the frozen capacity/last_checked in Redis
                 # reflect the bucket's state at the moment of removal. Without
@@ -1186,6 +1192,7 @@ class RedisBackend(RateLimiterBackend):
                 # integrate the new rate across the remove→re-add gap (and any
                 # time preceding it). Then clear the runtime override so the
                 # re-add starts from the callable config's static quota again.
+                await self._extend_locks(lock_stack)
                 await self._snapshot_bucket_state(bucket)
                 await bucket.clear_max_capacity_override()
             for quota in cfg.quotas:
@@ -1207,6 +1214,7 @@ class RedisBackend(RateLimiterBackend):
                 # any mutation could change it. Prefer current_bucket (its
                 # _max_capacity_default matches the stored override payload,
                 # so the override is accepted and yields the true active rate).
+                await self._extend_locks(lock_stack)
                 await self._snapshot_bucket_state(
                     current_bucket if current_bucket is not None else bucket
                 )
@@ -1216,6 +1224,7 @@ class RedisBackend(RateLimiterBackend):
                     await bucket.clear_max_capacity_override()
                 bucket.set_configured_max_capacity(float(quota.limit))
 
+            await self._extend_locks(lock_stack)
             self.install_reconfigured_state(
                 buckets=list(new_buckets),
                 cfg=cfg,
