@@ -1035,14 +1035,25 @@ class RedisBackend(RateLimiterBackend):
 
             # Extend lock TTL before committing the write, see _extend_locks.
             await self._extend_locks(lock_stack)
-            # Always update capacities in Redis with the current time
-            await self._set_capacities_unsafe(
-                frozendict(updated_capacities),
-                pipeline=pipeline,
-                current_time=current_time,
-                allow_negative=True,
-                buckets=buckets,
+            write_task = asyncio.create_task(
+                self._set_capacities_unsafe(
+                    frozendict(updated_capacities),
+                    pipeline=pipeline,
+                    current_time=current_time,
+                    allow_negative=True,
+                    buckets=buckets,
+                )
             )
+            try:
+                await asyncio.shield(write_task)
+            except asyncio.CancelledError:
+                refunded = await self._wait_for_task_outcome_while_cancelled(write_task)
+                if not refunded:
+                    raise
+                # Write landed despite cancel — refund is done.
+                # Suppress so the caller doesn't retry and double-refund.
+                suppress_current_task_cancellation()
+                return
         async with self._local_condition:
             self._local_condition.notify_all()
         await self._fresh_start_buckets_callback(fresh_start_buckets)
