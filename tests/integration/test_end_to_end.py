@@ -6,6 +6,7 @@ a real backend, using the parameterized `backend_builder` fixture.
 """
 
 import asyncio
+import json
 import time
 
 import pytest
@@ -230,7 +231,7 @@ async def test_dynamic_max_capacity_change(request, backend_builder, redis_clien
     # Reduce max_capacity for requests from 10 to 3 via Redis directly.
     await redis_client.set(
         "rate_limiting:dynamic:requests:1:max_capacity_override",
-        3,
+        json.dumps({"configured_max_capacity": 10, "override_max_capacity": 3}),
     )
 
     # Wait for cache TTL to expire (1 second cache + margin) so the new

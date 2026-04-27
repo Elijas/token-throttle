@@ -5,6 +5,7 @@ Tests features that only apply to the Redis backend (e.g., dynamic max_capacity
 via Redis keys).
 """
 
+import json
 import time
 import warnings
 
@@ -42,7 +43,7 @@ def test_dynamic_max_capacity_change(sync_redis_client):
     # Reduce max_capacity for requests from 10 to 3 via Redis directly.
     sync_redis_client.set(
         "rate_limiting:dynamic_sync:requests:1:max_capacity_override",
-        3,
+        json.dumps({"configured_max_capacity": 10, "override_max_capacity": 3}),
     )
 
     # Wait for cache TTL to expire (1 second cache + margin).

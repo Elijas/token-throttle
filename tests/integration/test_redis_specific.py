@@ -1,6 +1,7 @@
 """Integration tests for Redis-specific internals (RedisBucket, RedisBackend locking)."""
 
 import asyncio
+import json
 import re
 import time
 import warnings
@@ -78,7 +79,12 @@ class TestRedisBucketMaxCapacity:
         assert await bucket.get_max_capacity() == pytest.approx(200.0)
 
         # Manually update the Redis key directly, bypassing the cache
-        await redis_client.set(bucket._max_capacity_key, 999.0)
+        await redis_client.set(
+            bucket._max_capacity_key,
+            json.dumps(
+                {"configured_max_capacity": 100, "override_max_capacity": 999.0}
+            ),
+        )
 
         # Cache is still fresh, so we should still see the old value
         assert await bucket.get_max_capacity() == pytest.approx(200.0)
