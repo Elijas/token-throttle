@@ -970,6 +970,8 @@ class TestCallableConfigMetricSetRebuildIntegrity:
         reservation = await limiter.acquire_capacity({"tokens": 90}, "test-model")
         await limiter.refund_capacity({"tokens": 90}, reservation)
 
+        await limiter.acquire_capacity({"tokens": 10}, "test-model")
+
         use_expanded = True
 
         async def trigger_rebuild() -> None:
@@ -983,10 +985,6 @@ class TestCallableConfigMetricSetRebuildIntegrity:
         rebuild_task = asyncio.create_task(trigger_rebuild())
         await builder.prepare_started.wait()
 
-        use_expanded = False
-        await limiter.acquire_capacity({"tokens": 10}, "test-model", timeout=0)
-
-        use_expanded = True
         builder.release_prepare.set()
         await rebuild_task
 

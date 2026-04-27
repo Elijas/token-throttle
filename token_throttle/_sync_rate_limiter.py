@@ -571,24 +571,22 @@ class SyncRateLimiter:
                 ),
             )
             backend = self._backend.build(rebuild_cfg, callbacks=self._callbacks)
-            backend = old_backend.prepare_reconfigured_backend(backend, rebuild_cfg)
-            # Race window (see async limiter for full discussion): between
-            # the in-place mutation inside `prepare_reconfigured_backend`
-            # and the snapshot dict update below, a concurrent fast-path
-            # `_get_backend` reader whose desired snapshot equals OLD will
-            # match the stale cache and receive the now-mutated backend,
-            # surfacing a "metrics not in backend metric keys" ValueError.
-            # We accept the race because invalidating the cache during the
-            # rebuild deadlocks legitimate old-config callers when
-            # `prepare_reconfigured_backend` blocks, and forcing the fast
-            # path to take the backend lock defeats its purpose. The window
-            # is bounded by `_restore_runtime_max_capacity`.
-            self._restore_runtime_max_capacity(
-                model_family,
-                old_snapshot=old_snapshot,
-                new_snapshot=new_snapshot,
-                backend=backend,
-            )
+            # Invalidate fast-path cache before mutation to close the
+            # TOCTOU window where a concurrent reader could match the stale
+            # snapshot against an already-mutated backend, tag its reservation
+            # with old bucket_ids, and silently leak capacity on refund.
+            self._model_family_to_quotas.pop(model_family, None)
+            try:
+                backend = old_backend.prepare_reconfigured_backend(backend, rebuild_cfg)
+                self._restore_runtime_max_capacity(
+                    model_family,
+                    old_snapshot=old_snapshot,
+                    new_snapshot=new_snapshot,
+                    backend=backend,
+                )
+            except BaseException:
+                self._model_family_to_quotas[model_family] = old_snapshot
+                raise
 
             self._model_family_to_backend[model_family] = backend
             self._model_family_to_quotas[model_family] = new_snapshot

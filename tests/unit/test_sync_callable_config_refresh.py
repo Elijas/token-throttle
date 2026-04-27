@@ -982,6 +982,8 @@ class TestSyncCallableConfigMetricSetRebuildIntegrity:
         reservation = limiter.acquire_capacity({"tokens": 90}, "test-model")
         limiter.refund_capacity({"tokens": 90}, reservation)
 
+        limiter.acquire_capacity({"tokens": 10}, "test-model")
+
         use_expanded = True
 
         def trigger_rebuild() -> None:
@@ -996,10 +998,6 @@ class TestSyncCallableConfigMetricSetRebuildIntegrity:
         rebuild_thread.start()
         assert builder.prepare_started.wait(timeout=2.0)
 
-        use_expanded = False
-        limiter.acquire_capacity({"tokens": 10}, "test-model", timeout=0)
-
-        use_expanded = True
         builder.release_prepare.set()
         rebuild_thread.join(timeout=2.0)
 

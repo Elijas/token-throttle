@@ -591,34 +591,24 @@ class RateLimiter(BaseRateLimiter):
                 ),
             )
             backend = self._backend.build(rebuild_cfg, callbacks=self._callbacks)
-            backend = await old_backend.prepare_reconfigured_backend(
-                backend, rebuild_cfg
-            )
-            # Race window: between the in-place mutation finishing inside
-            # `prepare_reconfigured_backend` and the snapshot dict update
-            # below, the backend reference points at NEW bucket state while
-            # `_model_family_to_quotas[model_family]` still describes OLD
-            # state. A concurrent fast-path `_get_backend` reader whose
-            # desired snapshot equals OLD will match the stale cache and
-            # receive the (now-mutated) backend, then surface a confusing
-            # "metrics not in backend metric keys" ValueError from the
-            # backend's downstream `validate_backend_usage`.
-            #
-            # We accept this race because the cleaner fixes either (a)
-            # invalidate the cache for the entire rebuild — which deadlocks
-            # concurrent legitimate old-config callers when
-            # `prepare_reconfigured_backend` blocks (e.g. test gates,
-            # cross-worker prepare in distributed backends), or (b) require
-            # the fast path to acquire the backend's condition lock,
-            # eliminating its purpose as a fast path. The window is bounded
-            # by `_restore_runtime_max_capacity` (a few await checkpoints)
-            # and surfaces only as a clear validation error, not corruption.
-            await self._restore_runtime_max_capacity(
-                model_family,
-                old_snapshot=old_snapshot,
-                new_snapshot=new_snapshot,
-                backend=backend,
-            )
+            # Invalidate fast-path cache before mutation to close the
+            # TOCTOU window where a concurrent reader could match the stale
+            # snapshot against an already-mutated backend, tag its reservation
+            # with old bucket_ids, and silently leak capacity on refund.
+            self._model_family_to_quotas.pop(model_family, None)
+            try:
+                backend = await old_backend.prepare_reconfigured_backend(
+                    backend, rebuild_cfg
+                )
+                await self._restore_runtime_max_capacity(
+                    model_family,
+                    old_snapshot=old_snapshot,
+                    new_snapshot=new_snapshot,
+                    backend=backend,
+                )
+            except BaseException:
+                self._model_family_to_quotas[model_family] = old_snapshot
+                raise
 
             self._model_family_to_backend[model_family] = backend
             self._model_family_to_quotas[model_family] = new_snapshot
