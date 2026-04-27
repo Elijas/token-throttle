@@ -531,9 +531,7 @@ class RateLimiter(BaseRateLimiter):
             )
 
     async def _get_backend(self, cfg: PerModelConfig) -> RateLimiterBackend:
-        if not cfg.model_family:
-            raise ValueError("cfg.model_family cannot be empty")
-        model_family = cfg.model_family
+        model_family = cfg.get_model_family()
         new_snapshot = _quotas_snapshot(cfg)
 
         # Fast path: unchanged configs can reuse the cached backend without
@@ -563,7 +561,7 @@ class RateLimiter(BaseRateLimiter):
         Caller must hold ``self._lock`` so only one concurrent caller can
         mutate a model-family backend at a time.
         """
-        model_family = cfg.model_family
+        model_family = cfg.get_model_family()
         new_snapshot = _quotas_snapshot(cfg)
         old_snapshot = self._model_family_to_quotas[model_family]
 

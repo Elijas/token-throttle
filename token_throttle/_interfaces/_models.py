@@ -147,6 +147,10 @@ def frozen_usage(usage: Usage) -> FrozenUsage:
         )
     converted: dict[MetricName, float] = {}
     for metric, amount in usage.items():
+        if not isinstance(metric, str) or not metric:
+            raise ValueError(
+                f"Usage metric key must be a non-empty string (got {metric!r})"
+            )
         converted[metric] = _coerce_usage_value(metric, amount)
     return frozendict(converted)
 
@@ -183,7 +187,10 @@ class CapacityReservation(BaseModel):
         if value is None:
             return None
         if not isinstance(value, (set, frozenset, list, tuple)):
-            return value
+            try:
+                value = tuple(value)
+            except TypeError:
+                return value
 
         normalized: set[BucketId] = set()
         for item in value:
