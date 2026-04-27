@@ -38,7 +38,7 @@ class RedisBucket:
     processes to the wrong limit.
     """
 
-    # Cache TTL for max_capacity reads (in seconds)
+    # Per-process convenience cache; correctness is guaranteed by lock-held re-read. 1s staleness is advisory. Audited 2026-04.
     MAX_CAPACITY_CACHE_TTL = 1.0
 
     def __init__(
@@ -238,7 +238,7 @@ class RedisBucket:
             and self._max_capacity_key == other._max_capacity_key
         )
 
-    __hash__ = None  # mutable; defining __eq__ without __hash__
+    __hash__ = None  # Mutable — unhashable by design (capacity/rate change at runtime). Audited 2026-04.
 
     def lock(self, **kwargs) -> redis.asyncio.lock.Lock:
         return redis.asyncio.lock.Lock(self._redis, self._lock_key, **kwargs)

@@ -112,6 +112,7 @@ class RedisBackendBuilder(RateLimiterBackendBuilderInterface):
 
 class RedisBackend(RateLimiterBackend):
     DEFAULT_SLEEP_INTERVAL: ClassVar[float] = 0.1
+    # Cross-worker poll ceiling; intra-process wakeup is instant via _local_condition. Audited 2026-04.
     MAX_CROSS_WORKER_POLL: ClassVar[float] = 1.0
 
     def __init__(

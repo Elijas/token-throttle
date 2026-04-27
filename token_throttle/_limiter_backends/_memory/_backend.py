@@ -68,7 +68,7 @@ class MemoryBackend(RateLimiterBackend):
     ) -> None:
         super().__init__()
         self._buckets = buckets
-        self._condition = asyncio.Condition()
+        self._condition = asyncio.Condition()  # Lazily binds to event loop on first use (3.10+), safe before loop starts. Audited 2026-04.
         self._sleep_interval: float = (
             self.DEFAULT_SLEEP_INTERVAL if sleep_interval is None else sleep_interval
         )
