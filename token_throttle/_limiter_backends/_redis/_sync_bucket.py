@@ -126,25 +126,23 @@ class SyncRedisBucket:
             with contextlib.suppress(json.JSONDecodeError):
                 decoded = json.loads(decoded)
 
-        if isinstance(decoded, dict):
-            override_value = self._parse_positive_finite_value(
-                decoded.get(self._OVERRIDE_LIMIT_KEY)
-            )
-            if override_value is None:
-                return None
+        if not isinstance(decoded, dict):
+            return None
 
-            configured_value = decoded.get(self._CONFIGURED_LIMIT_KEY)
-            if configured_value is None:
-                return override_value
+        override_value = self._parse_positive_finite_value(
+            decoded.get(self._OVERRIDE_LIMIT_KEY)
+        )
+        if override_value is None:
+            return None
 
-            configured_limit = self._parse_positive_finite_value(configured_value)
-            if configured_limit is None:
-                return None
-            if configured_limit != self._max_capacity_default:
-                return None
-            return override_value
-
-        return self._parse_positive_finite_value(decoded)
+        configured_limit = self._parse_positive_finite_value(
+            decoded.get(self._CONFIGURED_LIMIT_KEY)
+        )
+        if configured_limit is None:
+            return None
+        if configured_limit != self._max_capacity_default:
+            return None
+        return override_value
 
     def update_max_capacity_from_result(self, raw_value: bytes | None) -> None:
         """Update the runtime-override cache from a pre-fetched pipeline result."""

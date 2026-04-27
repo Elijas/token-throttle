@@ -80,3 +80,20 @@ def test_update_max_capacity_from_result_ignores_stale_metadata(bucket):
 
     assert bucket._max_capacity_cached is None
     assert bucket.max_capacity == 20.0
+
+
+def test_bare_numeric_string_rejected(bucket):
+    """Bare numeric strings are rejected — all overrides must use anchored JSON."""
+    bucket.update_max_capacity_from_result(b"15.0")
+
+    assert bucket._max_capacity_cached is None
+    assert bucket.max_capacity == 20.0
+
+
+def test_dict_missing_configured_max_capacity_rejected(bucket):
+    """Dict without configured_max_capacity is rejected to prevent anchor bypass."""
+    payload = json.dumps({"override_max_capacity": 5.0}).encode()
+    bucket.update_max_capacity_from_result(payload)
+
+    assert bucket._max_capacity_cached is None
+    assert bucket.max_capacity == 20.0

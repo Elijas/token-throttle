@@ -72,7 +72,10 @@ class TestGetMaxCapacity:
 
     def test_fetches_from_redis_when_no_cache(self, bucket, mock_redis):
         """get_max_capacity() fetches from Redis when cache is empty."""
-        mock_redis.get.return_value = b"15.0"
+        payload = json.dumps(
+            {"configured_max_capacity": 20.0, "override_max_capacity": 15.0}
+        ).encode()
+        mock_redis.get.return_value = payload
 
         result = asyncio.run(bucket.get_max_capacity())
 
@@ -93,7 +96,10 @@ class TestGetMaxCapacity:
         """get_max_capacity() refetches from Redis when cache is stale."""
         bucket._max_capacity_cached = 10.0
         bucket._max_capacity_cache_time = time.time() - 2.0  # Stale (>1s TTL)
-        mock_redis.get.return_value = b"8.0"
+        payload = json.dumps(
+            {"configured_max_capacity": 20.0, "override_max_capacity": 8.0}
+        ).encode()
+        mock_redis.get.return_value = payload
 
         result = asyncio.run(bucket.get_max_capacity())
 
@@ -277,7 +283,10 @@ class TestSetMaxCapacityUpdatesRate:
     def test_get_max_capacity_updates_rate_on_redis_change(self, bucket, mock_redis):
         """get_max_capacity() must recalculate _rate_per_sec when Redis value differs."""
         # Simulate another process changing max_capacity in Redis
-        mock_redis.get.return_value = b"50.0"
+        payload = json.dumps(
+            {"configured_max_capacity": 20.0, "override_max_capacity": 50.0}
+        ).encode()
+        mock_redis.get.return_value = payload
         bucket._max_capacity_cache_time = 0.0  # Force cache miss
 
         asyncio.run(bucket.get_max_capacity())
@@ -288,9 +297,12 @@ class TestSetMaxCapacityUpdatesRate:
 class TestUpdateMaxCapacityFromResult:
     """Tests for update_max_capacity_from_result() — pipeline-based cache update."""
 
-    def test_valid_bytes_updates_cache_and_rate(self, bucket):
-        """Valid bytes input updates cached max_capacity and rate."""
-        bucket.update_max_capacity_from_result(b"15.0")
+    def test_valid_payload_updates_cache_and_rate(self, bucket):
+        """Valid anchored JSON payload updates cached max_capacity and rate."""
+        payload = json.dumps(
+            {"configured_max_capacity": 20.0, "override_max_capacity": 15.0}
+        ).encode()
+        bucket.update_max_capacity_from_result(payload)
 
         assert bucket._max_capacity_cached == 15.0
         assert bucket._rate_per_sec == pytest.approx(15.0)  # 15.0 / per_seconds=1
@@ -355,7 +367,10 @@ class TestUpdateMaxCapacityFromResult:
 
     def test_rate_recalculation(self, bucket):
         """Rate is recalculated as new_value / per_seconds."""
-        bucket.update_max_capacity_from_result(b"50.0")
+        payload = json.dumps(
+            {"configured_max_capacity": 20.0, "override_max_capacity": 50.0}
+        ).encode()
+        bucket.update_max_capacity_from_result(payload)
 
         # per_seconds=1, so rate = 50.0 / 1 = 50.0
         assert bucket._rate_per_sec == pytest.approx(50.0)
@@ -367,9 +382,27 @@ class TestUpdateMaxCapacityFromResult:
 
         assert bucket._max_capacity_cache_time > 0
 
+    def test_bare_numeric_string_rejected(self, bucket, quota):
+        """Bare numeric strings are rejected — all overrides must use anchored JSON."""
+        bucket.update_max_capacity_from_result(b"15.0")
+
+        assert bucket._max_capacity_cached is None
+        assert bucket.max_capacity == quota.limit
+
+    def test_dict_missing_configured_max_capacity_rejected(self, bucket, quota):
+        """Dict without configured_max_capacity is rejected to prevent anchor bypass."""
+        payload = json.dumps({"override_max_capacity": 5.0}).encode()
+        bucket.update_max_capacity_from_result(payload)
+
+        assert bucket._max_capacity_cached is None
+        assert bucket.max_capacity == quota.limit
+
     def test_no_redis_call(self, bucket, mock_redis):
         """update_max_capacity_from_result does not call Redis."""
-        bucket.update_max_capacity_from_result(b"15.0")
+        payload = json.dumps(
+            {"configured_max_capacity": 20.0, "override_max_capacity": 15.0}
+        ).encode()
+        bucket.update_max_capacity_from_result(payload)
 
         mock_redis.get.assert_not_called()
 
