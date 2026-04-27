@@ -222,6 +222,7 @@ class SyncRateLimiter:
     ):
         self._backend = backend
         self._lock = threading.Lock()
+        self._validation_lock = threading.Lock()
         self._callbacks = callbacks
         self._config_getter = lambda model_name: resolve_config(cfg, model_name)
         self._model_family_to_backend: dict[str, SyncRateLimiterBackend] = {}
@@ -260,17 +261,13 @@ class SyncRateLimiter:
     ) -> CapacityReservation:
         usage = frozen_usage(usage)
         limit_config = self._config_getter(model)
-        resolved_model_family = self._validated_model_family(model, limit_config)
+        self._validated_model_family(model, limit_config)
         self._validate_shared_model_family_config(model, limit_config)
         if limit_config.is_unlimited:
-            reservation = self._unlimited_reservation(usage, model)
-            self._remember_model_family(model, resolved_model_family)
-            return reservation
-        reservation = self._acquire_capacity(
+            return self._unlimited_reservation(usage, model)
+        return self._acquire_capacity(
             model, usage, limit_config, _block=_block, timeout=timeout
         )
-        self._remember_model_family(model, resolved_model_family)
-        return reservation
 
     def acquire_capacity_for_request(
         self,
@@ -286,7 +283,7 @@ class SyncRateLimiter:
         model = kwargs["model"]
 
         limit_config = self._config_getter(model)
-        resolved_model_family = self._validated_model_family(model, limit_config)
+        self._validated_model_family(model, limit_config)
         self._validate_shared_model_family_config(model, limit_config)
         if limit_config.is_unlimited:
             usage = frozendict()
@@ -295,9 +292,7 @@ class SyncRateLimiter:
                     limit_config.usage_counter, **kwargs
                 )
             usage = merge_extra_usage_unrestricted(usage, extra_usage)
-            reservation = self._unlimited_reservation(usage, model)
-            self._remember_model_family(model, resolved_model_family)
-            return reservation
+            return self._unlimited_reservation(usage, model)
         if limit_config.usage_counter is None:
             raise ValueError("limit_config.usage_counter cannot be None")
 
@@ -305,11 +300,7 @@ class SyncRateLimiter:
             resolve_usage_counter_result(limit_config.usage_counter, **kwargs),
             extra_usage,
         )
-        reservation = self._acquire_capacity(
-            model, usage, limit_config, timeout=timeout
-        )
-        self._remember_model_family(model, resolved_model_family)
-        return reservation
+        return self._acquire_capacity(model, usage, limit_config, timeout=timeout)
 
     def _acquire_capacity(
         self,
@@ -409,7 +400,7 @@ class SyncRateLimiter:
         per_seconds = validate_per_seconds(per_seconds)
         value = validate_max_capacity_value(value)
         limit_config = self._config_getter(model)
-        resolved_model_family = self._validated_model_family(model, limit_config)
+        self._validated_model_family(model, limit_config)
         self._validate_shared_model_family_config(model, limit_config)
         if limit_config.is_unlimited:
             raise ValueError("Cannot set max capacity: model has unlimited quotas")
@@ -421,11 +412,8 @@ class SyncRateLimiter:
             )
         backend = self._get_backend(limit_config)
         backend.set_max_capacity(metric, per_seconds, value)
-        # State mutations last: only update caches once the backend call succeeded,
-        # so a failed set_max_capacity doesn't leave stale reverse-lookup entries.
         self._model_family_to_model_name[model_family] = model
         self._remember_runtime_max_capacity(model_family, metric, per_seconds, value)
-        self._remember_model_family(model, resolved_model_family)
 
     def _refund_capacity(
         self,
@@ -627,37 +615,24 @@ class SyncRateLimiter:
             )
         return resolved_model_family
 
-    def _remember_model_family(
-        self,
-        model: str,
-        model_family: str,
-    ) -> None:
-        self._model_name_to_model_family[model] = model_family
-
     def _validate_shared_model_family_config(
         self,
         model: str,
         limit_config: PerModelConfig,
     ) -> None:
-        # Best-effort detection, not a safety invariant. Two concurrent
-        # first-time acquires for different models in the same family can
-        # both observe an empty reverse-lookup map and pass validation
-        # because `_remember_model_family` runs only after the acquire
-        # returns. Any subsequent acquire detects the conflict, and
-        # `_sync_backend_quotas` reconciles the shared backend's quotas on
-        # each call — so the system self-corrects rather than corrupting
-        # reservations. If you need hard enforcement, use distinct
-        # `model_family` values for models with differing quotas.
+        # Detects conflicting quotas across models sharing a model_family.
+        # Registration in the reverse-lookup map and the validation-signature
+        # cache happen inside this method, under _validation_lock, so that
+        # validate + register is atomic w.r.t. concurrent threads. A separate
+        # lock is used (not self._lock) to avoid deadlock with _get_backend.
         #
-        # Complexity: O(M) in the number of known models on the first acquire
-        # of a new `model` or after a config-signature change for this family
-        # (we re-call config_getter for every sibling). On the steady-state
-        # hot path the cache check below short-circuits to O(1). The
-        # aggregate worst case is O(M^2) across first-time acquires of M
-        # distinct models in one family; we accept that cost because
-        # validation must see every sibling's current signature to detect
-        # inconsistency, and M is bounded by the number of distinct model
-        # names a process ever uses.
+        # Steady-state fast path: the cache check runs lock-free. Only the
+        # first acquire of a new model (or a signature change) takes the lock.
+        #
+        # Complexity: O(1) steady-state via cache check. O(M) on first
+        # acquire of a new model or after a config-signature change (re-calls
+        # config_getter for every sibling). O(M^2) aggregate across first-
+        # time acquires of M distinct models in one family.
         model_family = limit_config.get_model_family()
         current_signature = _config_signature(limit_config)
 
@@ -669,53 +644,59 @@ class SyncRateLimiter:
         ):
             return
 
-        conflicts: list[tuple[str, str]] = []
+        with self._validation_lock:
+            cached = self._model_family_to_validated_signature.get(model_family)
+            if (
+                cached is not None
+                and cached == current_signature
+                and model in self._model_name_to_model_family
+            ):
+                return
 
-        for known_model, known_family in sorted(
-            self._model_name_to_model_family.items()
-        ):
-            if known_family != model_family or known_model == model:
-                continue
+            conflicts: list[tuple[str, str]] = []
 
-            known_config = self._config_getter(known_model)
-            try:
-                known_resolved_family = self._validated_model_family(
-                    known_model, known_config
+            for known_model, known_family in sorted(
+                self._model_name_to_model_family.items()
+            ):
+                if known_family != model_family or known_model == model:
+                    continue
+
+                known_config = self._config_getter(known_model)
+                try:
+                    known_resolved_family = self._validated_model_family(
+                        known_model, known_config
+                    )
+                except ValueError as exc:
+                    raise ValueError(
+                        f"While validating shared-model_family config for "
+                        f"'{model}', detected a routing change in sibling "
+                        f"'{known_model}': {exc}"
+                    ) from exc
+                if known_resolved_family != model_family:
+                    continue
+
+                known_signature = _config_signature(known_config)
+                if known_signature != current_signature:
+                    conflicts.append(
+                        (known_model, _describe_config_signature(known_signature))
+                    )
+
+            if conflicts:
+                conflicts_desc = "; ".join(
+                    f"{conflict_model} -> {conflict_signature}"
+                    for conflict_model, conflict_signature in conflicts
                 )
-            except ValueError as exc:
-                # _validated_model_family raises if a sibling's resolved
-                # model_family drifted since registration. Re-raise with the
-                # caller's context so the user knows the failure surfaced
-                # while validating `model`, not while routing `known_model`.
                 raise ValueError(
-                    f"While validating shared-model_family config for "
-                    f"'{model}', detected a routing change in sibling "
-                    f"'{known_model}': {exc}"
-                ) from exc
-            if known_resolved_family != model_family:
-                continue
-
-            known_signature = _config_signature(known_config)
-            if known_signature != current_signature:
-                conflicts.append(
-                    (known_model, _describe_config_signature(known_signature))
+                    f"Config for model_family '{model_family}' is inconsistent across "
+                    f"models. Model '{model}' resolves to "
+                    f"{_describe_config_signature(current_signature)}, but {conflicts_desc}. "
+                    "Models sharing a model_family must return identical quotas and "
+                    "unlimited behavior for a limiter instance. Use different "
+                    "model_family values for different limits."
                 )
 
-        if conflicts:
-            conflicts_desc = "; ".join(
-                f"{conflict_model} -> {conflict_signature}"
-                for conflict_model, conflict_signature in conflicts
-            )
-            raise ValueError(
-                f"Config for model_family '{model_family}' is inconsistent across "
-                f"models. Model '{model}' resolves to "
-                f"{_describe_config_signature(current_signature)}, but {conflicts_desc}. "
-                "Models sharing a model_family must return identical quotas and "
-                "unlimited behavior for a limiter instance. Use different "
-                "model_family values for different limits."
-            )
-
-        self._model_family_to_validated_signature[model_family] = current_signature
+            self._model_name_to_model_family[model] = model_family
+            self._model_family_to_validated_signature[model_family] = current_signature
 
     def _remember_runtime_max_capacity(
         self,

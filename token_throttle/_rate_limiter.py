@@ -274,17 +274,13 @@ class RateLimiter(BaseRateLimiter):
     ) -> CapacityReservation:
         usage = frozen_usage(usage)
         limit_config = self._config_getter(model)
-        resolved_model_family = self._validated_model_family(model, limit_config)
+        self._validated_model_family(model, limit_config)
         self._validate_shared_model_family_config(model, limit_config)
         if limit_config.is_unlimited:
-            reservation = self._unlimited_reservation(usage, model)
-            self._remember_model_family(model, resolved_model_family)
-            return reservation
-        reservation = await self._acquire_capacity(
+            return self._unlimited_reservation(usage, model)
+        return await self._acquire_capacity(
             model, usage, limit_config, _block=_block, timeout=timeout
         )
-        self._remember_model_family(model, resolved_model_family)
-        return reservation
 
     async def acquire_capacity_for_request(
         self,
@@ -300,7 +296,7 @@ class RateLimiter(BaseRateLimiter):
         model = kwargs["model"]
 
         limit_config = self._config_getter(model)
-        resolved_model_family = self._validated_model_family(model, limit_config)
+        self._validated_model_family(model, limit_config)
         self._validate_shared_model_family_config(model, limit_config)
         if limit_config.is_unlimited:
             usage = frozendict()
@@ -309,9 +305,7 @@ class RateLimiter(BaseRateLimiter):
                     limit_config.usage_counter, **kwargs
                 )
             usage = merge_extra_usage_unrestricted(usage, extra_usage)
-            reservation = self._unlimited_reservation(usage, model)
-            self._remember_model_family(model, resolved_model_family)
-            return reservation
+            return self._unlimited_reservation(usage, model)
         if limit_config.usage_counter is None:
             raise ValueError("limit_config.usage_counter cannot be None")
 
@@ -319,14 +313,12 @@ class RateLimiter(BaseRateLimiter):
             resolve_usage_counter_result(limit_config.usage_counter, **kwargs),
             extra_usage,
         )
-        reservation = await self._acquire_capacity(
+        return await self._acquire_capacity(
             model,
             usage,
             limit_config,
             timeout=timeout,
         )
-        self._remember_model_family(model, resolved_model_family)
-        return reservation
 
     async def _acquire_capacity(
         self,
@@ -429,7 +421,7 @@ class RateLimiter(BaseRateLimiter):
         per_seconds = validate_per_seconds(per_seconds)
         value = validate_max_capacity_value(value)
         limit_config = self._config_getter(model)
-        resolved_model_family = self._validated_model_family(model, limit_config)
+        self._validated_model_family(model, limit_config)
         self._validate_shared_model_family_config(model, limit_config)
         if limit_config.is_unlimited:
             raise ValueError("Cannot set max capacity: model has unlimited quotas")
@@ -441,11 +433,8 @@ class RateLimiter(BaseRateLimiter):
             )
         backend = await self._get_backend(limit_config)
         await backend.set_max_capacity(metric, per_seconds, value)
-        # State mutations last: only update caches once the backend call succeeded,
-        # so a failed set_max_capacity doesn't leave stale reverse-lookup entries.
         self._model_family_to_model_name[model_family] = model
         self._remember_runtime_max_capacity(model_family, metric, per_seconds, value)
-        self._remember_model_family(model, resolved_model_family)
 
     async def _refund_capacity(
         self,
@@ -649,27 +638,19 @@ class RateLimiter(BaseRateLimiter):
             )
         return resolved_model_family
 
-    def _remember_model_family(
-        self,
-        model: str,
-        model_family: str,
-    ) -> None:
-        self._model_name_to_model_family[model] = model_family
-
     def _validate_shared_model_family_config(
         self,
         model: str,
         limit_config: PerModelConfig,
     ) -> None:
-        # Best-effort detection, not a safety invariant. Two concurrent
-        # first-time acquires for different models in the same family can
-        # both observe an empty reverse-lookup map and pass validation
-        # because `_remember_model_family` runs only after the acquire's
-        # await resolves. Any subsequent acquire detects the conflict, and
-        # `_sync_backend_quotas` reconciles the shared backend's quotas on
-        # each call — so the system self-corrects rather than corrupting
-        # reservations. If you need hard enforcement, use distinct
-        # `model_family` values for models with differing quotas.
+        # Detects conflicting quotas across models sharing a model_family.
+        # Registration in the reverse-lookup map (_remember_model_family)
+        # happens inside this method, after validation passes, so that
+        # validate + register is atomic w.r.t. concurrent callers. Under
+        # asyncio this is guaranteed because the method contains no await
+        # expressions — the event loop cannot switch tasks mid-execution.
+        # See _sync_rate_limiter.py for the threaded variant, which uses
+        # an explicit lock.
         #
         # Complexity: O(M) in the number of known models on the first acquire
         # of a new `model` or after a config-signature change for this family
@@ -705,10 +686,6 @@ class RateLimiter(BaseRateLimiter):
                     known_model, known_config
                 )
             except ValueError as exc:
-                # _validated_model_family raises if a sibling's resolved
-                # model_family drifted since registration. Re-raise with the
-                # caller's context so the user knows the failure surfaced
-                # while validating `model`, not while routing `known_model`.
                 raise ValueError(
                     f"While validating shared-model_family config for "
                     f"'{model}', detected a routing change in sibling "
@@ -737,6 +714,7 @@ class RateLimiter(BaseRateLimiter):
                 "model_family values for different limits."
             )
 
+        self._model_name_to_model_family[model] = model_family
         self._model_family_to_validated_signature[model_family] = current_signature
 
     def _remember_runtime_max_capacity(
