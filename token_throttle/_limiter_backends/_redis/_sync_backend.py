@@ -424,96 +424,108 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         consumed_monotonic: float | None = None
         current_time: float = 0.0
         fresh_start_buckets: list[SyncRedisBucket] = []
-        with self._lock(
-            timeout=LOCK_TIMEOUT_SECONDS,
-            blocking_timeout=lock_blocking_timeout,
-            buckets=buckets,
-        ) as lock_stack:
-            # Pipeline is reused: _get_capacities_unsafe executes it (clearing
-            # the command buffer), then _set_capacities_unsafe adds new commands
-            # and executes again.  Safe because redis-py clears the buffer on execute().
-            pipeline = self._redis.pipeline()
-            current_time = sync_server_time(self._redis)
+        consumed = False
+        try:
+            with self._lock(
+                timeout=LOCK_TIMEOUT_SECONDS,
+                blocking_timeout=lock_blocking_timeout,
+                buckets=buckets,
+            ) as lock_stack:
+                # Pipeline is reused: _get_capacities_unsafe executes it (clearing
+                # the command buffer), then _set_capacities_unsafe adds new commands
+                # and executes again.  Safe because redis-py clears the buffer on execute().
+                pipeline = self._redis.pipeline()
+                current_time = sync_server_time(self._redis)
 
-            preconsumption_capacities, fresh_start_buckets = (
-                self._get_capacities_unsafe(
-                    pipeline=pipeline,
-                    current_time=current_time,
-                    buckets=buckets,
+                preconsumption_capacities, fresh_start_buckets = (
+                    self._get_capacities_unsafe(
+                        pipeline=pipeline,
+                        current_time=current_time,
+                        buckets=buckets,
+                    )
                 )
-            )
-            active_metric_names = {metric for metric, _ in preconsumption_capacities}
-            self._ensure_usage_metrics_are_active(usage, active_metric_names)
+                active_metric_names = {
+                    metric for metric, _ in preconsumption_capacities
+                }
+                self._ensure_usage_metrics_are_active(usage, active_metric_names)
 
-            # Fail fast: if usage exceeds any bucket's max_capacity, it can
-            # never be satisfied (capacity is capped at max_capacity).
-            for usage_metric_name, usage_amount in usage.items():
-                for bucket in buckets:
-                    if bucket.usage_metric != usage_metric_name:
-                        continue
-                    # Uses cached max_capacity — refreshed from the pipeline
-                    # result by update_max_capacity_from_result() inside
-                    # _get_capacities_unsafe just above.
-                    if usage_amount > bucket.max_capacity:
-                        raise ValueError(
-                            f"Usage value for {usage_metric_name} ({usage_amount}) "
-                            f"exceeds bucket max capacity ({bucket.max_capacity})",
-                        )
+                # Fail fast: if usage exceeds any bucket's max_capacity, it can
+                # never be satisfied (capacity is capped at max_capacity).
+                for usage_metric_name, usage_amount in usage.items():
+                    for bucket in buckets:
+                        if bucket.usage_metric != usage_metric_name:
+                            continue
+                        # Uses cached max_capacity — refreshed from the pipeline
+                        # result by update_max_capacity_from_result() inside
+                        # _get_capacities_unsafe just above.
+                        if usage_amount > bucket.max_capacity:
+                            raise ValueError(  # noqa: TRY301
+                                f"Usage value for {usage_metric_name} ({usage_amount}) "
+                                f"exceeds bucket max capacity ({bucket.max_capacity})",
+                            )
 
-            for usage_metric_name, usage_amount in usage.items():
+                for usage_metric_name, usage_amount in usage.items():
+                    for (
+                        capacity_metric_name,
+                        _,
+                    ), capacity_amount in preconsumption_capacities.items():
+                        if usage_metric_name != capacity_metric_name:
+                            continue
+                        if usage_amount > capacity_amount:
+                            return (
+                                False,
+                                preconsumption_capacities,
+                                postconsumption_capacities,
+                                consumed_monotonic,
+                                buckets,
+                            )
+
+                postconsumption_dict = dict(preconsumption_capacities)
                 for (
                     capacity_metric_name,
-                    _,
+                    per_seconds,
                 ), capacity_amount in preconsumption_capacities.items():
-                    if usage_metric_name != capacity_metric_name:
+                    usage_amount = usage.get(capacity_metric_name)
+                    if usage_amount is None:
                         continue
-                    if usage_amount > capacity_amount:
-                        return (
-                            False,
-                            preconsumption_capacities,
-                            postconsumption_capacities,
-                            consumed_monotonic,
-                            buckets,
-                        )
-
-            postconsumption_dict = dict(preconsumption_capacities)
-            for (
-                capacity_metric_name,
-                per_seconds,
-            ), capacity_amount in preconsumption_capacities.items():
-                usage_amount = usage.get(capacity_metric_name)
-                if usage_amount is None:
-                    continue
-                postconsumption_dict[(capacity_metric_name, per_seconds)] = (
-                    capacity_amount - usage_amount
+                    postconsumption_dict[(capacity_metric_name, per_seconds)] = (
+                        capacity_amount - usage_amount
+                    )
+                postconsumption_capacities = frozendict(postconsumption_dict)
+                consumed_monotonic = time.monotonic()
+                # Extend lock TTL before write to guard against GC-pause
+                # induced lost-update races; see _extend_locks.
+                self._extend_locks(lock_stack)
+                # `allow_negative=False` is correct here only because the
+                # `usage_amount > capacity_amount` gate above guarantees
+                # post = pre - usage >= 0. Keep this branch in sync with that
+                # gate; consume_capacity (speedometer) writes with
+                # `allow_negative=True` because it has no such guarantee.
+                self._set_capacities_unsafe(
+                    postconsumption_capacities,
+                    pipeline=pipeline,
+                    current_time=current_time,
+                    allow_negative=False,
+                    buckets=buckets,
                 )
-            postconsumption_capacities = frozendict(postconsumption_dict)
-            consumed_monotonic = time.monotonic()
-            # Extend lock TTL before write to guard against GC-pause
-            # induced lost-update races; see _extend_locks.
-            self._extend_locks(lock_stack)
-            # `allow_negative=False` is correct here only because the
-            # `usage_amount > capacity_amount` gate above guarantees
-            # post = pre - usage >= 0. Keep this branch in sync with that
-            # gate; consume_capacity (speedometer) writes with
-            # `allow_negative=True` because it has no such guarantee.
-            self._set_capacities_unsafe(
-                postconsumption_capacities,
-                pipeline=pipeline,
-                current_time=current_time,
-                allow_negative=False,
-                buckets=buckets,
-            )
-        self._fresh_start_buckets_callback(fresh_start_buckets)
-        if self._callbacks and self._callbacks.on_capacity_consumed:
-            self._invoke_callback_safe(
-                self._callbacks.on_capacity_consumed,
-                model_family=self._limit_config.get_model_family(),
-                preconsumption_capacities=preconsumption_capacities,
-                postconsumption_capacities=postconsumption_capacities,
-                usage=usage,
-                current_time=current_time,
-            )
+                consumed = True
+            self._fresh_start_buckets_callback(fresh_start_buckets)
+            if self._callbacks and self._callbacks.on_capacity_consumed:
+                self._invoke_callback_safe(
+                    self._callbacks.on_capacity_consumed,
+                    model_family=self._limit_config.get_model_family(),
+                    preconsumption_capacities=preconsumption_capacities,
+                    postconsumption_capacities=postconsumption_capacities,
+                    usage=usage,
+                    current_time=current_time,
+                )
+        except BaseException:
+            if consumed:
+                try:  # noqa: SIM105
+                    self._refund_cancelled_consumption(usage, buckets=buckets)
+                except BaseException:  # noqa: BLE001, S110
+                    pass
+            raise
         return (
             True,
             preconsumption_capacities,
@@ -633,22 +645,35 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                     raise
                 raise TimeoutError("Timed out waiting for capacity") from exc
             if available:
-                if has_waited:
-                    wait_time_s = max(
-                        0.0,
-                        (consumed_monotonic or time.monotonic())
-                        - (wait_started_at or (consumed_monotonic or time.monotonic()))
-                        - wait_start_callback_overhead,
-                    )
-                    if self._callbacks and self._callbacks.after_wait_end_consumption:
-                        self._invoke_callback_safe(
-                            self._callbacks.after_wait_end_consumption,
-                            model_family=self._limit_config.get_model_family(),
-                            preconsumption_capacities=preconsumption,
-                            postconsumption_capacities=postconsumption,
-                            usage=frozendict(usage),
-                            wait_time_s=wait_time_s,
+                try:
+                    if has_waited:
+                        wait_time_s = max(
+                            0.0,
+                            (consumed_monotonic or time.monotonic())
+                            - (
+                                wait_started_at
+                                or (consumed_monotonic or time.monotonic())
+                            )
+                            - wait_start_callback_overhead,
                         )
+                        if (
+                            self._callbacks
+                            and self._callbacks.after_wait_end_consumption
+                        ):
+                            self._invoke_callback_safe(
+                                self._callbacks.after_wait_end_consumption,
+                                model_family=self._limit_config.get_model_family(),
+                                preconsumption_capacities=preconsumption,
+                                postconsumption_capacities=postconsumption,
+                                usage=frozendict(usage),
+                                wait_time_s=wait_time_s,
+                            )
+                except BaseException:
+                    try:  # noqa: SIM105
+                        self._refund_cancelled_consumption(usage, buckets=buckets)
+                    except BaseException:  # noqa: BLE001, S110
+                        pass
+                    raise
                 return
 
             if deadline is not None and time.monotonic() >= deadline:
@@ -996,12 +1021,64 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         """Fire a user callback, suppressing exceptions to prevent capacity leaks."""
         try:
             callback(**kwargs)
-        except Exception as exc:  # noqa: BLE001
+        except BaseException as exc:  # noqa: BLE001
             warnings.warn(
                 f"Rate limiter callback raised {type(exc).__name__}: {exc}",
                 RuntimeWarning,
                 stacklevel=3,
             )
+
+    def _refund_cancelled_consumption(
+        self,
+        usage: FrozenUsage,
+        *,
+        buckets: tuple[SyncRedisBucket, ...] | list[SyncRedisBucket] | None = None,
+    ) -> None:
+        """
+        Refund capacity consumed before a BaseException hit callbacks.
+
+        Fires no callbacks to avoid recursion and another interruption window.
+        """
+        target_buckets = self._snapshot_buckets() if buckets is None else tuple(buckets)
+        with self._lock(
+            timeout=LOCK_TIMEOUT_SECONDS,
+            buckets=target_buckets,
+        ) as lock_stack:
+            pipeline = self._redis.pipeline()
+            current_time = sync_server_time(self._redis)
+            capacities, _ = self._get_capacities_unsafe(
+                pipeline=pipeline,
+                current_time=current_time,
+                buckets=target_buckets,
+            )
+            refunded: dict[tuple[str, int], float] = dict(capacities)
+            for (cap_metric, per_seconds), cap_amount in capacities.items():
+                for usage_metric, usage_amount in usage.items():
+                    if cap_metric != usage_metric:
+                        continue
+                    bucket = self._find_bucket(
+                        target_buckets,
+                        cap_metric,
+                        per_seconds,
+                    )
+                    if bucket is None:  # pragma: no cover
+                        raise ValueError(
+                            f"Bucket '{cap_metric}/{per_seconds}s' not found",
+                        )
+                    refunded[(cap_metric, per_seconds)] = min(
+                        cap_amount + usage_amount,
+                        bucket.max_capacity,
+                    )
+            self._extend_locks(lock_stack)
+            self._set_capacities_unsafe(
+                frozendict(refunded),
+                pipeline=pipeline,
+                current_time=current_time,
+                allow_negative=True,
+                buckets=target_buckets,
+            )
+        with self._local_condition:
+            self._local_condition.notify_all()
 
     def _fresh_start_buckets_callback(
         self,

@@ -316,36 +316,45 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
                 if deadline is not None and time.monotonic() >= deadline:
                     raise TimeoutError("Timed out waiting for capacity")
 
-        # All callbacks fired outside the lock
-        self._fresh_start_buckets_callback(fresh)
-        if self._callbacks and self._callbacks.on_capacity_consumed:
-            self._invoke_callback_safe(
-                self._callbacks.on_capacity_consumed,
-                model_family=self._limit_config.get_model_family(),
-                preconsumption_capacities=preconsumption,
-                postconsumption_capacities=postconsumption,
-                usage=usage,
-                current_time=current_time,
-            )
-        if (
-            has_waited
-            and self._callbacks
-            and self._callbacks.after_wait_end_consumption
-        ):
-            wait_time_s = max(
-                0.0,
-                consumed_monotonic
-                - (wait_started_at or consumed_monotonic)
-                - wait_start_callback_overhead,
-            )
-            self._invoke_callback_safe(
-                self._callbacks.after_wait_end_consumption,
-                model_family=self._limit_config.get_model_family(),
-                preconsumption_capacities=preconsumption,
-                postconsumption_capacities=postconsumption,
-                usage=frozendict(usage),
-                wait_time_s=wait_time_s,
-            )
+        # All callbacks fired outside the lock.  If BaseException arrives
+        # during any callback, refund the consumed capacity so it is not
+        # permanently lost (the caller never receives a reservation).
+        try:
+            self._fresh_start_buckets_callback(fresh)
+            if self._callbacks and self._callbacks.on_capacity_consumed:
+                self._invoke_callback_safe(
+                    self._callbacks.on_capacity_consumed,
+                    model_family=self._limit_config.get_model_family(),
+                    preconsumption_capacities=preconsumption,
+                    postconsumption_capacities=postconsumption,
+                    usage=usage,
+                    current_time=current_time,
+                )
+            if (
+                has_waited
+                and self._callbacks
+                and self._callbacks.after_wait_end_consumption
+            ):
+                wait_time_s = max(
+                    0.0,
+                    consumed_monotonic
+                    - (wait_started_at or consumed_monotonic)
+                    - wait_start_callback_overhead,
+                )
+                self._invoke_callback_safe(
+                    self._callbacks.after_wait_end_consumption,
+                    model_family=self._limit_config.get_model_family(),
+                    preconsumption_capacities=preconsumption,
+                    postconsumption_capacities=postconsumption,
+                    usage=frozendict(usage),
+                    wait_time_s=wait_time_s,
+                )
+        except BaseException:
+            try:  # noqa: SIM105
+                self._refund_cancelled_consumption(usage)
+            except BaseException:  # noqa: BLE001, S110
+                pass
+            raise
 
     def _compute_sleep(self, usage: FrozenUsage, preconsumption: Capacities) -> float:
         """Compute max wait across all buckets based on deficit / rate."""
@@ -565,12 +574,40 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
         """Fire a user callback, suppressing exceptions to prevent capacity leaks."""
         try:
             callback(**kwargs)
-        except Exception as exc:  # noqa: BLE001
+        except BaseException as exc:  # noqa: BLE001
             warnings.warn(
                 f"Rate limiter callback raised {type(exc).__name__}: {exc}",
                 RuntimeWarning,
                 stacklevel=3,
             )
+
+    def _refund_cancelled_consumption(self, usage: FrozenUsage) -> None:
+        """
+        Refund capacity consumed before a BaseException hit callbacks.
+
+        Fires no callbacks to avoid recursion and another interruption window.
+        """
+        with self._condition:
+            current_time = time.time()
+            capacities, _ = self._get_capacities(current_time)
+            refunded: dict[tuple[str, int], float] = dict(capacities)
+            for (cap_metric, per_seconds), cap_amount in capacities.items():
+                for usage_metric, usage_amount in usage.items():
+                    if cap_metric != usage_metric:
+                        continue
+                    bucket = next(
+                        b
+                        for b in self._buckets
+                        if b.usage_metric == cap_metric and b.per_seconds == per_seconds
+                    )
+                    refunded[(cap_metric, per_seconds)] = min(
+                        cap_amount + usage_amount,
+                        bucket.max_capacity,
+                    )
+            self._set_capacities(
+                frozendict(refunded), current_time, allow_negative=True
+            )
+            self._condition.notify_all()
 
     def _fresh_start_buckets_callback(
         self,

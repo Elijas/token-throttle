@@ -602,7 +602,9 @@ class MemoryBackend(RateLimiterBackend):
         """Fire a user callback, suppressing exceptions to prevent capacity leaks."""
         try:
             await callback(**kwargs)
-        except Exception as exc:  # noqa: BLE001
+        except asyncio.CancelledError:
+            raise
+        except BaseException as exc:  # noqa: BLE001
             warnings.warn(
                 f"Rate limiter callback raised {type(exc).__name__}: {exc}",
                 RuntimeWarning,
