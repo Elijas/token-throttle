@@ -160,7 +160,7 @@ class SingleBucketAccountingMachine(RuleBasedStateMachine):
             frozen_usage({METRIC: reserved}),
             frozen_usage({METRIC: actual}),
         )
-        refund_amount = reserved - actual
+        refund_amount = max(reserved - actual, -self.shadow_max_capacity)
         self.shadow_raw_stored = min(
             readable_before + refund_amount, self.shadow_max_capacity
         )
@@ -346,9 +346,13 @@ class MultiWindowAccountingMachine(RuleBasedStateMachine):
             frozen_usage({METRIC: reserved}),
             frozen_usage({METRIC: actual}),
         )
-        refund_amount = reserved - actual
-        self.shadow_short_raw = min(short_r + refund_amount, self.short_max)
-        self.shadow_long_raw = min(long_r + refund_amount, self.long_max)
+        raw_refund = reserved - actual
+        self.shadow_short_raw = min(
+            short_r + max(raw_refund, -self.short_max), self.short_max
+        )
+        self.shadow_long_raw = min(
+            long_r + max(raw_refund, -self.long_max), self.long_max
+        )
 
     @invariant()
     def short_capacity_matches_shadow(self):
@@ -693,8 +697,8 @@ class MultiMetricAccountingMachine(RuleBasedStateMachine):
                 {TOKENS_METRIC: tokens_actual, REQUESTS_METRIC: requests_actual}
             ),
         )
-        tokens_refund = tokens_reserved - tokens_actual
-        requests_refund = requests_reserved - requests_actual
+        tokens_refund = max(tokens_reserved - tokens_actual, -self.tokens_max)
+        requests_refund = max(requests_reserved - requests_actual, -self.requests_max)
         self.shadow_tokens_raw = min(tokens_r + tokens_refund, self.tokens_max)
         self.shadow_requests_raw = min(requests_r + requests_refund, self.requests_max)
 

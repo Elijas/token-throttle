@@ -265,13 +265,15 @@ class SpeedometerRefundLifecycleMachine(RuleBasedStateMachine):
             frozen_usage({METRIC: reserved}),
             frozen_usage({METRIC: actual}),
         )
-        refund_amount = reserved - actual
-        self.short_stored = min(short_r + refund_amount, self.short_max)
+        raw_refund = reserved - actual
+        short_refund = max(raw_refund, -self.short_max)
+        long_refund = max(raw_refund, -self.long_max)
+        self.short_stored = min(short_r + short_refund, self.short_max)
         self.short_last_checked = self.current_time
-        self.long_stored = min(long_r + refund_amount, self.long_max)
+        self.long_stored = min(long_r + long_refund, self.long_max)
         self.long_last_checked = self.current_time
-        self.short_refunded += refund_amount
-        self.long_refunded += refund_amount
+        self.short_refunded += short_refund
+        self.long_refunded += long_refund
 
     @rule(value=m1_max_cap_values)
     def set_max_capacity_short(self, value):
@@ -541,7 +543,7 @@ class ConsumeSetMaxRefundChainMachine(RuleBasedStateMachine):
             frozen_usage({METRIC: reserved}),
             frozen_usage({METRIC: actual}),
         )
-        refund_amount = reserved - actual
+        refund_amount = max(reserved - actual, -self.shadow_max)
         self.shadow_stored = min(readable + refund_amount, self.shadow_max)
         self.shadow_last_checked = self.current_time
         self.total_refunded += refund_amount
@@ -585,7 +587,7 @@ class ConsumeSetMaxRefundChainMachine(RuleBasedStateMachine):
             frozen_usage({METRIC: consume_amount}),
             frozen_usage({METRIC: actual}),
         )
-        refund_amount = consume_amount - actual
+        refund_amount = max(consume_amount - actual, -self.shadow_max)
         self.shadow_stored = min(readable2 + refund_amount, self.shadow_max)
         self.shadow_last_checked = self.current_time
         self.total_refunded += refund_amount
@@ -786,7 +788,7 @@ class FractionalLimitsMachine(RuleBasedStateMachine):
             frozen_usage({METRIC: reserved}),
             frozen_usage({METRIC: actual}),
         )
-        refund_amount = reserved - actual
+        refund_amount = max(reserved - actual, -self.shadow_max)
         self.shadow_stored = min(readable + refund_amount, self.shadow_max)
         self.shadow_last_checked = self.current_time
         self.total_refunded += refund_amount
@@ -956,7 +958,7 @@ class LongSequenceStressMachine(RuleBasedStateMachine):
             frozen_usage({METRIC: reserved}),
             frozen_usage({METRIC: actual}),
         )
-        refund_amount = reserved - actual
+        refund_amount = max(reserved - actual, -self.shadow_max)
         new_raw = readable + refund_amount
         capped = min(new_raw, self.shadow_max)
         clipped = new_raw - capped

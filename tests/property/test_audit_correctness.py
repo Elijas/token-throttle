@@ -192,7 +192,7 @@ class TightConservationMachine(RuleBasedStateMachine):
             frozen_usage({T1_METRIC: reserved}),
             frozen_usage({T1_METRIC: actual}),
         )
-        refund_amount = reserved - actual
+        refund_amount = max(reserved - actual, -self.shadow_max_capacity)
         new_raw = readable_before + refund_amount
         capped = min(new_raw, self.shadow_max_capacity)
         clipped = new_raw - capped
@@ -750,7 +750,7 @@ class SetMaxCapacityRefundInteractionMachine(RuleBasedStateMachine):
             frozen_usage({T3_METRIC: reserved}),
             frozen_usage({T3_METRIC: actual}),
         )
-        refund_amount = reserved - actual
+        refund_amount = max(reserved - actual, -self.shadow_max)
         self.shadow_stored = min(readable + refund_amount, self.shadow_max)
         self.shadow_last_checked = self.current_time
         self.total_refunded += refund_amount
