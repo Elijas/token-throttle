@@ -8,7 +8,7 @@ if typing.TYPE_CHECKING:
 
 from frozendict import frozendict
 
-from token_throttle._interfaces._models import FrozenUsage
+from token_throttle._interfaces._models import FrozenUsage, _is_bool_like
 
 _OUTPUT_BUDGET_KEYS = (
     "max_output_tokens",
@@ -298,8 +298,8 @@ def _count_request_context_fragments(
 ) -> int:
     if value is None:
         return 0
-    if isinstance(value, bool):
-        return len(encoding.encode(str(value).lower()))
+    if _is_bool_like(value):
+        return len(encoding.encode(str(bool(value)).lower()))
     if isinstance(value, str):
         return len(encoding.encode(value))
     if isinstance(value, int | float):
@@ -332,7 +332,7 @@ def _count_request_context_fragments(
 
 
 def _parse_non_negative_int(value: object, field_name: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int | float):
+    if _is_bool_like(value) or not isinstance(value, int | float):
         raise TypeError(f"'{field_name}' must be a finite non-negative integer")
 
     parsed = float(value)
@@ -342,7 +342,7 @@ def _parse_non_negative_int(value: object, field_name: str) -> int:
 
 
 def _is_token_id(value: object) -> bool:
-    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+    return isinstance(value, int) and not _is_bool_like(value) and value >= 0
 
 
 def _count_pretokenized_input_tokens(input_: object) -> int | None:
@@ -383,10 +383,8 @@ def _count_text_fragments(
 ) -> int:
     if value is None:
         return 0
-    if isinstance(value, bool):
-        # bool before int: isinstance(True, int) is True in Python.
-        # Serialize as JSON would ("true"/"false") and count tokens.
-        return len(encoding.encode(str(value).lower()))
+    if _is_bool_like(value):
+        return len(encoding.encode(str(bool(value)).lower()))
     if isinstance(value, str):
         return len(encoding.encode(value))
     if isinstance(value, (int, float)):

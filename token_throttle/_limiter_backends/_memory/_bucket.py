@@ -2,6 +2,7 @@ import math
 import warnings
 
 from token_throttle._capacity import CalculatedCapacity, calculate_capacity
+from token_throttle._interfaces._models import _is_bool_like
 
 
 class MemoryBucket:
@@ -72,8 +73,8 @@ class MemoryBucket:
         cap sequences recoverable: overflow hidden under the low cap is
         re-exposed when the cap rises.
         """
-        if isinstance(value, bool):
-            raise ValueError("max_capacity must not be a boolean")  # noqa: TRY004
+        if _is_bool_like(value):
+            raise ValueError("max_capacity must not be a boolean")
         if not (math.isfinite(value) and value > 0):
             raise ValueError("max_capacity must be finite and greater than 0")
         if self.last_checked is not None and self.capacity is not None:

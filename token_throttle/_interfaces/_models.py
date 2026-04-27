@@ -10,6 +10,13 @@ from frozendict import frozendict
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 
 
+def _is_bool_like(value: object) -> bool:
+    """Reject Python bool and numpy.bool_ (which is not a subclass of bool)."""
+    if isinstance(value, bool):
+        return True
+    return hasattr(value, "dtype") and str(getattr(value, "dtype", "")) == "bool"
+
+
 class SecondsIn(int, Enum):
     MINUTE = 60
     HOUR = 3600
@@ -38,10 +45,8 @@ class Quota(BaseModel):
         value: object,
         info: ValidationInfo,
     ) -> object:
-        if isinstance(value, bool):
-            raise ValueError(  # noqa: TRY004
-                f"{info.field_name} must not be a boolean"
-            )
+        if _is_bool_like(value):
+            raise ValueError(f"{info.field_name} must not be a boolean")
         return value
 
     @field_validator("metric", mode="before")
@@ -124,10 +129,8 @@ def _coerce_usage_value(
     *,
     label: str = "Usage value",
 ) -> float:
-    if isinstance(amount, bool):
-        raise ValueError(  # noqa: TRY004
-            f"{label} for {metric} must not be a boolean"
-        )
+    if _is_bool_like(amount):
+        raise ValueError(f"{label} for {metric} must not be a boolean")
     try:
         value = float(amount)
     except (TypeError, ValueError) as exc:
@@ -199,7 +202,7 @@ class CapacityReservation(BaseModel):
             metric, per_seconds = item
             if not isinstance(metric, str) or not metric:
                 raise ValueError("bucket_id metric must be a non-empty string")
-            if isinstance(per_seconds, bool):
+            if _is_bool_like(per_seconds):
                 raise TypeError("bucket_id per_seconds must not be a boolean")
             try:
                 parsed_per_seconds = float(per_seconds)

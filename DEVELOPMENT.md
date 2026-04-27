@@ -88,12 +88,6 @@ standard level strings (DEBUG, INFO, WARNING, ERROR, CRITICAL) plus the
 loguru extensions (TRACE, SUCCESS). Adding a `.get()` fallback would silently
 mask typos in level names.
 
-### `numpy.bool_` and other numpy scalar types are not rejected
-
-All boolean-rejection guards use `isinstance(value, bool)`. `numpy.bool_` is **not** a subclass of Python `bool`, so `numpy.bool_(True)` passes through and is coerced to `1.0` via `float()`. This applies to `Quota.limit`, `Quota.per_seconds`, usage values, and `bucket_id` per_seconds.
-
-This is accepted behavior: numpy scalars convert correctly through `float()` coercion, and adding numpy-awareness would couple a numpy-agnostic library to numpy's type hierarchy. If strict rejection is needed later, add a `_is_bool_like(value)` helper that checks `isinstance(value, bool) or (hasattr(value, 'dtype') and str(value.dtype) == 'bool')`.
-
 ### Capacity matching loop and the postconsumption invariant
 
 `_check_and_consume_capacity` and `consume_capacity` build a `postconsumption_dict` via a nested loop that matches capacity entries against usage entries by metric name. This O(n×m) pattern appears in all four backends (async/sync × memory/Redis).

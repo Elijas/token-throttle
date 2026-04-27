@@ -17,6 +17,7 @@ from token_throttle._interfaces._models import (
     Usage,
     UsageQuotas,
     _coerce_usage_value,
+    _is_bool_like,
     frozen_usage,
 )
 
@@ -102,10 +103,8 @@ def extract_total_tokens(usage: object) -> float:
             "total_tokens is None — cannot compute refund. "
             "Pass actual usage via refund_capacity() instead."
         )
-    if isinstance(total_tokens, bool):
-        raise ValueError(  # noqa: TRY004
-            "total_tokens must not be a boolean"
-        )
+    if _is_bool_like(total_tokens):
+        raise ValueError("total_tokens must not be a boolean")
     try:
         value = float(total_tokens)
     except (TypeError, ValueError) as exc:
@@ -257,8 +256,8 @@ def validate_timeout(timeout: object) -> float | None:
     """Validate timeout values used by blocking acquire/wait operations."""
     if timeout is None:
         return None
-    if isinstance(timeout, bool):
-        raise ValueError("timeout must not be a boolean")  # noqa: TRY004
+    if _is_bool_like(timeout):
+        raise ValueError("timeout must not be a boolean")
     try:
         timeout_value = float(timeout)
     except (TypeError, ValueError) as exc:
@@ -272,8 +271,8 @@ def validate_timeout(timeout: object) -> float | None:
 
 def validate_max_capacity_value(value: object) -> float:
     """Validate the value parameter for set_max_capacity."""
-    if isinstance(value, bool):
-        raise ValueError("max_capacity must not be a boolean")  # noqa: TRY004
+    if _is_bool_like(value):
+        raise ValueError("max_capacity must not be a boolean")
     try:
         float_value = float(value)
     except (TypeError, ValueError) as exc:
@@ -338,10 +337,8 @@ def _merge_extra_usage(
             raise ValueError(
                 f"Usage key '{metric}' not found in usage counter",
             )
-        if isinstance(raw_amount, bool):
-            raise ValueError(  # noqa: TRY004
-                f"Usage value for {metric} must not be a boolean"
-            )
+        if _is_bool_like(raw_amount):
+            raise ValueError(f"Usage value for {metric} must not be a boolean")
         try:
             amount = float(raw_amount)
         except (TypeError, ValueError) as exc:
@@ -386,8 +383,8 @@ def validate_metric(metric: object) -> str:
 
 def validate_per_seconds(per_seconds: object) -> int:
     """Validate the per_seconds parameter for set_max_capacity."""
-    if isinstance(per_seconds, bool):
-        raise ValueError("per_seconds must not be a boolean")  # noqa: TRY004
+    if _is_bool_like(per_seconds):
+        raise ValueError("per_seconds must not be a boolean")
     if not isinstance(per_seconds, int | float):
         raise ValueError(  # noqa: TRY004
             f"per_seconds must be a positive integer (got {per_seconds!r})"

@@ -15,7 +15,7 @@ except ImportError as exc:
 
 from token_throttle._capacity import CalculatedCapacity, calculate_capacity
 from token_throttle._interfaces._interfaces import PerModelConfig
-from token_throttle._interfaces._models import Quota
+from token_throttle._interfaces._models import Quota, _is_bool_like
 
 from ._server_time import async_server_time
 
@@ -181,8 +181,8 @@ class RedisBucket:
             value: The new max capacity value (must be > 0).
 
         """
-        if isinstance(value, bool):
-            raise ValueError("max_capacity must not be a boolean")  # noqa: TRY004
+        if _is_bool_like(value):
+            raise ValueError("max_capacity must not be a boolean")
         if not (math.isfinite(value) and value > 0):
             raise ValueError("max_capacity must be finite and greater than 0")
 
@@ -199,8 +199,8 @@ class RedisBucket:
 
     def set_configured_max_capacity(self, value: float) -> None:
         """Update the configured/static max capacity without persisting an override."""
-        if isinstance(value, bool):
-            raise ValueError("max_capacity must not be a boolean")  # noqa: TRY004
+        if _is_bool_like(value):
+            raise ValueError("max_capacity must not be a boolean")
         if not (math.isfinite(value) and value > 0):
             raise ValueError("max_capacity must be finite and greater than 0")
 

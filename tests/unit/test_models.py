@@ -9,6 +9,8 @@ from token_throttle._interfaces._models import (
     Quota,
     SecondsIn,
     UsageQuotas,
+    _coerce_usage_value,
+    _is_bool_like,
     frozen_usage,
 )
 
@@ -305,3 +307,89 @@ class TestCapacityReservation:
         )
         with pytest.raises(ValidationError):
             reservation.model_family = "other"
+
+
+class _FakeDtype:
+    def __str__(self) -> str:
+        return "bool"
+
+
+class _FakeNumpyBool:
+    """Simulates numpy.bool_ — has dtype='bool' but is NOT a Python bool subclass."""
+
+    def __init__(self, *, value: object) -> None:
+        self._value = value
+        self.dtype = _FakeDtype()
+
+    def __float__(self) -> float:
+        return float(self._value)
+
+    def __bool__(self) -> bool:
+        return bool(self._value)
+
+
+FAKE_NP_TRUE = _FakeNumpyBool(value=1)
+FAKE_NP_FALSE = _FakeNumpyBool(value=0)
+
+
+class TestIsBoolLike:
+    def test_python_true(self):
+        assert _is_bool_like(True) is True  # noqa: FBT003
+
+    def test_python_false(self):
+        assert _is_bool_like(False) is True  # noqa: FBT003
+
+    def test_int_not_bool_like(self):
+        assert _is_bool_like(1) is False
+
+    def test_float_not_bool_like(self):
+        assert _is_bool_like(1.0) is False
+
+    def test_string_not_bool_like(self):
+        assert _is_bool_like("true") is False
+
+    def test_none_not_bool_like(self):
+        assert _is_bool_like(None) is False
+
+    def test_fake_numpy_bool_true(self):
+        assert _is_bool_like(FAKE_NP_TRUE) is True
+
+    def test_fake_numpy_bool_false(self):
+        assert _is_bool_like(FAKE_NP_FALSE) is True
+
+    def test_real_numpy_bool(self):
+        np = pytest.importorskip("numpy")
+        assert _is_bool_like(np.bool_(1)) is True
+        assert _is_bool_like(np.bool_(0)) is True
+
+    def test_numpy_int_not_bool_like(self):
+        np = pytest.importorskip("numpy")
+        assert _is_bool_like(np.int64(1)) is False
+
+
+class TestNumpyBoolRejection:
+    """numpy.bool_ must be rejected everywhere Python bool is rejected."""
+
+    def test_quota_limit_rejects_numpy_bool(self):
+        with pytest.raises(ValidationError, match="must not be a boolean"):
+            Quota(metric="tokens", limit=FAKE_NP_TRUE)
+
+    def test_quota_per_seconds_rejects_numpy_bool(self):
+        with pytest.raises(ValidationError, match="must not be a boolean"):
+            Quota(metric="tokens", limit=100.0, per_seconds=FAKE_NP_TRUE)
+
+    def test_coerce_usage_value_rejects_numpy_bool(self):
+        with pytest.raises(ValueError, match="must not be a boolean"):
+            _coerce_usage_value("tokens", FAKE_NP_TRUE)
+
+    def test_frozen_usage_rejects_numpy_bool_value(self):
+        with pytest.raises(ValueError, match="must not be a boolean"):
+            frozen_usage({"tokens": FAKE_NP_TRUE})
+
+    def test_bucket_ids_per_seconds_rejects_numpy_bool(self):
+        with pytest.raises(TypeError, match="must not be a boolean"):
+            CapacityReservation(
+                usage={"requests": 1.0},
+                model_family="gpt-4o",
+                bucket_ids=[("requests", FAKE_NP_TRUE)],
+            )

@@ -8,8 +8,11 @@ from frozendict import frozendict
 from token_throttle._interfaces._interfaces import PerModelConfig
 from token_throttle._interfaces._models import Quota, UsageQuotas
 from token_throttle._validation import (
+    extract_total_tokens,
+    merge_extra_usage,
     resolve_config,
     validate_acquire_usage,
+    validate_max_capacity_value,
     validate_metric,
     validate_per_seconds,
     validate_refund_usage,
@@ -215,3 +218,49 @@ class TestResolveConfig:
         cfg = PerModelConfig(quotas=UsageQuotas([Quota(metric="tokens", limit=1)]))
         with pytest.raises(ValueError, match="whitespace-only"):
             resolve_config(cfg, whitespace_name)
+
+
+class _FakeDtype:
+    def __str__(self) -> str:
+        return "bool"
+
+
+class _FakeNumpyBool:
+    """Simulates numpy.bool_ — has dtype='bool' but is NOT a Python bool subclass."""
+
+    def __init__(self, *, value: object) -> None:
+        self._value = value
+        self.dtype = _FakeDtype()
+
+    def __float__(self) -> float:
+        return float(self._value)
+
+    def __bool__(self) -> bool:
+        return bool(self._value)
+
+
+FAKE_NP_TRUE = _FakeNumpyBool(value=1)
+
+
+class TestNumpyBoolRejectionInValidation:
+    def test_extract_total_tokens_rejects_numpy_bool(self):
+        usage = type("Usage", (), {"total_tokens": FAKE_NP_TRUE})()
+        with pytest.raises(ValueError, match="must not be a boolean"):
+            extract_total_tokens(usage)
+
+    def test_validate_timeout_rejects_numpy_bool(self):
+        with pytest.raises(ValueError, match="must not be a boolean"):
+            validate_timeout(FAKE_NP_TRUE)
+
+    def test_validate_max_capacity_value_rejects_numpy_bool(self):
+        with pytest.raises(ValueError, match="must not be a boolean"):
+            validate_max_capacity_value(FAKE_NP_TRUE)
+
+    def test_validate_per_seconds_rejects_numpy_bool(self):
+        with pytest.raises(ValueError, match="must not be a boolean"):
+            validate_per_seconds(FAKE_NP_TRUE)
+
+    def test_merge_extra_usage_rejects_numpy_bool(self):
+        usage = frozendict({"tokens": 100.0})
+        with pytest.raises(ValueError, match="must not be a boolean"):
+            merge_extra_usage(usage, {"tokens": FAKE_NP_TRUE})
