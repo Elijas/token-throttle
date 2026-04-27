@@ -977,3 +977,146 @@ class TestNumericValuesInMessages:
         )
         assert result["requests"] == 1
         assert result["tokens"] > 0
+
+
+class TestToolCallsJsonSerialization:
+    """tool_calls in assistant messages must be counted via JSON serialization
+    so that structural tokens ({, }, [, ], :, ",", spaces) are not dropped.
+    """
+
+    def test_tool_calls_delta_matches_json_dumps(self):
+        """Regression for under-counting of ~41-58%: counter must include JSON
+        structural characters for tool_calls in messages.
+        """
+        tiktoken = pytest.importorskip("tiktoken")
+        counter = OpenAIUsageCounter()
+        enc = tiktoken.encoding_for_model("gpt-4")
+
+        tool_calls = [
+            {
+                "id": "call_abc",
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "arguments": '{"city": "London", "units": "celsius"}',
+                },
+            }
+        ]
+        base = counter(
+            model="gpt-4",
+            messages=[{"role": "assistant", "content": ""}],
+        )["tokens"]
+        with_tc = counter(
+            model="gpt-4",
+            messages=[{"role": "assistant", "tool_calls": tool_calls}],
+        )["tokens"]
+        tc_delta = with_tc - base
+        json_tokens = len(enc.encode(json.dumps(tool_calls)))
+
+        assert tc_delta >= json_tokens, (
+            f"tool_calls under-counted: delta={tc_delta}, json={json_tokens}"
+        )
+        assert tc_delta - json_tokens <= 5
+
+    def test_multiple_tool_calls_counted_via_json_dumps(self):
+        tiktoken = pytest.importorskip("tiktoken")
+        counter = OpenAIUsageCounter()
+        enc = tiktoken.encoding_for_model("gpt-4")
+
+        tool_calls = [
+            {
+                "id": f"call_{i}",
+                "type": "function",
+                "function": {
+                    "name": f"fn_{i}",
+                    "arguments": json.dumps({"key": f"value_{i}"}),
+                },
+            }
+            for i in range(3)
+        ]
+        base = counter(
+            model="gpt-4",
+            messages=[{"role": "assistant", "content": ""}],
+        )["tokens"]
+        with_tc = counter(
+            model="gpt-4",
+            messages=[{"role": "assistant", "tool_calls": tool_calls}],
+        )["tokens"]
+        tc_delta = with_tc - base
+        json_tokens = len(enc.encode(json.dumps(tool_calls)))
+
+        assert tc_delta >= json_tokens
+        assert tc_delta - json_tokens <= 5
+
+
+class TestResponsesApiStructuredItemCounting:
+    """Responses-API structured items (function_call, etc.) must not be
+    misclassified as chat messages, and must be JSON-serialized for counting.
+    """
+
+    def test_function_call_item_not_classified_as_message(self):
+        """function_call items have 'name' but no 'role'; they must not be
+        routed through the chat message counting path.
+        """
+        counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
+        function_call_item = {
+            "type": "function_call",
+            "name": "get_weather",
+            "call_id": "call_abc",
+            "arguments": '{"city": "London"}',
+        }
+
+        result = counter("gpt-4", input=[function_call_item])
+        assert result["requests"] == 1
+        assert result["tokens"] > 0
+
+    def test_function_call_counted_via_json_serialization(self):
+        tiktoken = pytest.importorskip("tiktoken")
+        counter = OpenAIUsageCounter()
+        enc = tiktoken.encoding_for_model("gpt-4")
+
+        function_call_item = {
+            "type": "function_call",
+            "name": "get_weather",
+            "call_id": "call_abc",
+            "arguments": '{"city": "London"}',
+        }
+
+        result = counter("gpt-4", input=[function_call_item])
+        json_tokens = len(enc.encode(json.dumps([function_call_item])))
+
+        assert result["tokens"] == json_tokens
+
+    def test_mixed_messages_and_function_calls_counted_correctly(self):
+        pytest.importorskip("tiktoken")
+        counter = OpenAIUsageCounter()
+
+        message = {"role": "user", "content": "call the weather function"}
+        function_call = {
+            "type": "function_call",
+            "name": "get_weather",
+            "call_id": "call_abc",
+            "arguments": '{"city": "Paris"}',
+        }
+
+        msg_tokens = counter("gpt-4", input=[message])["tokens"]
+        fc_tokens = counter("gpt-4", input=[function_call])["tokens"]
+        combined = counter("gpt-4", input=[message, function_call])["tokens"]
+
+        assert combined == msg_tokens + fc_tokens
+
+    def test_single_structured_dict_counted_via_json_serialization(self):
+        tiktoken = pytest.importorskip("tiktoken")
+        counter = OpenAIUsageCounter()
+        enc = tiktoken.encoding_for_model("gpt-4")
+
+        item = {
+            "type": "function_call_output",
+            "call_id": "call_abc",
+            "output": '{"temp": 22}',
+        }
+
+        result = counter("gpt-4", input=item)
+        json_tokens = len(enc.encode(json.dumps(item)))
+
+        assert result["tokens"] == json_tokens

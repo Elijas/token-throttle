@@ -197,11 +197,13 @@ def count_structured_input_tokens(
     if isinstance(input_, dict):
         if _looks_like_message(input_):
             return count_chat_input_tokens(encoding, messages=[input_])
-        return _count_text_fragments(
+        unsupported = _get_unsupported_content_part_name(input_)
+        if unsupported is not None:
+            raise _unsupported_content_part_error(unsupported)
+        return _count_json_serialized_tokens(
             encoding,
             input_,
             invalid_error=invalid_error,
-            content_part_context=True,
         )
     if isinstance(input_, list):
         if not all(isinstance(item, dict) for item in input_):
@@ -211,29 +213,33 @@ def count_structured_input_tokens(
         if len(message_items) == len(items):
             return count_chat_input_tokens(encoding, messages=items)
         if not message_items:
-            return _count_text_fragments(
+            for item in items:
+                unsupported = _get_unsupported_content_part_name(item)
+                if unsupported is not None:
+                    raise _unsupported_content_part_error(unsupported)
+            return _count_json_serialized_tokens(
                 encoding,
                 items,
                 invalid_error=invalid_error,
-                content_part_context=True,
             )
         structured_items = [item for item in items if not _looks_like_message(item)]
-        # Mixed responses-style input lists need chat framing for message items
-        # and plain fragment counting for non-message structured items.
+        for item in structured_items:
+            unsupported = _get_unsupported_content_part_name(item)
+            if unsupported is not None:
+                raise _unsupported_content_part_error(unsupported)
         return count_chat_input_tokens(
             encoding,
             messages=message_items,
-        ) + _count_text_fragments(
+        ) + _count_json_serialized_tokens(
             encoding,
             structured_items,
             invalid_error=invalid_error,
-            content_part_context=True,
         )
     raise ValueError(invalid_error)
 
 
 def _looks_like_message(value: dict[str, object]) -> bool:
-    return "role" in value or "content" in value or "name" in value
+    return "role" in value
 
 
 def _get_reserved_output_tokens(request: dict[str, object]) -> int:
@@ -444,12 +450,19 @@ def count_chat_input_tokens(
         num_tokens += 3
 
         for key, value in message.items():
-            num_tokens += _count_text_fragments(
-                encoding,
-                value,
-                invalid_error="All keys and values in messages must be of type str",
-                content_part_context=key == "content",
-            )
+            if key == "tool_calls":
+                num_tokens += _count_json_serialized_tokens(
+                    encoding,
+                    value,
+                    invalid_error="All keys and values in messages must be of type str",
+                )
+            else:
+                num_tokens += _count_text_fragments(
+                    encoding,
+                    value,
+                    invalid_error="All keys and values in messages must be of type str",
+                    content_part_context=key == "content",
+                )
 
             if key == "name":
                 num_tokens += 1
