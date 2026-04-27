@@ -19,10 +19,10 @@ if TYPE_CHECKING:
 async def async_server_time(client: redis.asyncio.Redis) -> float:
     """Return the Redis server's current time as a ``time.time()``-compatible float."""
     seconds, microseconds = await client.time()
-    return seconds + microseconds / 1_000_000
+    return float(seconds) + float(microseconds) / 1_000_000
 
 
 def sync_server_time(client: redis.Redis) -> float:
     """Return the Redis server's current time as a ``time.time()``-compatible float."""
     seconds, microseconds = client.time()
-    return seconds + microseconds / 1_000_000
+    return float(seconds) + float(microseconds) / 1_000_000

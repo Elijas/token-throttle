@@ -5,6 +5,8 @@ import warnings
 
 from pydantic import BaseModel
 
+_backward_clock_warned: bool = False
+
 
 class CalculatedCapacity(BaseModel):
     """
@@ -64,13 +66,16 @@ def calculate_capacity(  # noqa: PLR0913
 
     time_passed = current_time - last_checked
     if time_passed < 0:
-        warnings.warn(
-            f"Negative time_passed ({time_passed:.4f}s) detected in bucket "
-            f"'{bucket_id}' — likely NTP clock correction. "
-            f"Clamping to 0.",
-            RuntimeWarning,
-            stacklevel=2,
-        )
+        global _backward_clock_warned  # noqa: PLW0603
+        if not _backward_clock_warned:
+            _backward_clock_warned = True
+            warnings.warn(
+                f"Negative time_passed ({time_passed:.4f}s) detected in bucket "
+                f"'{bucket_id}' — likely NTP clock correction. "
+                f"Clamping to 0. Further backward-clock warnings suppressed.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
         time_passed = 0.0
 
     current_preconsumption_capacity = min(

@@ -8,6 +8,7 @@ calculate_capacity() function, plus MemoryBucket-specific state management
 
 import pytest
 
+import token_throttle._capacity as _cap
 from token_throttle._capacity import CalculatedCapacity
 from token_throttle._interfaces._interfaces import PerModelConfig
 from token_throttle._interfaces._models import Quota, UsageQuotas, frozen_usage
@@ -185,6 +186,7 @@ class TestEdgeCases:
 
     def test_negative_time_passed_clamps_to_zero_with_warning(self):
         """Clock skew (negative time_passed) clamps to 0 and issues RuntimeWarning."""
+        _cap._backward_clock_warned = False
         bucket = make_bucket(limit=100, per_seconds=60)
         bucket.set_capacity(40.0, current_time=1010.0)
         with pytest.warns(RuntimeWarning, match="Negative time_passed"):
@@ -195,6 +197,7 @@ class TestEdgeCases:
 
     def test_negative_time_passed_warning_includes_bucket_id(self):
         """RuntimeWarning for negative time mentions the bucket's ID."""
+        _cap._backward_clock_warned = False
         bucket = make_bucket(
             limit=100, per_seconds=60, model_family="my-model", metric="tokens"
         )

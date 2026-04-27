@@ -171,7 +171,7 @@ n_refunders_strategy = st.integers(min_value=4, max_value=8)
 
 
 @pytest.mark.filterwarnings("ignore::RuntimeWarning")
-@hypothesis_settings(max_examples=50, deadline=None)
+@hypothesis_settings(max_examples=200, deadline=None)
 @given(ops=ops_list_strategy, n_threads=n_threads_strategy)
 def test_sync_concurrent_ops_no_corruption(ops, n_threads):
     """Hypothesis-generated ops dispatched to multiple threads on SyncMemoryBackend.
@@ -233,7 +233,7 @@ def test_sync_concurrent_ops_no_corruption(ops, n_threads):
 
 
 @pytest.mark.filterwarnings("ignore::RuntimeWarning")
-@hypothesis_settings(max_examples=50, deadline=None)
+@hypothesis_settings(max_examples=200, deadline=None)
 @given(ops=ops_list_strategy, n_tasks=n_threads_strategy)
 def test_async_concurrent_ops_no_corruption(ops, n_tasks):
     """Async mirror of test 1 using asyncio.gather with MemoryBackend."""
@@ -284,7 +284,7 @@ def test_async_concurrent_ops_no_corruption(ops, n_tasks):
 # ---------------------------------------------------------------------------
 
 
-@hypothesis_settings(max_examples=50, deadline=None)
+@hypothesis_settings(max_examples=200, deadline=None)
 @given(n_requesters=n_requesters_strategy)
 def test_sync_concurrent_all_acquires_no_double_spend(n_requesters):
     """N threads each requesting LIMIT/N tokens from a fresh bucket.
@@ -313,7 +313,7 @@ def test_sync_concurrent_all_acquires_no_double_spend(n_requesters):
 # ---------------------------------------------------------------------------
 
 
-@hypothesis_settings(max_examples=50, deadline=None)
+@hypothesis_settings(max_examples=200, deadline=None)
 @given(n_requesters=n_requesters_strategy)
 def test_async_concurrent_all_acquires_no_double_spend(n_requesters):
     """Async mirror of test 3."""
@@ -346,7 +346,7 @@ def test_async_concurrent_all_acquires_no_double_spend(n_requesters):
 # ---------------------------------------------------------------------------
 
 
-@hypothesis_settings(max_examples=30, deadline=None)
+@hypothesis_settings(max_examples=200, deadline=None)
 @given(acquire_amount=acquire_amount_strategy)
 def test_sync_blocked_acquire_wakes_on_refund(acquire_amount):
     """Refund -> notify_all() -> blocked waiter wakes path.
@@ -403,7 +403,7 @@ def test_sync_blocked_acquire_wakes_on_refund(acquire_amount):
 # ---------------------------------------------------------------------------
 
 
-@hypothesis_settings(max_examples=30, deadline=None)
+@hypothesis_settings(max_examples=200, deadline=None)
 @given(acquire_amount=acquire_amount_strategy)
 def test_async_blocked_acquire_wakes_on_refund(acquire_amount):
     """Async mirror of test 5."""
@@ -445,7 +445,7 @@ def test_async_blocked_acquire_wakes_on_refund(acquire_amount):
 # ---------------------------------------------------------------------------
 
 
-@hypothesis_settings(max_examples=30, deadline=None)
+@hypothesis_settings(max_examples=200, deadline=None)
 @given(
     n_waiters=n_waiters_strategy,
     per_waiter=small_amount_strategy,
@@ -509,7 +509,7 @@ def test_sync_multiple_waiters_wake_on_refund(n_waiters, per_waiter):
 # ---------------------------------------------------------------------------
 
 
-@hypothesis_settings(max_examples=30, deadline=None)
+@hypothesis_settings(max_examples=200, deadline=None)
 @given(
     acquire_amount=st.floats(
         min_value=2.0, max_value=10.0, allow_nan=False, allow_infinity=False
@@ -568,7 +568,7 @@ def test_sync_blocked_acquire_wakes_on_set_max_capacity(acquire_amount):
 # ---------------------------------------------------------------------------
 
 
-@hypothesis_settings(max_examples=30, deadline=None)
+@hypothesis_settings(max_examples=200, deadline=None)
 @given(
     acquire_amount=st.floats(
         min_value=10.0, max_value=50.0, allow_nan=False, allow_infinity=False
@@ -626,7 +626,7 @@ def test_sync_set_max_below_acquire_raises_valueerror(acquire_amount, new_max):
 
 
 @pytest.mark.filterwarnings("ignore::RuntimeWarning")
-@hypothesis_settings(max_examples=50, deadline=None)
+@hypothesis_settings(max_examples=200, deadline=None)
 @given(
     n_refunders=n_refunders_strategy,
     refund_amount=refund_clip_amount_strategy,

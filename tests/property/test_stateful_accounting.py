@@ -493,7 +493,7 @@ async def _run_async_ops(backend, ops):
 
 
 @pytest.mark.filterwarnings("ignore::RuntimeWarning")
-@hypothesis_settings(max_examples=100, deadline=None)
+@hypothesis_settings(max_examples=500, deadline=None)
 @given(ops=ops_strategy())
 def test_sync_async_parity(ops):
     """Identical op sequences on sync and async backends must produce identical final capacity."""
@@ -787,7 +787,7 @@ def acquire_refund_pairs(draw):
 
 
 @pytest.mark.filterwarnings("ignore::RuntimeWarning")
-@hypothesis_settings(max_examples=100, deadline=None)
+@hypothesis_settings(max_examples=500, deadline=None)
 @given(pairs=acquire_refund_pairs())
 def test_acquire_refund_conservation(pairs):
     """After each acquire+refund pair, capacity is conserved.

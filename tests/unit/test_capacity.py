@@ -4,6 +4,7 @@ import warnings
 
 import pytest
 
+import token_throttle._capacity as _cap
 from token_throttle._capacity import calculate_capacity
 
 
@@ -46,6 +47,7 @@ class TestClockSkewBehavior:
 
     def test_negative_time_passed_clamps_to_zero(self):
         """When current_time < last_checked, time_passed is clamped to 0."""
+        _cap._backward_clock_warned = False
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
             result = calculate_capacity(

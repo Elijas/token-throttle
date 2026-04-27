@@ -123,6 +123,26 @@ In the async Redis backend, `consume_capacity` shields the Redis write so that a
 
 `RateLimiter` and `SyncRateLimiter` maintain six per-model-family dicts (`_model_family_to_backend`, `_model_family_to_model_name`, etc.) that grow with each distinct model name seen. For bounded deployments (a handful of model families), this is fine. For applications that generate unbounded unique model names (e.g. per-user model aliases), consider using a single rate limiter per model family or periodically creating fresh limiter instances.
 
+### Redis `max_capacity_override` self-heals on config mismatch
+
+When `_deserialize_max_capacity_override` reads a stored override from Redis, it compares the `configured_max_capacity` field in the JSON payload against the current process's `_max_capacity_default` (from `Quota.limit`). If they differ — e.g. after a deployment changes the static quota — the override is silently discarded (returns `None`), causing the bucket to fall back to the new static limit.
+
+This is intentional self-healing: an override created under a previous quota configuration should not pin the new deployment to a stale limit. The override was set relative to the old config; applying it under a different config would produce an unexpected effective limit. Discarding it lets the new static config take effect cleanly, and operators can re-apply an override if needed.
+
+### Redis connection pool sizing
+
+The Redis backend accepts a user-provided `redis.asyncio.Redis` (or `redis.Redis`) client and uses its connection pool as-is. By default, `redis-py` creates a pool with `max_connections=2**31` (effectively unlimited). In high-fanout applications (many concurrent `await_for_capacity` calls), the actual connection count may spike because each pipeline/lock acquisition can consume a connection.
+
+If you need to bound connection usage, configure `max_connections` on the Redis client before passing it to the rate limiter:
+
+```python
+import redis.asyncio as aioredis
+
+pool = aioredis.ConnectionPool.from_url("redis://localhost", max_connections=50)
+client = aioredis.Redis(connection_pool=pool)
+limiter = RateLimiter(client=client, ...)
+```
+
 ### Float precision at extreme capacity limits
 
 All capacity values are Python `float` (IEEE 754 double). At limits above ~2^53, integer precision is lost: consecutive integers are indistinguishable, so `capacity - usage` may not change the stored value. This is a known limitation of the float64 representation and is acceptable for all real-world rate-limiting scenarios (token quotas are orders of magnitude below 2^53).
