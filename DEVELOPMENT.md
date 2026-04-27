@@ -69,11 +69,15 @@ Example: bucket at 50, actual usage 130 → capacity becomes −80. The token-bu
 
 The `allow_negative` flag on `set_capacity` / `_set_capacities_unsafe` controls this. The blocking path (`await_for_capacity` / `_check_and_consume_capacity`) uses `allow_negative=False` because it guarantees capacity ≥ usage before consuming.
 
-### `set_max_capacity` applies the new refill rate retroactively
+### `set_max_capacity` anchors capacity before swapping the refill rate
 
-When `set_max_capacity` changes a bucket's limit, `_rate_per_sec` is recalculated immediately. The next `calculate_capacity` call uses the new rate for the *entire* elapsed time since the last check — not just the time since the rate changed.
+When `set_max_capacity` changes a bucket's limit, it performs an anchor-and-swap in three steps:
 
-If the last capacity check was 5 seconds ago and the rate doubles, the refill is `5 × new_rate` instead of `4 × old_rate + 1 × new_rate`. The error is bounded by `|rate_diff| × sleep_interval` (~0.1s typically), so it's negligible in practice. Tracking rate-change timestamps would add significant complexity for minimal benefit.
+1. **Anchor at old rate:** capacity is updated using the *old* `_rate_per_sec` for the time elapsed since `last_checked` (`capacity += elapsed × old_rate`).
+2. **Reset timestamp:** `last_checked` is set to `now`, so no elapsed time carries over.
+3. **Swap rate:** `max_capacity` and `_rate_per_sec` are updated to reflect the new limit.
+
+Because `last_checked` is reset to `now` before the new rate takes effect, the new rate applies only to *future* time — it is not applied retroactively to time that elapsed under the old rate. The Redis backend achieves the same result via `_snapshot_bucket_state` (which anchors and writes back to Redis) before calling `bucket.set_max_capacity`.
 
 ### `_log()` fails fast on unrecognized level strings
 

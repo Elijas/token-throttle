@@ -35,9 +35,8 @@ tasks:
   ##############################
   lint:
     cmds:
-      - bash -c "$(curl -fsSL https://gist.githubusercontent.com/Elijas/ce4480d070d4726fe7eb1863d1afd58d/raw/657b0bfea2b660ee3b0938c79f53418a03229cf3/init_generator.sh)"
       - uv run ruff check --fix
-    desc: Run Ruff linter in watch mode with auto-fix
+    desc: Run Ruff linter with auto-fix
     aliases: [l]
   lint-watch:
     cmds:
