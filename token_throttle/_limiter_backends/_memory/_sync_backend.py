@@ -85,11 +85,14 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
     def _get_capacities(
         self,
         current_time: float,
+        *,
+        buckets: list[MemoryBucket] | None = None,
     ) -> tuple[Capacities, list[MemoryBucket]]:
         """Get capacities for all buckets. Must be called under lock."""
+        target = self._buckets if buckets is None else buckets
         caps: dict[tuple[str, int], float] = {}
         fresh_start_buckets: list[MemoryBucket] = []
-        for bucket in self._buckets:
+        for bucket in target:
             result = bucket.get_capacity(current_time)
             if result.is_fresh_start:
                 fresh_start_buckets.append(bucket)
@@ -120,6 +123,7 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
         current_time: float,
         *,
         allow_negative: bool = False,
+        buckets: list[MemoryBucket] | None = None,
     ) -> None:
         """
         Set capacities for all buckets. Must be called under lock.
@@ -127,11 +131,12 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
         allow_negative=True is required for consume_capacity (speedometer)
         and refund_capacity (preserves negative debt for natural refill).
         """
+        target = self._buckets if buckets is None else buckets
         for (usage_metric, per_seconds), amount in new_capacities.items():
             bucket = next(
                 (
                     b
-                    for b in self._buckets
+                    for b in target
                     if b.usage_metric == usage_metric and b.per_seconds == per_seconds
                 ),
                 None,
@@ -276,6 +281,7 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
         preconsumption: Capacities = frozendict()
         current_time = time.time()
         consumed_monotonic = time.monotonic()
+        consumed_buckets: list[MemoryBucket] | None = None
 
         while True:
             should_fire_wait_start = False
@@ -290,6 +296,7 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
                     )
                     if ok:
                         consumed_monotonic = time.monotonic()
+                        consumed_buckets = list(self._buckets)
                         break
                     if deadline is not None and time.monotonic() >= deadline:
                         raise TimeoutError("Timed out waiting for capacity")
@@ -359,7 +366,7 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
                 )
         except BaseException:
             try:  # noqa: SIM105
-                self._refund_cancelled_consumption(usage)
+                self._refund_cancelled_consumption(usage, buckets=consumed_buckets)
             except BaseException:  # noqa: BLE001, S110
                 pass
             raise
@@ -525,12 +532,14 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
                 "SyncMemoryBackend can only reconfigure into another SyncMemoryBackend"
             )
 
-        existing_buckets = dict(getattr(self, "_bucket_registry", {})) or {
-            (bucket.usage_metric, int(bucket.per_seconds)): bucket
-            for bucket in self._buckets
-        }
-
         with self._condition:
+            if hasattr(self, "_bucket_registry"):
+                existing_buckets = dict(self._bucket_registry)
+            else:
+                existing_buckets = {
+                    (bucket.usage_metric, int(bucket.per_seconds)): bucket
+                    for bucket in self._buckets
+                }
             current_time = time.time()
             prepared_buckets: list[MemoryBucket] = []
             for quota in cfg.quotas:
@@ -592,31 +601,50 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
                 stacklevel=3,
             )
 
-    def _refund_cancelled_consumption(self, usage: FrozenUsage) -> None:
+    def _refund_cancelled_consumption(
+        self,
+        usage: FrozenUsage,
+        *,
+        buckets: list[MemoryBucket] | None = None,
+    ) -> None:
         """
         Refund capacity consumed before a BaseException hit callbacks.
 
         Fires no callbacks to avoid recursion and another interruption window.
+
+        ``buckets`` should be the snapshot captured at consumption time so
+        that a concurrent reconfiguration cannot redirect the refund to a
+        different bucket set.
         """
+        target_buckets = self._buckets if buckets is None else buckets
         with self._condition:
             current_time = time.time()
-            capacities, _ = self._get_capacities(current_time)
+            capacities, _ = self._get_capacities(current_time, buckets=target_buckets)
             refunded: dict[tuple[str, int], float] = dict(capacities)
             for (cap_metric, per_seconds), cap_amount in capacities.items():
                 for usage_metric, usage_amount in usage.items():
                     if cap_metric != usage_metric:
                         continue
                     bucket = next(
-                        b
-                        for b in self._buckets
-                        if b.usage_metric == cap_metric and b.per_seconds == per_seconds
+                        (
+                            b
+                            for b in target_buckets
+                            if b.usage_metric == cap_metric
+                            and b.per_seconds == per_seconds
+                        ),
+                        None,
                     )
+                    if bucket is None:
+                        continue
                     refunded[(cap_metric, per_seconds)] = min(
                         cap_amount + usage_amount,
                         bucket.max_capacity,
                     )
             self._set_capacities(
-                frozendict(refunded), current_time, allow_negative=True
+                frozendict(refunded),
+                current_time,
+                allow_negative=True,
+                buckets=target_buckets,
             )
             self._condition.notify_all()
 

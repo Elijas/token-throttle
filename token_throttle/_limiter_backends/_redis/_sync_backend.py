@@ -201,6 +201,8 @@ class SyncRedisBackend(SyncRateLimiterBackend):
 
         try:
             for bucket in target_buckets:
+                if stack.locks:
+                    self._extend_locks(stack)
                 remaining = (
                     None
                     if stop_trying_at is None

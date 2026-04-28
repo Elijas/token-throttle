@@ -227,6 +227,8 @@ class RedisBackend(RateLimiterBackend):
 
         try:
             for bucket in target_buckets:
+                if stack.locks:
+                    await self._extend_locks(stack)
                 remaining = (
                     None
                     if stop_trying_at is None
@@ -1069,6 +1071,8 @@ class RedisBackend(RateLimiterBackend):
                 # Write landed despite cancel — refund is done.
                 # Suppress so the caller doesn't retry and double-refund.
                 suppress_current_task_cancellation()
+                async with self._local_condition:
+                    self._local_condition.notify_all()
                 return
         async with self._local_condition:
             self._local_condition.notify_all()

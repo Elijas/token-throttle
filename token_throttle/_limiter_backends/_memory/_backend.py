@@ -90,11 +90,14 @@ class MemoryBackend(RateLimiterBackend):
     def _get_capacities(
         self,
         current_time: float,
+        *,
+        buckets: list[MemoryBucket] | None = None,
     ) -> tuple[Capacities, list[MemoryBucket]]:
         """Get capacities for all buckets. Must be called under lock."""
+        target = self._buckets if buckets is None else buckets
         caps: dict[tuple[str, int], float] = {}
         fresh_start_buckets: list[MemoryBucket] = []
-        for bucket in self._buckets:
+        for bucket in target:
             result = bucket.get_capacity(current_time)
             if result.is_fresh_start:
                 fresh_start_buckets.append(bucket)
@@ -125,6 +128,7 @@ class MemoryBackend(RateLimiterBackend):
         current_time: float,
         *,
         allow_negative: bool = False,
+        buckets: list[MemoryBucket] | None = None,
     ) -> None:
         """
         Set capacities for all buckets. Must be called under lock.
@@ -134,11 +138,12 @@ class MemoryBackend(RateLimiterBackend):
         """
         # O(N*M) linear scan per bucket -- acceptable because N (buckets)
         # and M (usage metrics) are typically 2-5 in practice.
+        target = self._buckets if buckets is None else buckets
         for (usage_metric, per_seconds), amount in new_capacities.items():
             bucket = next(
                 (
                     b
-                    for b in self._buckets
+                    for b in target
                     if b.usage_metric == usage_metric and b.per_seconds == per_seconds
                 ),
                 None,
@@ -659,7 +664,9 @@ class MemoryBackend(RateLimiterBackend):
         async def _do_refund() -> None:
             async with self._condition:
                 current_time = time.time()
-                capacities, _ = self._get_capacities(current_time)
+                capacities, _ = self._get_capacities(
+                    current_time, buckets=target_buckets
+                )
                 refunded: dict[tuple[str, int], float] = dict(capacities)
                 for (cap_metric, per_seconds), cap_amount in capacities.items():
                     for usage_metric, usage_amount in usage.items():
@@ -681,7 +688,10 @@ class MemoryBackend(RateLimiterBackend):
                             bucket.max_capacity,
                         )
                 self._set_capacities(
-                    frozendict(refunded), current_time, allow_negative=True
+                    frozendict(refunded),
+                    current_time,
+                    allow_negative=True,
+                    buckets=target_buckets,
                 )
                 self._condition.notify_all()
 

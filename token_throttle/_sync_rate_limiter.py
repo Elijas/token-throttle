@@ -449,7 +449,6 @@ class SyncRateLimiter:
                 stacklevel=3,
             )
             return
-        self._refunded_reservation_ids.add(reservation.reservation_id)
         actual_usage = frozen_usage(actual_usage)
         if reservation.model_family not in self._model_family_to_backend:
             raise ValueError(
@@ -482,6 +481,7 @@ class SyncRateLimiter:
             actual_usage,
             bucket_ids=refund_bucket_ids,
         )
+        self._refunded_reservation_ids.add(reservation.reservation_id)
 
     def _unlimited_reservation(
         self,
