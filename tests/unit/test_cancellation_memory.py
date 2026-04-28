@@ -450,13 +450,14 @@ class TestCancellationDebtPreservation:
         # (otherwise the main coroutine blocks in slow_callback for 10s)
         gate.clear()
 
-        # While Task A is stuck in callback, Task B drives capacity negative
+        # While Task A is stuck in callback, Task B drives capacity negative.
         # consume_capacity is a "speedometer" op — it uses allow_negative=True
+        # but clamps at -max_capacity to prevent poisoning.
         await backend.consume_capacity(frozendict({"requests": 200.0}))
         cap_after_consume = _get_bucket_capacity(backend)
-        # capacity was 40 (50-10 already consumed by task_a) → 40-200 = -160
-        assert cap_after_consume < -100, (
-            f"Expected deep negative debt, got {cap_after_consume}"
+        # capacity was 40 (50-10 already consumed by task_a) → clamped to -100
+        assert cap_after_consume == pytest.approx(-100.0, abs=1.0), (
+            f"Expected clamped negative debt at -max_capacity, got {cap_after_consume}"
         )
 
         # Cancel Task A during callback → triggers _refund_cancelled_consumption

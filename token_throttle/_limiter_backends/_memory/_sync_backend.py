@@ -220,6 +220,9 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
                             stacklevel=2,
                         )
 
+            max_cap = {
+                (b.usage_metric, b.per_seconds): b.max_capacity for b in self._buckets
+            }
             postconsumption_dict: dict[tuple[str, int], float] = dict(
                 preconsumption_capacities
             )
@@ -230,8 +233,9 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
                 usage_amount = usage.get(cap_metric)
                 if usage_amount is None:
                     continue
-                postconsumption_dict[(cap_metric, per_seconds)] = (
-                    cap_amount - usage_amount
+                postconsumption_dict[(cap_metric, per_seconds)] = max(
+                    cap_amount - usage_amount,
+                    -max_cap[(cap_metric, per_seconds)],
                 )
             postconsumption_capacities = frozendict(postconsumption_dict)
             self._set_capacities(
@@ -579,6 +583,8 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
         """Fire a user callback, suppressing exceptions to prevent capacity leaks."""
         try:
             callback(**kwargs)
+        except (KeyboardInterrupt, SystemExit, GeneratorExit):
+            raise
         except BaseException as exc:  # noqa: BLE001
             warnings.warn(
                 f"Rate limiter callback raised {type(exc).__name__}: {exc}",

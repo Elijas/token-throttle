@@ -675,6 +675,7 @@ class RedisBackend(RateLimiterBackend):
                             stacklevel=2,
                         )
 
+            max_cap = {(b.usage_metric, b.per_seconds): b.max_capacity for b in buckets}
             postconsumption_dict = dict(preconsumption_capacities)
             for (
                 capacity_metric_name,
@@ -683,8 +684,9 @@ class RedisBackend(RateLimiterBackend):
                 usage_amount = usage.get(capacity_metric_name)
                 if usage_amount is None:
                     continue
-                postconsumption_dict[(capacity_metric_name, per_seconds)] = (
-                    capacity_amount - usage_amount
+                postconsumption_dict[(capacity_metric_name, per_seconds)] = max(
+                    capacity_amount - usage_amount,
+                    -max_cap[(capacity_metric_name, per_seconds)],
                 )
             postconsumption_capacities = frozendict(postconsumption_dict)
             # Extend lock TTL immediately before the write so a GC pause
@@ -1266,6 +1268,8 @@ class RedisBackend(RateLimiterBackend):
         try:
             await callback(**kwargs)
         except asyncio.CancelledError:
+            raise
+        except (KeyboardInterrupt, SystemExit, GeneratorExit):
             raise
         except BaseException as exc:  # noqa: BLE001
             warnings.warn(
