@@ -1,3 +1,4 @@
+import logging
 import threading
 import time
 import warnings
@@ -19,6 +20,8 @@ from token_throttle._validation import (
 )
 
 from ._bucket import MemoryBucket
+
+_logger = logging.getLogger("token_throttle")
 
 
 class SyncMemoryBackendBuilder(SyncRateLimiterBackendBuilderInterface):
@@ -599,11 +602,9 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
         except (KeyboardInterrupt, SystemExit, GeneratorExit):
             raise
         except BaseException as exc:  # noqa: BLE001
-            warnings.warn(
-                f"Rate limiter callback raised {type(exc).__name__}: {exc}",
-                RuntimeWarning,
-                stacklevel=3,
-            )
+            msg = f"Rate limiter callback raised {type(exc).__name__}: {exc}"
+            warnings.warn(msg, RuntimeWarning, stacklevel=3)
+            _logger.warning(msg)
 
     def _refund_cancelled_consumption(
         self,

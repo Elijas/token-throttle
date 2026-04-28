@@ -1,4 +1,5 @@
 import contextlib
+import logging
 import math
 import threading
 import time
@@ -34,6 +35,8 @@ from token_throttle._validation import (
 
 from ._server_time import sync_server_time
 from ._sync_bucket import SyncRedisBucket
+
+_logger = logging.getLogger("token_throttle")
 
 
 class SyncCapacitiesGetterResult(typing.NamedTuple):
@@ -1040,11 +1043,9 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         except (KeyboardInterrupt, SystemExit, GeneratorExit):
             raise
         except BaseException as exc:  # noqa: BLE001
-            warnings.warn(
-                f"Rate limiter callback raised {type(exc).__name__}: {exc}",
-                RuntimeWarning,
-                stacklevel=3,
-            )
+            msg = f"Rate limiter callback raised {type(exc).__name__}: {exc}"
+            warnings.warn(msg, RuntimeWarning, stacklevel=3)
+            _logger.warning(msg)
 
     def _refund_cancelled_consumption(
         self,

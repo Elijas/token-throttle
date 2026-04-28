@@ -34,6 +34,8 @@ _UNSUPPORTED_CONTENT_PART_TYPES = frozenset(
         "input_audio",
         "input_file",
         "input_image",
+        "output_audio",
+        "output_image",
         "computer_use_screenshot",
     },
 )
@@ -187,7 +189,9 @@ def count_structured_input_tokens(
     if isinstance(input_, dict):
         if _looks_like_message(input_):
             return count_chat_input_tokens(encoding, messages=[input_])
-        unsupported = _get_unsupported_content_part_name(input_)
+        unsupported = _get_unsupported_content_part_name(
+            input_
+        ) or _check_nested_unsupported_content(input_)
         if unsupported is not None:
             raise _unsupported_content_part_error(unsupported)
         return _count_json_serialized_tokens(
@@ -204,7 +208,9 @@ def count_structured_input_tokens(
             return count_chat_input_tokens(encoding, messages=items)
         if not message_items:
             for item in items:
-                unsupported = _get_unsupported_content_part_name(item)
+                unsupported = _get_unsupported_content_part_name(
+                    item
+                ) or _check_nested_unsupported_content(item)
                 if unsupported is not None:
                     raise _unsupported_content_part_error(unsupported)
             return _count_json_serialized_tokens(
@@ -214,7 +220,9 @@ def count_structured_input_tokens(
             )
         structured_items = [item for item in items if not _looks_like_message(item)]
         for item in structured_items:
-            unsupported = _get_unsupported_content_part_name(item)
+            unsupported = _get_unsupported_content_part_name(
+                item
+            ) or _check_nested_unsupported_content(item)
             if unsupported is not None:
                 raise _unsupported_content_part_error(unsupported)
         return count_chat_input_tokens(
@@ -368,6 +376,30 @@ def _get_unsupported_content_part_name(value: dict[str, object]) -> str | None:
     return None
 
 
+def _check_nested_unsupported_content(value: object) -> str | None:
+    """
+    Walk a value tree and return the first unsupported content part type, if any.
+
+    Only checks ``type``-based matches (not field-level matches like
+    ``image_url``) to avoid false positives on string fields that happen
+    to share a name with an unsupported content field.
+    """
+    if isinstance(value, dict):
+        part_type = value.get("type")
+        if isinstance(part_type, str) and part_type in _UNSUPPORTED_CONTENT_PART_TYPES:
+            return part_type
+        for nested in value.values():
+            result = _check_nested_unsupported_content(nested)
+            if result is not None:
+                return result
+    elif isinstance(value, list):
+        for item in value:
+            result = _check_nested_unsupported_content(item)
+            if result is not None:
+                return result
+    return None
+
+
 def _count_text_fragments(
     encoding: "Encoding",
     value: object,
@@ -442,7 +474,7 @@ def count_chat_input_tokens(
         num_tokens += 3
 
         for key, value in message.items():
-            if key == "tool_calls":
+            if key in ("tool_calls", "function_call"):
                 num_tokens += _count_json_serialized_tokens(
                     encoding,
                     value,

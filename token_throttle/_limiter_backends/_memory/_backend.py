@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import logging
 import time
 import warnings
 from typing import ClassVar
@@ -20,6 +21,8 @@ from token_throttle._validation import (
 )
 
 from ._bucket import MemoryBucket
+
+_logger = logging.getLogger("token_throttle")
 
 
 class MemoryBackendBuilder(RateLimiterBackendBuilderInterface):
@@ -636,11 +639,9 @@ class MemoryBackend(RateLimiterBackend):
         except (KeyboardInterrupt, SystemExit, GeneratorExit):
             raise
         except BaseException as exc:  # noqa: BLE001
-            warnings.warn(
-                f"Rate limiter callback raised {type(exc).__name__}: {exc}",
-                RuntimeWarning,
-                stacklevel=3,
-            )
+            msg = f"Rate limiter callback raised {type(exc).__name__}: {exc}"
+            warnings.warn(msg, RuntimeWarning, stacklevel=3)
+            _logger.warning(msg)
 
     async def _refund_cancelled_consumption(
         self,

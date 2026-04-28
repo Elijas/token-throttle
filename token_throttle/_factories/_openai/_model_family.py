@@ -8,6 +8,8 @@ def openai_model_family_getter(model: str, /) -> str:
     # and/or after the date component.
     # Single/triple-digit version numbers (-1, -002) are preserved.
     model = model.removeprefix("openai/")
+    if model.startswith("ft:"):
+        model = model.split(":")[1]
     result = re.sub(
         r"((-preview)?-(?:\d{8}|\d{4}(?:-\d{2}){0,2})(-preview)?|-preview)$",
         "",

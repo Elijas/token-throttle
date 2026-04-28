@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import logging
 import math
 import time
 import typing
@@ -37,6 +38,8 @@ from token_throttle._validation import (
 
 from ._bucket import RedisBucket
 from ._server_time import async_server_time
+
+_logger = logging.getLogger("token_throttle")
 
 
 class CapacitiesGetterResult(typing.NamedTuple):
@@ -1276,11 +1279,9 @@ class RedisBackend(RateLimiterBackend):
         except (KeyboardInterrupt, SystemExit, GeneratorExit):
             raise
         except BaseException as exc:  # noqa: BLE001
-            warnings.warn(
-                f"Rate limiter callback raised {type(exc).__name__}: {exc}",
-                RuntimeWarning,
-                stacklevel=3,
-            )
+            msg = f"Rate limiter callback raised {type(exc).__name__}: {exc}"
+            warnings.warn(msg, RuntimeWarning, stacklevel=3)
+            _logger.warning(msg)
 
     async def _refund_cancelled_consumption(
         self,

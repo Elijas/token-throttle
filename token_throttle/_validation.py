@@ -351,6 +351,8 @@ def validate_metric(metric: object) -> str:
         )
     if not metric:
         raise ValueError("metric must be a non-empty string")
+    if not metric.strip():
+        raise ValueError("metric must not be whitespace-only")
     if ":" in metric:
         raise ValueError("metric must not contain ':' (used as Redis key separator)")
     return metric

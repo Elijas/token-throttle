@@ -1,3 +1,4 @@
+import collections
 import threading
 import warnings
 
@@ -248,11 +249,10 @@ class SyncRateLimiter:
         self._model_family_to_validated_signature: dict[
             str, tuple[bool, tuple[tuple[str, int, float], ...]]
         ] = {}
-        # Tracks reservation IDs that have already been refunded to prevent
-        # double-crediting. Grows monotonically; acceptable for typical
-        # lifetimes but may need a bounded structure for long-lived processes
-        # with millions of reservations.
-        self._refunded_reservation_ids: set[str] = set()
+        self._refunded_reservation_ids: collections.OrderedDict[str, None] = (
+            collections.OrderedDict()
+        )
+        self._refunded_ids_cap = 131_072
 
     def acquire_capacity(
         self, usage: Usage, model: str, *, timeout: float | None = None
@@ -481,7 +481,9 @@ class SyncRateLimiter:
             actual_usage,
             bucket_ids=refund_bucket_ids,
         )
-        self._refunded_reservation_ids.add(reservation.reservation_id)
+        self._refunded_reservation_ids[reservation.reservation_id] = None
+        if len(self._refunded_reservation_ids) > self._refunded_ids_cap:
+            self._refunded_reservation_ids.popitem(last=False)
 
     def _unlimited_reservation(
         self,

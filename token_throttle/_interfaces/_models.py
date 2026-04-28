@@ -24,6 +24,16 @@ class SecondsIn(int, Enum):
 
 
 class Quota(BaseModel):
+    """
+    Immutable rate-limit quota (frozen Pydantic model).
+
+    ``frozen=True`` prevents mutation via normal attribute assignment.
+    Direct ``object.__setattr__`` or ``__dict__`` writes bypass this at
+    the Python level — this is a CPython limitation, not a library bug.
+    Do not mutate instances after construction; hash stability depends
+    on immutability.
+    """
+
     DEFAULT_SECONDS: ClassVar[int] = SecondsIn.MINUTE
     metric: str
     limit: float = Field(
@@ -48,6 +58,15 @@ class Quota(BaseModel):
         if _is_bool_like(value):
             raise ValueError(f"{info.field_name} must not be a boolean")
         return value
+
+    @field_validator("per_seconds", mode="before")
+    @classmethod
+    def _reject_non_numeric_per_seconds(cls, value: object) -> object:
+        if isinstance(value, (int, float)) or _is_bool_like(value):
+            return value
+        raise ValueError(
+            f"per_seconds must be int or float (got {type(value).__name__})"
+        )
 
     @field_validator("metric", mode="before")
     @classmethod
@@ -161,6 +180,14 @@ def frozen_usage(usage: Usage) -> FrozenUsage:
 
 
 class CapacityReservation(BaseModel):
+    """
+    Frozen reservation returned by acquire/record operations.
+
+    Same ``frozen=True`` caveat as ``Quota``: ``object.__setattr__``
+    and ``__dict__`` writes bypass Pydantic's freeze at the CPython level.
+    Mutating ``is_unlimited`` via this vector would bypass metering.
+    """
+
     reservation_id: str = Field(default_factory=lambda: uuid.uuid4().hex)
     usage: FrozenUsage
     model_family: str

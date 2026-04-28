@@ -95,6 +95,24 @@ _STDLIB_LEVEL_MAP: dict[str, int] = {
 }
 
 
+def _validate_log_level(level: str | None, param_name: str) -> None:
+    if level is None:
+        return
+    if not isinstance(level, str):
+        raise TypeError(
+            f"{param_name} must be a string or None (got {type(level).__name__})"
+        )
+    if not level.strip():
+        raise ValueError(f"{param_name} must not be empty or whitespace-only")
+    if level.upper() not in _STDLIB_LEVEL_MAP:
+        loguru = _probe_loguru()
+        if loguru is None:
+            raise ValueError(
+                f"Unknown log level {level!r} for {param_name}; "
+                f"valid levels: {sorted(_STDLIB_LEVEL_MAP)}"
+            )
+
+
 def _log(level: str, message: str, **kwargs) -> None:
     """
     Log using loguru if available, otherwise stdlib logging.
@@ -362,6 +380,15 @@ def create_logging_callbacks(
     capacity_refunded: str | None = "DEBUG",
     missing_consumption_data: str | None = "DEBUG",
 ) -> RateLimiterCallbacks:
+    for _name, _val in (
+        ("wait_start", wait_start),
+        ("wait_end_consumption", wait_end_consumption),
+        ("capacity_consumed", capacity_consumed),
+        ("capacity_refunded", capacity_refunded),
+        ("missing_consumption_data", missing_consumption_data),
+    ):
+        _validate_log_level(_val, _name)
+
     async def on_wait_start(
         *,
         model_family: str,
@@ -467,6 +494,15 @@ def create_sync_logging_callbacks(
     capacity_refunded: str | None = "DEBUG",
     missing_consumption_data: str | None = "DEBUG",
 ) -> SyncRateLimiterCallbacks:
+    for _name, _val in (
+        ("wait_start", wait_start),
+        ("wait_end_consumption", wait_end_consumption),
+        ("capacity_consumed", capacity_consumed),
+        ("capacity_refunded", capacity_refunded),
+        ("missing_consumption_data", missing_consumption_data),
+    ):
+        _validate_log_level(_val, _name)
+
     def on_wait_start(
         *,
         model_family: str,
@@ -590,6 +626,15 @@ def create_loguru_callbacks(
     capacity_refunded: str | None = None,
     missing_consumption_data: str | None = None,
 ) -> RateLimiterCallbacks:
+    for _name, _val in (
+        ("wait_start", wait_start),
+        ("wait_end_consumption", wait_end_consumption),
+        ("capacity_consumed", capacity_consumed),
+        ("capacity_refunded", capacity_refunded),
+        ("missing_consumption_data", missing_consumption_data),
+    ):
+        _validate_log_level(_val, _name)
+
     async def on_wait_start(
         *,
         model_family: str,
@@ -700,6 +745,15 @@ def create_sync_loguru_callbacks(
     capacity_refunded: str | None = None,
     missing_consumption_data: str | None = None,
 ) -> SyncRateLimiterCallbacks:
+    for _name, _val in (
+        ("wait_start", wait_start),
+        ("wait_end_consumption", wait_end_consumption),
+        ("capacity_consumed", capacity_consumed),
+        ("capacity_refunded", capacity_refunded),
+        ("missing_consumption_data", missing_consumption_data),
+    ):
+        _validate_log_level(_val, _name)
+
     def on_wait_start(
         *,
         model_family: str,
