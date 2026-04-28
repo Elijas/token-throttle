@@ -41,6 +41,11 @@ class RedisBucket:
     # Per-process convenience cache; correctness is guaranteed by lock-held re-read. 1s staleness is advisory. Audited 2026-04.
     MAX_CAPACITY_CACHE_TTL = 1.0
 
+    # Pipeline command offsets within get_capacity(). The backend's
+    # _get_capacities_unsafe indexes results using these offsets.
+    PIPELINE_LAST_CHECKED_OFFSET = 0
+    PIPELINE_CAPACITY_OFFSET = 1
+
     def __init__(
         self,
         quota: Quota,
@@ -256,6 +261,7 @@ class RedisBucket:
         if own_pipeline:
             pipeline = self._redis.pipeline()
 
+        # Order must match PIPELINE_LAST_CHECKED_OFFSET / PIPELINE_CAPACITY_OFFSET
         pipeline.get(self._last_checked_key)
         pipeline.get(self._capacity_key)
 

@@ -287,8 +287,8 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         fresh_start_buckets: list[SyncRedisBucket] = []
         for i, bucket in enumerate(target_buckets):
             idx = i * _PIPELINE_CMDS_PER_BUCKET
-            last_checked = results[idx]
-            capacity = results[idx + 1]
+            last_checked = results[idx + SyncRedisBucket.PIPELINE_LAST_CHECKED_OFFSET]
+            capacity = results[idx + SyncRedisBucket.PIPELINE_CAPACITY_OFFSET]
             # max_capacity GETs come after all the per-bucket command pairs
             bucket.update_max_capacity_from_result(
                 results[num_buckets * _PIPELINE_CMDS_PER_BUCKET + i]

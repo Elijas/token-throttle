@@ -55,6 +55,7 @@ class SyncMemoryBackendBuilder(SyncRateLimiterBackendBuilderInterface):
 
 class SyncMemoryBackend(SyncRateLimiterBackend):
     DEFAULT_SLEEP_INTERVAL: ClassVar[float] = 0.1
+    MAX_CROSS_WORKER_POLL: ClassVar[float] = 1.0
 
     def __init__(
         self,
@@ -306,7 +307,10 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
                         wait_started_at = time.monotonic()
                         should_fire_wait_start = True
                         break
-                    computed = self._compute_sleep(usage, preconsumption)
+                    computed = min(
+                        self._compute_sleep(usage, preconsumption),
+                        self.MAX_CROSS_WORKER_POLL,
+                    )
                     if deadline is not None:
                         computed = min(computed, max(0, deadline - time.monotonic()))
                     self._condition.wait(timeout=max(0.001, computed))
