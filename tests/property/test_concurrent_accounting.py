@@ -25,6 +25,8 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pytest
+import redis as sync_redis
+import redis.asyncio as async_redis
 from hypothesis import given
 from hypothesis import settings as hypothesis_settings
 from hypothesis import strategies as st
@@ -38,6 +40,10 @@ from token_throttle._limiter_backends._memory._backend import (
 from token_throttle._limiter_backends._memory._sync_backend import (
     SyncMemoryBackend,
     SyncMemoryBackendBuilder,
+)
+from token_throttle._limiter_backends._redis._backend import RedisBackendBuilder
+from token_throttle._limiter_backends._redis._sync_backend import (
+    SyncRedisBackendBuilder,
 )
 
 # ---------------------------------------------------------------------------
@@ -664,3 +670,150 @@ def test_sync_concurrent_refund_cap_clipping(n_refunders, refund_amount):
     assert final_cap <= max_cap + 0.01, (
         f"Cap-clipping failed: capacity {final_cap} > max {max_cap}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Redis backend helpers (F18.07)
+# ---------------------------------------------------------------------------
+
+
+def _build_async_redis_backend(
+    redis_client,
+    *,
+    limit: float = LIMIT,
+    per_seconds: int = SLOW_WINDOW,
+    metric: str = METRIC,
+):
+    builder = RedisBackendBuilder(redis_client)
+    config = PerModelConfig(
+        model_family="test-concurrent-redis",
+        quotas=UsageQuotas(
+            [Quota(metric=metric, limit=limit, per_seconds=per_seconds)]
+        ),
+    )
+    return builder.build(config)
+
+
+def _build_sync_redis_backend(
+    redis_client,
+    *,
+    limit: float = LIMIT,
+    per_seconds: int = SLOW_WINDOW,
+    metric: str = METRIC,
+):
+    builder = SyncRedisBackendBuilder(redis_client)
+    config = PerModelConfig(
+        model_family="test-concurrent-redis-sync",
+        quotas=UsageQuotas(
+            [Quota(metric=metric, limit=limit, per_seconds=per_seconds)]
+        ),
+    )
+    return builder.build(config)
+
+
+async def _get_redis_async_capacity(backend) -> float:
+    pipeline = backend._redis.pipeline()
+    caps, _ = await backend._get_capacities_unsafe(
+        pipeline=pipeline, current_time=time.time()
+    )
+    return next(iter(caps.values()))
+
+
+def _get_redis_sync_capacity(backend) -> float:
+    pipeline = backend._redis.pipeline()
+    caps, _ = backend._get_capacities_unsafe(
+        pipeline=pipeline, current_time=time.time()
+    )
+    return next(iter(caps.values()))
+
+
+# ---------------------------------------------------------------------------
+# Test 11: Async concurrent acquires — no double-spend (Redis)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.redis
+@hypothesis_settings(max_examples=20, deadline=None)
+@given(n_requesters=st.integers(min_value=2, max_value=5))
+def test_async_concurrent_all_acquires_no_double_spend_redis(n_requesters, request):
+    """Redis variant of test 4 — distributed lock + pipeline atomicity under contention."""
+    redis_url = request.config.getoption("--redis-url")
+
+    async def run():
+        client = async_redis.from_url(redis_url)
+        await client.flushdb()
+        try:
+            per_task = LIMIT / n_requesters
+            backend = _build_async_redis_backend(client, limit=LIMIT)
+
+            results = await asyncio.gather(
+                *[
+                    backend.await_for_capacity(frozen_usage({METRIC: per_task}))
+                    for _ in range(n_requesters)
+                ],
+                return_exceptions=True,
+            )
+
+            failures = [r for r in results if isinstance(r, BaseException)]
+            assert failures == [], f"Unexpected failures: {failures}"
+
+            final_cap = await _get_redis_async_capacity(backend)
+            assert final_cap == pytest.approx(0.0, abs=REFILL_TOLERANCE), (
+                f"Expected ~0 after exact drain by {n_requesters} tasks, "
+                f"got {final_cap}"
+            )
+        finally:
+            await client.flushdb()
+            await client.aclose()
+
+    asyncio.run(run())
+
+
+# ---------------------------------------------------------------------------
+# Test 12: Sync concurrent refund cap-clipping (Redis)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.redis
+@pytest.mark.filterwarnings("ignore::RuntimeWarning")
+@hypothesis_settings(max_examples=20, deadline=None)
+@given(
+    n_refunders=st.integers(min_value=2, max_value=5),
+    refund_amount=st.floats(min_value=5.0, max_value=50.0),
+)
+def test_sync_concurrent_refund_cap_clipping_redis(n_refunders, refund_amount, request):
+    """Redis variant of test 10 — distributed lock cap-clipping atomicity."""
+    redis_url = request.config.getoption("--redis-url")
+    client = sync_redis.from_url(redis_url)
+    client.flushdb()
+    try:
+        backend = _build_sync_redis_backend(client, limit=LIMIT)
+        small_consume = 10.0
+        backend.consume_capacity(frozen_usage({METRIC: small_consume}))
+
+        errors: list[BaseException] = []
+
+        def do_refund():
+            try:
+                backend.refund_capacity(
+                    reserved_usage=frozen_usage({METRIC: refund_amount}),
+                    actual_usage=frozen_usage({METRIC: 0}),
+                )
+            except BaseException as exc:
+                errors.append(exc)
+
+        with ThreadPoolExecutor(max_workers=n_refunders) as pool:
+            futures = [pool.submit(do_refund) for _ in range(n_refunders)]
+            for f in as_completed(futures, timeout=10):
+                f.result()
+
+        assert errors == [], f"Unexpected errors: {errors}"
+
+        final_cap = _get_redis_sync_capacity(backend)
+        max_cap = backend.sorted_buckets[0].max_capacity
+        assert final_cap <= max_cap + 0.01, (
+            f"Cap-clipping failed: capacity {final_cap} > max {max_cap}"
+        )
+    finally:
+        client.flushdb()
+        client.close()
