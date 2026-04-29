@@ -487,9 +487,13 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
                 if bucket is None:  # pragma: no cover
                     raise ValueError(f"Bucket '{cap_metric}/{per_seconds}s' not found")
                 refund_amount = max(refund_amount, -bucket.max_capacity)
-                updated_capacities_[(cap_metric, int(per_seconds))] = min(
-                    updated_capacities_[(cap_metric, int(per_seconds))] + refund_amount,
-                    bucket.max_capacity,
+                updated_capacities_[(cap_metric, int(per_seconds))] = max(
+                    -bucket.max_capacity,
+                    min(
+                        updated_capacities_[(cap_metric, int(per_seconds))]
+                        + refund_amount,
+                        bucket.max_capacity,
+                    ),
                 )
             updated_capacities = frozendict(updated_capacities_)
 

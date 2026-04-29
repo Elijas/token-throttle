@@ -209,12 +209,12 @@ reservation = await limiter.acquire_capacity(
     usage={"requests": 1, "tokens": 500},
     timeout=5.0,  # Raise TimeoutError after 5s
 )
+```
 
 Async callbacks are awaited within the remaining timeout budget. Sync
 callbacks run inline and cannot be preempted, so a slow sync wait callback can
 push wall-clock time past the requested timeout before `TimeoutError` is
 raised.
-```
 
 ## Sync API
 

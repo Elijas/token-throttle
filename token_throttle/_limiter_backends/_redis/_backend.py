@@ -1047,10 +1047,13 @@ class RedisBackend(RateLimiterBackend):
                 # handles recovery — clamping to 0 here would erase debt
                 # from the record_usage (speedometer) path.
                 refund_amount = max(refund_amount, -bucket.max_capacity)
-                updated_capacities_[(capability_usage_metric, int(per_seconds))] = min(
-                    updated_capacities_[(capability_usage_metric, int(per_seconds))]
-                    + refund_amount,
-                    bucket.max_capacity,  # cached — refreshed from pipeline result in _get_capacities_unsafe
+                updated_capacities_[(capability_usage_metric, int(per_seconds))] = max(
+                    -bucket.max_capacity,
+                    min(
+                        updated_capacities_[(capability_usage_metric, int(per_seconds))]
+                        + refund_amount,
+                        bucket.max_capacity,  # cached — refreshed from pipeline result in _get_capacities_unsafe
+                    ),
                 )
             updated_capacities = frozendict(updated_capacities_)
 

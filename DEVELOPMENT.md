@@ -137,11 +137,21 @@ If you need to bound connection usage, configure `max_connections` on the Redis 
 
 ```python
 import redis.asyncio as aioredis
+from token_throttle import RedisBackendBuilder
 
 pool = aioredis.ConnectionPool.from_url("redis://localhost", max_connections=50)
 client = aioredis.Redis(connection_pool=pool)
-limiter = RateLimiter(client=client, ...)
+backend = RedisBackendBuilder(client)
+limiter = RateLimiter(get_config, backend=backend)
 ```
+
+### Fork safety (Redis backend)
+
+`RateLimiter` and `SyncRateLimiter` capture the user-supplied Redis client by reference in the builder, backend, and every bucket. If a limiter is built before `os.fork()` (common with gunicorn preload or `multiprocessing.Pool`), the parent and child share the same connection pool, leading to interleaved I/O and silent data corruption.
+
+- Do not reuse a `RateLimiter` instance across fork boundaries.
+- Build the limiter lazily inside each worker process.
+- If fork cannot be avoided, call `redis_client.close()` and re-create both the client and the limiter in the child's post-fork hook.
 
 ### Float precision at extreme capacity limits
 

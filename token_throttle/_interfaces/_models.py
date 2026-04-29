@@ -226,7 +226,7 @@ class CapacityReservation(BaseModel):
 
         normalized: set[BucketId] = set()
         for item in value:
-            if not isinstance(item, tuple) or len(item) != 2:  # noqa: PLR2004
+            if not isinstance(item, (list, tuple)) or len(item) != 2:  # noqa: PLR2004
                 raise ValueError("Each bucket_id must be a (metric, per_seconds) pair")
             metric, per_seconds = item
             if not isinstance(metric, str) or not metric:
