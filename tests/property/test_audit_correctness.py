@@ -103,8 +103,8 @@ class TightConservationMachine(RuleBasedStateMachine):
     Single-bucket with frozen time, no set_max_capacity, no advance_time.
 
     Under these conditions conservation is exact (==) not just (<=).
-    Any capacity lost to cap-clipping (refund overshooting max) is tracked
-    explicitly so the equation balances perfectly.
+    Tracking effective amounts (clamped to backend bounds) rather than
+    requested amounts makes the equation balance without explicit clipping.
     """
 
     def __init__(self):
@@ -115,7 +115,6 @@ class TightConservationMachine(RuleBasedStateMachine):
         self.shadow_max_capacity: float = T1_LIMIT
         self.total_consumed: float = 0.0
         self.total_refunded: float = 0.0
-        self.total_clipped_by_cap: float = 0.0
         self._time_patcher = patch(
             "token_throttle._limiter_backends._memory._sync_backend.time"
         )
@@ -148,14 +147,14 @@ class TightConservationMachine(RuleBasedStateMachine):
         self.shadow_max_capacity = T1_LIMIT
         self.total_consumed = 0.0
         self.total_refunded = 0.0
-        self.total_clipped_by_cap = 0.0
 
     @rule(amount=amounts)
     def consume(self, amount):
         readable_before = self._shadow_readable()
         self.backend.consume_capacity(frozen_usage({T1_METRIC: amount}))
-        self.shadow_raw_stored = readable_before - amount
-        self.total_consumed += amount
+        clamped = max(readable_before - amount, -self.shadow_max_capacity)
+        self.shadow_raw_stored = clamped
+        self.total_consumed += readable_before - clamped
 
     @rule(amount=amounts)
     def try_acquire(self, amount):
@@ -194,12 +193,9 @@ class TightConservationMachine(RuleBasedStateMachine):
         )
         refund_amount = max(reserved - actual, -self.shadow_max_capacity)
         new_raw = readable_before + refund_amount
-        capped = min(new_raw, self.shadow_max_capacity)
-        clipped = new_raw - capped
-        if clipped > 0:
-            self.total_clipped_by_cap += clipped
-        self.shadow_raw_stored = capped
-        self.total_refunded += refund_amount
+        clamped = max(-self.shadow_max_capacity, min(new_raw, self.shadow_max_capacity))
+        self.shadow_raw_stored = clamped
+        self.total_refunded += clamped - readable_before
 
     @invariant()
     def capacity_matches_shadow(self):
@@ -213,28 +209,23 @@ class TightConservationMachine(RuleBasedStateMachine):
 
     @invariant()
     def tight_conservation(self):
-        """Exact conservation: capacity + consumed - refunded + clipped == LIMIT.
+        """Exact conservation: capacity + consumed - refunded == LIMIT.
 
         Under frozen time with no set_max_capacity and no time advance,
         every unit of capacity is either:
         - still in the bucket (capacity)
-        - consumed and not refunded (consumed - refunded)
-        - lost to cap-clipping on refund (clipped)
+        - effectively consumed and not refunded (consumed - refunded)
+        Tracking effective amounts (clamped to [-max_capacity, max_capacity])
+        makes explicit clipping unnecessary.
         """
         if self.bucket is None:
             return
         actual = self.bucket.get_capacity(FROZEN_TIME).amount
-        balance = (
-            actual
-            + self.total_consumed
-            - self.total_refunded
-            + self.total_clipped_by_cap
-        )
+        balance = actual + self.total_consumed - self.total_refunded
         assert balance == pytest.approx(T1_LIMIT, abs=1e-9), (
             f"Tight conservation violation: capacity={actual}, "
             f"consumed={self.total_consumed}, refunded={self.total_refunded}, "
-            f"clipped={self.total_clipped_by_cap}, balance={balance}, "
-            f"expected={T1_LIMIT}"
+            f"balance={balance}, expected={T1_LIMIT}"
         )
 
     def teardown(self):
@@ -383,18 +374,20 @@ class MultiMetricMultiWindowMachine(RuleBasedStateMachine):
             if key[0] != metric:
                 continue
             readable = self._shadow_readable(key)
-            s["stored"] = readable - amount
+            clamped = max(readable - amount, -s["max"])
+            s["stored"] = clamped
             s["last_checked"] = self.current_time
-            s["consumed"] += amount
+            s["consumed"] += readable - clamped
 
     def _refund_shadow(self, metric: str, refund_amount: float):
         for key, s in self.shadows.items():
             if key[0] != metric:
                 continue
             readable = self._shadow_readable(key)
-            s["stored"] = min(readable + refund_amount, s["max"])
+            clamped = max(-s["max"], min(readable + refund_amount, s["max"]))
+            s["stored"] = clamped
             s["last_checked"] = self.current_time
-            s["refunded"] += refund_amount
+            s["refunded"] += clamped - readable
 
     @rule(delta=time_deltas)
     def advance_time(self, delta):
@@ -664,9 +657,10 @@ class SetMaxCapacityRefundInteractionMachine(RuleBasedStateMachine):
     def consume(self, amount):
         readable = self._shadow_readable()
         self.backend.consume_capacity(frozen_usage({T3_METRIC: amount}))
-        self.shadow_stored = readable - amount
+        clamped = max(readable - amount, -self.shadow_max)
+        self.shadow_stored = clamped
         self.shadow_last_checked = self.current_time
-        self.total_consumed += amount
+        self.total_consumed += readable - clamped
 
     @rule(amount=t3_acquire_amounts)
     def try_acquire(self, amount):
@@ -751,9 +745,11 @@ class SetMaxCapacityRefundInteractionMachine(RuleBasedStateMachine):
             frozen_usage({T3_METRIC: actual}),
         )
         refund_amount = max(reserved - actual, -self.shadow_max)
-        self.shadow_stored = min(readable + refund_amount, self.shadow_max)
+        new_raw = readable + refund_amount
+        clamped = max(-self.shadow_max, min(new_raw, self.shadow_max))
+        self.shadow_stored = clamped
         self.shadow_last_checked = self.current_time
-        self.total_refunded += refund_amount
+        self.total_refunded += clamped - readable
 
     @invariant()
     def capacity_matches_shadow(self):

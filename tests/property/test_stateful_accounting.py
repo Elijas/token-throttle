@@ -121,8 +121,9 @@ class SingleBucketAccountingMachine(RuleBasedStateMachine):
     def consume(self, amount):
         readable_before = self._shadow_readable()
         self.backend.consume_capacity(frozen_usage({METRIC: amount}))
-        self.shadow_raw_stored = readable_before - amount
-        self.total_consumed += amount
+        clamped = max(readable_before - amount, -self.shadow_max_capacity)
+        self.shadow_raw_stored = clamped
+        self.total_consumed += readable_before - clamped
 
     @rule(amount=amounts)
     def try_acquire(self, amount):
@@ -161,10 +162,10 @@ class SingleBucketAccountingMachine(RuleBasedStateMachine):
             frozen_usage({METRIC: actual}),
         )
         refund_amount = max(reserved - actual, -self.shadow_max_capacity)
-        self.shadow_raw_stored = min(
-            readable_before + refund_amount, self.shadow_max_capacity
-        )
-        self.total_refunded += refund_amount
+        new_raw = readable_before + refund_amount
+        clamped = max(-self.shadow_max_capacity, min(new_raw, self.shadow_max_capacity))
+        self.shadow_raw_stored = clamped
+        self.total_refunded += clamped - readable_before
 
     @rule(value=max_cap_values)
     def set_max_capacity(self, value):
@@ -305,8 +306,8 @@ class MultiWindowAccountingMachine(RuleBasedStateMachine):
         short_r = self._short_readable()
         long_r = self._long_readable()
         self.backend.consume_capacity(frozen_usage({METRIC: amount}))
-        self.shadow_short_raw = short_r - amount
-        self.shadow_long_raw = long_r - amount
+        self.shadow_short_raw = max(short_r - amount, -self.short_max)
+        self.shadow_long_raw = max(long_r - amount, -self.long_max)
 
     @rule(amount=small_amounts)
     def try_acquire(self, amount):
@@ -347,11 +348,12 @@ class MultiWindowAccountingMachine(RuleBasedStateMachine):
             frozen_usage({METRIC: actual}),
         )
         raw_refund = reserved - actual
-        self.shadow_short_raw = min(
-            short_r + max(raw_refund, -self.short_max), self.short_max
+        self.shadow_short_raw = max(
+            -self.short_max,
+            min(short_r + max(raw_refund, -self.short_max), self.short_max),
         )
-        self.shadow_long_raw = min(
-            long_r + max(raw_refund, -self.long_max), self.long_max
+        self.shadow_long_raw = max(
+            -self.long_max, min(long_r + max(raw_refund, -self.long_max), self.long_max)
         )
 
     @invariant()
@@ -640,8 +642,8 @@ class MultiMetricAccountingMachine(RuleBasedStateMachine):
                 {TOKENS_METRIC: tokens_amount, REQUESTS_METRIC: requests_amount}
             )
         )
-        self.shadow_tokens_raw = tokens_r - tokens_amount
-        self.shadow_requests_raw = requests_r - requests_amount
+        self.shadow_tokens_raw = max(tokens_r - tokens_amount, -self.tokens_max)
+        self.shadow_requests_raw = max(requests_r - requests_amount, -self.requests_max)
 
     @rule(tokens_amount=multi_metric_amounts, requests_amount=multi_metric_amounts)
     def try_acquire(self, tokens_amount, requests_amount):
@@ -699,8 +701,12 @@ class MultiMetricAccountingMachine(RuleBasedStateMachine):
         )
         tokens_refund = max(tokens_reserved - tokens_actual, -self.tokens_max)
         requests_refund = max(requests_reserved - requests_actual, -self.requests_max)
-        self.shadow_tokens_raw = min(tokens_r + tokens_refund, self.tokens_max)
-        self.shadow_requests_raw = min(requests_r + requests_refund, self.requests_max)
+        self.shadow_tokens_raw = max(
+            -self.tokens_max, min(tokens_r + tokens_refund, self.tokens_max)
+        )
+        self.shadow_requests_raw = max(
+            -self.requests_max, min(requests_r + requests_refund, self.requests_max)
+        )
 
     @rule(value=max_cap_values)
     def set_max_capacity_tokens(self, value):

@@ -159,9 +159,10 @@ class TimeAdvancingAccountingMachine(RuleBasedStateMachine):
     def consume(self, amount):
         readable = self._shadow_readable()
         self.backend.consume_capacity(frozen_usage({METRIC: amount}))
-        self.shadow_stored = readable - amount
+        clamped = max(readable - amount, -self.shadow_max_capacity)
+        self.shadow_stored = clamped
         self.shadow_last_checked = self.current_time
-        self.total_consumed += amount
+        self.total_consumed += readable - clamped
 
     @rule(amount=amounts)
     def try_acquire(self, amount):
@@ -198,9 +199,11 @@ class TimeAdvancingAccountingMachine(RuleBasedStateMachine):
             frozen_usage({METRIC: actual}),
         )
         refund_amount = max(reserved - actual, -self.shadow_max_capacity)
-        self.shadow_stored = min(readable + refund_amount, self.shadow_max_capacity)
+        new_raw = readable + refund_amount
+        clamped = max(-self.shadow_max_capacity, min(new_raw, self.shadow_max_capacity))
+        self.shadow_stored = clamped
         self.shadow_last_checked = self.current_time
-        self.total_refunded += refund_amount
+        self.total_refunded += clamped - readable
 
     @rule(value=max_cap_values)
     def set_max_capacity(self, value):
@@ -409,12 +412,14 @@ class TimeAdvancingMultiWindowMachine(RuleBasedStateMachine):
         short_r = self._short_readable()
         long_r = self._long_readable()
         self.backend.consume_capacity(frozen_usage({METRIC: amount}))
-        self.short_stored = short_r - amount
+        short_clamped = max(short_r - amount, -self.short_max)
+        self.short_stored = short_clamped
         self.short_last_checked = self.current_time
-        self.long_stored = long_r - amount
+        long_clamped = max(long_r - amount, -self.long_max)
+        self.long_stored = long_clamped
         self.long_last_checked = self.current_time
-        self.short_consumed += amount
-        self.long_consumed += amount
+        self.short_consumed += short_r - short_clamped
+        self.long_consumed += long_r - long_clamped
 
     @rule(amount=small_amounts)
     def try_acquire(self, amount):
@@ -460,12 +465,16 @@ class TimeAdvancingMultiWindowMachine(RuleBasedStateMachine):
         raw_refund = reserved - actual
         short_refund = max(raw_refund, -self.short_max)
         long_refund = max(raw_refund, -self.long_max)
-        self.short_stored = min(short_r + short_refund, self.short_max)
+        short_clamped = max(
+            -self.short_max, min(short_r + short_refund, self.short_max)
+        )
+        self.short_stored = short_clamped
         self.short_last_checked = self.current_time
-        self.long_stored = min(long_r + long_refund, self.long_max)
+        long_clamped = max(-self.long_max, min(long_r + long_refund, self.long_max))
+        self.long_stored = long_clamped
         self.long_last_checked = self.current_time
-        self.short_refunded += short_refund
-        self.long_refunded += long_refund
+        self.short_refunded += short_clamped - short_r
+        self.long_refunded += long_clamped - long_r
 
     @invariant()
     def short_capacity_matches_shadow(self):

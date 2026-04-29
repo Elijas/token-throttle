@@ -241,12 +241,14 @@ class SpeedometerRefundLifecycleMachine(RuleBasedStateMachine):
         short_r = self._short_readable()
         long_r = self._long_readable()
         self.backend.consume_capacity(frozen_usage({METRIC: amount}))
-        self.short_stored = short_r - amount
+        short_clamped = max(short_r - amount, -self.short_max)
+        self.short_stored = short_clamped
         self.short_last_checked = self.current_time
-        self.long_stored = long_r - amount
+        long_clamped = max(long_r - amount, -self.long_max)
+        self.long_stored = long_clamped
         self.long_last_checked = self.current_time
-        self.short_consumed += amount
-        self.long_consumed += amount
+        self.short_consumed += short_r - short_clamped
+        self.long_consumed += long_r - long_clamped
         self.outstanding_consumes.append(amount)
 
     @precondition(lambda self: len(self.outstanding_consumes) > 0)
@@ -268,12 +270,16 @@ class SpeedometerRefundLifecycleMachine(RuleBasedStateMachine):
         raw_refund = reserved - actual
         short_refund = max(raw_refund, -self.short_max)
         long_refund = max(raw_refund, -self.long_max)
-        self.short_stored = min(short_r + short_refund, self.short_max)
+        short_clamped = max(
+            -self.short_max, min(short_r + short_refund, self.short_max)
+        )
+        self.short_stored = short_clamped
         self.short_last_checked = self.current_time
-        self.long_stored = min(long_r + long_refund, self.long_max)
+        long_clamped = max(-self.long_max, min(long_r + long_refund, self.long_max))
+        self.long_stored = long_clamped
         self.long_last_checked = self.current_time
-        self.short_refunded += short_refund
-        self.long_refunded += long_refund
+        self.short_refunded += short_clamped - short_r
+        self.long_refunded += long_clamped - long_r
 
     @rule(value=m1_max_cap_values)
     def set_max_capacity_short(self, value):
@@ -314,12 +320,14 @@ class SpeedometerRefundLifecycleMachine(RuleBasedStateMachine):
         short_r = self._short_readable()
         long_r = self._long_readable()
         self.backend.consume_capacity(frozen_usage({METRIC: amount}))
-        self.short_stored = short_r - amount
+        short_clamped = max(short_r - amount, -self.short_max)
+        self.short_stored = short_clamped
         self.short_last_checked = self.current_time
-        self.long_stored = long_r - amount
+        long_clamped = max(long_r - amount, -self.long_max)
+        self.long_stored = long_clamped
         self.long_last_checked = self.current_time
-        self.short_consumed += amount
-        self.long_consumed += amount
+        self.short_consumed += short_r - short_clamped
+        self.long_consumed += long_r - long_clamped
 
         # Immediate full refund (reserved=amount, actual=0)
         short_r2 = self._short_readable()
@@ -509,9 +517,10 @@ class ConsumeSetMaxRefundChainMachine(RuleBasedStateMachine):
     def consume(self, amount):
         readable = self._shadow_readable()
         self.backend.consume_capacity(frozen_usage({METRIC: amount}))
-        self.shadow_stored = readable - amount
+        clamped = max(readable - amount, -self.shadow_max)
+        self.shadow_stored = clamped
         self.shadow_last_checked = self.current_time
-        self.total_consumed += amount
+        self.total_consumed += readable - clamped
         self.outstanding_consumes.append(amount)
 
     @rule(value=m2_max_cap_values)
@@ -544,9 +553,11 @@ class ConsumeSetMaxRefundChainMachine(RuleBasedStateMachine):
             frozen_usage({METRIC: actual}),
         )
         refund_amount = max(reserved - actual, -self.shadow_max)
-        self.shadow_stored = min(readable + refund_amount, self.shadow_max)
+        new_raw = readable + refund_amount
+        clamped = max(-self.shadow_max, min(new_raw, self.shadow_max))
+        self.shadow_stored = clamped
         self.shadow_last_checked = self.current_time
-        self.total_refunded += refund_amount
+        self.total_refunded += clamped - readable
 
     @rule(
         consume_amount=m2_consume_amounts,
@@ -562,9 +573,10 @@ class ConsumeSetMaxRefundChainMachine(RuleBasedStateMachine):
         # 1. Consume
         readable = self._shadow_readable()
         self.backend.consume_capacity(frozen_usage({METRIC: consume_amount}))
-        self.shadow_stored = readable - consume_amount
+        clamped = max(readable - consume_amount, -self.shadow_max)
+        self.shadow_stored = clamped
         self.shadow_last_checked = self.current_time
-        self.total_consumed += consume_amount
+        self.total_consumed += readable - clamped
 
         # 2. Set max capacity (changes the rules for the refund)
         old_readable = self._shadow_readable()
@@ -588,9 +600,11 @@ class ConsumeSetMaxRefundChainMachine(RuleBasedStateMachine):
             frozen_usage({METRIC: actual}),
         )
         refund_amount = max(consume_amount - actual, -self.shadow_max)
-        self.shadow_stored = min(readable2 + refund_amount, self.shadow_max)
+        new_raw = readable2 + refund_amount
+        clamped = max(-self.shadow_max, min(new_raw, self.shadow_max))
+        self.shadow_stored = clamped
         self.shadow_last_checked = self.current_time
-        self.total_refunded += refund_amount
+        self.total_refunded += clamped - readable2
 
     @rule(amount=m2_acquire_amounts)
     def try_acquire(self, amount):
@@ -750,9 +764,10 @@ class FractionalLimitsMachine(RuleBasedStateMachine):
     def consume(self, amount):
         readable = self._shadow_readable()
         self.backend.consume_capacity(frozen_usage({METRIC: amount}))
-        self.shadow_stored = readable - amount
+        clamped = max(readable - amount, -self.shadow_max)
+        self.shadow_stored = clamped
         self.shadow_last_checked = self.current_time
-        self.total_consumed += amount
+        self.total_consumed += readable - clamped
 
     @rule(amount=m3_acquire_amounts)
     def try_acquire(self, amount):
@@ -789,9 +804,11 @@ class FractionalLimitsMachine(RuleBasedStateMachine):
             frozen_usage({METRIC: actual}),
         )
         refund_amount = max(reserved - actual, -self.shadow_max)
-        self.shadow_stored = min(readable + refund_amount, self.shadow_max)
+        new_raw = readable + refund_amount
+        clamped = max(-self.shadow_max, min(new_raw, self.shadow_max))
+        self.shadow_stored = clamped
         self.shadow_last_checked = self.current_time
-        self.total_refunded += refund_amount
+        self.total_refunded += clamped - readable
 
     @rule(
         value=st.sampled_from([0.5, 3.7, 7.77, 17.31, 33.333, 99.99]),
@@ -922,8 +939,9 @@ class LongSequenceStressMachine(RuleBasedStateMachine):
     def consume(self, amount):
         readable = self._shadow_readable()
         self.backend.consume_capacity(frozen_usage({METRIC: amount}))
-        self.shadow_stored = readable - amount
-        self.total_consumed += amount
+        clamped = max(readable - amount, -self.shadow_max)
+        self.shadow_stored = clamped
+        self.total_consumed += readable - clamped
 
     @rule(amount=m4_amounts)
     def try_acquire(self, amount):
@@ -960,12 +978,9 @@ class LongSequenceStressMachine(RuleBasedStateMachine):
         )
         refund_amount = max(reserved - actual, -self.shadow_max)
         new_raw = readable + refund_amount
-        capped = min(new_raw, self.shadow_max)
-        clipped = new_raw - capped
-        if clipped > 0:
-            self.total_clipped_by_cap += clipped
-        self.shadow_stored = capped
-        self.total_refunded += refund_amount
+        clamped = max(-self.shadow_max, min(new_raw, self.shadow_max))
+        self.shadow_stored = clamped
+        self.total_refunded += clamped - readable
 
     @rule(value=m4_max_cap_values)
     def set_max_capacity(self, value):
@@ -1131,10 +1146,11 @@ def test_set_max_preserves_negative_debt(limit, overshoot, new_max):
         )
         backend = SyncMemoryBackend(buckets=[bucket], limit_config=config)
 
-        # Consume large amount -> deeply negative
+        # Consume large amount -> deeply negative (clamped to -max_capacity)
         backend.consume_capacity(frozen_usage({METRIC: consume_amount}))
         stored_before = bucket.capacity
-        assert stored_before == pytest.approx(limit - consume_amount, abs=1e-9)
+        expected_stored = max(limit - consume_amount, -limit)
+        assert stored_before == pytest.approx(expected_stored, abs=1e-9)
         assert stored_before < 0, f"Expected negative capacity, got {stored_before}"
 
         # Set max capacity
