@@ -247,7 +247,7 @@ class TestWaitCallbacks:
         cbs = _make_callbacks()
         builder = MemoryBackendBuilder(sleep_interval=0.01)
         cfg = PerModelConfig(
-            quotas=UsageQuotas([Quota(metric="tokens", limit=100, per_seconds=1)]),
+            quotas=UsageQuotas([Quota(metric="tokens", limit=100, per_seconds=10)]),
             model_family="test-family",
         )
         backend = builder.build(cfg, callbacks=cbs)
@@ -256,9 +256,9 @@ class TestWaitCallbacks:
         await backend.consume_capacity(frozendict({"tokens": 100.0}))
         cbs.on_capacity_consumed.reset_mock()
 
-        # Now await_for_capacity should wait for refill (1 token/sec rate)
-        # With per_seconds=1 and limit=100, rate is 100/sec
-        # So waiting ~0.01s should be enough for 1 token
+        # With per_seconds=10 and limit=100, refill rate is 10 tokens/sec.
+        # 1 token takes ~0.1s to refill — slow enough to reliably trigger the
+        # wait path, fast enough to keep the test quick.
         await backend.await_for_capacity(frozendict({"tokens": 1.0}))
 
         cbs.on_wait_start.assert_awaited_once()
