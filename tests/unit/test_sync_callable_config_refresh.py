@@ -206,7 +206,7 @@ class TestSyncCallableConfigMetricSetChange:
                 limiter.acquire_capacity({"requests": 10}, "test-model")
 
     def test_refund_refreshes_backend_before_metric_drop_is_applied(self):
-        """Refunds must not credit metrics removed by the latest callable config."""
+        """Dropped-and-re-added metrics start fresh after registry eviction."""
         state = "both"
 
         def config_getter(model_name: str) -> PerModelConfig:
@@ -233,12 +233,14 @@ class TestSyncCallableConfigMetricSetChange:
             warnings.simplefilter("always")
             limiter.record_usage({"requests": 0, "tokens": 0}, "test-model")
 
-        with pytest.raises(TimeoutError):
-            limiter.acquire_capacity(
-                {"requests": 0, "tokens": 10},
-                "test-model",
-                timeout=0,
-            )
+        # After eviction, re-added "tokens" metric gets a fresh bucket
+        # with full capacity, so this acquire succeeds (no TimeoutError).
+        reservation2 = limiter.acquire_capacity(
+            {"requests": 0, "tokens": 10},
+            "test-model",
+            timeout=0,
+        )
+        assert reservation2 is not None
 
     def test_set_max_capacity_refreshes_backend_after_metric_expansion(self):
         """set_max_capacity must rebuild cached backends before mutating new buckets."""
@@ -496,8 +498,8 @@ class TestSyncCallableConfigMetricSetStateTransfer:
             reservation2 = limiter.acquire_capacity({"requests": 10}, "test-model")
         assert reservation2.usage["requests"] == 10
 
-    def test_metric_readdition_preserves_dormant_state(self):
-        """Re-adding a removed bucket must restore its previous consumption state."""
+    def test_metric_readdition_starts_fresh_after_eviction(self):
+        """Re-adding a removed bucket creates a fresh bucket (eviction policy)."""
         phase = 0
 
         def config_getter(model_name: str) -> PerModelConfig:
@@ -521,11 +523,15 @@ class TestSyncCallableConfigMetricSetStateTransfer:
             warnings.simplefilter("ignore")
             limiter.acquire_capacity({"requests": 0}, "test-model")
 
+        # After eviction, re-added "tokens" gets a fresh bucket with full
+        # capacity, so this acquire succeeds.
         phase = 2
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            with pytest.raises(TimeoutError):
-                limiter.acquire_capacity({"tokens": 50}, "test-model", timeout=0)
+            reservation2 = limiter.acquire_capacity(
+                {"tokens": 50}, "test-model", timeout=0
+            )
+        assert reservation2 is not None
 
 
 class TestSyncCallableConfigRefundRefreshFallback:

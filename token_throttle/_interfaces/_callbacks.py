@@ -180,7 +180,15 @@ class OnCapacityConsumedCallback(Protocol):
         usage: FrozenUsage,
         current_time: float,
     ) -> None:
-        """Called when capacity is consumed"""
+        """
+        Called when capacity is consumed.
+
+        Not 100% delivery-guaranteed under task cancellation: if the
+        calling task is cancelled while a shielded backend write is
+        in flight and that write commits, the cancellation is suppressed
+        and this callback is skipped (the cancel context is already
+        stripped, so firing user callbacks would be misleading).
+        """
 
 
 @runtime_checkable
@@ -250,7 +258,7 @@ class RateLimiterCallbacks(BaseModel):
     ) -> object:
         if value is not None and not is_async_callable(value):
             raise ValueError(f"{info.field_name} must be an async callable")
-        if value is not None:
+        if value is not None and info.field_name is not None:
             _validate_callback_signature(value, info.field_name)
         return value
 
@@ -294,7 +302,15 @@ class SyncOnCapacityConsumedCallback(Protocol):
         postconsumption_capacities: Capacities,
         usage: FrozenUsage,
         current_time: float,
-    ) -> None: ...
+    ) -> None:
+        """
+        Called when capacity is consumed.
+
+        Not 100% delivery-guaranteed under task cancellation: if the
+        calling task is cancelled while a shielded backend write is
+        in flight and that write commits, the cancellation is suppressed
+        and this callback is skipped.
+        """
 
 
 @runtime_checkable
@@ -362,7 +378,7 @@ class SyncRateLimiterCallbacks(BaseModel):
     ) -> object:
         if value is not None and is_async_callable(value):
             raise ValueError(f"{info.field_name} must be a synchronous callable")
-        if value is not None:
+        if value is not None and info.field_name is not None:
             _validate_callback_signature(value, info.field_name)
         return value
 

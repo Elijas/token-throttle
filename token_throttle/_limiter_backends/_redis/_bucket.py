@@ -260,6 +260,7 @@ class RedisBucket:
         own_pipeline = pipeline is None
         if own_pipeline:
             pipeline = self._redis.pipeline()
+        assert pipeline is not None  # noqa: S101
 
         # Order must match PIPELINE_LAST_CHECKED_OFFSET / PIPELINE_CAPACITY_OFFSET
         pipeline.get(self._last_checked_key)
@@ -297,6 +298,7 @@ class RedisBucket:
             raise ValueError("execute=False requires an explicit pipeline")
         if own_pipeline:
             pipeline = self._redis.pipeline()
+        assert pipeline is not None  # noqa: S101
 
         if current_time is None:
             current_time = await async_server_time(self._redis)

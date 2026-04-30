@@ -260,6 +260,8 @@ class RateLimiter(BaseRateLimiter):
             collections.OrderedDict()
         )
         self._refunded_ids_cap = 131_072
+        self._refund_guard = asyncio.Lock()
+        self._refund_in_progress: set[str] = set()
 
     async def acquire_capacity(
         self, usage: Usage, model: str, *, timeout: float | None = None
@@ -455,50 +457,58 @@ class RateLimiter(BaseRateLimiter):
         actual_usage: Usage,
         reservation: CapacityReservation,
     ) -> None:
-        if reservation.reservation_id in self._refunded_reservation_ids:
-            warnings.warn(
-                f"Reservation {reservation.reservation_id} has already been "
-                "refunded. Ignoring duplicate refund to prevent "
-                "double-crediting capacity.",
-                UserWarning,
-                stacklevel=3,
+        rid = reservation.reservation_id
+        async with self._refund_guard:
+            if rid in self._refunded_reservation_ids:
+                warnings.warn(
+                    f"Reservation {rid} has already been "
+                    "refunded. Ignoring duplicate refund to prevent "
+                    "double-crediting capacity.",
+                    UserWarning,
+                    stacklevel=3,
+                )
+                return
+            if rid in self._refund_in_progress:
+                raise ValueError(f"Refund for reservation {rid} is already in progress")
+            self._refund_in_progress.add(rid)
+        try:
+            actual_usage = frozen_usage(actual_usage)
+            if reservation.model_family not in self._model_family_to_backend:
+                raise ValueError(
+                    f"Backend not found for model family {reservation.model_family}",
+                )
+            await self._refresh_backend_for_reservation(reservation)
+            backend = self._model_family_to_backend[reservation.model_family]
+            # If `_refresh_backend_for_reservation` swallowed an exception (it
+            # downgrades refresh failures to RuntimeWarning to keep refunds
+            # unblocked), the snapshot below may still describe the pre-refresh
+            # bucket set. A reservation made against a now-incompatible bucket
+            # set will then surface as a "Refund bucket ids ... not found in
+            # backend" ValueError from the backend's validation. That error
+            # appears alongside the earlier warning — they together describe
+            # the situation.
+            active_bucket_ids = None
+            snapshot = self._model_family_to_quotas.get(reservation.model_family)
+            if snapshot is not None:
+                active_bucket_ids = frozenset(snapshot)
+            reserved_usage, actual_usage, refund_bucket_ids = _project_refund_scope(
+                reservation.get_usage(),
+                actual_usage,
+                reservation.bucket_ids,
+                active_bucket_ids,
             )
-            return
-        actual_usage = frozen_usage(actual_usage)
-        if reservation.model_family not in self._model_family_to_backend:
-            raise ValueError(
-                f"Backend not found for model family {reservation.model_family}",
+            if not reserved_usage:
+                return
+            await backend.refund_capacity_for_buckets(
+                reserved_usage,
+                actual_usage,
+                bucket_ids=refund_bucket_ids,
             )
-        await self._refresh_backend_for_reservation(reservation)
-        backend = self._model_family_to_backend[reservation.model_family]
-        # If `_refresh_backend_for_reservation` swallowed an exception (it
-        # downgrades refresh failures to RuntimeWarning to keep refunds
-        # unblocked), the snapshot below may still describe the pre-refresh
-        # bucket set. A reservation made against a now-incompatible bucket
-        # set will then surface as a "Refund bucket ids ... not found in
-        # backend" ValueError from the backend's validation. That error
-        # appears alongside the earlier warning — they together describe
-        # the situation.
-        active_bucket_ids = None
-        snapshot = self._model_family_to_quotas.get(reservation.model_family)
-        if snapshot is not None:
-            active_bucket_ids = frozenset(snapshot)
-        reserved_usage, actual_usage, refund_bucket_ids = _project_refund_scope(
-            reservation.get_usage(),
-            actual_usage,
-            reservation.bucket_ids,
-            active_bucket_ids,
-        )
-        if not reserved_usage:
-            return
-        await backend.refund_capacity_for_buckets(
-            reserved_usage,
-            actual_usage,
-            bucket_ids=refund_bucket_ids,
-        )
-        self._refunded_reservation_ids[reservation.reservation_id] = None
-        if len(self._refunded_reservation_ids) > self._refunded_ids_cap:
-            self._refunded_reservation_ids.popitem(last=False)
+            self._refunded_reservation_ids[rid] = None
+            if len(self._refunded_reservation_ids) > self._refunded_ids_cap:
+                self._refunded_reservation_ids.popitem(last=False)
+        finally:
+            self._refund_in_progress.discard(rid)
 
     def _unlimited_reservation(
         self,

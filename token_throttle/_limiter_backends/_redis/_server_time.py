@@ -9,7 +9,7 @@ computing token-bucket refill math.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
     import redis
@@ -18,11 +18,11 @@ if TYPE_CHECKING:
 
 async def async_server_time(client: redis.asyncio.Redis) -> float:
     """Return the Redis server's current time as a ``time.time()``-compatible float."""
-    seconds, microseconds = await client.time()
+    seconds, microseconds = cast("tuple[int, int]", await client.time())
     return float(seconds) + float(microseconds) / 1_000_000
 
 
 def sync_server_time(client: redis.Redis) -> float:
     """Return the Redis server's current time as a ``time.time()``-compatible float."""
-    seconds, microseconds = client.time()
+    seconds, microseconds = cast("tuple[int, int]", client.time())
     return float(seconds) + float(microseconds) / 1_000_000

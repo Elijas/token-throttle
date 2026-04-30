@@ -77,8 +77,6 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
         self._callbacks = callbacks
         self._limit_config = limit_config
         self._usage_metric_names: set[str] = {bucket.usage_metric for bucket in buckets}
-        # Keep retired buckets around so a later metric re-add can resume from
-        # the last known capacity instead of starting full again.
         self._bucket_registry: dict[tuple[str, int], MemoryBucket] = {
             (bucket.usage_metric, int(bucket.per_seconds)): bucket for bucket in buckets
         }
@@ -568,7 +566,10 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
                 prepared_buckets.append(bucket)
                 existing_buckets[bucket_id] = bucket
 
-            self._bucket_registry = existing_buckets
+            active_ids = {(q.metric, int(q.per_seconds)) for q in cfg.quotas}
+            self._bucket_registry = {
+                k: v for k, v in existing_buckets.items() if k in active_ids
+            }
 
             self.install_reconfigured_state(
                 condition=self._condition,

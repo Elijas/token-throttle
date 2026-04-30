@@ -722,6 +722,12 @@ class RedisBackend(RateLimiterBackend):
                 # Lock release during the `async with` exit is shielded
                 # (via _shielded_lock_release in _lock()), so a re-cancel
                 # between suppression and release will not leak the lock.
+                #
+                # on_capacity_consumed is intentionally NOT fired here:
+                # the cancel context is already stripped, so user
+                # callbacks would run in a misleading state. See the
+                # OnCapacityConsumedCallback docstring for the delivery
+                # guarantee contract.
                 suppress_current_task_cancellation()
                 return
         # Callbacks fire after the lock is released. Consumption is already
