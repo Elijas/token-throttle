@@ -278,11 +278,13 @@ class TestRedisCancellationDebtPreservation:
         # Close gate so consume_capacity's callback returns fast
         gate.clear()
 
-        # Drive capacity negative: was 40 (50-10) → 40-200 = -160
+        # Drive capacity negative: was 40 (50-10), consume 200.
+        # Post-HIGH-07 clamp: consume_capacity caps debt at -max_capacity (-100).
+        # Without the clamp this would be 40-200 = -160; with it it's -100.
         await backend.consume_capacity(frozendict({"requests": 200.0}))
         cap_after_consume = await _get_redis_capacity(backend)
-        assert cap_after_consume < -100, (
-            f"Expected deep negative debt, got {cap_after_consume}"
+        assert cap_after_consume == pytest.approx(-100.0, abs=1.0), (
+            f"Expected debt clamped at -max_capacity, got {cap_after_consume}"
         )
 
         # Cancel Task A → refund 10
