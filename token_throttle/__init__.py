@@ -71,6 +71,7 @@ _LAZY_IMPORTS: dict[str, str] = {
     "RedisBackendBuilder": "token_throttle._limiter_backends._redis._backend",
     # openai redis factory (imports redis at module level)
     "create_openai_redis_rate_limiter": "token_throttle._factories._openai._openai_rate_limiter",
+    "create_openai_redis_sync_rate_limiter": "token_throttle._factories._openai._openai_sync_rate_limiter",
     # redis-independent openai helper
     "openai_model_family_getter": "token_throttle._factories._openai._model_family",
     # openai token counter (tiktoken lazy inside, but part of optional openai extra)
@@ -106,6 +107,7 @@ _REDIS_ALL = [
     "SyncRedisBackendBuilder",
     "SyncRedisBucket",
     "create_openai_redis_rate_limiter",
+    "create_openai_redis_sync_rate_limiter",
 ]
 
 __all__ = [

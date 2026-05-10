@@ -16,6 +16,7 @@ _REDIS_EXPORTS = {
     "SyncRedisBackendBuilder",
     "SyncRedisBucket",
     "create_openai_redis_rate_limiter",
+    "create_openai_redis_sync_rate_limiter",
 }
 
 

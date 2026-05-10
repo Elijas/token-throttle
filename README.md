@@ -24,9 +24,11 @@ pip install "token-throttle>=1.4.1,<1.5.0"                   # Any provider + in
 ### OpenAI (built-in helpers)
 
 ```python
+import redis.asyncio as redis
 from openai import AsyncOpenAI
 from token_throttle import create_openai_redis_rate_limiter
 
+redis_client = redis.from_url("redis://localhost:6379")
 client = AsyncOpenAI()
 limiter = create_openai_redis_rate_limiter(
     redis_client, rpm=10_000, tpm=2_000_000,
