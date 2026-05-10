@@ -265,3 +265,77 @@ class TestCreateOpenAIRedisRateLimiter:
         assert len(token_quotas) == 1
         assert token_quotas[0].limit == 40000
         assert token_quotas[0].per_seconds == 60
+
+
+class TestL01F04CallbacksDefaultFallbackContract:
+    """Regression tests for L01 F04 footgun: callbacks default-fallback contract.
+
+    The factory used `callbacks or create_logging_callbacks(...)` which relied on
+    Python truthiness. `RateLimiterCallbacks()` (empty model with all-None fields)
+    is truthy, so the `or` short-circuit and the fixed `if callbacks is not None`
+    behave identically for any value typed as `RateLimiterCallbacks | None`. The
+    swap is a *semantic* fix: it makes the contract explicit in the code that
+    defaults trigger only on the sentinel `None`, never on a "truthy-but-empty"
+    instance, and never via auto-merging user callbacks with defaults.
+
+    These tests lock in that contract:
+      * `callbacks=None`           -> factory's default logging callbacks applied
+      * `callbacks=RateLimiterCallbacks()`            -> user's empty preserved
+      * `callbacks=RateLimiterCallbacks(on_x=...)`    -> user's instance preserved
+        (the factory does NOT auto-fill missing slots with its defaults)
+
+    The third case captures the *user-facing observability footgun*: a user
+    adding ONE callback does NOT silently inherit the factory's default
+    `missing_consumption_data="INFO"` logger. This is now the documented
+    contract, not an accidental side-effect of truthiness.
+
+    See: capsules/260510-r4-full-bugs-and-footguns/findings/01-footgun-catalog.md
+    """
+
+    def test_callbacks_none_applies_default_missing_consumption_data_logger(self):
+        mock_redis = MagicMock()
+        limiter = create_openai_redis_rate_limiter(
+            mock_redis,
+            rpm=100,
+            tpm=10000,
+        )
+        assert limiter._callbacks is not None
+        assert limiter._callbacks.on_missing_consumption_data is not None
+
+    def test_empty_callbacks_model_preserved_without_default_merge(self):
+        mock_redis = MagicMock()
+        empty = RateLimiterCallbacks()
+        limiter = create_openai_redis_rate_limiter(
+            mock_redis,
+            rpm=100,
+            tpm=10000,
+            callbacks=empty,
+        )
+        assert limiter._callbacks is empty
+        assert limiter._callbacks.on_missing_consumption_data is None
+
+    def test_user_callback_preserved_without_default_logger_merged_in(self):
+        async def on_capacity_consumed(
+            *,
+            model_family: str,
+            preconsumption_capacities,
+            postconsumption_capacities,
+            usage,
+            current_time: float,
+        ) -> None:
+            pass
+
+        mock_redis = MagicMock()
+        user_cbs = RateLimiterCallbacks(on_capacity_consumed=on_capacity_consumed)
+        limiter = create_openai_redis_rate_limiter(
+            mock_redis,
+            rpm=100,
+            tpm=10000,
+            callbacks=user_cbs,
+        )
+        assert limiter._callbacks is user_cbs
+        assert limiter._callbacks.on_capacity_consumed is on_capacity_consumed
+        assert limiter._callbacks.on_missing_consumption_data is None
+        assert limiter._callbacks.on_wait_start is None
+        assert limiter._callbacks.after_wait_end_consumption is None
+        assert limiter._callbacks.on_capacity_refunded is None
