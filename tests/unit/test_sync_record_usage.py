@@ -117,5 +117,7 @@ class TestRecordUsageUnlimited:
         reservation = limiter.record_usage({"tokens": 5}, model="gpt-4")
 
         assert reservation.model_family == _UNLIMITED_FLAG
-        assert dict(reservation.usage) == {"tokens": 5.0}
+        # Unlimited reservations carry empty usage by construction
+        # (FIX-03 BUNDLE-VALIDATOR option (b)).
+        assert dict(reservation.usage) == {}
         assert reservation.is_unlimited is True

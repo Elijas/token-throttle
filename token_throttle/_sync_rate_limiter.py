@@ -290,7 +290,7 @@ class SyncRateLimiter:
         self._validated_model_family(model, limit_config)
         self._validate_shared_model_family_config(model, limit_config)
         if limit_config.is_unlimited:
-            return self._unlimited_reservation(usage, model)
+            return self._unlimited_reservation(model)
         return self._acquire_capacity(
             model, usage, limit_config, _block=_block, timeout=timeout
         )
@@ -312,13 +312,17 @@ class SyncRateLimiter:
         self._validated_model_family(model, limit_config)
         self._validate_shared_model_family_config(model, limit_config)
         if limit_config.is_unlimited:
+            # Counter still runs for telemetry consistency (L05 I03);
+            # extra_usage shape is still validated; both results are
+            # discarded because the unlimited reservation always
+            # carries empty usage by construction.
             usage = frozendict()
             if limit_config.usage_counter is not None:
                 usage = resolve_usage_counter_result(
                     limit_config.usage_counter, **kwargs
                 )
-            usage = merge_extra_usage_unrestricted(usage, extra_usage)
-            return self._unlimited_reservation(usage, model)
+            merge_extra_usage_unrestricted(usage, extra_usage)
+            return self._unlimited_reservation(model)
         if limit_config.usage_counter is None:
             raise ValueError("limit_config.usage_counter cannot be None")
 
@@ -501,13 +505,15 @@ class SyncRateLimiter:
         finally:
             self._refund_in_progress.discard(rid)
 
-    def _unlimited_reservation(
-        self,
-        usage: FrozenUsage,
-        model: str,
-    ) -> CapacityReservation:
+    def _unlimited_reservation(self, model: str) -> CapacityReservation:
+        # Unlimited reservations bypass metering, so their ``usage`` is
+        # never read. The ``CapacityReservation`` field validator
+        # requires empty ``usage`` when ``is_unlimited=True``; passing
+        # ``frozendict()`` makes the factory the only canonical
+        # producer of unlimited reservations and closes V05/V14/I05
+        # at construction time.
         return CapacityReservation(
-            usage=usage,
+            usage=frozendict(),
             model_family=_UNLIMITED_FLAG,
             model=model,
             is_unlimited=True,

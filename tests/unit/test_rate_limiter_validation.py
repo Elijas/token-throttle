@@ -123,7 +123,12 @@ class TestAcquireCapacityValidation:
         reservation = await limiter.acquire_capacity({"tokens": 5}, model="gpt-4")
 
         assert reservation.model_family == _UNLIMITED_FLAG
-        assert dict(reservation.usage) == {"tokens": 5.0}
+        # Unlimited reservations carry empty usage by construction
+        # (FIX-03 BUNDLE-VALIDATOR option (b) — the factory drops the
+        # caller's usage so the field validator can enforce its
+        # invariant). The user's input was still validated for
+        # finiteness/non-negativity before being dropped.
+        assert dict(reservation.usage) == {}
         assert reservation.is_unlimited is True
 
     async def test_unlimited_config_with_empty_usage_returns_unlimited_reservation(
@@ -368,7 +373,11 @@ class TestAcquireCapacityForRequestValidation:
         )
 
         assert reservation.model_family == _UNLIMITED_FLAG
-        assert dict(reservation.usage) == {"tokens": 10.0}
+        # Unlimited reservations carry empty usage by construction
+        # (FIX-03 BUNDLE-VALIDATOR option (b)). The extra_usage
+        # shape is still validated for non-negativity / finiteness;
+        # the merged value is just not stored on the reservation.
+        assert dict(reservation.usage) == {}
         assert reservation.is_unlimited is True
 
     async def test_unlimited_config_with_empty_extra_usage_succeeds(self):
@@ -393,35 +402,37 @@ class TestAcquireCapacityForRequestValidation:
             backend=builder,
         )
 
+        # The counter still runs on the unlimited path (L05 I03 — kept
+        # for telemetry consistency) and extra_usage with new keys
+        # still validates without raising. Both results are then
+        # discarded because the unlimited reservation always carries
+        # empty usage (FIX-03 BUNDLE-VALIDATOR option (b)).
         reservation = await limiter.acquire_capacity_for_request(
             model="gpt-4",
             extra_usage={"images": 2, "tokens": 5},
         )
 
-        assert dict(reservation.usage) == {
-            "tokens": 105.0,
-            "requests": 1.0,
-            "images": 2.0,
-        }
+        assert dict(reservation.usage) == {}
         assert reservation.is_unlimited is True
 
 
 class TestRefundCapacityValidation:
     """Tests for ValueError paths in refund_capacity."""
 
-    async def test_unlimited_reservation_with_nonempty_usage_is_noop(self):
-        builder, _ = make_mock_backend_builder()
-        limiter = RateLimiter(make_unlimited_config(), backend=builder)
-
-        reservation = CapacityReservation(
-            usage={"tokens": 5},
-            model_family=_UNLIMITED_FLAG,
-            is_unlimited=True,
-        )
-
-        result = await limiter.refund_capacity({"tokens": 5}, reservation)
-
-        assert result is None
+    async def test_unlimited_reservation_with_nonempty_usage_rejected_at_construction(
+        self,
+    ):
+        # Pre-FIX-03 this hand-construction silently produced an
+        # unlimited reservation that no-op'd on refund (the V05
+        # footgun). The field validator now rejects it at construction
+        # — closes V14/I05 by making the canonical factory shape the
+        # only reachable unlimited shape.
+        with pytest.raises(ValidationError, match="empty usage"):
+            CapacityReservation(
+                usage={"tokens": 5},
+                model_family=_UNLIMITED_FLAG,
+                is_unlimited=True,
+            )
 
     async def test_unlimited_reservation_with_empty_usage_is_noop(self):
         builder, _ = make_mock_backend_builder()
@@ -1033,5 +1044,7 @@ class TestRecordUsage:
         limiter = RateLimiter(make_unlimited_config(), backend=builder)
         reservation = await limiter.record_usage({"tokens": 5}, model="gpt-4")
         assert reservation.model_family == _UNLIMITED_FLAG
-        assert dict(reservation.usage) == {"tokens": 5.0}
+        # Unlimited reservations carry empty usage by construction
+        # (FIX-03 BUNDLE-VALIDATOR option (b)).
+        assert dict(reservation.usage) == {}
         assert reservation.is_unlimited is True

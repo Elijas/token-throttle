@@ -11,6 +11,7 @@ from token_throttle._interfaces._callable_utils import (
 )
 from token_throttle._interfaces._interfaces import PerModelConfig, PerModelConfigGetter
 from token_throttle._interfaces._models import (
+    _UNLIMITED_FLAG,
     BucketId,
     CapacityReservation,
     FrozenUsage,
@@ -21,35 +22,28 @@ from token_throttle._interfaces._models import (
     frozen_usage,
 )
 
-_UNLIMITED_FLAG = "__rate_limiting_disabled__"
+# Re-exported from ``_models`` so external callers that imported
+# ``_UNLIMITED_FLAG`` from this module keep working.
+__all__ = ["_UNLIMITED_FLAG"]
 
 
 def is_unlimited_reservation(reservation: CapacityReservation) -> bool:
     """
     True when a reservation represents a disabled/unlimited rate limit.
 
-    **Design intent:** ``is_unlimited=True`` is the authoritative signal and
-    bypasses metering regardless of the reservation's usage data. This is
-    deliberate — a hand-constructed reservation with ``is_unlimited=True``
-    and non-empty usage is treated as unlimited because the flag is the
-    single source of truth. Callers constructing ``CapacityReservation``
-    manually must set ``is_unlimited=True`` for unlimited reservations.
+    The ``is_unlimited`` flag is the single source of truth. The
+    ``CapacityReservation`` field validator now enforces that
+    ``is_unlimited=True`` requires the canonical sentinel shape
+    (``model_family == _UNLIMITED_FLAG``, empty ``usage``,
+    ``bucket_ids is None``), so the flag is reliable end-to-end.
 
-    Legacy path: reservations created before the ``is_unlimited`` field
-    existed carry only the sentinel ``model_family`` and an empty
-    ``usage`` / ``bucket_ids``. The extra-conservative fallback preserves
-    back-compat for those, but it intentionally does NOT match reservations
-    that have the sentinel family plus non-empty usage — those cannot be
-    produced by the current code and are likely hand-constructed.
+    Legacy fallback removed (L05 I10): a reservation with the sentinel
+    ``model_family`` but ``is_unlimited=False`` is no longer treated as
+    unlimited. Hand-constructing the sentinel string was the second
+    bypass vector beyond V05; closing it requires this tightening AND
+    the validator above.
     """
-    return bool(
-        reservation.is_unlimited
-        or (
-            reservation.model_family == _UNLIMITED_FLAG
-            and not reservation.usage
-            and reservation.bucket_ids is None
-        )
-    )
+    return reservation.is_unlimited
 
 
 def extract_usage_from_response(response: object) -> object:
