@@ -9,6 +9,15 @@ from typing import ClassVar, Self
 from frozendict import frozendict
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 
+_UNLIMITED_FLAG = "__rate_limiting_disabled__"
+"""
+Sentinel ``model_family`` value used by ``_unlimited_reservation``.
+
+Lives in this module (not ``_validation``) so ``CapacityReservation``'s
+``is_unlimited`` field validator can reference it without an import cycle.
+``_validation`` re-exports it for back-compat with any external imports.
+"""
+
 
 def _is_bool_like(value: object) -> bool:
     """Reject Python bool and numpy.bool_ (which is not a subclass of bool)."""
@@ -211,6 +220,44 @@ class CapacityReservation(BaseModel):
                         f"Reserved usage value for {metric} must be non-negative"
                     )
             return normalized_usage
+        return value
+
+    @field_validator("is_unlimited", mode="after")
+    @classmethod
+    def _require_sentinel_when_unlimited(
+        cls,
+        value: bool,  # noqa: FBT001  # Pydantic-driven validator signature.
+        info: ValidationInfo,
+    ) -> bool:
+        """
+        Couple ``is_unlimited=True`` to its semantic invariant.
+
+        Rejects any reservation that flips the unlimited flag without also
+        matching the canonical shape produced by the library's
+        ``_unlimited_reservation`` factory: sentinel ``model_family``,
+        empty ``usage``, ``bucket_ids is None``. Closes the V05/V10/V14
+        bypass family by failing both ``model_validate`` and
+        ``model_validate_json`` on hand-constructed or forged
+        reservations whose flag does not match their shape.
+        """
+        if not value:
+            return value
+        family = info.data.get("model_family")
+        usage = info.data.get("usage")
+        bucket_ids = info.data.get("bucket_ids")
+        if family != _UNLIMITED_FLAG:
+            raise ValueError(
+                f"is_unlimited=True requires model_family == {_UNLIMITED_FLAG!r}; "
+                f"got {family!r}"
+            )
+        if usage:
+            raise ValueError(
+                "is_unlimited=True requires empty usage (got non-empty mapping)"
+            )
+        if bucket_ids is not None:
+            raise ValueError(
+                "is_unlimited=True requires bucket_ids=None (got non-None set)"
+            )
         return value
 
     @field_validator("bucket_ids", mode="before")

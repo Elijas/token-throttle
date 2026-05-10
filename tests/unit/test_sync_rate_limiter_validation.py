@@ -119,7 +119,9 @@ class TestAcquireCapacityValidation:
         reservation = limiter.acquire_capacity({"tokens": 5}, model="gpt-4")
 
         assert reservation.model_family == _UNLIMITED_FLAG
-        assert dict(reservation.usage) == {"tokens": 5.0}
+        # Unlimited reservations carry empty usage by construction
+        # (FIX-03 BUNDLE-VALIDATOR option (b)).
+        assert dict(reservation.usage) == {}
         assert reservation.is_unlimited is True
 
     def test_unlimited_config_with_empty_usage_returns_unlimited_reservation(self):
@@ -180,19 +182,16 @@ class TestAcquireCapacityValidation:
 class TestRefundCapacityValidation:
     """Tests for ValueError paths in refund_capacity."""
 
-    def test_unlimited_reservation_with_nonempty_usage_is_noop(self):
-        builder, _ = make_mock_backend_builder()
-        limiter = SyncRateLimiter(make_unlimited_config(), backend=builder)
-
-        reservation = CapacityReservation(
-            usage={"tokens": 5},
-            model_family=_UNLIMITED_FLAG,
-            is_unlimited=True,
-        )
-
-        result = limiter.refund_capacity({"tokens": 5}, reservation)
-
-        assert result is None
+    def test_unlimited_reservation_with_nonempty_usage_rejected_at_construction(self):
+        # Pre-FIX-03 this hand-construction silently produced an
+        # unlimited reservation that no-op'd on refund (the V05
+        # footgun). The field validator now rejects it at construction.
+        with pytest.raises(ValidationError, match="empty usage"):
+            CapacityReservation(
+                usage={"tokens": 5},
+                model_family=_UNLIMITED_FLAG,
+                is_unlimited=True,
+            )
 
     def test_unlimited_reservation_with_empty_usage_is_noop(self):
         builder, _ = make_mock_backend_builder()
@@ -481,7 +480,9 @@ class TestAcquireCapacityForRequestValidation:
         )
 
         assert reservation.model_family == _UNLIMITED_FLAG
-        assert dict(reservation.usage) == {"tokens": 10.0}
+        # Unlimited reservations carry empty usage by construction
+        # (FIX-03 BUNDLE-VALIDATOR option (b)).
+        assert dict(reservation.usage) == {}
         assert reservation.is_unlimited is True
 
     def test_unlimited_config_with_empty_extra_usage_succeeds(self):
@@ -506,16 +507,16 @@ class TestAcquireCapacityForRequestValidation:
             backend=builder,
         )
 
+        # The counter still runs on the unlimited path (L05 I03 — kept
+        # for telemetry consistency) and extra_usage with new keys
+        # still validates. Both results are then discarded because the
+        # unlimited reservation always carries empty usage (FIX-03).
         reservation = limiter.acquire_capacity_for_request(
             model="gpt-4",
             extra_usage={"images": 2, "tokens": 5},
         )
 
-        assert dict(reservation.usage) == {
-            "tokens": 105.0,
-            "requests": 1.0,
-            "images": 2.0,
-        }
+        assert dict(reservation.usage) == {}
         assert reservation.is_unlimited is True
 
 
@@ -1031,5 +1032,7 @@ class TestRecordUsage:
         limiter = SyncRateLimiter(make_unlimited_config(), backend=builder)
         reservation = limiter.record_usage({"tokens": 5}, model="gpt-4")
         assert reservation.model_family == _UNLIMITED_FLAG
-        assert dict(reservation.usage) == {"tokens": 5.0}
+        # Unlimited reservations carry empty usage by construction
+        # (FIX-03 BUNDLE-VALIDATOR option (b)).
+        assert dict(reservation.usage) == {}
         assert reservation.is_unlimited is True
