@@ -1,5 +1,27 @@
+"""
+Callback infrastructure for the rate limiter.
+
+Loguru detection staleness contract
+-----------------------------------
+``_probe_loguru()`` runs once per process and caches its result. If
+loguru becomes available or breaks AFTER the first probe, the cache
+will not auto-invalidate. To force a re-probe, either:
+
+- call :func:`_reset_loguru_cache` programmatically, or
+- set the ``TOKEN_THROTTLE_LOGURU_DETECT_AGAIN`` environment variable
+  to a non-empty value before the next callback fires.
+
+The cache stores a *factory* callable (or an unavailability sentinel),
+not a resolved logger. Each ``_log()`` invocation calls the factory,
+which re-reads ``loguru.logger`` from ``sys.modules``. This means
+in-process loguru API drift (monkey-patching, hot reload, a future
+loguru release renaming ``.log()``) surfaces as a clear ``AttributeError``
+at the call site instead of being masked by a stale poisoned reference.
+"""
+
 import inspect
 import logging
+import os
 from typing import Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
@@ -11,21 +33,98 @@ from token_throttle._interfaces._models import Capacities, FrozenUsage
 # Auto-detect loguru vs stdlib logging
 # ---------------------------------------------------------------------------
 
+_stdlib_logger = logging.getLogger("token_throttle")
+
+# Sentinel: the probe has run and concluded loguru is not usable for any
+# reason (missing, broken install, API drifted at probe time, etc.).
+_LOGURU_UNAVAILABLE: object = object()
+
+# Module-level detection cache.
+#
+# Schema: ``{"factory": <zero-arg callable> | _LOGURU_UNAVAILABLE}``.
+# Missing key → not yet probed.
+#
+# Storing a factory rather than a resolved logger means each ``_log()``
+# call re-reads ``loguru.logger`` (cheap via ``sys.modules``) so any
+# post-probe API drift (e.g. ``.log`` renamed) surfaces as a clear
+# ``AttributeError`` at the call site instead of being masked by a stale
+# cached reference.
 _loguru_cache: dict[str, object] = {}
+
+_LOGURU_DETECT_AGAIN_ENV = "TOKEN_THROTTLE_LOGURU_DETECT_AGAIN"
+
+
+def _resolve_loguru_logger():
+    """
+    Fresh resolution + API smoke-test of the loguru logger.
+
+    Imports ``loguru.logger`` (cached via ``sys.modules`` after the first
+    real import) and verifies that ``.log`` is callable. Any exception
+    that import or attribute lookup raises propagates — callers handle
+    the catching.
+    """
+    from loguru import logger
+
+    if not callable(getattr(logger, "log", None)):
+        # ImportError signals "the loguru API we need is not importable"
+        # so the upstream `except Exception` in _probe_loguru routes us
+        # to the stdlib fallback uniformly with other import failures.
+        raise ImportError(  # noqa: TRY004 - ImportError is the bridge's contract
+            "loguru.logger.log is not callable; loguru API has drifted."
+        )
+    return logger
 
 
 def _probe_loguru():
-    if "logger" not in _loguru_cache:
+    """
+    Detect loguru and return a logger factory, or ``None``.
+
+    On first call (or after a reset), attempts to import loguru and
+    smoke-test the API. Caches a factory callable on success or the
+    ``_LOGURU_UNAVAILABLE`` sentinel on any failure (including non-
+    ``ImportError`` failures from broken installs). Subsequent calls
+    return the cached value.
+
+    Returns a zero-arg callable that yields a working ``loguru.Logger``
+    when loguru is usable, otherwise ``None``.
+    """
+    if os.environ.get(_LOGURU_DETECT_AGAIN_ENV):
+        _loguru_cache.pop("factory", None)
+
+    if "factory" not in _loguru_cache:
         try:
-            from loguru import logger
+            _resolve_loguru_logger()
+        except Exception as exc:  # noqa: BLE001 - any import-time failure → fall back
+            # Broad on purpose. Broken loguru installs raise
+            # ImportError / ModuleNotFoundError (most common) plus
+            # AttributeError / RuntimeError / OSError / TypeError /
+            # ValueError on import side effects, and the API smoke-test
+            # raises ImportError on .log drift. Excludes BaseException
+            # so KeyboardInterrupt and SystemExit propagate.
+            _stdlib_logger.warning(
+                "loguru not usable (%s: %s); falling back to stdlib logging",
+                type(exc).__name__,
+                exc,
+            )
+            _loguru_cache["factory"] = _LOGURU_UNAVAILABLE
+        else:
+            _loguru_cache["factory"] = _resolve_loguru_logger
 
-            _loguru_cache["logger"] = logger
-        except ImportError:
-            _loguru_cache["logger"] = None
-    return _loguru_cache["logger"]
+    factory = _loguru_cache["factory"]
+    return None if factory is _LOGURU_UNAVAILABLE else factory
 
 
-_stdlib_logger = logging.getLogger("token_throttle")
+def _reset_loguru_cache() -> None:
+    """
+    Drop the cached loguru detection result so the next probe re-runs.
+
+    Call this after a runtime install (e.g. ``%pip install loguru`` in
+    a notebook, plugin loaders) or in tests that toggle availability.
+    The cache is shared by sync and async paths, so a single reset
+    suffices for both. See module docstring for the staleness contract.
+    """
+    _loguru_cache.pop("factory", None)
+
 
 _EXPECTED_CALLBACK_PARAMS: dict[str, frozenset[str]] = {
     "on_wait_start": frozenset({"model_family", "usage", "preconsumption_capacities"}),
@@ -105,8 +204,8 @@ def _validate_log_level(level: str | None, param_name: str) -> None:
     if not level.strip():
         raise ValueError(f"{param_name} must not be empty or whitespace-only")
     if level.upper() not in _STDLIB_LEVEL_MAP:
-        loguru = _probe_loguru()
-        if loguru is None:
+        loguru_factory = _probe_loguru()
+        if loguru_factory is None:
             raise ValueError(
                 f"Unknown log level {level!r} for {param_name}; "
                 f"valid levels: {sorted(_STDLIB_LEVEL_MAP)}"
@@ -121,12 +220,16 @@ def _log(level: str, message: str, **kwargs) -> None:
     ``create_*_callbacks`` factories; those closures are only registered when
     their level parameter is truthy (see e.g. ``on_wait_start if wait_start
     else None`` guards), so ``_log`` is never reachable with ``level=None``.
+
+    Resolves the loguru logger fresh per call (via the cached factory)
+    so post-probe API drift surfaces as a clear error at the call site
+    rather than from a poisoned cached reference.
     """
     if not isinstance(level, str):
         raise TypeError(f"_log level must be str, got {type(level).__name__}")
-    loguru = _probe_loguru()
-    if loguru is not None:
-        loguru.log(level, message, **kwargs)
+    loguru_factory = _probe_loguru()
+    if loguru_factory is not None:
+        loguru_factory().log(level, message, **kwargs)
     else:
         # Intentional KeyError on unknown levels — _log() is private and only
         # called from create_*_callbacks() factories with known level strings.
@@ -622,13 +725,20 @@ def create_sync_logging_callbacks(
 
 
 def _get_loguru_logger():
-    loguru = _probe_loguru()
-    if loguru is None:
+    """
+    Resolve a working loguru logger or raise ``ImportError``.
+
+    Used by the explicit ``create_loguru_callbacks`` factories. Calls
+    the cached factory each invocation so post-probe API drift surfaces
+    via the live attribute lookup at the call site.
+    """
+    loguru_factory = _probe_loguru()
+    if loguru_factory is None:
         raise ImportError(
             'The "loguru" package is required for loguru callbacks. '
             'Install it with: pip install "token-throttle[loguru]"'
         )
-    return loguru
+    return loguru_factory()
 
 
 def create_loguru_callbacks(

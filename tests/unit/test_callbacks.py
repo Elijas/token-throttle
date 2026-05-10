@@ -9,6 +9,7 @@ from frozendict import frozendict
 from pydantic import ValidationError
 
 from token_throttle._interfaces._callbacks import (
+    _LOGURU_UNAVAILABLE,
     RateLimiterCallbacks,
     SyncRateLimiterCallbacks,
     _get_loguru_logger,
@@ -123,7 +124,7 @@ class TestProbeLoguru:
 class TestLogStdlibFallback:
     def test_log_uses_stdlib_when_loguru_unavailable(self):
         _loguru_cache.clear()
-        _loguru_cache["logger"] = None  # Force stdlib path
+        _loguru_cache["factory"] = _LOGURU_UNAVAILABLE  # Force stdlib path
         try:
             with patch(
                 "token_throttle._interfaces._callbacks._stdlib_logger"
@@ -135,7 +136,7 @@ class TestLogStdlibFallback:
 
     def test_log_stdlib_with_kwargs(self):
         _loguru_cache.clear()
-        _loguru_cache["logger"] = None
+        _loguru_cache["factory"] = _LOGURU_UNAVAILABLE
         try:
             with patch(
                 "token_throttle._interfaces._callbacks._stdlib_logger"
@@ -153,7 +154,7 @@ class TestLogStdlibFallback:
 
     def test_log_stdlib_level_mapping(self):
         _loguru_cache.clear()
-        _loguru_cache["logger"] = None
+        _loguru_cache["factory"] = _LOGURU_UNAVAILABLE
         try:
             with patch(
                 "token_throttle._interfaces._callbacks._stdlib_logger"
@@ -167,7 +168,7 @@ class TestLogStdlibFallback:
         pytest.importorskip("loguru")
         _loguru_cache.clear()
         mock_loguru = MagicMock()
-        _loguru_cache["logger"] = mock_loguru
+        _loguru_cache["factory"] = lambda: mock_loguru
         try:
             _log("DEBUG", "test message", key="val")
             mock_loguru.log.assert_called_once_with("DEBUG", "test message", key="val")
@@ -324,7 +325,7 @@ class TestCreateSyncLoggingCallbacks:
 class TestGetLoguruLogger:
     def test_raises_import_error_when_loguru_unavailable(self):
         _loguru_cache.clear()
-        _loguru_cache["logger"] = None
+        _loguru_cache["factory"] = _LOGURU_UNAVAILABLE
         try:
             with pytest.raises(ImportError, match="loguru"):
                 _get_loguru_logger()
