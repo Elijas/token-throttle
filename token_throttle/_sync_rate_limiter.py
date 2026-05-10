@@ -121,12 +121,18 @@ def _cfg_with_preserved_runtime_max_capacity(
         if float(quota.limit) == float(override):
             rebuilt_quotas.append(quota)
             continue
-        rebuilt_quotas.append(quota.model_copy(update={"limit": float(override)}))
+        rebuilt_quotas.append(
+            Quota.model_validate(
+                {**quota.model_dump(), "limit": float(override)}, strict=True
+            )
+        )
         updated = True
 
     if not updated:
         return cfg
-    return cfg.model_copy(update={"quotas": UsageQuotas(rebuilt_quotas)})
+    return PerModelConfig.model_validate(
+        {**cfg.model_dump(), "quotas": UsageQuotas(rebuilt_quotas)}, strict=True
+    )
 
 
 def _project_refund_scope(

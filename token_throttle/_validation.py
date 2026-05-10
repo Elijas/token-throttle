@@ -423,7 +423,11 @@ def resolve_config(
             f"cfg must resolve to PerModelConfig (got {type(r).__name__})"
         )
     resolved = (
-        r if r.model_family else r.model_copy(update={"model_family": model_name})
+        r
+        if r.model_family
+        else PerModelConfig.model_validate(
+            {**r.model_dump(), "model_family": model_name}, strict=True
+        )
     )
     model_family = resolved.get_model_family()
     if ":" in model_family:
