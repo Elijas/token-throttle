@@ -19,15 +19,23 @@ loguru release renaming ``.log()``) surfaces as a clear ``AttributeError``
 at the call site instead of being masked by a stale poisoned reference.
 """
 
+from __future__ import annotations
+
+import asyncio
+import concurrent.futures
+import contextlib
 import inspect
 import logging
 import os
-from typing import Protocol, runtime_checkable
+import threading
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 
 from token_throttle._interfaces._callable_utils import is_async_callable
-from token_throttle._interfaces._models import Capacities, FrozenUsage
+
+if TYPE_CHECKING:
+    from token_throttle._interfaces._models import Capacities, FrozenUsage
 
 # ---------------------------------------------------------------------------
 # Auto-detect loguru vs stdlib logging
@@ -239,6 +247,105 @@ def _log(level: str, message: str, **kwargs) -> None:
             _stdlib_logger.log(stdlib_level, "%s | %s", message, extra)
         else:
             _stdlib_logger.log(stdlib_level, message)
+
+
+def _log_callback_timeout(timeout: float) -> None:
+    _stdlib_logger.warning(
+        "Rate limiter callback exceeded %.3fs timeout; skipping", timeout
+    )
+
+
+async def _invoke_async_callback_with_timeout(
+    callback,
+    callback_timeout: float | None,
+    **kwargs,
+) -> None:
+    if callback_timeout is None:
+        await callback(**kwargs)
+        return
+    try:
+        await asyncio.wait_for(callback(**kwargs), timeout=callback_timeout)
+    except TimeoutError:
+        _log_callback_timeout(callback_timeout)
+
+
+def _invoke_sync_callback_with_timeout(
+    callback,
+    callback_timeout: float | None,
+    **kwargs,
+) -> None:
+    if callback_timeout is None:
+        callback(**kwargs)
+        return
+
+    future: concurrent.futures.Future[None] = concurrent.futures.Future()
+
+    def run_callback() -> None:
+        try:
+            callback(**kwargs)
+        except BaseException as exc:  # noqa: BLE001 - re-raised on caller thread below
+            with contextlib.suppress(concurrent.futures.InvalidStateError):
+                future.set_exception(exc)
+        else:
+            with contextlib.suppress(concurrent.futures.InvalidStateError):
+                future.set_result(None)
+
+    thread = threading.Thread(target=run_callback, daemon=True)
+    thread.start()
+    try:
+        future.result(timeout=callback_timeout)
+    except concurrent.futures.TimeoutError:
+        _log_callback_timeout(callback_timeout)
+
+
+def with_callback_timeout(
+    callbacks: RateLimiterCallbacks | None,
+    timeout: float | None,
+) -> RateLimiterCallbacks | None:
+    if callbacks is None:
+        return None
+
+    def wrap(callback):
+        if callback is None:
+            return None
+
+        async def wrapped(**kwargs) -> None:
+            await _invoke_async_callback_with_timeout(callback, timeout, **kwargs)
+
+        return wrapped
+
+    return RateLimiterCallbacks(
+        on_wait_start=wrap(callbacks.on_wait_start),
+        after_wait_end_consumption=wrap(callbacks.after_wait_end_consumption),
+        on_capacity_consumed=wrap(callbacks.on_capacity_consumed),
+        on_capacity_refunded=wrap(callbacks.on_capacity_refunded),
+        on_missing_consumption_data=wrap(callbacks.on_missing_consumption_data),
+    )
+
+
+def with_sync_callback_timeout(
+    callbacks: SyncRateLimiterCallbacks | None,
+    timeout: float | None,
+) -> SyncRateLimiterCallbacks | None:
+    if callbacks is None:
+        return None
+
+    def wrap(callback):
+        if callback is None:
+            return None
+
+        def wrapped(**kwargs) -> None:
+            _invoke_sync_callback_with_timeout(callback, timeout, **kwargs)
+
+        return wrapped
+
+    return SyncRateLimiterCallbacks(
+        on_wait_start=wrap(callbacks.on_wait_start),
+        after_wait_end_consumption=wrap(callbacks.after_wait_end_consumption),
+        on_capacity_consumed=wrap(callbacks.on_capacity_consumed),
+        on_capacity_refunded=wrap(callbacks.on_capacity_refunded),
+        on_missing_consumption_data=wrap(callbacks.on_missing_consumption_data),
+    )
 
 
 # ---------------------------------------------------------------------------
