@@ -266,6 +266,16 @@ class RateLimiterBackend(ABC):
         return new_backend
 
 
+def backend_uses_default_prepare_reconfigured_backend(
+    backend: RateLimiterBackend,
+) -> bool:
+    """Return whether *backend* inherits the ABC's no-op reconfiguration hook."""
+    return (
+        type(backend).prepare_reconfigured_backend
+        is RateLimiterBackend.prepare_reconfigured_backend
+    )
+
+
 class BaseRateLimiter(ABC):
     @abstractmethod
     async def acquire_capacity(
@@ -405,6 +415,16 @@ class SyncRateLimiterBackend(ABC):
         live state into the rebuilt backend.
         """
         return new_backend
+
+
+def sync_backend_uses_default_prepare_reconfigured_backend(
+    backend: SyncRateLimiterBackend,
+) -> bool:
+    """Return whether *backend* inherits the ABC's no-op reconfiguration hook."""
+    return (
+        type(backend).prepare_reconfigured_backend
+        is SyncRateLimiterBackend.prepare_reconfigured_backend
+    )
 
 
 class SyncRateLimiterBackendBuilderInterface(ABC):

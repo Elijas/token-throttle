@@ -17,6 +17,7 @@ from token_throttle._interfaces._interfaces import (
     PerModelConfigGetter,
     RateLimiterBackend,
     RateLimiterBackendBuilderInterface,
+    backend_uses_default_prepare_reconfigured_backend,
 )
 from token_throttle._interfaces._models import (
     BucketId,
@@ -914,6 +915,14 @@ class RateLimiter(BaseRateLimiter):
                     f"Callable config for model family '{model_family}' changed metric set, "
                     f"but backend {type(old_backend).__name__} does not support "
                     "metric-set changes."
+                )
+            if backend_uses_default_prepare_reconfigured_backend(old_backend):
+                raise RuntimeError(
+                    f"Custom backend {type(old_backend).__name__} claims "
+                    "supports_metric_set_change=True but did not override "
+                    "prepare_reconfigured_backend — silent state drop would occur. "
+                    "Override prepare_reconfigured_backend to handle metric-set "
+                    "changes correctly."
                 )
 
             warnings.warn(
