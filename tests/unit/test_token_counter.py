@@ -53,6 +53,11 @@ class TestOpenAIUsageCounterWithInput:
         with pytest.raises(ValueError, match="must be of type str"):
             counter("gpt-4", input=123)
 
+    def test_bytes_input_error_names_actual_type(self):
+        counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
+        with pytest.raises(ValueError, match=r"got bytes"):
+            counter("gpt-4", input=b"hello")
+
     def test_input_single_item_string_list(self):
         """input=["hello"] is valid per the OpenAI Embeddings API."""
         counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
@@ -887,6 +892,11 @@ class TestMalformedMessages:
         counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
         with pytest.raises(ValueError, match="All messages must be dicts"):
             counter("gpt-4", messages=[{"role": "user", "content": "hi"}, "bad"])
+
+    def test_tuple_messages_error_names_outer_container(self):
+        counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
+        with pytest.raises(ValueError, match=r"messages must be a list.*got tuple"):
+            counter("gpt-4", messages=({"role": "user", "content": "hi"},))
 
 
 class TestNumericValuesInMessages:

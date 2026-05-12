@@ -275,30 +275,30 @@ class TestSetMaxCapacity:
         assert bucket.max_capacity == 50.0
 
 
-class TestSleepIntervalZero:
-    """sleep_interval=0 must be respected, not treated as falsy."""
+class TestSleepIntervalValidation:
+    """sleep_interval must be a positive finite poll interval."""
 
-    def test_memory_backend_sleep_interval_zero(self):
+    def test_memory_backend_sleep_interval_zero_rejected(self):
         quota = Quota(metric="requests", limit=100, per_seconds=60)
         config = PerModelConfig(model_family="test", quotas=UsageQuotas([quota]))
         bucket = make_bucket(limit=100, per_seconds=60)
-        backend = MemoryBackend(
-            buckets=[bucket],
-            limit_config=config,
-            sleep_interval=0,
-        )
-        assert backend._sleep_interval == 0
+        with pytest.raises(ValueError, match="sleep_interval"):
+            MemoryBackend(
+                buckets=[bucket],
+                limit_config=config,
+                sleep_interval=0,
+            )
 
-    def test_sync_memory_backend_sleep_interval_zero(self):
+    def test_sync_memory_backend_sleep_interval_zero_rejected(self):
         quota = Quota(metric="requests", limit=100, per_seconds=60)
         config = PerModelConfig(model_family="test", quotas=UsageQuotas([quota]))
         bucket = make_bucket(limit=100, per_seconds=60)
-        backend = SyncMemoryBackend(
-            buckets=[bucket],
-            limit_config=config,
-            sleep_interval=0,
-        )
-        assert backend._sleep_interval == 0
+        with pytest.raises(ValueError, match="sleep_interval"):
+            SyncMemoryBackend(
+                buckets=[bucket],
+                limit_config=config,
+                sleep_interval=0,
+            )
 
 
 class TestMaxCapacityGuard:
