@@ -4,6 +4,7 @@ import warnings
 
 from frozendict import frozendict
 
+from token_throttle._interfaces._callable_utils import is_async_callable
 from token_throttle._interfaces._callbacks import (
     RateLimiterCallbacks,
     with_callback_timeout,
@@ -66,6 +67,14 @@ def _raise_if_set_max_capacity_args_look_swapped(
             "set_max_capacity expects (model, metric, per_seconds, value); "
             "the first two arguments look swapped."
         )
+
+
+def _missing_model_parameter_error(kwargs: collections.abc.Mapping[str, object]) -> str:
+    aliases = ("model_name", "modelName", "model_id", "modelId")
+    for alias in aliases:
+        if alias in kwargs:
+            return f"'model' parameter is required; did you mean 'model' instead of '{alias}'?"
+    return "'model' parameter is required"
 
 
 def _quotas_snapshot(cfg: PerModelConfig) -> dict[tuple[str, int], float]:
@@ -321,6 +330,8 @@ class RateLimiter(BaseRateLimiter):
         callbacks: RateLimiterCallbacks | None = None,
         callback_timeout: float | None = 30.0,
     ):
+        if callable(cfg) and is_async_callable(cfg):
+            raise ValueError("cfg must be a synchronous PerModelConfig getter")
         self._backend = backend
         self._lock = asyncio.Lock()
         callback_timeout = validate_timeout(callback_timeout)
@@ -427,7 +438,7 @@ class RateLimiter(BaseRateLimiter):
         timeout = validate_timeout(timeout)
         extra_usage = validate_extra_usage(extra_usage)
         if "model" not in kwargs:
-            raise ValueError("'model' parameter is required")
+            raise ValueError(_missing_model_parameter_error(kwargs))
         model = kwargs["model"]
 
         limit_config = self._config_getter(model)
@@ -586,6 +597,9 @@ class RateLimiter(BaseRateLimiter):
         self._validated_model_family(model, limit_config)
         self._validate_shared_model_family_config(model, limit_config)
         if limit_config.is_unlimited:
+            # Audited 2026-05 (R4 L05:I11): set_max_capacity rejects
+            # unlimited configs before backend lookup, preserving the
+            # semantic "unlimited model" error instead of "no backend".
             raise ValueError("Cannot set max capacity: model has unlimited quotas")
         model_family = limit_config.get_model_family()
         async with self._lock:

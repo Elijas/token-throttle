@@ -129,9 +129,11 @@ class OpenAIUsageCounter:
 
         if payload_key == "messages":
             messages = request["messages"]
-            if not isinstance(messages, list) or not all(
-                isinstance(m, dict) for m in messages
-            ):
+            if not isinstance(messages, list):
+                raise ValueError(
+                    f"messages must be a list of dicts (got {type(messages).__name__})"
+                )
+            if not all(isinstance(m, dict) for m in messages):
                 raise ValueError("All messages must be dicts")
             tokens = (
                 count_chat_input_tokens(
@@ -202,7 +204,7 @@ def count_structured_input_tokens(
     """Count tokens for OpenAI Responses-style structured input payloads."""
     invalid_error = (
         "The value of 'input' must be of type str or a list/dict of "
-        "structured input items"
+        f"structured input items (got {type(input_).__name__})"
     )
     if isinstance(input_, dict):
         if _looks_like_message(input_):

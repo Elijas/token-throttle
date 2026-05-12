@@ -1,11 +1,14 @@
 """Shared token-bucket capacity math — used by all backends (Redis, in-memory, sync, async)."""
 
 import math
+import time
 import warnings
 
 from pydantic import BaseModel
 
 _backward_clock_warned: bool = False
+_backward_clock_last_warning_at: float | None = None
+_BACKWARD_CLOCK_WARNING_INTERVAL_SECONDS = 300.0
 MIN_MAX_CAPACITY = 1e-9
 
 
@@ -124,13 +127,22 @@ def calculate_capacity(  # noqa: PLR0913
 
     time_passed = current_time - last_checked
     if time_passed < 0:
-        global _backward_clock_warned  # noqa: PLW0603
-        if not _backward_clock_warned:
+        global _backward_clock_last_warning_at, _backward_clock_warned  # noqa: PLW0603
+        now = time.monotonic()
+        should_warn = (
+            not _backward_clock_warned
+            or _backward_clock_last_warning_at is None
+            or now - _backward_clock_last_warning_at
+            >= _BACKWARD_CLOCK_WARNING_INTERVAL_SECONDS
+        )
+        if should_warn:
             _backward_clock_warned = True
+            _backward_clock_last_warning_at = now
             warnings.warn(
                 f"Negative time_passed ({time_passed:.4f}s) detected in bucket "
                 f"'{bucket_id}' — likely NTP clock correction. "
-                f"Clamping to 0. Further backward-clock warnings suppressed.",
+                "Clamping to 0. Further backward-clock warnings suppressed "
+                f"for {_BACKWARD_CLOCK_WARNING_INTERVAL_SECONDS:.0f}s.",
                 RuntimeWarning,
                 stacklevel=2,
             )

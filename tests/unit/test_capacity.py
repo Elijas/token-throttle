@@ -48,6 +48,7 @@ class TestClockSkewBehavior:
     def test_negative_time_passed_clamps_to_zero(self):
         """When current_time < last_checked, time_passed is clamped to 0."""
         _cap._backward_clock_warned = False
+        _cap._backward_clock_last_warning_at = None
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
             result = calculate_capacity(
@@ -63,6 +64,28 @@ class TestClockSkewBehavior:
         assert result.is_fresh_start is False
         assert len(w) == 1
         assert "Negative time_passed" in str(w[0].message)
+
+    def test_negative_time_warning_is_throttled_not_global_once(self, monkeypatch):
+        """Backward-clock warnings re-emit after the throttle window."""
+        _cap._backward_clock_warned = False
+        _cap._backward_clock_last_warning_at = None
+        ticks = iter([0.0, 1.0, 301.0])
+        monkeypatch.setattr(_cap.time, "monotonic", lambda: next(ticks))
+
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            for _ in range(3):
+                calculate_capacity(
+                    last_checked=100.0,
+                    outdated_capacity=50.0,
+                    current_time=90.0,
+                    max_capacity=100.0,
+                    rate_per_sec=1.0,
+                    bucket_id="test:clock-skew",
+                )
+
+        assert len(w) == 2
+        assert all("Negative time_passed" in str(warning.message) for warning in w)
 
     def test_clock_ahead_host_causes_premature_refill(self):
         """A clock-ahead host sees inflated time_passed, fully refilling a drained bucket.

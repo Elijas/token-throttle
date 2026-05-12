@@ -1,5 +1,6 @@
 import asyncio
 import time
+import warnings
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -68,6 +69,40 @@ def test_default_callback_timeout_is_thirty_seconds():
 
     assert limiter._callback_timeout == 30.0
     assert sync_limiter._callback_timeout == 30.0
+
+
+async def test_async_callback_warning_filter_error_does_not_escape(caplog):
+    async def on_capacity_consumed(**_kwargs) -> None:
+        raise RuntimeError("callback boom")
+
+    limiter = RateLimiter(
+        _config(),
+        backend=MemoryBackendBuilder(),
+        callbacks=RateLimiterCallbacks(on_capacity_consumed=on_capacity_consumed),
+    )
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        await limiter.acquire_capacity({"requests": 1}, model="gpt-test")
+
+    assert "callback boom" in caplog.text
+
+
+def test_sync_callback_warning_filter_error_does_not_escape(caplog):
+    def on_capacity_consumed(**_kwargs) -> None:
+        raise RuntimeError("callback boom")
+
+    limiter = SyncRateLimiter(
+        _config(),
+        backend=SyncMemoryBackendBuilder(),
+        callbacks=SyncRateLimiterCallbacks(on_capacity_consumed=on_capacity_consumed),
+    )
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        limiter.acquire_capacity({"requests": 1}, model="gpt-test")
+
+    assert "callback boom" in caplog.text
 
 
 async def test_acquire_timeout_bounds_capacity_wait_not_backend_latency():

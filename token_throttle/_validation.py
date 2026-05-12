@@ -148,9 +148,14 @@ def _validate_usage_mapping(
         raise ValueError(  # noqa: TRY004
             f"{mapping_label} must be a mapping (got {type(usage).__name__})"
         )
-    if set(usage) != expected_keys:
+    usage_keys = set(usage)
+    if usage_keys != expected_keys:
+        missing = sorted(expected_keys - usage_keys)
+        extra = sorted(usage_keys - expected_keys)
         raise ValueError(
-            f"Usage keys {set(usage)} do not match {expected_keys_label} {expected_keys}",
+            f"Usage keys do not match {expected_keys_label}: "
+            f"missing={missing}, extra={extra}. "
+            f"Usage keys={sorted(usage_keys)}, {expected_keys_label}={sorted(expected_keys)}",
         )
     for metric, amount_ in usage.items():
         amount = _coerce_usage_value(
@@ -269,6 +274,29 @@ def validate_timeout(timeout: object) -> float | None:
     if timeout_value < 0:
         raise ValueError(f"timeout must be non-negative or None (got {timeout!r})")
     return timeout_value
+
+
+def validate_sleep_interval(sleep_interval: object) -> float | None:
+    """Validate backend poll sleep intervals."""
+    if sleep_interval is None:
+        return None
+    if _is_bool_like(sleep_interval):
+        raise ValueError("sleep_interval must not be a boolean")
+    if not isinstance(sleep_interval, (int, float)):
+        raise ValueError(  # noqa: TRY004 - public validators raise ValueError.
+            f"sleep_interval must be finite and greater than 0 (got {sleep_interval!r})"
+        )
+    try:
+        sleep_interval_value = float(sleep_interval)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"sleep_interval must be finite and greater than 0 (got {sleep_interval!r})"
+        ) from exc
+    if not math.isfinite(sleep_interval_value) or sleep_interval_value <= 0:
+        raise ValueError(
+            f"sleep_interval must be finite and greater than 0 (got {sleep_interval!r})"
+        )
+    return sleep_interval_value
 
 
 def validate_max_capacity_value(value: object) -> float:

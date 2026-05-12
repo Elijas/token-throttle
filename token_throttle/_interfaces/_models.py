@@ -176,8 +176,10 @@ class UsageQuotas:
             quota.metric in self._metrics
             and quota.per_seconds in self._metrics[quota.metric]
         ):
+            existing = self._metrics[quota.metric][quota.per_seconds]
             raise ValueError(
-                f"Metric {quota.metric} with {quota.per_seconds} seconds already exists.",
+                f"Metric {quota.metric} with {quota.per_seconds} seconds already "
+                f"exists (existing limit={existing.limit}, new limit={quota.limit}).",
             )
         self._metrics[quota.metric][quota.per_seconds] = quota
 

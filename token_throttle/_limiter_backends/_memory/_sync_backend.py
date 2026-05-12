@@ -1,3 +1,4 @@
+import contextlib
 import logging
 import math
 import threading
@@ -17,6 +18,7 @@ from token_throttle._interfaces._models import Capacities, FrozenUsage
 from token_throttle._validation import (
     validate_backend_refund_usage_for_bucket_ids,
     validate_backend_usage,
+    validate_sleep_interval,
     validate_timeout,
 )
 
@@ -32,7 +34,7 @@ class SyncMemoryBackendBuilder(SyncRateLimiterBackendBuilderInterface):
         sleep_interval: float | None = None,
     ) -> None:
         super().__init__()
-        self._sleep_interval = sleep_interval
+        self._sleep_interval = validate_sleep_interval(sleep_interval)
 
     def build(
         self,
@@ -73,7 +75,9 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
         self._buckets = buckets
         self._condition = threading.Condition()
         self._sleep_interval: float = (
-            self.DEFAULT_SLEEP_INTERVAL if sleep_interval is None else sleep_interval
+            self.DEFAULT_SLEEP_INTERVAL
+            if sleep_interval is None
+            else validate_sleep_interval(sleep_interval)
         )
         self._callbacks = callbacks
         self._limit_config = limit_config
@@ -619,6 +623,8 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
 
         Audited 2026-05 (R4 L03): exception ladder verified parity-clean across
         all 4 _invoke_callback_safe implementations.
+        Audited 2026-05 (R4 L12:C03): non-group exotic exceptions are swallowed
+        or propagated by design; warning filters must not reopen the leak path.
         """
         try:
             callback(**kwargs)
@@ -626,7 +632,8 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
             raise
         except BaseException as exc:  # noqa: BLE001
             msg = f"Rate limiter callback raised {type(exc).__name__}: {exc}"
-            warnings.warn(msg, RuntimeWarning, stacklevel=3)
+            with contextlib.suppress(Warning):
+                warnings.warn(msg, RuntimeWarning, stacklevel=3)
             _logger.warning(msg)
 
     def _refund_cancelled_consumption(
