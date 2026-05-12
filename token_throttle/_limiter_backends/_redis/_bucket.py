@@ -112,6 +112,11 @@ class RedisBucket:
         Example:
             rate_limiting:gemini/gemini-2.0-flash:requests:1:max_capacity_override
 
+    Legacy override formats are intentionally not migrated because they were
+    unanchored and cannot be safely applied after a config change. Era 1
+    ``:max_capacity`` keys and Era 2 bare-numeric / unanchored JSON values are
+    logged and ignored; operators should re-set runtime overrides after upgrade.
+
     Static quota limits come from the current ``PerModelConfig`` in each process.
     Only explicit runtime overrides from ``set_max_capacity()`` are persisted in
     Redis so stale static config from an old deployment cannot pin future
@@ -131,6 +136,8 @@ class RedisBucket:
         quota: Quota,
         limit_config: PerModelConfig,
         redis_client: redis.asyncio.Redis,
+        *,
+        override_ttl_seconds: int | None = None,
     ):
         self.usage_metric = quota.metric
         self.per_seconds = validate_per_seconds(quota.per_seconds)
@@ -144,6 +151,9 @@ class RedisBucket:
         self._max_capacity_cached: float | None = None
         self._max_capacity_cache_populated: bool = False
         self._max_capacity_cache_time: float = 0.0
+        self._override_ttl_seconds = self._validate_override_ttl_seconds(
+            override_ttl_seconds
+        )
 
         self._redis = redis_client
         # Initialised from quota.limit; corrected on the first override refresh.
@@ -155,6 +165,7 @@ class RedisBucket:
         self._capacity_key = f"{self.full_redis_key}:capacity"
         self._lock_key = f"{self.full_redis_key}:lock"
         self._max_capacity_key = f"{self.full_redis_key}:max_capacity_override"
+        self._legacy_max_capacity_key = f"{self.full_redis_key}:max_capacity"
 
     @property
     def configured_max_capacity(self) -> float:
@@ -239,6 +250,54 @@ class RedisBucket:
             return None
         return parsed
 
+    @staticmethod
+    def _validate_override_ttl_seconds(value: object) -> int | None:
+        if value is None:
+            return None
+        if type(value) is bool or not isinstance(value, int):
+            raise TypeError("override_ttl_seconds must be an int number of seconds")
+        if value <= 0:
+            raise ValueError("override_ttl_seconds must be greater than 0")
+        return value
+
+    def _handle_corrupt_override(self, reason: str, *, raw_value: object) -> None:
+        _logger.warning(
+            "Ignoring corrupt Redis max_capacity override for bucket %s at key %s: "
+            "%s (raw=%r). Treating it as missing override.",
+            self.full_redis_key,
+            self._max_capacity_key,
+            reason,
+            raw_value,
+        )
+
+    def _handle_legacy_override(
+        self,
+        era: str,
+        reason: str,
+        *,
+        key: str | None = None,
+        raw_value: object,
+    ) -> None:
+        _logger.warning(
+            "Ignoring legacy Redis max_capacity override for bucket %s at key %s: "
+            "%s format detected (%s, raw=%r). Re-set the override after upgrade "
+            "to write the current anchored format.",
+            self.full_redis_key,
+            key if key is not None else self._max_capacity_key,
+            era,
+            reason,
+            raw_value,
+        )
+
+    def handle_legacy_max_capacity_key(self, raw_value: object) -> None:
+        if raw_value is not None:
+            self._handle_legacy_override(
+                "Era 1",
+                "old :max_capacity key path",
+                key=self._legacy_max_capacity_key,
+                raw_value=raw_value,
+            )
+
     def _deserialize_max_capacity_override(self, raw_value: object) -> float | None:
         if raw_value is None:
             return None
@@ -256,40 +315,68 @@ class RedisBucket:
         if isinstance(raw_value, bytes):
             try:
                 decoded = raw_value.decode()
-            except UnicodeDecodeError as exc:
-                raise MaxCapacityOverrideParseError(
-                    "Redis max_capacity override is not valid UTF-8"
-                ) from exc
+            except UnicodeDecodeError:
+                self._handle_corrupt_override("not valid UTF-8", raw_value=raw_value)
+                return None
 
         if isinstance(decoded, str):
             try:
                 decoded = json.loads(decoded)
-            except json.JSONDecodeError as exc:
-                raise MaxCapacityOverrideParseError(
-                    "Redis max_capacity override is not valid JSON"
-                ) from exc
+            except json.JSONDecodeError:
+                self._handle_corrupt_override("not valid JSON", raw_value=raw_value)
+                return None
 
         if not isinstance(decoded, dict):
-            raise MaxCapacityOverrideParseError(
-                "Redis max_capacity override JSON must decode to an object"
+            if self._parse_positive_finite_value(decoded) is not None:
+                self._handle_legacy_override(
+                    "Era 2",
+                    "bare numeric override without configured_max_capacity anchor",
+                    raw_value=raw_value,
+                )
+                return None
+            self._handle_corrupt_override(
+                "JSON must decode to an object", raw_value=raw_value
             )
+            return None
 
         override_value = self._parse_positive_finite_value(
             decoded.get(self._OVERRIDE_LIMIT_KEY)
         )
         if override_value is None:
-            raise MaxCapacityOverrideParseError(
-                "Redis max_capacity override has invalid override_max_capacity"
+            self._handle_corrupt_override(
+                "invalid override_max_capacity", raw_value=raw_value
             )
+            return None
 
         configured_limit = self._parse_positive_finite_value(
             decoded.get(self._CONFIGURED_LIMIT_KEY)
         )
         if configured_limit is None:
-            raise MaxCapacityOverrideParseError(
-                "Redis max_capacity override has invalid configured_max_capacity"
+            if self._CONFIGURED_LIMIT_KEY not in decoded:
+                self._handle_legacy_override(
+                    "Era 2",
+                    "JSON override without configured_max_capacity anchor",
+                    raw_value=raw_value,
+                )
+                return None
+            self._handle_corrupt_override(
+                "invalid configured_max_capacity", raw_value=raw_value
             )
-        if configured_limit != self._max_capacity_default:
+            return None
+        if not math.isclose(
+            configured_limit,
+            self._max_capacity_default,
+            rel_tol=1e-12,
+        ):
+            _logger.warning(
+                "Ignoring Redis max_capacity override for bucket %s at key %s: "
+                "configured_max_capacity anchor %r does not match current "
+                "configured limit %r.",
+                self.full_redis_key,
+                self._max_capacity_key,
+                configured_limit,
+                self._max_capacity_default,
+            )
             return None
         return override_value
 
@@ -322,7 +409,15 @@ class RedisBucket:
                 self._OVERRIDE_LIMIT_KEY: value,
             }
         )
-        await self._redis.set(self._max_capacity_key, payload)
+        await self._redis.set(self._SCHEMA_VERSION_KEY, self._SCHEMA_VERSION, nx=True)
+        if self._override_ttl_seconds is None:
+            await self._redis.set(self._max_capacity_key, payload)
+        else:
+            await self._redis.set(
+                self._max_capacity_key,
+                payload,
+                ex=self._override_ttl_seconds,
+            )
         # Update runtime override cache immediately
         self._set_cached_max_capacity_override(value)
         self._max_capacity_cache_time = time.time()
@@ -468,3 +563,5 @@ class RedisBucket:
 
     _OVERRIDE_LIMIT_KEY = "override_max_capacity"
     _CONFIGURED_LIMIT_KEY = "configured_max_capacity"
+    _SCHEMA_VERSION = "3"
+    _SCHEMA_VERSION_KEY = "rate_limiting:schema_version"

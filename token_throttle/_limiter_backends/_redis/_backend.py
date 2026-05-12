@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import inspect
 import logging
 import math
 import time
@@ -85,15 +86,24 @@ class _RedisLockStack(AsyncExitStack):
 
 
 class RedisBackendBuilder(RateLimiterBackendBuilderInterface):
+    """
+    Build async Redis limiter backends.
+
+    ``override_ttl_seconds`` optionally adds an expiry to runtime max-capacity
+    override keys. The default ``None`` preserves historical no-TTL behavior.
+    """
+
     def __init__(
         self,
         redis_client: redis.asyncio.Redis,
         *,
         sleep_interval: float | None = None,
+        override_ttl_seconds: int | None = None,
     ) -> None:
         super().__init__()
         self._redis = redis_client
         self._sleep_interval = sleep_interval
+        self._override_ttl_seconds = override_ttl_seconds
 
     def build(
         self,
@@ -107,6 +117,7 @@ class RedisBackendBuilder(RateLimiterBackendBuilderInterface):
                 quota=quota,
                 limit_config=cfg,
                 redis_client=self._redis,
+                override_ttl_seconds=self._override_ttl_seconds,
             )
             redis_buckets.append(b)
         return RedisBackend(
@@ -142,11 +153,26 @@ class RedisBackend(RateLimiterBackend):
         self._limit_config = limit_config
         self._usage_metric_names: set[str] = {bucket.usage_metric for bucket in buckets}
         self._local_condition = asyncio.Condition()
+        self._legacy_override_probe_complete = False
 
     def supports_metric_set_change(self) -> bool:
         # Surviving bucket state lives in Redis under stable keys, so a rebuilt
         # backend can safely point at the same buckets.
         return True
+
+    async def _probe_legacy_override_keys_once(
+        self,
+        buckets: tuple[RedisBucket, ...] | list[RedisBucket] | None = None,
+    ) -> None:
+        if self._legacy_override_probe_complete:
+            return
+        target_buckets = self.sorted_buckets if buckets is None else buckets
+        for bucket in target_buckets:
+            result = self._redis.get(bucket._legacy_max_capacity_key)  # noqa: SLF001
+            if inspect.isawaitable(result):
+                result = await result
+            bucket.handle_legacy_max_capacity_key(result)
+        self._legacy_override_probe_complete = True
 
     def _snapshot_buckets(self) -> tuple[RedisBucket, ...]:
         return tuple(getattr(self, "sorted_buckets", ()))
@@ -319,6 +345,7 @@ class RedisBackend(RateLimiterBackend):
         if pipeline is None:
             pipeline = self._redis.pipeline()
         target_buckets = self.sorted_buckets if buckets is None else buckets
+        await self._probe_legacy_override_keys_once(target_buckets)
 
         if current_time is None:
             current_time = await async_server_time(self._redis)
