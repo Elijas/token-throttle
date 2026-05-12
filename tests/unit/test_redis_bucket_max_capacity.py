@@ -135,29 +135,26 @@ class TestGetMaxCapacity:
         assert result == quota.limit
         mock_redis.get.assert_called_once_with(bucket._max_capacity_key)
 
-    def test_handles_invalid_redis_value(self, bucket, mock_redis, quota):
-        """get_max_capacity() returns default for invalid Redis values."""
+    def test_handles_invalid_redis_value(self, bucket, mock_redis):
+        """get_max_capacity() raises for corrupt Redis override values."""
         mock_redis.get.return_value = b"not-a-number"
 
-        result = asyncio.run(bucket.get_max_capacity())
+        with pytest.raises(ValueError, match="not valid JSON"):
+            asyncio.run(bucket.get_max_capacity())
 
-        assert result == quota.limit
-
-    def test_falls_back_on_nan_from_redis(self, bucket, mock_redis, quota):
-        """get_max_capacity() returns default when Redis contains NaN."""
+    def test_raises_on_nan_from_redis(self, bucket, mock_redis):
+        """get_max_capacity() raises when Redis contains non-canonical NaN."""
         mock_redis.get.return_value = b"nan"
 
-        result = asyncio.run(bucket.get_max_capacity())
+        with pytest.raises(ValueError, match="not valid JSON"):
+            asyncio.run(bucket.get_max_capacity())
 
-        assert result == quota.limit
-
-    def test_falls_back_on_inf_from_redis(self, bucket, mock_redis, quota):
-        """get_max_capacity() returns default when Redis contains inf."""
+    def test_raises_on_inf_from_redis(self, bucket, mock_redis):
+        """get_max_capacity() raises when Redis contains non-canonical inf."""
         mock_redis.get.return_value = b"inf"
 
-        result = asyncio.run(bucket.get_max_capacity())
-
-        assert result == quota.limit
+        with pytest.raises(ValueError, match="not valid JSON"):
+            asyncio.run(bucket.get_max_capacity())
 
 
 class TestSetMaxCapacity:
@@ -316,40 +313,30 @@ class TestUpdateMaxCapacityFromResult:
         assert bucket.max_capacity == quota.limit
         assert bucket._rate_per_sec == pytest.approx(float(quota.limit))
 
-    def test_invalid_bytes_falls_back_to_default(self, bucket, quota):
-        """Non-numeric bytes input falls back to default."""
-        bucket.update_max_capacity_from_result(b"not-a-number")
+    def test_invalid_bytes_raise(self, bucket):
+        """Non-canonical bytes input raises."""
+        with pytest.raises(ValueError, match="not valid JSON"):
+            bucket.update_max_capacity_from_result(b"not-a-number")
 
-        assert bucket._max_capacity_cached is None
-        assert bucket.max_capacity == quota.limit
+    def test_nan_raises(self, bucket):
+        """NaN bytes input raises."""
+        with pytest.raises(ValueError, match="not valid JSON"):
+            bucket.update_max_capacity_from_result(b"nan")
 
-    def test_nan_falls_back_to_default(self, bucket, quota):
-        """NaN bytes input falls back to default."""
-        bucket.update_max_capacity_from_result(b"nan")
+    def test_inf_raises(self, bucket):
+        """Inf bytes input raises."""
+        with pytest.raises(ValueError, match="not valid JSON"):
+            bucket.update_max_capacity_from_result(b"inf")
 
-        assert bucket._max_capacity_cached is None
-        assert bucket.max_capacity == quota.limit
+    def test_negative_raises(self, bucket):
+        """Negative bare value raises."""
+        with pytest.raises(ValueError, match="JSON must decode to an object"):
+            bucket.update_max_capacity_from_result(b"-5.0")
 
-    def test_inf_falls_back_to_default(self, bucket, quota):
-        """Inf bytes input falls back to default."""
-        bucket.update_max_capacity_from_result(b"inf")
-
-        assert bucket._max_capacity_cached is None
-        assert bucket.max_capacity == quota.limit
-
-    def test_negative_falls_back_to_default(self, bucket, quota):
-        """Negative value falls back to default."""
-        bucket.update_max_capacity_from_result(b"-5.0")
-
-        assert bucket._max_capacity_cached is None
-        assert bucket.max_capacity == quota.limit
-
-    def test_zero_falls_back_to_default(self, bucket, quota):
-        """Zero value falls back to default (must be > 0)."""
-        bucket.update_max_capacity_from_result(b"0")
-
-        assert bucket._max_capacity_cached is None
-        assert bucket.max_capacity == quota.limit
+    def test_zero_raises(self, bucket):
+        """Zero bare value raises."""
+        with pytest.raises(ValueError, match="JSON must decode to an object"):
+            bucket.update_max_capacity_from_result(b"0")
 
     def test_stale_override_metadata_for_old_config_is_ignored(self, bucket, quota):
         """Fresh processes should ignore overrides written against an old static limit."""
@@ -382,20 +369,17 @@ class TestUpdateMaxCapacityFromResult:
 
         assert bucket._max_capacity_cache_time > 0
 
-    def test_bare_numeric_string_rejected(self, bucket, quota):
+    def test_bare_numeric_string_rejected(self, bucket):
         """Bare numeric strings are rejected — all overrides must use anchored JSON."""
-        bucket.update_max_capacity_from_result(b"15.0")
+        with pytest.raises(ValueError, match="JSON must decode to an object"):
+            bucket.update_max_capacity_from_result(b"15.0")
 
-        assert bucket._max_capacity_cached is None
-        assert bucket.max_capacity == quota.limit
-
-    def test_dict_missing_configured_max_capacity_rejected(self, bucket, quota):
+    def test_dict_missing_configured_max_capacity_rejected(self, bucket):
         """Dict without configured_max_capacity is rejected to prevent anchor bypass."""
         payload = json.dumps({"override_max_capacity": 5.0}).encode()
-        bucket.update_max_capacity_from_result(payload)
 
-        assert bucket._max_capacity_cached is None
-        assert bucket.max_capacity == quota.limit
+        with pytest.raises(ValueError, match="invalid configured_max_capacity"):
+            bucket.update_max_capacity_from_result(payload)
 
     def test_no_redis_call(self, bucket, mock_redis):
         """update_max_capacity_from_result does not call Redis."""

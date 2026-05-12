@@ -242,25 +242,21 @@ class _FakeNumpyBool:
 FAKE_NP_TRUE = _FakeNumpyBool(value=1)
 
 
-class TestNumpyBoolRejectionInValidation:
-    def test_extract_total_tokens_rejects_numpy_bool(self):
+class TestNumpyBoolCoercionInValidation:
+    def test_extract_total_tokens_accepts_duck_typed_numpy_bool(self):
         usage = type("Usage", (), {"total_tokens": FAKE_NP_TRUE})()
-        with pytest.raises(ValueError, match="must not be a boolean"):
-            extract_total_tokens(usage)
+        assert extract_total_tokens(usage) == 1
 
-    def test_validate_timeout_rejects_numpy_bool(self):
-        with pytest.raises(ValueError, match="must not be a boolean"):
-            validate_timeout(FAKE_NP_TRUE)
+    def test_validate_timeout_accepts_duck_typed_numpy_bool(self):
+        assert validate_timeout(FAKE_NP_TRUE) == 1.0
 
-    def test_validate_max_capacity_value_rejects_numpy_bool(self):
-        with pytest.raises(ValueError, match="must not be a boolean"):
-            validate_max_capacity_value(FAKE_NP_TRUE)
+    def test_validate_max_capacity_value_accepts_duck_typed_numpy_bool(self):
+        assert validate_max_capacity_value(FAKE_NP_TRUE) == 1.0
 
-    def test_validate_per_seconds_rejects_numpy_bool(self):
-        with pytest.raises(ValueError, match="must not be a boolean"):
+    def test_validate_per_seconds_rejects_non_numeric_duck_typed_numpy_bool(self):
+        with pytest.raises(ValueError, match="positive integer"):
             validate_per_seconds(FAKE_NP_TRUE)
 
-    def test_merge_extra_usage_rejects_numpy_bool(self):
+    def test_merge_extra_usage_accepts_duck_typed_numpy_bool(self):
         usage = frozendict({"tokens": 100.0})
-        with pytest.raises(ValueError, match="must not be a boolean"):
-            merge_extra_usage(usage, {"tokens": FAKE_NP_TRUE})
+        assert merge_extra_usage(usage, {"tokens": FAKE_NP_TRUE})["tokens"] == 101.0

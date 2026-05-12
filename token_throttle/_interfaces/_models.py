@@ -20,10 +20,8 @@ Lives in this module (not ``_validation``) so ``CapacityReservation``'s
 
 
 def _is_bool_like(value: object) -> bool:
-    """Reject Python bool and numpy.bool_ (which is not a subclass of bool)."""
-    if isinstance(value, bool):
-        return True
-    return hasattr(value, "dtype") and str(getattr(value, "dtype", "")) == "bool"
+    """Reject Python bool values without duck-typing numeric lookalikes."""
+    return type(value) is bool
 
 
 class SecondsIn(int, Enum):

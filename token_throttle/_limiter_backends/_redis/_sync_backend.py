@@ -34,7 +34,12 @@ from token_throttle._validation import (
 )
 
 from ._server_time import sync_server_time
-from ._sync_bucket import SyncRedisBucket
+from ._sync_bucket import (
+    SyncRedisBucket,
+    _normalize_bucket_state_pair,
+    _raise_pipeline_response_error,
+    _validate_pipeline_results,
+)
 
 _logger = logging.getLogger("token_throttle")
 
@@ -274,24 +279,31 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         for bucket in target_buckets:
             pipeline.get(bucket._max_capacity_key)  # noqa: SLF001
 
-        # Execute the pipeline to get all results
-        results = pipeline.execute()
-
         num_buckets = len(target_buckets)
         expected_results = num_buckets * _PIPELINE_CMDS_PER_BUCKET + num_buckets
-        if len(results) != expected_results:
-            raise RuntimeError(
-                f"Pipeline returned {len(results)} results, expected {expected_results} "
-                f"({num_buckets} buckets x {_PIPELINE_CMDS_PER_BUCKET} cmds + "
-                f"{num_buckets} max_capacity GETs)"
+        try:
+            results = pipeline.execute()
+        except redis.exceptions.ResponseError as exc:
+            _raise_pipeline_response_error(
+                "SyncRedisBackend._get_capacities_unsafe", exc
             )
+        results = _validate_pipeline_results(
+            results,
+            context="SyncRedisBackend._get_capacities_unsafe",
+            expected_count=expected_results,
+        )
 
         new_capacities: dict[tuple[str, int], float] = {}
         fresh_start_buckets: list[SyncRedisBucket] = []
         for i, bucket in enumerate(target_buckets):
             idx = i * _PIPELINE_CMDS_PER_BUCKET
-            last_checked = results[idx + SyncRedisBucket.PIPELINE_LAST_CHECKED_OFFSET]
-            capacity = results[idx + SyncRedisBucket.PIPELINE_CAPACITY_OFFSET]
+            last_checked, capacity = _normalize_bucket_state_pair(
+                results[idx + SyncRedisBucket.PIPELINE_LAST_CHECKED_OFFSET],
+                results[idx + SyncRedisBucket.PIPELINE_CAPACITY_OFFSET],
+                context=(
+                    f"SyncRedisBackend._get_capacities_unsafe({bucket.full_redis_key})"
+                ),
+            )
             # max_capacity GETs come after all the per-bucket command pairs
             bucket.update_max_capacity_from_result(
                 results[num_buckets * _PIPELINE_CMDS_PER_BUCKET + i]
@@ -349,7 +361,12 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                 execute=False,
                 allow_negative=allow_negative,
             )
-        pipeline.execute()
+        try:
+            pipeline.execute()
+        except redis.exceptions.ResponseError as exc:
+            _raise_pipeline_response_error(
+                "SyncRedisBackend._set_capacities_unsafe", exc
+            )
 
     def _bucket_ids(
         self,
@@ -885,19 +902,55 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         pipeline = self._redis.pipeline()
         pipeline.get(bucket._last_checked_key)  # noqa: SLF001
         pipeline.get(bucket._capacity_key)  # noqa: SLF001
-        last_checked_raw, stored_raw = pipeline.execute()
+        try:
+            results = pipeline.execute()
+        except redis.exceptions.ResponseError as exc:
+            _raise_pipeline_response_error(
+                "SyncRedisBackend._snapshot_bucket_state", exc
+            )
+        results = _validate_pipeline_results(
+            results,
+            context=f"SyncRedisBackend._snapshot_bucket_state({bucket.full_redis_key})",
+            expected_count=2,
+        )
+        last_checked_raw, stored_raw = _normalize_bucket_state_pair(
+            results[SyncRedisBucket.PIPELINE_LAST_CHECKED_OFFSET],
+            results[SyncRedisBucket.PIPELINE_CAPACITY_OFFSET],
+            context=f"SyncRedisBackend._snapshot_bucket_state({bucket.full_redis_key})",
+        )
         if last_checked_raw is None or stored_raw is None:
             # Partial state (one None) is treated the same as full absence:
             # the bucket will start fresh on the next acquire. This is the
             # correct fallback — anchoring with incomplete data would produce
             # a wrong capacity value.
+            _logger.warning(
+                "Bucket %s: snapshot skipped due to missing Redis state "
+                "(last_checked=%r, capacity=%r).",
+                bucket.full_redis_key,
+                last_checked_raw,
+                stored_raw,
+            )
             return
         try:
             last_checked = float(last_checked_raw)
             stored = float(stored_raw)
         except (TypeError, ValueError):
+            _logger.warning(
+                "Bucket %s: snapshot skipped due to unparseable Redis state "
+                "(last_checked=%r, capacity=%r).",
+                bucket.full_redis_key,
+                last_checked_raw,
+                stored_raw,
+            )
             return
         if not (math.isfinite(last_checked) and math.isfinite(stored)):
+            _logger.warning(
+                "Bucket %s: snapshot skipped due to non-finite Redis state "
+                "(last_checked=%r, capacity=%r).",
+                bucket.full_redis_key,
+                last_checked_raw,
+                stored_raw,
+            )
             return
         time_passed = current_time - last_checked
         if time_passed < 0:

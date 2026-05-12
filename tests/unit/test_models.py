@@ -352,44 +352,41 @@ class TestIsBoolLike:
         assert _is_bool_like(None) is False
 
     def test_fake_numpy_bool_true(self):
-        assert _is_bool_like(FAKE_NP_TRUE) is True
+        assert _is_bool_like(FAKE_NP_TRUE) is False
 
     def test_fake_numpy_bool_false(self):
-        assert _is_bool_like(FAKE_NP_FALSE) is True
+        assert _is_bool_like(FAKE_NP_FALSE) is False
 
     def test_real_numpy_bool(self):
         np = pytest.importorskip("numpy")
-        assert _is_bool_like(np.bool_(1)) is True
-        assert _is_bool_like(np.bool_(0)) is True
+        assert _is_bool_like(np.bool_(1)) is False
+        assert _is_bool_like(np.bool_(0)) is False
 
     def test_numpy_int_not_bool_like(self):
         np = pytest.importorskip("numpy")
         assert _is_bool_like(np.int64(1)) is False
 
 
-class TestNumpyBoolRejection:
-    """numpy.bool_ must be rejected everywhere Python bool is rejected."""
+class TestNumpyBoolCoercion:
+    """Only exact Python bool is treated as bool-like."""
 
-    def test_quota_limit_rejects_numpy_bool(self):
-        with pytest.raises(ValidationError, match="must not be a boolean"):
-            Quota(metric="tokens", limit=FAKE_NP_TRUE)
+    def test_quota_limit_accepts_duck_typed_numpy_bool(self):
+        assert Quota(metric="tokens", limit=FAKE_NP_TRUE).limit == 1.0
 
-    def test_quota_per_seconds_rejects_numpy_bool(self):
-        with pytest.raises(ValidationError, match="must not be a boolean"):
+    def test_quota_per_seconds_rejects_non_numeric_duck_typed_numpy_bool(self):
+        with pytest.raises(ValidationError, match="per_seconds must be int or float"):
             Quota(metric="tokens", limit=100.0, per_seconds=FAKE_NP_TRUE)
 
-    def test_coerce_usage_value_rejects_numpy_bool(self):
-        with pytest.raises(ValueError, match="must not be a boolean"):
-            _coerce_usage_value("tokens", FAKE_NP_TRUE)
+    def test_coerce_usage_value_accepts_duck_typed_numpy_bool(self):
+        assert _coerce_usage_value("tokens", FAKE_NP_TRUE) == 1.0
 
-    def test_frozen_usage_rejects_numpy_bool_value(self):
-        with pytest.raises(ValueError, match="must not be a boolean"):
-            frozen_usage({"tokens": FAKE_NP_TRUE})
+    def test_frozen_usage_accepts_duck_typed_numpy_bool_value(self):
+        assert frozen_usage({"tokens": FAKE_NP_TRUE})["tokens"] == 1.0
 
-    def test_bucket_ids_per_seconds_rejects_numpy_bool(self):
-        with pytest.raises(TypeError, match="must not be a boolean"):
-            CapacityReservation(
-                usage={"requests": 1.0},
-                model_family="gpt-4o",
-                bucket_ids=[("requests", FAKE_NP_TRUE)],
-            )
+    def test_bucket_ids_per_seconds_accepts_duck_typed_numpy_bool(self):
+        reservation = CapacityReservation(
+            usage={"requests": 1.0},
+            model_family="gpt-4o",
+            bucket_ids=[("requests", FAKE_NP_TRUE)],
+        )
+        assert reservation.bucket_ids == frozenset({("requests", 1)})

@@ -36,7 +36,12 @@ from token_throttle._validation import (
     validate_timeout,
 )
 
-from ._bucket import RedisBucket
+from ._bucket import (
+    RedisBucket,
+    _normalize_bucket_state_pair,
+    _raise_pipeline_response_error,
+    _validate_pipeline_results,
+)
 from ._server_time import async_server_time
 
 _logger = logging.getLogger("token_throttle")
@@ -325,17 +330,17 @@ class RedisBackend(RateLimiterBackend):
         for bucket in target_buckets:
             pipeline.get(bucket._max_capacity_key)  # noqa: SLF001
 
-        # Execute the pipeline to get all results
-        results = await pipeline.execute()
-
         num_buckets = len(target_buckets)
         expected_results = num_buckets * _PIPELINE_CMDS_PER_BUCKET + num_buckets
-        if len(results) != expected_results:
-            raise RuntimeError(
-                f"Pipeline returned {len(results)} results, expected {expected_results} "
-                f"({num_buckets} buckets x {_PIPELINE_CMDS_PER_BUCKET} cmds + "
-                f"{num_buckets} max_capacity GETs)"
-            )
+        try:
+            results = await pipeline.execute()
+        except redis.exceptions.ResponseError as exc:
+            _raise_pipeline_response_error("RedisBackend._get_capacities_unsafe", exc)
+        results = _validate_pipeline_results(
+            results,
+            context="RedisBackend._get_capacities_unsafe",
+            expected_count=expected_results,
+        )
 
         # We're using dict instead of Usage because two different application
         # versions might use the same Redis backend that's not cleaned up
@@ -345,8 +350,11 @@ class RedisBackend(RateLimiterBackend):
         fresh_start_buckets: list[RedisBucket] = []
         for i, bucket in enumerate(target_buckets):
             idx = i * _PIPELINE_CMDS_PER_BUCKET
-            last_checked = results[idx + RedisBucket.PIPELINE_LAST_CHECKED_OFFSET]
-            capacity = results[idx + RedisBucket.PIPELINE_CAPACITY_OFFSET]
+            last_checked, capacity = _normalize_bucket_state_pair(
+                results[idx + RedisBucket.PIPELINE_LAST_CHECKED_OFFSET],
+                results[idx + RedisBucket.PIPELINE_CAPACITY_OFFSET],
+                context=f"RedisBackend._get_capacities_unsafe({bucket.full_redis_key})",
+            )
             # max_capacity GETs come after all the per-bucket command pairs
             bucket.update_max_capacity_from_result(
                 results[num_buckets * _PIPELINE_CMDS_PER_BUCKET + i]
@@ -404,7 +412,10 @@ class RedisBackend(RateLimiterBackend):
                 execute=False,
                 allow_negative=allow_negative,
             )
-        await pipeline.execute()
+        try:
+            await pipeline.execute()
+        except redis.exceptions.ResponseError as exc:
+            _raise_pipeline_response_error("RedisBackend._set_capacities_unsafe", exc)
 
     def _bucket_ids(
         self,
@@ -1120,19 +1131,53 @@ class RedisBackend(RateLimiterBackend):
         pipeline = self._redis.pipeline()
         pipeline.get(bucket._last_checked_key)  # noqa: SLF001
         pipeline.get(bucket._capacity_key)  # noqa: SLF001
-        last_checked_raw, stored_raw = await pipeline.execute()
+        try:
+            results = await pipeline.execute()
+        except redis.exceptions.ResponseError as exc:
+            _raise_pipeline_response_error("RedisBackend._snapshot_bucket_state", exc)
+        results = _validate_pipeline_results(
+            results,
+            context=f"RedisBackend._snapshot_bucket_state({bucket.full_redis_key})",
+            expected_count=2,
+        )
+        last_checked_raw, stored_raw = _normalize_bucket_state_pair(
+            results[RedisBucket.PIPELINE_LAST_CHECKED_OFFSET],
+            results[RedisBucket.PIPELINE_CAPACITY_OFFSET],
+            context=f"RedisBackend._snapshot_bucket_state({bucket.full_redis_key})",
+        )
         if last_checked_raw is None or stored_raw is None:
             # Partial state (one None) is treated the same as full absence:
             # the bucket will start fresh on the next acquire. This is the
             # correct fallback — anchoring with incomplete data would produce
             # a wrong capacity value.
+            _logger.warning(
+                "Bucket %s: snapshot skipped due to missing Redis state "
+                "(last_checked=%r, capacity=%r).",
+                bucket.full_redis_key,
+                last_checked_raw,
+                stored_raw,
+            )
             return
         try:
             last_checked = float(last_checked_raw)
             stored = float(stored_raw)
         except (TypeError, ValueError):
+            _logger.warning(
+                "Bucket %s: snapshot skipped due to unparseable Redis state "
+                "(last_checked=%r, capacity=%r).",
+                bucket.full_redis_key,
+                last_checked_raw,
+                stored_raw,
+            )
             return  # unparseable state — leave as-is; a later write will overwrite.
         if not (math.isfinite(last_checked) and math.isfinite(stored)):
+            _logger.warning(
+                "Bucket %s: snapshot skipped due to non-finite Redis state "
+                "(last_checked=%r, capacity=%r).",
+                bucket.full_redis_key,
+                last_checked_raw,
+                stored_raw,
+            )
             return
         time_passed = current_time - last_checked
         if time_passed < 0:

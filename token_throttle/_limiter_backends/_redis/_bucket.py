@@ -1,7 +1,8 @@
-import contextlib
 import json
 import math
 import time
+import typing
+from collections.abc import Sequence
 
 try:
     import redis.asyncio
@@ -21,6 +22,75 @@ from ._server_time import async_server_time
 
 # Re-export for backwards compatibility
 __all__ = ["CalculatedCapacity", "RedisBucket"]
+
+
+class RedisPipelineResultError(RuntimeError):
+    """Redis pipeline returned an unusable result shape."""
+
+
+def _raise_pipeline_response_error(
+    context: str, exc: redis.exceptions.ResponseError
+) -> typing.NoReturn:
+    raise RedisPipelineResultError(
+        f"Redis pipeline failed at {context}: {exc}"
+    ) from exc
+
+
+def _validate_pipeline_results(
+    results: object,
+    *,
+    context: str,
+    expected_count: int,
+) -> Sequence[object]:
+    if results is None:
+        raise RedisPipelineResultError(
+            f"{context}: pipeline.execute() returned None, expected "
+            f"{expected_count} results"
+        )
+    if not isinstance(results, Sequence) or isinstance(results, (bytes, str)):
+        raise RedisPipelineResultError(
+            f"{context}: pipeline.execute() returned {type(results).__name__}, "
+            f"expected a result sequence"
+        )
+    if len(results) != expected_count:
+        raise RedisPipelineResultError(
+            f"{context}: pipeline returned {len(results)} results, "
+            f"expected {expected_count}"
+        )
+    return results
+
+
+def _validate_bucket_state_result(value: object, *, context: str) -> object:
+    if isinstance(value, BaseException):
+        raise RedisPipelineResultError(
+            f"{context}: Redis returned an error response for bucket state: {value}"
+        )
+    if value is None:
+        return None
+    if type(value) is bool or not isinstance(value, (bytes, str, int, float)):
+        raise RedisPipelineResultError(
+            f"{context}: unexpected bucket-state result type {type(value).__name__}"
+        )
+    return value
+
+
+def _normalize_bucket_state_pair(
+    last_checked: object,
+    capacity: object,
+    *,
+    context: str,
+) -> tuple[object, object]:
+    last_checked = _validate_bucket_state_result(
+        last_checked, context=f"{context} last_checked"
+    )
+    capacity = _validate_bucket_state_result(capacity, context=f"{context} capacity")
+    if last_checked is None or capacity is None:
+        return None, None
+    return last_checked, capacity
+
+
+class MaxCapacityOverrideParseError(ValueError):
+    """Redis max-capacity override exists but is not canonical."""
 
 
 class RedisBucket:
@@ -129,6 +199,8 @@ class RedisBucket:
 
     @staticmethod
     def _parse_positive_finite_value(raw_value: object) -> float | None:
+        if type(raw_value) is bool or not isinstance(raw_value, (int, float)):
+            return None
         try:
             parsed = float(raw_value)
         except (TypeError, ValueError):
@@ -137,39 +209,61 @@ class RedisBucket:
             return None
         return parsed
 
-    def _deserialize_max_capacity_override(
-        self, raw_value: bytes | str | None
-    ) -> float | None:
+    def _deserialize_max_capacity_override(self, raw_value: object) -> float | None:
         if raw_value is None:
             return None
+        if isinstance(raw_value, BaseException):
+            raise MaxCapacityOverrideParseError(
+                "Redis max_capacity override command returned an error response"
+            )
+        if not isinstance(raw_value, (bytes, str, dict)):
+            raise MaxCapacityOverrideParseError(
+                "Redis max_capacity override must be bytes, str, dict, or None "
+                f"(got {type(raw_value).__name__})"
+            )
 
         decoded: object = raw_value
         if isinstance(raw_value, bytes):
-            decoded = raw_value.decode()
+            try:
+                decoded = raw_value.decode()
+            except UnicodeDecodeError as exc:
+                raise MaxCapacityOverrideParseError(
+                    "Redis max_capacity override is not valid UTF-8"
+                ) from exc
 
         if isinstance(decoded, str):
-            with contextlib.suppress(json.JSONDecodeError):
+            try:
                 decoded = json.loads(decoded)
+            except json.JSONDecodeError as exc:
+                raise MaxCapacityOverrideParseError(
+                    "Redis max_capacity override is not valid JSON"
+                ) from exc
 
         if not isinstance(decoded, dict):
-            return None
+            raise MaxCapacityOverrideParseError(
+                "Redis max_capacity override JSON must decode to an object"
+            )
 
         override_value = self._parse_positive_finite_value(
             decoded.get(self._OVERRIDE_LIMIT_KEY)
         )
         if override_value is None:
-            return None
+            raise MaxCapacityOverrideParseError(
+                "Redis max_capacity override has invalid override_max_capacity"
+            )
 
         configured_limit = self._parse_positive_finite_value(
             decoded.get(self._CONFIGURED_LIMIT_KEY)
         )
         if configured_limit is None:
-            return None
+            raise MaxCapacityOverrideParseError(
+                "Redis max_capacity override has invalid configured_max_capacity"
+            )
         if configured_limit != self._max_capacity_default:
             return None
         return override_value
 
-    def update_max_capacity_from_result(self, raw_value: bytes | None) -> None:
+    def update_max_capacity_from_result(self, raw_value: object) -> None:
         """Update the runtime-override cache from a pre-fetched pipeline result."""
         new_value = self._deserialize_max_capacity_override(raw_value)
         self._set_cached_max_capacity_override(new_value)
@@ -269,8 +363,20 @@ class RedisBucket:
         if own_pipeline:
             # Refresh max_capacity cache before calculating
             await self.get_max_capacity()
-            results = await pipeline.execute()
-            last_checked, capacity = results
+            try:
+                results = await pipeline.execute()
+            except redis.exceptions.ResponseError as exc:
+                _raise_pipeline_response_error("RedisBucket.get_capacity", exc)
+            results = _validate_pipeline_results(
+                results,
+                context=f"RedisBucket.get_capacity({self.full_redis_key})",
+                expected_count=2,
+            )
+            last_checked, capacity = _normalize_bucket_state_pair(
+                results[self.PIPELINE_LAST_CHECKED_OFFSET],
+                results[self.PIPELINE_CAPACITY_OFFSET],
+                context=f"RedisBucket.get_capacity({self.full_redis_key})",
+            )
             return self.calculate_capacity(last_checked, capacity, current_time)
         return None
 
@@ -310,7 +416,10 @@ class RedisBucket:
         pipeline.set(self._capacity_key, new_capacity)
 
         if execute:
-            await pipeline.execute()
+            try:
+                await pipeline.execute()
+            except redis.exceptions.ResponseError as exc:
+                _raise_pipeline_response_error("RedisBucket.set_capacity", exc)
 
     def calculate_capacity(
         self,
