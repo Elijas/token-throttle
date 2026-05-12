@@ -43,6 +43,31 @@ from token_throttle._validation import (
 )
 
 
+def _raise_if_set_max_capacity_args_look_swapped(
+    *,
+    model: object,
+    metric: object,
+    config_getter: PerModelConfigGetter,
+) -> None:
+    if not isinstance(model, str) or not isinstance(metric, str):
+        return
+    try:
+        cfg_for_metric_as_model = config_getter(metric)
+    except Exception:  # noqa: BLE001 - best-effort footgun detection only.
+        return
+    if not isinstance(cfg_for_metric_as_model, PerModelConfig):
+        return
+    if cfg_for_metric_as_model.is_unlimited:
+        return
+
+    metrics_for_second_arg = {quota.metric for quota in cfg_for_metric_as_model.quotas}
+    if model in metrics_for_second_arg and metric not in metrics_for_second_arg:
+        raise TypeError(
+            "set_max_capacity expects (model, metric, per_seconds, value); "
+            "the first two arguments look swapped."
+        )
+
+
 def _quotas_snapshot(cfg: PerModelConfig) -> dict[tuple[str, int], float]:
     """Snapshot of quotas for change detection: {(metric, per_seconds): limit}."""
     return {(q.metric, q.per_seconds): q.limit for q in cfg.quotas}
@@ -477,6 +502,11 @@ class RateLimiter(BaseRateLimiter):
         actual_usage: Usage,
         reservation: CapacityReservation,
     ) -> None:
+        if isinstance(actual_usage, CapacityReservation):
+            raise TypeError(
+                "refund_capacity expects (actual_usage, reservation); "
+                "did you mean refund_capacity_from_response?"
+            )
         if is_unlimited_reservation(reservation):
             return
         validate_refund_usage(actual_usage, set(reservation.usage))
@@ -547,6 +577,11 @@ class RateLimiter(BaseRateLimiter):
         metric = validate_metric(metric)
         per_seconds = validate_per_seconds(per_seconds)
         value = validate_max_capacity_value(value)
+        _raise_if_set_max_capacity_args_look_swapped(
+            model=model,
+            metric=metric,
+            config_getter=self._config_getter,
+        )
         limit_config = self._config_getter(model)
         self._validated_model_family(model, limit_config)
         self._validate_shared_model_family_config(model, limit_config)
@@ -734,7 +769,8 @@ class RateLimiter(BaseRateLimiter):
             warnings.warn(
                 f"Callable config for model family '{model_family}' changed metric set "
                 f"(was {sorted(old_snapshot)}, now {sorted(new_snapshot)}). "
-                "Rebuilding backend; consumption state for surviving metrics will be transferred.",
+                "Rebuilding backend; consumption state for surviving metrics will be "
+                "transferred by backends that support it.",
                 UserWarning,
                 stacklevel=2,
             )

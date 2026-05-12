@@ -231,9 +231,17 @@ class RateLimiterBackend(ABC):
 
         The default is ``False`` because rebuilding a backend that keeps its
         state only in local memory will otherwise lose or split accounting.
-        Backends with shared external state (for example Redis) or custom
-        rebuild logic should override this and, when needed, also override
-        :meth:`prepare_reconfigured_backend`.
+
+        Override this to return ``True`` only when metric additions/removals
+        can preserve accounting for surviving buckets. If your backend keeps
+        any live state outside stable shared storage, you must also override
+        :meth:`prepare_reconfigured_backend` to migrate or share that state.
+        Returning ``True`` while inheriting the no-op
+        ``prepare_reconfigured_backend`` can silently reset surviving metrics'
+        consumption state.
+
+        L18 H07 deliberately keeps this default ``False``: flipping it to
+        ``True`` would make naive custom backends opt into silent state loss.
         """
         return False
 
@@ -364,9 +372,17 @@ class SyncRateLimiterBackend(ABC):
 
         The default is ``False`` because rebuilding a backend that keeps its
         state only in local memory will otherwise lose or split accounting.
-        Backends with shared external state (for example Redis) or custom
-        rebuild logic should override this and, when needed, also override
-        :meth:`prepare_reconfigured_backend`.
+
+        Override this to return ``True`` only when metric additions/removals
+        can preserve accounting for surviving buckets. If your backend keeps
+        any live state outside stable shared storage, you must also override
+        :meth:`prepare_reconfigured_backend` to migrate or share that state.
+        Returning ``True`` while inheriting the no-op
+        ``prepare_reconfigured_backend`` can silently reset surviving metrics'
+        consumption state.
+
+        L18 H07 deliberately keeps this default ``False``: flipping it to
+        ``True`` would make naive custom backends opt into silent state loss.
         """
         return False
 

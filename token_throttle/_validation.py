@@ -92,6 +92,12 @@ def extract_total_tokens(usage: object) -> float:
     total_tokens = getattr(usage, "total_tokens", sentinel)
     if total_tokens is sentinel:
         if not isinstance(usage, Mapping):
+            token_attrs = ("prompt_tokens", "completion_tokens")
+            if any(hasattr(usage, attr) for attr in token_attrs):
+                raise ValueError(
+                    "usage object has prompt_tokens/completion_tokens but no "
+                    "total_tokens; sum them manually and use refund_capacity()"
+                )
             raise ValueError(
                 "usage must be an object with total_tokens attribute or a mapping"
             )

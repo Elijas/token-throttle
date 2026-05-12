@@ -1,5 +1,7 @@
 import re
 
+_MIN_FINE_TUNED_MODEL_ID_PARTS = 3
+
 
 def openai_model_family_getter(model: str, /) -> str:
     # Strip provider prefix if present, then collapse date/snapshot suffixes.
@@ -7,9 +9,16 @@ def openai_model_family_getter(model: str, /) -> str:
     # -YYYY-MM-DD (e.g. -2024-04-09), with optional -preview before
     # and/or after the date component.
     # Single/triple-digit version numbers (-1, -002) are preserved.
+    original_model = model
     model = model.removeprefix("openai/")
     if model.startswith("ft:"):
-        model = model.split(":")[1]
+        parts = model.split(":")
+        if len(parts) < _MIN_FINE_TUNED_MODEL_ID_PARTS or not parts[1] or not parts[2]:
+            raise ValueError(
+                f"Malformed fine-tuned model id: {original_model!r}; "
+                "expected 'ft:<base>:<job>...' format"
+            )
+        model = parts[1]
     result = re.sub(
         r"((-preview)?-(?:\d{8}|\d{4}(?:-\d{2}){0,2})(-preview)?|-preview)$",
         "",
