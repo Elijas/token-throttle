@@ -28,7 +28,12 @@ are filtered out before the counter is called.
 
 
 class PerModelConfig(BaseModel):
-    """Configuration for limiting API requests to a model."""
+    """
+    Configuration for limiting API requests to a model.
+
+    Use ``PerModelConfig(quotas=UsageQuotas.unlimited(), ...)`` to disable
+    rate limiting for a model while preserving the normal limiter API.
+    """
 
     quotas: UsageQuotas = Field(
         ...,
@@ -233,12 +238,12 @@ class RateLimiterBackend(ABC):
         state only in local memory will otherwise lose or split accounting.
 
         Override this to return ``True`` only when metric additions/removals
-        can preserve accounting for surviving buckets. If your backend keeps
-        any live state outside stable shared storage, you must also override
-        :meth:`prepare_reconfigured_backend` to migrate or share that state.
-        Returning ``True`` while inheriting the no-op
-        ``prepare_reconfigured_backend`` can silently reset surviving metrics'
-        consumption state.
+        can preserve accounting for surviving buckets. To do so you must
+        satisfy one of two contracts: store live state in stable external
+        storage keyed by metric/window, or override
+        :meth:`prepare_reconfigured_backend` to migrate/share in-process state.
+        Returning ``True`` while inheriting the no-op migration can silently
+        reset surviving metrics' consumption state.
 
         L18 H07 deliberately keeps this default ``False``: flipping it to
         ``True`` would make naive custom backends opt into silent state loss.

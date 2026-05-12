@@ -36,13 +36,15 @@ limiter = create_openai_redis_rate_limiter(
 
 # 1. Reserve capacity (blocks until available)
 request = dict(model="gpt-4.1", messages=[{"role": "user", "content": "Hi"}])
-reservation = await limiter.acquire_capacity_for_request(**request, extra_usage=None)
+reservation = await limiter.acquire_capacity_for_request(**request)
 
 # 2. Make the API call
 response = await client.chat.completions.create(**request)
 
 # 3. Refund unused tokens
 await limiter.refund_capacity_from_response(reservation, response)
+# Or, when you already separated the usage object:
+# await limiter.refund_capacity_from_response(reservation, usage=response.usage)
 ```
 
 ### Any provider (manual usage)
@@ -103,6 +105,20 @@ token-throttle implements a [token bucket](https://en.wikipedia.org/wiki/Token_b
 
 The Redis backend uses sorted locking to prevent deadlocks when acquiring multiple resource buckets simultaneously.
 
+### Reservation lifecycle
+
+A `CapacityReservation` is an internal accounting token, not a durable portable
+credential. Refund it on the same limiter lifetime that issued it, after the API
+call finishes. If your config changes before refund, token-throttle refunds only
+the surviving buckets that still correspond to the reservation; buckets removed
+by a callable-config rebuild are skipped to avoid crediting unrelated capacity.
+
+Unlimited reservations are no-ops on refund. They are trusted in-process
+objects, so do not deserialize, pickle, or accept reservations across trust
+boundaries as proof that a caller was rate-limited. For queue-and-retry
+workflows, reserve immediately before dispatching the external request rather
+than storing reservations in a long-lived queue.
+
 ## Configuration
 
 ### Quotas
@@ -139,6 +155,28 @@ limiter = RateLimiter(get_config, backend=RedisBackendBuilder(redis_client))
 
 Models that share a `model_family` must also share the same live quota definition. If two model names need different limits, give them different `model_family` values instead of reusing one family name.
 
+`model_family` defaults to the request model name. A typo such as
+`"gpt-4o-mini-prod"` therefore creates a distinct family instead of failing
+closed; validate model names in your application if they come from users or
+configuration.
+
+To disable rate limiting for a model while keeping the same API surface, return
+an unlimited config:
+
+```python
+PerModelConfig(
+    quotas=UsageQuotas.unlimited(),
+    model_family="paid-tier",
+)
+```
+
+Unlimited configs still validate direct usage values for `acquire_capacity()`
+but do not require usage keys to match quota names because there are no quotas.
+For `acquire_capacity_for_request()`, a configured `usage_counter` may still run
+for telemetry; any `extra_usage` keys are accepted and then discarded with the
+unlimited reservation. If you toggle a model between limited and unlimited,
+keep `extra_usage` keys compatible with the limited quota metrics.
+
 `OpenAIUsageCounter` handles text-only OpenAI requests. It counts `input`,
 `inputs`, or `messages`, plus prompt-bearing request context such as
 `instructions`, tool/function definitions, and structured output schemas.
@@ -162,6 +200,18 @@ backend = MemoryBackendBuilder()
 ```
 
 Both backends are available in sync (`SyncRedisBackendBuilder`, `SyncMemoryBackendBuilder`) and async variants.
+
+Custom backends implement `RateLimiterBackend` or `SyncRateLimiterBackend`.
+Required operations are capacity wait/consume/refund and `set_max_capacity`.
+Optional extension points include `refund_capacity_for_buckets`,
+`apply_configured_max_capacity`, `supports_metric_set_change`, and
+`prepare_reconfigured_backend`.
+
+Leave `supports_metric_set_change()` as `False` unless bucket additions/removals
+can preserve live state for surviving metrics. To return `True`, either keep
+bucket state in stable external storage keyed by metric/window, or override
+`prepare_reconfigured_backend()` to migrate in-process state into the rebuilt
+backend. Returning `True` with a no-op migration can silently reset accounting.
 
 ### Dynamic rate limits
 
@@ -187,6 +237,13 @@ If a callable config removes a bucket and later re-adds it, the re-added
 bucket starts from the static quota in the current config. Runtime overrides
 from earlier `set_max_capacity()` calls do not survive a remove-and-readd;
 call `set_max_capacity()` again if you want the override restored.
+
+If you want to change the static configured quota, update the callable config
+and let the limiter rebuild on the next acquire/refund. `set_max_capacity()` is
+an explicit runtime override, not a config edit. Config rotations concurrent
+with `set_max_capacity()` are ordered by whichever backend update completes
+last; a later config rebuild resolves back to the static quota unless you
+reapply the override.
 
 ### Timeout
 

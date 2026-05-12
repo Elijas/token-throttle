@@ -53,6 +53,48 @@ is intentionally matching Python's own call-signature convention.
 - `create_loguru_callbacks` / `create_sync_loguru_callbacks` require loguru explicitly and raise `ImportError` if missing.
 - `_models.py` uses `warnings.warn()` for the empty-quota warning — no loguru dependency.
 - `_probe_loguru()` caches its result on first call. If loguru is not installed at import time, the `None` result is cached for the process lifetime. Installing loguru after the first probe will not be detected — restart the process to pick it up.
+- Private escape hatch for tests and unusual plugin loaders: `from token_throttle._interfaces._callbacks import _loguru_cache; _loguru_cache.clear()` forces the next logging call to probe again. This is intentionally not public API.
+
+### Reservation and serialization trust boundary
+
+`CapacityReservation` is trusted in-process state. It is safe to pass between
+your own functions, but it is not a signed or durable authorization token.
+Do not accept pickled, JSON, cloudpickle, dill, or other serialized
+reservations from an untrusted process as proof that capacity was acquired.
+Arrow IPC is less direct because callers must convert back to plain Python
+types before `model_validate()`, but the trust-boundary rule is the same:
+only refund reservations produced inside the trusted limiter workflow.
+
+Reservations should be refunded while the issuing limiter and backend are still
+alive. After callable-config changes, refunds are scoped to bucket ids captured
+at acquire time; removed buckets are not credited back into unrelated future
+metrics.
+
+### Unlimited configs
+
+`UsageQuotas.unlimited()` is the public way to disable limits for a model.
+`PerModelConfig.is_unlimited` is derived from the quota set and is part of the
+model-family signature: models sharing a `model_family` must all be limited or
+all be unlimited with identical quota structure.
+
+Unlimited direct acquires validate numeric values but intentionally do not
+shape-check metric keys because there is no quota key set. Request acquires may
+still invoke `usage_counter` for telemetry consistency; the resulting usage and
+any `extra_usage` are discarded in the returned unlimited reservation.
+
+### Custom backend reconfiguration contract
+
+Audited in R4 L18 H03/H04. A backend that returns `True` from
+`supports_metric_set_change()` must preserve live state for surviving buckets
+when callable configs add or remove metrics. It can do that by storing state in
+external shared storage such as Redis, or by overriding
+`prepare_reconfigured_backend()` to migrate local state into the rebuilt
+backend. In-process custom backends that return `True` while inheriting the
+no-op migration method can silently reset consumption state.
+
+Configured-cap changes from callable configs are per process. Runtime overrides
+from `set_max_capacity()` are distributed by Redis; `apply_configured_max_capacity`
+is the internal config-rebuild path and is not a public `RateLimiter` method.
 
 ### Redis integration tests are not parallel-safe
 
@@ -168,3 +210,13 @@ limiter = RateLimiter(get_config, backend=backend)
 ### Float precision at extreme capacity limits
 
 All capacity values are Python `float` (IEEE 754 double). At limits above ~2^53, integer precision is lost: consecutive integers are indistinguishable, so `capacity - usage` may not change the stored value. This is a known limitation of the float64 representation and is acceptable for all real-world rate-limiting scenarios (token quotas are orders of magnitude below 2^53).
+
+### R4 documentation audit cross-references
+
+FIX-21 checked and closed the documentation-only R4 audit gaps across L01-L22:
+F03/F05/F11-F14/F24/F31/F32/F34/F41/F43/F45; E08; P02-P06 where still
+applicable; I03/I04/I06/I07/I10/I12; U02/U05/U10/U12-U15; S03/S05/S07;
+X05/X10/X12/X14; Y05/Y08-Y10/Y13/Y14; N03/N07/N09/N11/N14; J06/J09;
+T03/T04/T06; O04. Some lanes were already closed by earlier fix bundles in
+this branch; the status report for FIX-21 records which surfaces were verified
+rather than re-edited.

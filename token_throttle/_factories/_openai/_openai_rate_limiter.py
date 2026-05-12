@@ -25,6 +25,19 @@ def create_openai_redis_rate_limiter(
     tpm: int,
     callbacks: RateLimiterCallbacks | None = None,
 ) -> RateLimiter:
+    """
+    Build an async OpenAI rate limiter backed by Redis.
+
+    ``redis_client`` must be a ``redis.asyncio.Redis`` instance. ``rpm`` and
+    ``tpm`` are per-minute limits for requests and tokens, grouped by
+    ``openai_model_family_getter`` so dated model variants share a family.
+    Pass ``callbacks=None`` to keep the factory's default INFO logger for
+    missing consumption data; passing a callbacks object uses it verbatim.
+
+    The helper is intentionally minute-window-only. For hourly/daily windows,
+    custom metrics, or non-OpenAI usage shapes, construct ``RateLimiter`` with
+    explicit ``Quota`` objects instead.
+    """
     return RateLimiter(
         lambda model_name: PerModelConfig(
             quotas=UsageQuotas(

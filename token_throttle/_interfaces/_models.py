@@ -143,6 +143,8 @@ class Quota(BaseModel):
 
 
 class UsageQuotas:
+    """Collection of per-metric quotas; empty only via ``unlimited()``."""
+
     def __init__(
         self,
         quotas: list[Quota],
@@ -161,6 +163,7 @@ class UsageQuotas:
 
     @classmethod
     def unlimited(cls) -> Self:
+        """Return an explicit no-limit quota set for disabled rate limiting."""
         return cls([], _allow_empty_quotas=True)
 
     @property
@@ -250,6 +253,14 @@ class CapacityReservation(BaseModel):
     """
     Frozen reservation returned by acquire/record operations.
 
+    Reservations bind to the limiter/backend workflow that issued them and
+    should be refunded while that limiter is still alive. They are not durable
+    cross-process credentials; do not accept serialized reservations across
+    trust boundaries as proof that capacity was acquired.
+
+    ``is_unlimited=True`` is a trusted in-process sentinel produced by
+    unlimited configs. Refunding such a reservation is a no-op.
+
     Same ``frozen=True`` caveat as ``Quota``: ``object.__setattr__``
     and ``__dict__`` writes bypass Pydantic's freeze at the CPython level.
     Mutating ``is_unlimited`` via this vector would bypass metering.
@@ -265,7 +276,13 @@ class CapacityReservation(BaseModel):
             "^[A-Za-z0-9_./-]+$."
         )
     )
-    bucket_ids: frozenset[BucketId] | None = None
+    bucket_ids: frozenset[BucketId] | None = Field(
+        default=None,
+        description=(
+            "Exact buckets reserved at acquire time. Iterable inputs are "
+            "materialized into a frozenset, so generators are consumed."
+        ),
+    )
     model: str | None = None
     is_unlimited: bool = False
     model_config = ConfigDict(

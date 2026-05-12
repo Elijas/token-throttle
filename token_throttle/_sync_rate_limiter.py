@@ -341,6 +341,11 @@ class SyncRateLimiter:
         """
         Wait for capacity, then reserve it.
 
+        ``usage`` is the first positional argument; use keyword arguments when
+        readability matters: ``acquire_capacity(usage={...}, model="gpt-4o")``.
+        The returned reservation should be refunded by this limiter after the
+        external request completes.
+
         ``timeout`` bounds only the time spent waiting for capacity. It does not
         bound backend operation latency or callback dispatch time; callbacks are
         bounded separately by ``callback_timeout`` configured on the limiter.
@@ -350,10 +355,11 @@ class SyncRateLimiter:
 
     def record_usage(self, usage: Usage, model: str) -> CapacityReservation:
         """
-        Record usage without blocking.
+        Consume capacity immediately without blocking.
 
-        Capacity may go negative by design (speedometer pattern); this tracks
-        overshoot rather than blocking.
+        Use this for post-hoc reporting of usage that has already happened
+        externally. Capacity may go negative by design (speedometer pattern);
+        the bucket recovers naturally as it refills.
         """
         return self._acquire_or_record(usage, model, _block=False)
 
@@ -485,6 +491,15 @@ class SyncRateLimiter:
         actual_usage: Usage,
         reservation: CapacityReservation,
     ) -> None:
+        """
+        Refund unused capacity from a prior reservation.
+
+        ``actual_usage`` must contain the same metric keys as the reservation.
+        Unlimited reservations are accepted and ignored because they never
+        consumed backend capacity. Reservations are scoped to the bucket ids
+        captured at acquire time, so config rebuilds refund only surviving
+        buckets.
+        """
         if isinstance(actual_usage, CapacityReservation):
             raise TypeError(
                 "refund_capacity expects (actual_usage, reservation); "
@@ -547,12 +562,18 @@ class SyncRateLimiter:
         """
         Dynamically change the max capacity for a specific bucket.
 
+        This is a runtime override. To change the static configured quota,
+        update the callable config; the limiter will rebuild on the next
+        acquire/refund path.
+
         The override survives subsequent acquires/refunds and config refreshes
         whose quota limits are unchanged. A metric-set change (the callable
         config drops the bucket and later re-adds it) drops the override:
         config-driven reconfiguration wins over runtime overrides, so a
         re-added metric starts from the callable config's static ``quota.limit``
         again. Re-call ``set_max_capacity`` after the re-add to reinstate.
+        Cross-process Redis visibility is bounded by the backend's short
+        max-capacity cache window.
         """
         metric = validate_metric(metric)
         per_seconds = validate_per_seconds(per_seconds)
