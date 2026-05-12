@@ -43,7 +43,7 @@ def _make_limiter() -> RateLimiter:
                 ]
             ),
         ),
-        backend=MemoryBackendBuilder(sleep_interval=0),
+        backend=MemoryBackendBuilder(sleep_interval=0.001),
         callbacks=create_logging_callbacks(),
     )
 
