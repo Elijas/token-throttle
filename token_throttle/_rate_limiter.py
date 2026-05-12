@@ -452,15 +452,21 @@ class RateLimiter(BaseRateLimiter):
         if limit_config.is_unlimited:
             raise ValueError("Cannot set max capacity: model has unlimited quotas")
         model_family = limit_config.get_model_family()
-        if self._model_family_to_backend.get(model_family) is None:
-            raise ValueError(
-                f"No backend for model family '{model_family}'. "
-                "Call acquire_capacity or record_usage first."
+        async with self._lock:
+            if self._model_family_to_backend.get(model_family) is None:
+                raise ValueError(
+                    f"No backend for model family '{model_family}'. "
+                    "Call acquire_capacity or record_usage first."
+                )
+            backend = await self._sync_backend_quotas(limit_config)
+            await backend.set_max_capacity(metric, per_seconds, value)
+            self._model_family_to_model_name[model_family] = model
+            self._remember_runtime_max_capacity(
+                model_family,
+                metric,
+                per_seconds,
+                value,
             )
-        backend = await self._get_backend(limit_config)
-        await backend.set_max_capacity(metric, per_seconds, value)
-        self._model_family_to_model_name[model_family] = model
-        self._remember_runtime_max_capacity(model_family, metric, per_seconds, value)
 
     async def _refund_capacity(
         self,
@@ -479,46 +485,52 @@ class RateLimiter(BaseRateLimiter):
                 )
                 return
             if rid in self._refund_in_progress:
-                raise ValueError(f"Refund for reservation {rid} is already in progress")
-            self._refund_in_progress.add(rid)
-        try:
-            actual_usage = frozen_usage(actual_usage)
-            if reservation.model_family not in self._model_family_to_backend:
-                raise ValueError(
-                    f"Backend not found for model family {reservation.model_family}",
+                warnings.warn(
+                    f"Reservation {rid} is already being refunded. "
+                    "Ignoring duplicate refund to prevent double-crediting capacity.",
+                    UserWarning,
+                    stacklevel=3,
                 )
-            await self._refresh_backend_for_reservation(reservation)
-            backend = self._model_family_to_backend[reservation.model_family]
-            # If `_refresh_backend_for_reservation` swallowed an exception (it
-            # downgrades refresh failures to RuntimeWarning to keep refunds
-            # unblocked), the snapshot below may still describe the pre-refresh
-            # bucket set. A reservation made against a now-incompatible bucket
-            # set will then surface as a "Refund bucket ids ... not found in
-            # backend" ValueError from the backend's validation. That error
-            # appears alongside the earlier warning — they together describe
-            # the situation.
-            active_bucket_ids = None
-            snapshot = self._model_family_to_quotas.get(reservation.model_family)
-            if snapshot is not None:
-                active_bucket_ids = frozenset(snapshot)
-            reserved_usage, actual_usage, refund_bucket_ids = _project_refund_scope(
-                reservation.get_usage(),
-                actual_usage,
-                reservation.bucket_ids,
-                active_bucket_ids,
-            )
-            if not reserved_usage:
                 return
-            await backend.refund_capacity_for_buckets(
-                reserved_usage,
-                actual_usage,
-                bucket_ids=refund_bucket_ids,
-            )
-            self._refunded_reservation_ids[rid] = None
-            if len(self._refunded_reservation_ids) > self._refunded_ids_cap:
-                self._refunded_reservation_ids.popitem(last=False)
-        finally:
-            self._refund_in_progress.discard(rid)
+            self._refund_in_progress.add(rid)
+            try:
+                actual_usage = frozen_usage(actual_usage)
+                if reservation.model_family not in self._model_family_to_backend:
+                    raise ValueError(
+                        f"Backend not found for model family {reservation.model_family}",
+                    )
+                await self._refresh_backend_for_reservation(reservation)
+                backend = self._model_family_to_backend[reservation.model_family]
+                # If `_refresh_backend_for_reservation` swallowed an exception (it
+                # downgrades refresh failures to RuntimeWarning to keep refunds
+                # unblocked), the snapshot below may still describe the pre-refresh
+                # bucket set. A reservation made against a now-incompatible bucket
+                # set will then surface as a "Refund bucket ids ... not found in
+                # backend" ValueError from the backend's validation. That error
+                # appears alongside the earlier warning — they together describe
+                # the situation.
+                active_bucket_ids = None
+                snapshot = self._model_family_to_quotas.get(reservation.model_family)
+                if snapshot is not None:
+                    active_bucket_ids = frozenset(snapshot)
+                reserved_usage, actual_usage, refund_bucket_ids = _project_refund_scope(
+                    reservation.get_usage(),
+                    actual_usage,
+                    reservation.bucket_ids,
+                    active_bucket_ids,
+                )
+                self._refunded_reservation_ids[rid] = None
+                if len(self._refunded_reservation_ids) > self._refunded_ids_cap:
+                    self._refunded_reservation_ids.popitem(last=False)
+                if not reserved_usage:
+                    return
+                await backend.refund_capacity_for_buckets(
+                    reserved_usage,
+                    actual_usage,
+                    bucket_ids=refund_bucket_ids,
+                )
+            finally:
+                self._refund_in_progress.discard(rid)
 
     def _unlimited_reservation(self, model: str) -> CapacityReservation:
         # Unlimited reservations bypass metering, so their ``usage`` is

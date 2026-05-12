@@ -2,6 +2,7 @@
 
 import asyncio
 import threading
+import time
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -61,44 +62,35 @@ class TestConcurrentDuplicateRefundAsync:
     reservation must not both credit the backend.
     """
 
-    async def test_concurrent_refund_raises_on_second_caller(self):
+    async def test_concurrent_refund_deduplicates_second_caller(self):
         builder, mock_backend = _make_mock_backend_builder()
-        hit_refund = asyncio.Event()
-        proceed = asyncio.Event()
 
         async def slow_refund(*args, **kwargs):
-            hit_refund.set()
-            await proceed.wait()
+            await asyncio.sleep(0.01)
 
         mock_backend.refund_capacity_for_buckets.side_effect = slow_refund
 
         limiter = RateLimiter(_make_config(), backend=builder)
         reservation = await limiter.acquire_capacity({"tokens": 10}, model="test-model")
 
-        async def refund_a():
+        async def refund_once():
             await limiter.refund_capacity({"tokens": 5}, reservation)
 
-        async def refund_b():
-            await hit_refund.wait()
-            with pytest.raises(ValueError, match="already in progress"):
-                await limiter.refund_capacity({"tokens": 5}, reservation)
-            proceed.set()
-
-        await asyncio.gather(refund_a(), refund_b())
+        with pytest.warns(UserWarning, match="has already been refunded"):
+            await asyncio.gather(refund_once(), refund_once())
         assert mock_backend.refund_capacity_for_buckets.await_count == 1
 
-    async def test_failed_refund_allows_retry(self):
+    async def test_failed_refund_deduplicates_retry(self):
         builder, mock_backend = _make_mock_backend_builder()
 
         call_count = 0
 
-        async def fail_then_succeed(*args, **kwargs):
+        async def fail_after_commit(*args, **kwargs):
             nonlocal call_count
             call_count += 1
-            if call_count == 1:
-                raise RuntimeError("backend failure")
+            raise RuntimeError("backend failure")
 
-        mock_backend.refund_capacity_for_buckets.side_effect = fail_then_succeed
+        mock_backend.refund_capacity_for_buckets.side_effect = fail_after_commit
 
         limiter = RateLimiter(_make_config(), backend=builder)
         reservation = await limiter.acquire_capacity({"tokens": 10}, model="test-model")
@@ -106,21 +98,21 @@ class TestConcurrentDuplicateRefundAsync:
         with pytest.raises(RuntimeError, match="backend failure"):
             await limiter.refund_capacity({"tokens": 5}, reservation)
 
-        await limiter.refund_capacity({"tokens": 5}, reservation)
-        assert call_count == 2
+        with pytest.warns(UserWarning, match="has already been refunded"):
+            await limiter.refund_capacity({"tokens": 5}, reservation)
+        assert call_count == 1
 
 
 class TestConcurrentDuplicateRefundSync:
     """F02.R3.01 (sync): Same TOCTOU fix for SyncRateLimiter."""
 
-    def test_concurrent_refund_raises_on_second_caller(self):
+    def test_concurrent_refund_deduplicates_second_caller(self):
         builder, mock_backend = _make_sync_mock_backend_builder()
         hit_refund = threading.Event()
-        proceed = threading.Event()
 
         def slow_refund(*args, **kwargs):
             hit_refund.set()
-            proceed.wait()
+            time.sleep(0.01)
 
         mock_backend.refund_capacity_for_buckets.side_effect = slow_refund
 
@@ -132,19 +124,17 @@ class TestConcurrentDuplicateRefundSync:
         def refund_b():
             hit_refund.wait()
             try:
-                limiter.refund_capacity({"tokens": 5}, reservation)
-            except ValueError as exc:
+                with pytest.warns(UserWarning, match="has already been refunded"):
+                    limiter.refund_capacity({"tokens": 5}, reservation)
+            except Exception as exc:
                 errors.append(exc)
-            finally:
-                proceed.set()
 
         t = threading.Thread(target=refund_b)
         t.start()
         limiter.refund_capacity({"tokens": 5}, reservation)
         t.join(timeout=5)
 
-        assert len(errors) == 1
-        assert "already in progress" in str(errors[0])
+        assert errors == []
         assert mock_backend.refund_capacity_for_buckets.call_count == 1
 
 
