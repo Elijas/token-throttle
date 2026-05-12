@@ -284,7 +284,12 @@ def merge_extra_usage(
     usage: FrozenUsage,
     extra_usage: Mapping[str, object] | None,
 ) -> FrozenUsage:
-    """Merge extra usage values into counted usage with consistent numeric checks."""
+    """
+    Add extra usage values to counted usage with consistent numeric checks.
+
+    Values are increments, not replacements. In limited configs, every
+    extra_usage key must already be present in the usage_counter output.
+    """
     return _merge_extra_usage(
         usage,
         extra_usage,
@@ -329,19 +334,37 @@ def _merge_extra_usage(
     for metric, raw_amount in extra_usage.items():
         if not allow_new_keys and metric not in merged_usage:
             raise ValueError(
-                f"Usage key '{metric}' not found in usage counter",
+                f"extra_usage key '{metric}' is not in counter output - "
+                "to add custom metrics, ensure the counter emits the key first.",
             )
-        amount = _coerce_usage_value(metric, raw_amount, label="Usage value")
+        amount = _coerce_extra_usage_value(metric, raw_amount)
         if amount < 0:
-            raise ValueError(f"Usage value for {metric} must be non-negative")
-        merged_usage[metric] = merged_usage.get(metric, 0.0) + amount
+            raise ValueError(f"extra_usage value for {metric} must be non-negative")
+        try:
+            merged_value = merged_usage.get(metric, 0.0) + amount
+        except OverflowError as exc:
+            raise ValueError(
+                f"extra_usage value for {metric} too large to fit in IEEE 754 double"
+            ) from exc
+        if not math.isfinite(merged_value):
+            raise ValueError(
+                f"extra_usage value for {metric} too large to fit in IEEE 754 double"
+            )
+        merged_usage[metric] = merged_value
     return frozen_usage(merged_usage)
 
 
 def validate_extra_usage(
     extra_usage: object,
 ) -> Mapping[str, object] | None:
-    """Validate optional extra_usage payloads for request-based acquire helpers."""
+    """
+    Validate optional extra_usage payloads for request-based acquire helpers.
+
+    This materializes custom Mapping instances into a plain dict, rejects
+    duplicate keys from non-dict Mapping implementations, and validates value
+    type/range before any usage_counter is invoked. Limited-config key checks
+    still happen later because they depend on the counter output.
+    """
     if extra_usage is None:
         return None
     if not isinstance(extra_usage, Mapping):
@@ -349,12 +372,42 @@ def validate_extra_usage(
             f"extra_usage must be a mapping or None (got {type(extra_usage).__name__})"
         )
     try:
-        return dict(extra_usage)
+        keys = list(extra_usage.keys())
     except Exception as exc:
         raise ValueError(
             "extra_usage must yield consistent key/value pairs "
             f"(got {type(exc).__name__}: {exc})"
         ) from exc
+    try:
+        if len(keys) != len(set(keys)):
+            raise ValueError("extra_usage must not contain duplicate keys")
+    except TypeError as exc:
+        raise ValueError(
+            f"extra_usage must yield hashable keys (got {type(exc).__name__}: {exc})"
+        ) from exc
+    try:
+        materialized = dict(extra_usage)
+    except Exception as exc:
+        raise ValueError(
+            "extra_usage must yield consistent key/value pairs "
+            f"(got {type(exc).__name__}: {exc})"
+        ) from exc
+    for metric, raw_amount in materialized.items():
+        amount = _coerce_extra_usage_value(metric, raw_amount)
+        if amount < 0:
+            raise ValueError(f"extra_usage value for {metric} must be non-negative")
+    return materialized
+
+
+def _coerce_extra_usage_value(metric: str, raw_amount: object) -> float:
+    try:
+        return _coerce_usage_value(metric, raw_amount, label="extra_usage value")
+    except ValueError as exc:
+        if "too large to fit in IEEE 754 double" in str(exc):
+            raise ValueError(
+                f"extra_usage value for {metric} too large to fit in IEEE 754 double"
+            ) from exc
+        raise
 
 
 def validate_metric(metric: object) -> str:

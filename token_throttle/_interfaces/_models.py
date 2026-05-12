@@ -186,6 +186,10 @@ def _coerce_usage_value(
         )
     try:
         value = float(amount)
+    except OverflowError as exc:
+        raise ValueError(
+            f"{label} for {metric} too large to fit in IEEE 754 double (got {amount!r})"
+        ) from exc
     except (TypeError, ValueError) as exc:
         raise ValueError(
             f"{label} for {metric} must be finite (got {amount!r})"
