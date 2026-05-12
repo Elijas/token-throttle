@@ -363,17 +363,41 @@ class RateLimiter(BaseRateLimiter):
     async def acquire_capacity_for_request(
         self,
         *,
-        extra_usage: dict | None = None,
+        extra_usage: collections.abc.Mapping[str, int | float] | None = None,
         timeout: float | None = None,
         **kwargs,
     ) -> CapacityReservation:
         """
         Count request usage, wait for capacity, then reserve it.
 
+        The limiter resolves ``model`` from ``kwargs`` and calls the configured
+        synchronous ``usage_counter`` with the request kwargs. For limited
+        configs, ``usage_counter`` must be present and must return a usage
+        mapping whose keys match the configured quotas after ``extra_usage`` is
+        merged. For unlimited configs, the counter may still run for telemetry,
+        but the returned reservation carries empty usage and does not consume
+        backend capacity.
+
+        ``extra_usage`` is optional; ``None`` and ``{}`` are equivalent. When
+        supplied, it must be a mapping of metric names to explicit ``int`` or
+        ``float`` values. Values are validated before the counter runs, must be
+        finite and non-negative, and are added to the counter output rather than
+        replacing it. In limited configs, each ``extra_usage`` key must already
+        appear in the counter output; emit zero-valued metrics from the counter
+        when a request will top them up via ``extra_usage``. Unlimited configs
+        accept additional metric keys, though usage is discarded in the
+        unlimited reservation.
+
         ``timeout`` bounds only the capacity-wait portion. It does not bound
         usage counting, backend operation latency, or callback dispatch time;
         callbacks are bounded separately by ``callback_timeout`` configured on
         the limiter.
+
+        Returns a ``CapacityReservation`` for the counted request. Raises
+        ``ValueError`` for invalid timeout, missing or invalid ``model``,
+        missing limited-config ``usage_counter``, invalid counter output,
+        invalid ``extra_usage``, or backend usage that does not match the
+        configured quotas.
         """
         timeout = validate_timeout(timeout)
         extra_usage = validate_extra_usage(extra_usage)

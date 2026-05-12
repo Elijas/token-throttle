@@ -252,7 +252,10 @@ class TestAcquireCapacityForRequestValidation:
         config = make_limited_config(usage_counter=fake_counter)
         limiter = RateLimiter(config, backend=builder)
 
-        with pytest.raises(ValueError, match="Usage key 'unknown_metric' not found"):
+        with pytest.raises(
+            ValueError,
+            match="extra_usage key 'unknown_metric' is not in counter output",
+        ):
             await limiter.acquire_capacity_for_request(
                 extra_usage={"unknown_metric": 5},
                 model="gpt-4",
