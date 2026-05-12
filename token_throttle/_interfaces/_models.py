@@ -258,6 +258,10 @@ class CapacityReservation(BaseModel):
     cross-process credentials; do not accept serialized reservations across
     trust boundaries as proof that capacity was acquired.
 
+    New reservations carry ``limiter_instance_id``. Serialized reservations
+    from older versions omit that field and are accepted as legacy at refund
+    time. Reservations do not currently expire by TTL.
+
     ``is_unlimited=True`` is a trusted in-process sentinel produced by
     unlimited configs. Refunding such a reservation is a no-op.
 
@@ -285,6 +289,14 @@ class CapacityReservation(BaseModel):
     )
     model: str | None = None
     is_unlimited: bool = False
+    limiter_instance_id: str | None = Field(
+        default=None,
+        description=(
+            "UUID of the limiter instance that issued this reservation. "
+            "None means a legacy serialized reservation created before this "
+            "field existed; refund accepts it in back-compat mode."
+        ),
+    )
     model_config = ConfigDict(
         arbitrary_types_allowed=True,
         frozen=True,
@@ -312,6 +324,15 @@ class CapacityReservation(BaseModel):
     @classmethod
     def _reject_empty_model_family(cls, value: object) -> object:
         return _validate_key_segment(value, field_name="model_family")
+
+    @field_validator("limiter_instance_id", mode="before")
+    @classmethod
+    def _reject_empty_limiter_instance_id(cls, value: object) -> object:
+        return _validate_key_segment(
+            value,
+            field_name="limiter_instance_id",
+            allow_none=True,
+        )
 
     @field_validator("is_unlimited", mode="after")
     @classmethod

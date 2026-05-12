@@ -1,5 +1,7 @@
 import collections
+import logging
 import threading
+import uuid
 import warnings
 
 from frozendict import frozendict
@@ -40,6 +42,8 @@ from token_throttle._validation import (
     validate_refund_usage,
     validate_timeout,
 )
+
+_logger = logging.getLogger("token_throttle")
 
 
 def _raise_if_set_max_capacity_args_look_swapped(
@@ -208,6 +212,13 @@ def _project_refund_scope(
         if bucket_id in active_bucket_ids
     )
     if not surviving_bucket_ids:
+        warnings.warn(
+            "Refund dropped: none of the reservation's bucket IDs exist in "
+            "the current backend (bucket set was reconfigured after the "
+            "reservation was created).",
+            RuntimeWarning,
+            stacklevel=3,
+        )
         return frozendict(), frozendict(), surviving_bucket_ids
 
     surviving_metric_names = frozenset(metric for metric, _ in surviving_bucket_ids)
@@ -241,6 +252,13 @@ def _warn_refund_refresh_failed(
         "to avoid leaking reserved capacity.",
         RuntimeWarning,
         stacklevel=2,
+    )
+
+
+def _raise_limiter_instance_mismatch() -> None:
+    raise ValueError(
+        "Reservation was issued by a different limiter; refund cross-limiter "
+        "is not supported. See L13 N01."
     )
 
 
@@ -334,6 +352,50 @@ class SyncRateLimiter:
         self._refunded_ids_cap = 131_072
         self._refund_guard = threading.Lock()
         self._refund_in_progress: set[str] = set()
+        self._limiter_instance_id = uuid.uuid4().hex
+        self._in_flight_reservation_ids: set[str] = set()
+        self._closed = False
+
+    def _raise_if_closed(self) -> None:
+        if self._closed:
+            raise RuntimeError("SyncRateLimiter is closed")
+
+    def _verify_reservation_limiter_instance(
+        self,
+        reservation: CapacityReservation,
+    ) -> None:
+        if reservation.limiter_instance_id is None:
+            _logger.info(
+                "legacy reservation without limiter_instance_id; refund accepted "
+                "in back-compat mode."
+            )
+            return
+        if reservation.limiter_instance_id != self._limiter_instance_id:
+            _logger.warning(
+                "Reservation %s was issued by limiter %s, not this limiter %s",
+                reservation.reservation_id,
+                reservation.limiter_instance_id,
+                self._limiter_instance_id,
+            )
+            _raise_limiter_instance_mismatch()
+
+    def close(self) -> None:
+        """
+        Close the limiter and report outstanding reservations.
+
+        Reservations are bound to this limiter instance. After close, new
+        acquire/record/refund operations raise ``RuntimeError``; reservations
+        that remain unrefunded may no longer be refundable.
+        """
+        with self._refund_guard:
+            if self._closed:
+                return
+            self._closed = True
+            in_flight_count = len(self._in_flight_reservation_ids)
+        _logger.warning(
+            "limiter closed; %d reservations still in flight may not be refundable.",
+            in_flight_count,
+        )
 
     def acquire_capacity(
         self, usage: Usage, model: str, *, timeout: float | None = None
@@ -350,6 +412,7 @@ class SyncRateLimiter:
         bound backend operation latency or callback dispatch time; callbacks are
         bounded separately by ``callback_timeout`` configured on the limiter.
         """
+        self._raise_if_closed()
         timeout = validate_timeout(timeout)
         return self._acquire_or_record(usage, model, _block=True, timeout=timeout)
 
@@ -361,6 +424,7 @@ class SyncRateLimiter:
         externally. Capacity may go negative by design (speedometer pattern);
         the bucket recovers naturally as it refills.
         """
+        self._raise_if_closed()
         return self._acquire_or_record(usage, model, _block=False)
 
     def _acquire_or_record(
@@ -420,6 +484,7 @@ class SyncRateLimiter:
         invalid ``extra_usage``, or backend usage that does not match the
         configured quotas.
         """
+        self._raise_if_closed()
         timeout = validate_timeout(timeout)
         extra_usage = validate_extra_usage(extra_usage)
         if "model" not in kwargs:
@@ -479,12 +544,15 @@ class SyncRateLimiter:
         # Only registered after a successful acquire — failed acquires don't
         # need refund routing, so skipping the cache on failure is intentional.
         self._model_family_to_model_name[model_family] = model
-        return CapacityReservation(
+        reservation = CapacityReservation(
             usage=usage,
             model_family=model_family,
             bucket_ids=_reservation_bucket_ids(limit_config),
             model=model,
+            limiter_instance_id=self._limiter_instance_id,
         )
+        self._in_flight_reservation_ids.add(reservation.reservation_id)
+        return reservation
 
     def refund_capacity(
         self,
@@ -500,12 +568,16 @@ class SyncRateLimiter:
         captured at acquire time, so config rebuilds refund only surviving
         buckets.
         """
+        self._raise_if_closed()
         if isinstance(actual_usage, CapacityReservation):
             raise TypeError(
                 "refund_capacity expects (actual_usage, reservation); "
                 "did you mean refund_capacity_from_response?"
             )
-        if is_unlimited_reservation(reservation):
+        is_unlimited = is_unlimited_reservation(reservation)
+        self._verify_reservation_limiter_instance(reservation)
+        if is_unlimited:
+            self._in_flight_reservation_ids.discard(reservation.reservation_id)
             return
         validate_refund_usage(actual_usage, set(reservation.usage))
         self._refund_capacity(actual_usage, reservation)
@@ -523,7 +595,11 @@ class SyncRateLimiter:
         ``create_openai_*`` factories).  For custom metric names, use
         :meth:`refund_capacity` directly.
         """
-        if is_unlimited_reservation(reservation):
+        self._raise_if_closed()
+        is_unlimited = is_unlimited_reservation(reservation)
+        self._verify_reservation_limiter_instance(reservation)
+        if is_unlimited:
+            self._in_flight_reservation_ids.discard(reservation.reservation_id)
             return
         reservation_metrics = set(reservation.usage)
         expected_metrics = {"tokens", "requests"}
@@ -575,6 +651,7 @@ class SyncRateLimiter:
         Cross-process Redis visibility is bounded by the backend's short
         max-capacity cache window.
         """
+        self._raise_if_closed()
         metric = validate_metric(metric)
         per_seconds = validate_per_seconds(per_seconds)
         value = validate_max_capacity_value(value)
@@ -615,6 +692,7 @@ class SyncRateLimiter:
     ) -> None:
         rid = reservation.reservation_id
         with self._refund_guard:
+            self._raise_if_closed()
             if rid in self._refunded_reservation_ids:
                 warnings.warn(
                     f"Reservation {rid} has already been "
@@ -662,6 +740,7 @@ class SyncRateLimiter:
                 self._refunded_reservation_ids[rid] = None
                 if len(self._refunded_reservation_ids) > self._refunded_ids_cap:
                     self._refunded_reservation_ids.popitem(last=False)
+                self._in_flight_reservation_ids.discard(rid)
                 if not reserved_usage:
                     return
                 try:
@@ -682,12 +761,15 @@ class SyncRateLimiter:
         # ``frozendict()`` makes the factory the only canonical
         # producer of unlimited reservations and closes V05/V14/I05
         # at construction time.
-        return CapacityReservation(
+        reservation = CapacityReservation(
             usage=frozendict(),
             model_family=_UNLIMITED_FLAG,
             model=model,
             is_unlimited=True,
+            limiter_instance_id=self._limiter_instance_id,
         )
+        self._in_flight_reservation_ids.add(reservation.reservation_id)
+        return reservation
 
     def _refresh_backend_for_reservation(
         self,
@@ -701,17 +783,41 @@ class SyncRateLimiter:
 
         try:
             limit_config = self._config_getter(model_name)
-            if limit_config.is_unlimited:
-                return
-            if limit_config.get_model_family() != reservation.model_family:
-                return
-            self._get_backend(limit_config)
         except Exception as exc:  # noqa: BLE001
             # Design intent: a refund must never be blocked by a transient
-            # failure of the user-supplied config_getter or backend. We fall
-            # back to cached backend state and emit a warning. BaseException
+            # failure of the user-supplied config_getter. We fall back to
+            # cached backend state and emit a warning. BaseException
             # (KeyboardInterrupt/SystemExit) is intentionally allowed to
             # propagate — those are shutdown signals, not refresh failures.
+            _warn_refund_refresh_failed(
+                model_name=model_name,
+                model_family=reservation.model_family,
+                exc=exc,
+            )
+            return
+
+        if limit_config.is_unlimited:
+            raise ValueError(
+                "Reservation model family "
+                f"{reservation.model_family!r} is now unlimited for model "
+                f"{model_name!r}; refund across a limited-to-unlimited "
+                "config change is not supported. See L13 N03."
+            )
+        current_model_family = limit_config.get_model_family()
+        if current_model_family != reservation.model_family:
+            raise ValueError(
+                "Reservation model family "
+                f"{reservation.model_family!r} no longer matches current "
+                f"config for model {model_name!r} "
+                f"({current_model_family!r}); refund across model_family "
+                "rerouting is not supported. See L13 N05."
+            )
+
+        try:
+            self._get_backend(limit_config)
+        except Exception as exc:  # noqa: BLE001
+            # Backend refresh failures still fall back to cached state so
+            # transient backend errors do not leak reserved capacity.
             _warn_refund_refresh_failed(
                 model_name=model_name,
                 model_family=reservation.model_family,

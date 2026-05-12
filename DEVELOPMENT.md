@@ -108,6 +108,16 @@ is the internal config-rebuild path and is not a public `RateLimiter` method.
 
 `test_excess_acquires_must_wait` in `tests/integration/test_sync_concurrency.py` starts a background thread but joins it with a 2-second timeout and asserts it exited cleanly. No daemon thread leak.
 
+### Reservation lifecycle
+
+`CapacityReservation` is a refund token for the limiter instance that issued it. New reservations carry `limiter_instance_id`, a per-`RateLimiter` / `SyncRateLimiter` UUID generated at construction time. Refund rejects a reservation whose populated `limiter_instance_id` does not match the current limiter, because cross-limiter and cross-process refunds do not share the limiter's in-memory dedup state.
+
+This is a contract change. Reservations serialized by older versions through pickle, JSON, job queues, or caches do not have `limiter_instance_id`; those are accepted as legacy in back-compat mode and logged at info level. New serialized reservations should preserve the field. If a queue moves reservations across processes, the worker applying the refund must use the same long-lived limiter instance identity; otherwise refund is rejected instead of crediting the wrong backend.
+
+Reservations currently have no TTL. A reservation remains eligible until it is refunded, rejected because the issuing limiter no longer matches, rejected because the model now routes differently, or the limiter is closed. `close()` / `aclose()` mark the limiter closed, log the number of reservations still in flight, and block subsequent acquire/refund operations.
+
+Callable config changes are checked at refund time for held limited reservations. A limited-to-unlimited flip raises instead of crediting an obsolete cached backend, and a `model_family` reroute raises instead of crediting the old family backend. Metric-set changes still project refunds onto surviving bucket ids; if the projection is empty, the refund id is committed to the dedup map before returning so queue retries cannot double-credit after a rebuild.
+
 ### `per_seconds` is constrained to integers
 
 `Quota.per_seconds` is typed as `int`. Pydantic v2 coerces whole floats (`60.0` -> `60`) but rejects fractional values (`0.5`). This is intentional — fractional rate-limiting windows don't make practical sense, and the Redis key format and capacity dict keys rely on integer values.
