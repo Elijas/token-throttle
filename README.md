@@ -191,7 +191,7 @@ call `set_max_capacity()` again if you want the override restored.
 ### Timeout
 
 By default, `acquire_capacity` blocks until enough capacity is available.
-Use `timeout` to fail fast or cap the wait:
+Use `timeout` to fail fast or cap the capacity wait:
 
 ```python
 # Non-blocking: check if capacity is available without waiting
@@ -209,14 +209,18 @@ except TimeoutError:
 reservation = await limiter.acquire_capacity(
     model="gpt-4o",
     usage={"requests": 1, "tokens": 500},
-    timeout=5.0,  # Raise TimeoutError after 5s
+    timeout=5.0,  # Raise TimeoutError after 5s waiting for capacity
 )
 ```
 
-Async callbacks are awaited within the remaining timeout budget. Sync
-callbacks run inline and cannot be preempted, so a slow sync wait callback can
-push wall-clock time past the requested timeout before `TimeoutError` is
-raised.
+`timeout` is not a total wall-clock deadline: backend operation latency
+(including Redis round trips) is outside this budget.
+
+User callbacks are bounded separately by `callback_timeout` on `RateLimiter`
+and `SyncRateLimiter` (default: 30 seconds per callback). When a callback
+exceeds that limit, token-throttle logs a warning, skips the callback result,
+and does not fail the acquire/refund call. Pass `callback_timeout=None` to
+restore unbounded callback execution.
 
 ## Sync API
 

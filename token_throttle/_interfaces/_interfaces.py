@@ -120,10 +120,14 @@ class RateLimiterBackend(ABC):
         """
         Wait until all buckets can satisfy *usage*, then consume atomically.
 
-        *timeout* controls how long to wait:
+        *timeout* controls how long to wait for capacity:
         - ``None`` (default): block indefinitely (current behaviour).
         - ``0``: try-acquire — return immediately or raise ``TimeoutError``.
         - ``N > 0``: wait up to *N* seconds, then raise ``TimeoutError``.
+
+        The timeout is not a total wall-clock deadline: backend operation
+        latency and callback dispatch are outside this budget. Public limiters
+        bound callback dispatch separately with ``callback_timeout``.
 
         Raises ``ValueError`` immediately (fail-fast) if any single metric
         in *usage* exceeds that bucket's ``max_capacity``, because waiting
@@ -278,9 +282,9 @@ class SyncRateLimiterBackend(ABC):
         - ``0``: try-acquire — return immediately or raise ``TimeoutError``.
         - ``N > 0``: wait up to *N* seconds, then raise ``TimeoutError``.
 
-        Sync callbacks run inline and cannot be preempted, so a slow callback
-        may extend wall-clock time beyond *timeout* even though the capacity
-        wait itself still times out once callback execution returns.
+        The timeout is not a total wall-clock deadline: backend operation
+        latency and callback dispatch are outside this budget. Public limiters
+        bound callback dispatch separately with ``callback_timeout``.
         """
 
     @abstractmethod

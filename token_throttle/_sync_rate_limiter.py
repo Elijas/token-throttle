@@ -4,7 +4,10 @@ import warnings
 
 from frozendict import frozendict
 
-from token_throttle._interfaces._callbacks import SyncRateLimiterCallbacks
+from token_throttle._interfaces._callbacks import (
+    SyncRateLimiterCallbacks,
+    with_sync_callback_timeout,
+)
 from token_throttle._interfaces._interfaces import (
     PerModelConfig,
     PerModelConfigGetter,
@@ -216,6 +219,36 @@ def _warn_refund_refresh_failed(
     )
 
 
+def _is_redis_exception(exc: Exception) -> bool:
+    return type(exc).__module__.startswith("redis.")
+
+
+def _raise_backend_external_error(exc: Exception) -> None:
+    if _is_redis_exception(exc):
+        raise RuntimeError(
+            "Rate limiter backend operation failed with a Redis error: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
+    raise exc
+
+
+def _resolve_usage_counter_result_for_model(
+    usage_counter,
+    *,
+    model_name: str,
+    **kwargs,
+) -> FrozenUsage:
+    try:
+        return resolve_usage_counter_result(usage_counter, **kwargs)
+    except KeyError as exc:
+        raise ValueError(
+            "Rate limiter usage_counter failed with KeyError while counting "
+            f"request usage for model {model_name!r}. If this is OpenAIUsageCounter, "
+            "token-throttle could not determine the tokenizer for that model; "
+            "pass an explicit get_encoding_func."
+        ) from exc
+
+
 class SyncRateLimiter:
     """
     Synchronous counterpart of ``RateLimiter`` — same architecture and contract.
@@ -234,11 +267,14 @@ class SyncRateLimiter:
         backend: SyncRateLimiterBackendBuilderInterface,
         *,
         callbacks: SyncRateLimiterCallbacks | None = None,
+        callback_timeout: float | None = 30.0,
     ):
         self._backend = backend
         self._lock = threading.Lock()
         self._validation_lock = threading.Lock()
-        self._callbacks = callbacks
+        callback_timeout = validate_timeout(callback_timeout)
+        self._callbacks = with_sync_callback_timeout(callbacks, callback_timeout)
+        self._callback_timeout = callback_timeout
         self._config_getter = lambda model_name: resolve_config(cfg, model_name)
         # Dict mutations below happen both under self._lock and outside it
         # (e.g. _acquire_capacity, set_max_capacity).  Single-key dict
@@ -265,6 +301,13 @@ class SyncRateLimiter:
     def acquire_capacity(
         self, usage: Usage, model: str, *, timeout: float | None = None
     ) -> CapacityReservation:
+        """
+        Wait for capacity, then reserve it.
+
+        ``timeout`` bounds only the time spent waiting for capacity. It does not
+        bound backend operation latency or callback dispatch time; callbacks are
+        bounded separately by ``callback_timeout`` configured on the limiter.
+        """
         timeout = validate_timeout(timeout)
         return self._acquire_or_record(usage, model, _block=True, timeout=timeout)
 
@@ -302,6 +345,14 @@ class SyncRateLimiter:
         timeout: float | None = None,
         **kwargs,
     ) -> CapacityReservation:
+        """
+        Count request usage, wait for capacity, then reserve it.
+
+        ``timeout`` bounds only the capacity-wait portion. It does not bound
+        usage counting, backend operation latency, or callback dispatch time;
+        callbacks are bounded separately by ``callback_timeout`` configured on
+        the limiter.
+        """
         timeout = validate_timeout(timeout)
         extra_usage = validate_extra_usage(extra_usage)
         if "model" not in kwargs:
@@ -318,8 +369,10 @@ class SyncRateLimiter:
             # carries empty usage by construction.
             usage = frozendict()
             if limit_config.usage_counter is not None:
-                usage = resolve_usage_counter_result(
-                    limit_config.usage_counter, **kwargs
+                usage = _resolve_usage_counter_result_for_model(
+                    limit_config.usage_counter,
+                    model_name=model,
+                    **kwargs,
                 )
             merge_extra_usage_unrestricted(usage, extra_usage)
             return self._unlimited_reservation(model)
@@ -327,7 +380,11 @@ class SyncRateLimiter:
             raise ValueError("limit_config.usage_counter cannot be None")
 
         usage = merge_extra_usage(
-            resolve_usage_counter_result(limit_config.usage_counter, **kwargs),
+            _resolve_usage_counter_result_for_model(
+                limit_config.usage_counter,
+                model_name=model,
+                **kwargs,
+            ),
             extra_usage,
         )
         return self._acquire_capacity(model, usage, limit_config, timeout=timeout)
@@ -343,11 +400,14 @@ class SyncRateLimiter:
     ) -> CapacityReservation:
         validate_acquire_usage(usage, limit_config.quotas)
 
-        backend = self._get_backend(limit_config)
-        if _block:
-            backend.wait_for_capacity(usage, timeout=timeout)
-        else:
-            backend.consume_capacity(usage)
+        try:
+            backend = self._get_backend(limit_config)
+            if _block:
+                backend.wait_for_capacity(usage, timeout=timeout)
+            else:
+                backend.consume_capacity(usage)
+        except Exception as exc:  # noqa: BLE001 - boundary wrapper preserves cause
+            _raise_backend_external_error(exc)
         model_family = limit_config.get_model_family()
         # Only registered after a successful acquire — failed acquires don't
         # need refund routing, so skipping the cache on failure is intentional.
@@ -443,8 +503,11 @@ class SyncRateLimiter:
                     f"No backend for model family '{model_family}'. "
                     "Call acquire_capacity or record_usage first."
                 )
-            backend = self._sync_backend_quotas(limit_config)
-            backend.set_max_capacity(metric, per_seconds, value)
+            try:
+                backend = self._sync_backend_quotas(limit_config)
+                backend.set_max_capacity(metric, per_seconds, value)
+            except Exception as exc:  # noqa: BLE001 - boundary wrapper preserves cause
+                _raise_backend_external_error(exc)
             self._model_family_to_model_name[model_family] = model
             self._remember_runtime_max_capacity(
                 model_family,
@@ -509,11 +572,14 @@ class SyncRateLimiter:
                     self._refunded_reservation_ids.popitem(last=False)
                 if not reserved_usage:
                     return
-                backend.refund_capacity_for_buckets(
-                    reserved_usage,
-                    actual_usage,
-                    bucket_ids=refund_bucket_ids,
-                )
+                try:
+                    backend.refund_capacity_for_buckets(
+                        reserved_usage,
+                        actual_usage,
+                        bucket_ids=refund_bucket_ids,
+                    )
+                except Exception as exc:  # noqa: BLE001 - boundary wrapper preserves cause
+                    _raise_backend_external_error(exc)
             finally:
                 self._refund_in_progress.discard(rid)
 
