@@ -237,12 +237,12 @@ class TestOpenAIUsageCounterWithMessages:
         assert result["requests"] == 1
         assert isinstance(result["tokens"], int)
 
-    def test_messages_numeric_content_counted_as_string(self):
-        """Numeric content values are converted to string for token counting."""
+    def test_messages_numeric_content_raises_value_error(self):
         counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
-        result = counter("gpt-4", messages=[{"role": "user", "content": 123}])
-        assert result["requests"] == 1
-        assert result["tokens"] > 0
+        with pytest.raises(
+            ValueError, match="All keys and values in messages must be of type str"
+        ):
+            counter("gpt-4", messages=[{"role": "user", "content": 123}])
 
     def test_messages_unsupported_type_value_raises(self):
         counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())

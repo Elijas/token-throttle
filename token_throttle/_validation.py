@@ -2,6 +2,7 @@
 
 import inspect
 import math
+import warnings
 from collections.abc import Mapping
 from collections.abc import Set as AbstractSet
 
@@ -428,8 +429,22 @@ def resolve_config(
     return resolved
 
 
-def resolve_usage_counter_result(usage_counter, /, **request) -> FrozenUsage:
+def resolve_usage_counter_result(
+    usage_counter,
+    /,
+    *,
+    warn_if_sync_counter_blocks_event_loop: bool = False,
+    **request,
+) -> FrozenUsage:
     """Run a usage_counter and reject awaitable return values with a clear error."""
+    if warn_if_sync_counter_blocks_event_loop:
+        warnings.warn(
+            "Synchronous usage_counter is being invoked inline on the asyncio "
+            "event loop; use a fast counter or wrap blocking work explicitly "
+            "with asyncio.to_thread.",
+            UserWarning,
+            stacklevel=2,
+        )
     result = _call_usage_counter(usage_counter, request)
     if inspect.isawaitable(result):
         close_awaitable_if_possible(result)
@@ -461,7 +476,7 @@ def _call_usage_counter(usage_counter, request: Mapping[str, object]) -> object:
         # expose an inspectable signature. Fall back to **kwargs
         # invocation, which will raise TypeError if the counter doesn't
         # accept keyword arguments.
-        return usage_counter(**request)
+        return _invoke_usage_counter(usage_counter, request)
 
     # Required positional-only check runs BEFORE the VAR_KEYWORD early-return:
     # a counter like ``def counter(model, /, **kwargs)`` otherwise slipped
@@ -486,8 +501,15 @@ def _call_usage_counter(usage_counter, request: Mapping[str, object]) -> object:
         parameter.kind == inspect.Parameter.VAR_KEYWORD
         for parameter in signature.parameters.values()
     ):
-        return usage_counter(**request)
+        return _invoke_usage_counter(usage_counter, request)
 
+    warnings.warn(
+        "usage_counter without **kwargs uses deprecated signature-filtered "
+        "dispatch; request fields not named in the counter signature are "
+        "not passed to the counter. Add **kwargs to receive the full request.",
+        UserWarning,
+        stacklevel=2,
+    )
     accepted_kwargs = {
         name: request[name]
         for name, parameter in signature.parameters.items()
@@ -498,4 +520,14 @@ def _call_usage_counter(usage_counter, request: Mapping[str, object]) -> object:
         )
         and name in request
     }
-    return usage_counter(**accepted_kwargs)
+    return _invoke_usage_counter(usage_counter, accepted_kwargs)
+
+
+def _invoke_usage_counter(
+    usage_counter,
+    request: Mapping[str, object],
+) -> object:
+    try:
+        return usage_counter(**request)
+    except Exception as exc:
+        raise ValueError(f"usage_counter raised: {type(exc).__name__}: {exc}") from exc

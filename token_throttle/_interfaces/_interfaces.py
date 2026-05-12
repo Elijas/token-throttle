@@ -17,6 +17,13 @@ from token_throttle._interfaces._models import (
 )
 
 UsageCounter = Callable[..., FrozenUsage]
+"""Synchronous callable that derives a usage mapping from request kwargs.
+
+Counters should accept ``**kwargs`` so they receive the full request payload.
+Fixed-signature counters are still supported for compatibility, but that
+dispatch path is deprecated because request fields not named in the signature
+are filtered out before the counter is called.
+"""
 
 
 class PerModelConfig(BaseModel):
@@ -32,7 +39,15 @@ class PerModelConfig(BaseModel):
     usage_counter: UsageCounter | None = Field(
         default=None,
         description=(
-            "Optional synchronous callable that derives usage from request kwargs."
+            "Optional synchronous callable that derives usage from request kwargs. "
+            "Counter contract: accept **kwargs to receive the full request payload; "
+            "fixed-signature counters are deprecated because unmatched request "
+            "fields are filtered before invocation. The callable must not be "
+            "async, must not be an async generator, and must return a usage "
+            "mapping. Async RateLimiter invokes the counter inline on the event "
+            "loop, so expensive CPU work, blocking I/O, or sleep calls block "
+            "concurrent rate-limited work unless the caller wraps the counter "
+            "explicitly, for example with asyncio.to_thread."
         ),
     )
 

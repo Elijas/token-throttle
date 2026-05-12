@@ -326,7 +326,9 @@ class RateLimiter(BaseRateLimiter):
             usage = frozendict()
             if limit_config.usage_counter is not None:
                 usage = resolve_usage_counter_result(
-                    limit_config.usage_counter, **kwargs
+                    limit_config.usage_counter,
+                    warn_if_sync_counter_blocks_event_loop=True,
+                    **kwargs,
                 )
             merge_extra_usage_unrestricted(usage, extra_usage)
             return self._unlimited_reservation(model)
@@ -334,7 +336,11 @@ class RateLimiter(BaseRateLimiter):
             raise ValueError("limit_config.usage_counter cannot be None")
 
         usage = merge_extra_usage(
-            resolve_usage_counter_result(limit_config.usage_counter, **kwargs),
+            resolve_usage_counter_result(
+                limit_config.usage_counter,
+                warn_if_sync_counter_blocks_event_loop=True,
+                **kwargs,
+            ),
             extra_usage,
         )
         return await self._acquire_capacity(

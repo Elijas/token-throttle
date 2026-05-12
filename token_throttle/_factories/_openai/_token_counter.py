@@ -15,6 +15,7 @@ _OUTPUT_BUDGET_KEYS = (
     "max_completion_tokens",
     "max_tokens",
 )
+_OUTPUT_MULTIPLIER_KEYS = ("n", "best_of")
 _REQUEST_PAYLOAD_KEYS = ("input", "messages")
 _REQUEST_CONTEXT_KEYS = (
     "instructions",
@@ -62,10 +63,27 @@ class EncodingGetter(Protocol):
 
 
 class OpenAIUsageCounter:
+    """
+    Estimate OpenAI request usage for text, chat, tool, and function payloads.
+
+    Supported chat message shapes include string/None message fields, string
+    content parts such as ``{"type": "input_text", "text": "..."}``, and
+    JSON-serializable ``tool_calls`` / ``function_call`` payloads. Non-text
+    image, file, and audio content is rejected because token cost cannot be
+    inferred locally.
+    """
+
     def __init__(self, get_encoding_func: EncodingGetter | None = None):
         self._get_encoding = get_encoding_func or get_encoding
 
     def __call__(self, model: str, **request) -> FrozenUsage:
+        if not isinstance(model, str):
+            raise TypeError(
+                f"model must be a non-empty string (got {type(model).__name__})"
+            )
+        if not model:
+            raise ValueError("model must be a non-empty string")
+        _validate_max_kwargs(request)
         encoding = self._get_encoding(model)
         reserved_output_tokens = _get_reserved_output_tokens(request)
         payload_key = _get_request_payload_key(request)
@@ -247,7 +265,31 @@ def _get_reserved_output_tokens(request: dict[str, object]) -> int:
         if raw_value is None:
             continue
         budgets.append(_parse_non_negative_int(raw_value, key))
-    return max(budgets, default=0)
+    return max(budgets, default=0) * _get_output_multiplier(request)
+
+
+def _get_output_multiplier(request: dict[str, object]) -> int:
+    multipliers: list[int] = []
+    for key in _OUTPUT_MULTIPLIER_KEYS:
+        raw_value = request.get(key)
+        if raw_value is None:
+            continue
+        multipliers.append(_parse_non_negative_int(raw_value, key))
+    return max(multipliers, default=1)
+
+
+def _validate_max_kwargs(request: dict[str, object]) -> None:
+    unknown_max_keys = [
+        key
+        for key in request
+        if key.startswith("max_") and key not in _OUTPUT_BUDGET_KEYS
+    ]
+    if unknown_max_keys:
+        known = ", ".join(_OUTPUT_BUDGET_KEYS)
+        raise ValueError(
+            f"Unknown OpenAI max_* token budget field(s): {unknown_max_keys}. "
+            f"Expected one of: {known}."
+        )
 
 
 def _count_request_context_tokens(
@@ -330,13 +372,12 @@ def _count_request_context_fragments(
 
 
 def _parse_non_negative_int(value: object, field_name: str) -> int:
-    if _is_bool_like(value) or not isinstance(value, int | float):
+    if _is_bool_like(value) or not isinstance(value, int):
         raise ValueError(f"'{field_name}' must be a finite non-negative integer")
 
-    parsed = float(value)
-    if not math.isfinite(parsed) or parsed < 0 or not parsed.is_integer():
+    if value < 0:
         raise ValueError(f"'{field_name}' must be a finite non-negative integer")
-    return int(parsed)
+    return value
 
 
 def _is_token_id(value: object) -> bool:
@@ -406,14 +447,15 @@ def _count_text_fragments(
     *,
     invalid_error: str,
     content_part_context: bool = False,
+    coerce_scalars: bool = False,
 ) -> int:
     if value is None:
         return 0
-    if _is_bool_like(value):
-        return len(encoding.encode(str(bool(value)).lower()))
     if isinstance(value, str):
         return len(encoding.encode(value))
-    if isinstance(value, (int, float)):
+    if coerce_scalars and _is_bool_like(value):
+        return len(encoding.encode(str(bool(value)).lower()))
+    if coerce_scalars and isinstance(value, int | float):
         return len(encoding.encode(str(value)))
     if isinstance(value, list):
         return sum(
@@ -422,6 +464,7 @@ def _count_text_fragments(
                 item,
                 invalid_error=invalid_error,
                 content_part_context=content_part_context,
+                coerce_scalars=coerce_scalars,
             )
             for item in value
         )
@@ -445,16 +488,19 @@ def _count_text_fragments(
                     value["content"],
                     invalid_error=invalid_error,
                     content_part_context=content_part_context,
+                    coerce_scalars=coerce_scalars,
                 )
-        return sum(
-            _count_text_fragments(
-                encoding,
-                nested_value,
-                invalid_error=invalid_error,
-                content_part_context=content_part_context and nested_key == "content",
+            return sum(
+                _count_text_fragments(
+                    encoding,
+                    nested_value,
+                    invalid_error=invalid_error,
+                    content_part_context=content_part_context
+                    and nested_key == "content",
+                    coerce_scalars=coerce_scalars and nested_key != "content",
+                )
+                for nested_key, nested_value in value.items()
             )
-            for nested_key, nested_value in value.items()
-        )
     raise ValueError(invalid_error)
 
 
@@ -486,6 +532,7 @@ def count_chat_input_tokens(
                     value,
                     invalid_error="All keys and values in messages must be of type str",
                     content_part_context=key == "content",
+                    coerce_scalars=key != "content",
                 )
 
             if key == "name":
