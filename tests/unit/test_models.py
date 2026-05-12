@@ -139,9 +139,9 @@ class TestUsageQuotas:
         quotas = UsageQuotas([Quota(metric="requests", limit=100.0)])
         assert quotas.is_unlimited is False
 
-    def test_empty_quotas_warns(self):
-        """Cover line 39: empty quotas list triggers UserWarning."""
-        with pytest.warns(UserWarning, match="Empty quota list"):
+    def test_empty_quotas_raises(self):
+        """Bare empty quotas are a typo trap; use UsageQuotas.unlimited()."""
+        with pytest.raises(ValueError, match=r"UsageQuotas\.unlimited"):
             UsageQuotas([])
 
     def test_names_property(self):

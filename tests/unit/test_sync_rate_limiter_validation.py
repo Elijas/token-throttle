@@ -907,9 +907,7 @@ class TestSetMaxCapacityValidation:
 class TestGetBackendValidation:
     def test_empty_model_family_rejected_at_construction(self):
         """PerModelConfig rejects empty model_family at construction time."""
-        with pytest.raises(
-            ValidationError, match="model_family must not be an empty string"
-        ):
+        with pytest.raises(ValidationError, match="model_family must not be empty"):
             PerModelConfig(
                 quotas=UsageQuotas(
                     [

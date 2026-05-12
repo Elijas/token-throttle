@@ -107,19 +107,19 @@ class TestValidateTimeout:
 
 class TestValidateMetric:
     def test_boolean_metric_raises(self):
-        with pytest.raises(ValueError, match="metric must be a non-empty string"):
+        with pytest.raises(ValueError, match="metric must be a str"):
             validate_metric(True)  # noqa: FBT003
 
     def test_non_string_metric_raises(self):
-        with pytest.raises(ValueError, match="metric must be a non-empty string"):
+        with pytest.raises(ValueError, match="metric must be a str"):
             validate_metric(42)
 
     def test_empty_metric_raises(self):
-        with pytest.raises(ValueError, match="metric must be a non-empty string"):
+        with pytest.raises(ValueError, match="metric must not be empty"):
             validate_metric("")
 
     def test_none_metric_raises(self):
-        with pytest.raises(ValueError, match="metric must be a non-empty string"):
+        with pytest.raises(ValueError, match="metric must be a str"):
             validate_metric(None)
 
     def test_rejects_metric_containing_colon(self):

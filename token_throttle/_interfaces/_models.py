@@ -1,6 +1,6 @@
 import math
+import unicodedata
 import uuid
-import warnings
 from collections import defaultdict
 from collections.abc import Iterator, Mapping
 from copy import deepcopy as _deepcopy
@@ -27,6 +27,42 @@ def _is_bool_like(value: object) -> bool:
     return type(value) is bool
 
 
+def _validate_key_segment(
+    value: object,
+    /,
+    *,
+    field_name: str,
+    allow_none: bool = False,
+) -> str | None:
+    """Validate Redis-key path segments used for metrics and model families."""
+    if value is None and allow_none:
+        return None
+    if type(value) is not str:
+        none_suffix = " or None" if allow_none else ""
+        raise ValueError(
+            f"{field_name} must be a str{none_suffix} (got {type(value).__name__})"
+        )
+    if not value:
+        raise ValueError(f"{field_name} must not be empty")
+
+    normalized = unicodedata.normalize("NFC", value)
+    if not normalized.strip():
+        raise ValueError(f"{field_name} must not be whitespace-only")
+    if normalized != normalized.strip():
+        raise ValueError(f"{field_name} must not contain leading/trailing whitespace")
+    if any(char.isspace() for char in normalized):
+        raise ValueError(f"{field_name} must not contain whitespace")
+    if any(not char.isprintable() for char in normalized):
+        raise ValueError(f"{field_name} must not contain non-printable characters")
+    if any(unicodedata.category(char).startswith("C") for char in normalized):
+        raise ValueError(f"{field_name} must not contain Unicode control characters")
+    if ":" in normalized:
+        raise ValueError(
+            f"{field_name} must not contain ':' (used as Redis key separator)"
+        )
+    return normalized
+
+
 class SecondsIn(int, Enum):
     MINUTE = 60
     HOUR = 3600
@@ -45,7 +81,14 @@ class Quota(BaseModel):
     """
 
     DEFAULT_SECONDS: ClassVar[int] = SecondsIn.MINUTE
-    metric: str
+    metric: str = Field(
+        description=(
+            "Metric name used in Redis key segments. Must be non-empty, NFC "
+            "normalized, printable, contain no whitespace/control characters, "
+            "and cannot contain ':'; the portable recommended character set is "
+            "^[A-Za-z0-9_./-]+$."
+        )
+    )
     limit: float = Field(
         gt=0,
         allow_inf_nan=False,
@@ -96,17 +139,7 @@ class Quota(BaseModel):
     @field_validator("metric", mode="before")
     @classmethod
     def _reject_empty_metric(cls, value: object) -> object:
-        if type(value) is not str:
-            raise ValueError(f"metric must be a str (got {type(value).__name__})")
-        if not value:
-            raise ValueError("metric must not be empty")
-        if not value.strip():
-            raise ValueError("metric must not be whitespace-only")
-        if ":" in value:
-            raise ValueError(
-                "metric must not contain ':' (used as Redis key separator)"
-            )
-        return value
+        return _validate_key_segment(value, field_name="metric")
 
 
 class UsageQuotas:
@@ -119,11 +152,9 @@ class UsageQuotas:
     ) -> None:
         self._metrics: defaultdict[str, dict[int, Quota]] = defaultdict(dict)
         if not _allow_empty_quotas and not quotas:
-            warnings.warn(
+            raise ValueError(
                 "Empty quota list provided. No rate limiting will be applied. "
-                "If this is intentional, use UsageQuotas.unlimited() instead.",
-                UserWarning,
-                stacklevel=2,
+                "If this is intentional, use UsageQuotas.unlimited() instead."
             )
         for quota in quotas:
             self.add_metric(quota)
@@ -222,7 +253,14 @@ class CapacityReservation(BaseModel):
 
     reservation_id: str = Field(default_factory=lambda: uuid.uuid4().hex)
     usage: FrozenUsage
-    model_family: str
+    model_family: str = Field(
+        description=(
+            "Model family used in Redis key segments. Must be non-empty, NFC "
+            "normalized, printable, contain no whitespace/control characters, "
+            "and cannot contain ':'; the portable recommended character set is "
+            "^[A-Za-z0-9_./-]+$."
+        )
+    )
     bucket_ids: frozenset[BucketId] | None = None
     model: str | None = None
     is_unlimited: bool = False
@@ -252,17 +290,7 @@ class CapacityReservation(BaseModel):
     @field_validator("model_family", mode="before")
     @classmethod
     def _reject_empty_model_family(cls, value: object) -> object:
-        if type(value) is not str:
-            raise ValueError(f"model_family must be a str (got {type(value).__name__})")
-        if not value:
-            raise ValueError("model_family must not be empty")
-        if not value.strip():
-            raise ValueError("model_family must not be whitespace-only")
-        if ":" in value:
-            raise ValueError(
-                "model_family must not contain ':' (used as Redis key separator)"
-            )
-        return value
+        return _validate_key_segment(value, field_name="model_family")
 
     @field_validator("is_unlimited", mode="after")
     @classmethod

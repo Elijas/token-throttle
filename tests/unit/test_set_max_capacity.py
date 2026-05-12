@@ -175,17 +175,17 @@ class TestSetMaxCapacityMetricValidation:
 
     async def test_boolean_metric_raises(self):
         limiter = await self._make_limiter_with_backend()
-        with pytest.raises(ValueError, match="metric must be a non-empty string"):
+        with pytest.raises(ValueError, match="metric must be a str"):
             await limiter.set_max_capacity("gpt-4o", True, 60, 5000)  # noqa: FBT003
 
     async def test_non_string_metric_raises(self):
         limiter = await self._make_limiter_with_backend()
-        with pytest.raises(ValueError, match="metric must be a non-empty string"):
+        with pytest.raises(ValueError, match="metric must be a str"):
             await limiter.set_max_capacity("gpt-4o", 42, 60, 5000)
 
     async def test_empty_metric_raises(self):
         limiter = await self._make_limiter_with_backend()
-        with pytest.raises(ValueError, match="metric must be a non-empty string"):
+        with pytest.raises(ValueError, match="metric must not be empty"):
             await limiter.set_max_capacity("gpt-4o", "", 60, 5000)
 
 

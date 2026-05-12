@@ -14,6 +14,7 @@ from token_throttle._interfaces._models import (
     FrozenUsage,
     Usage,
     UsageQuotas,
+    _validate_key_segment,
 )
 
 UsageCounter = Callable[..., FrozenUsage]
@@ -53,27 +54,22 @@ class PerModelConfig(BaseModel):
 
     model_family: str | None = Field(
         default=None,
-        description="Optional identifier for rate limiting purposes. Multiple model versions can share the same model_family to count against the same quota, but all models that resolve to the same model_family must expose identical quotas and unlimited-vs-limited behavior within a limiter instance. Defaults to the model name if not specified.",
+        description=(
+            "Optional identifier for rate limiting purposes. Multiple model "
+            "versions can share the same model_family to count against the same "
+            "quota, but all models that resolve to the same model_family must "
+            "expose identical quotas and unlimited-vs-limited behavior within "
+            "a limiter instance. Defaults to the model name if not specified. "
+            "When set, the value must be non-empty, NFC normalized, printable, "
+            "contain no whitespace/control characters, and cannot contain ':'; "
+            "the portable recommended character set is ^[A-Za-z0-9_./-]+$."
+        ),
     )
 
     @field_validator("model_family", mode="before")
     @classmethod
     def _reject_empty_string(cls, value: object) -> object:
-        if value is None:
-            return value
-        if type(value) is not str:
-            raise ValueError(
-                f"model_family must be a str or None (got {type(value).__name__})"
-            )
-        if not value:
-            raise ValueError("model_family must not be an empty string")
-        if not value.strip():
-            raise ValueError("model_family must not be whitespace-only")
-        if ":" in value:
-            raise ValueError(
-                "model_family must not contain ':' (used as Redis key separator)"
-            )
-        return value
+        return _validate_key_segment(value, field_name="model_family", allow_none=True)
 
     @field_validator("usage_counter", mode="after")
     @classmethod

@@ -21,6 +21,7 @@ from token_throttle._interfaces._models import (
     UsageQuotas,
     _coerce_usage_value,
     _is_bool_like,
+    _validate_key_segment,
     frozen_usage,
 )
 
@@ -359,17 +360,7 @@ def validate_extra_usage(
 
 def validate_metric(metric: object) -> str:
     """Validate the metric parameter for set_max_capacity."""
-    if type(metric) is not str:
-        raise ValueError(
-            f"metric must be a non-empty string (got {type(metric).__name__})"
-        )
-    if not metric:
-        raise ValueError("metric must be a non-empty string")
-    if not metric.strip():
-        raise ValueError("metric must not be whitespace-only")
-    if ":" in metric:
-        raise ValueError("metric must not contain ':' (used as Redis key separator)")
-    return metric
+    return _validate_key_segment(metric, field_name="metric")
 
 
 def validate_per_seconds(per_seconds: object) -> int:
@@ -431,11 +422,7 @@ def resolve_config(
         )
     )
     model_family = resolved.get_model_family()
-    if ":" in model_family:
-        raise ValueError(
-            f"model_family must not contain ':' (used as Redis key separator); "
-            f"got {model_family!r}"
-        )
+    _validate_key_segment(model_family, field_name="model_family")
     return resolved
 
 
