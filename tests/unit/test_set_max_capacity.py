@@ -228,8 +228,8 @@ class TestSetMaxCapacityPerSecondsValidation:
 class TestSetMaxCapacityCoercion:
     """Coerce validated values to float before passing to backend."""
 
-    async def test_decimal_value_is_coerced_to_float(self):
-        """Decimal causes TypeError in bucket code if not coerced to float."""
+    async def test_decimal_value_is_rejected(self):
+        """Max-capacity validation accepts only builtin int/float values."""
         config = make_limited_config(model_family="test-model")
         limiter = RateLimiter(config, backend=MemoryBackendBuilder())
 
@@ -237,8 +237,8 @@ class TestSetMaxCapacityCoercion:
             {"tokens": 100, "requests": 1}, model="test-model"
         )
 
-        # Should not raise — Decimal must be coerced to float
-        await limiter.set_max_capacity("test-model", "tokens", 60, Decimal(5000))
+        with pytest.raises(ValueError, match="max_capacity must be finite"):
+            await limiter.set_max_capacity("test-model", "tokens", 60, Decimal(5000))
 
     async def test_int_value_is_coerced_to_float(self):
         """Backend receives a float, not the raw int."""

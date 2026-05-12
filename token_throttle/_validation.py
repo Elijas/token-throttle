@@ -5,6 +5,7 @@ import math
 from collections.abc import Mapping
 from collections.abc import Set as AbstractSet
 
+from token_throttle._capacity import _validate_max_capacity_finite_positive
 from token_throttle._interfaces._callable_utils import (
     close_awaitable_if_possible,
     is_async_callable,
@@ -254,16 +255,11 @@ def validate_max_capacity_value(value: object) -> float:
     if _is_bool_like(value):
         raise ValueError("max_capacity must not be a boolean")
     try:
-        float_value = float(value)
-    except (TypeError, ValueError) as exc:
+        return _validate_max_capacity_finite_positive(value)
+    except ValueError as exc:
         raise ValueError(
             f"max_capacity must be finite and greater than 0 (got {value!r})"
         ) from exc
-    if not (math.isfinite(float_value) and float_value > 0):
-        raise ValueError(
-            f"max_capacity must be finite and greater than 0 (got {value!r})"
-        )
-    return float_value
 
 
 def merge_extra_usage(

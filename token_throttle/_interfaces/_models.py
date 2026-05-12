@@ -9,6 +9,8 @@ from typing import ClassVar, Self
 from frozendict import frozendict
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 
+from token_throttle._capacity import MIN_MAX_CAPACITY
+
 _UNLIMITED_FLAG = "__rate_limiting_disabled__"
 """
 Sentinel ``model_family`` value used by ``_unlimited_reservation``.
@@ -64,6 +66,15 @@ class Quota(BaseModel):
     ) -> object:
         if _is_bool_like(value):
             raise ValueError(f"{info.field_name} must not be a boolean")
+        return value
+
+    @field_validator("limit")
+    @classmethod
+    def _reject_subnormal_limit(cls, value: float) -> float:
+        if value < MIN_MAX_CAPACITY:
+            raise ValueError(
+                f"limit must be greater than or equal to {MIN_MAX_CAPACITY!r}"
+            )
         return value
 
     @field_validator("per_seconds", mode="before")

@@ -14,9 +14,16 @@ except ImportError as exc:
         'Install it with: pip install "token-throttle[redis]"'
     ) from exc
 
-from token_throttle._capacity import CalculatedCapacity, calculate_capacity
+from token_throttle._capacity import (
+    CalculatedCapacity,
+    _calculate_rate_per_sec,
+    _validate_max_capacity_finite_positive,
+    _validate_rate_per_sec_finite_positive,
+    calculate_capacity,
+)
 from token_throttle._interfaces._interfaces import PerModelConfig
 from token_throttle._interfaces._models import Quota, _is_bool_like
+from token_throttle._validation import validate_per_seconds
 
 from ._server_time import async_server_time
 
@@ -123,13 +130,13 @@ class RedisBucket:
         redis_client: redis.asyncio.Redis,
     ):
         self.usage_metric = quota.metric
-        self.per_seconds = quota.per_seconds
+        self.per_seconds = validate_per_seconds(quota.per_seconds)
         self.full_redis_key = f"rate_limiting:{limit_config.model_family}:{self.usage_metric}:{int(self.per_seconds)}"
         self.model_family = limit_config.get_model_family()
 
         # Default/configured max_capacity from quota (used when no runtime
         # override is present in Redis).
-        self._max_capacity_default = float(quota.limit)
+        self._max_capacity_default = _validate_max_capacity_finite_positive(quota.limit)
         # Cache for a runtime override fetched from Redis.
         self._max_capacity_cached: float | None = None
         self._max_capacity_cache_populated: bool = False
@@ -137,7 +144,9 @@ class RedisBucket:
 
         self._redis = redis_client
         # Initialised from quota.limit; corrected on the first override refresh.
-        self._rate_per_sec = float(quota.limit) / float(quota.per_seconds)
+        self._rate_per_sec = _calculate_rate_per_sec(
+            self._max_capacity_default, self.per_seconds
+        )
         # Keys for Redis
         self._last_checked_key = f"{self.full_redis_key}:last_checked"
         self._capacity_key = f"{self.full_redis_key}:capacity"
@@ -163,6 +172,14 @@ class RedisBucket:
         if self._max_capacity_cached is not None:
             return self._max_capacity_cached
         return self._max_capacity_default
+
+    @property
+    def _rate_per_sec(self) -> float:
+        return self._rate_per_sec_value
+
+    @_rate_per_sec.setter
+    def _rate_per_sec(self, value: object) -> None:
+        self._rate_per_sec_value = _validate_rate_per_sec_finite_positive(value)
 
     async def get_max_capacity(self) -> float:
         """
@@ -192,20 +209,20 @@ class RedisBucket:
         return self.max_capacity
 
     def _set_cached_max_capacity_override(self, value: float | None) -> None:
-        self._max_capacity_cached = value
+        self._max_capacity_cached = (
+            None if value is None else _validate_max_capacity_finite_positive(value)
+        )
         self._max_capacity_cache_populated = True
         effective_limit = self.max_capacity
-        self._rate_per_sec = effective_limit / float(self.per_seconds)
+        self._rate_per_sec = _calculate_rate_per_sec(effective_limit, self.per_seconds)
 
     @staticmethod
     def _parse_positive_finite_value(raw_value: object) -> float | None:
         if type(raw_value) is bool or not isinstance(raw_value, (int, float)):
             return None
         try:
-            parsed = float(raw_value)
-        except (TypeError, ValueError):
-            return None
-        if not (math.isfinite(parsed) and parsed > 0):
+            parsed = _validate_max_capacity_finite_positive(raw_value)
+        except ValueError:
             return None
         return parsed
 
@@ -284,8 +301,7 @@ class RedisBucket:
         """
         if _is_bool_like(value):
             raise ValueError("max_capacity must not be a boolean")
-        if not (math.isfinite(value) and value > 0):
-            raise ValueError("max_capacity must be finite and greater than 0")
+        value = _validate_max_capacity_finite_positive(value)
 
         payload = json.dumps(
             {
@@ -309,12 +325,11 @@ class RedisBucket:
         """
         if _is_bool_like(value):
             raise ValueError("max_capacity must not be a boolean")
-        if not (math.isfinite(value) and value > 0):
-            raise ValueError("max_capacity must be finite and greater than 0")
+        value = _validate_max_capacity_finite_positive(value)
 
         self._max_capacity_default = value
         if self._max_capacity_cached is None:
-            self._rate_per_sec = value / float(self.per_seconds)
+            self._rate_per_sec = _calculate_rate_per_sec(value, self.per_seconds)
 
     async def clear_max_capacity_override(self) -> None:
         """Remove any persisted runtime override for this bucket."""
@@ -411,6 +426,8 @@ class RedisBucket:
 
         if not math.isfinite(new_capacity):
             raise ValueError(f"capacity must be finite (got {new_capacity!r})")
+        if new_capacity == 0.0:
+            new_capacity = 0.0
         new_capacity = new_capacity if allow_negative else max(0, new_capacity)
         pipeline.set(self._last_checked_key, current_time)
         pipeline.set(self._capacity_key, new_capacity)
