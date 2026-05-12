@@ -29,7 +29,7 @@ from token_throttle._interfaces._models import (
 __all__ = ["_UNLIMITED_FLAG"]
 
 
-def is_unlimited_reservation(reservation: CapacityReservation) -> bool:
+def is_unlimited_reservation(reservation: object) -> bool:
     """
     True when a reservation represents a disabled/unlimited rate limit.
 
@@ -45,7 +45,12 @@ def is_unlimited_reservation(reservation: CapacityReservation) -> bool:
     bypass vector beyond V05; closing it requires this tightening AND
     the validator above.
     """
-    return reservation.is_unlimited
+    if not isinstance(reservation, CapacityReservation):
+        raise ValueError(  # noqa: TRY004 - public validators raise ValueError.
+            "reservation must be a CapacityReservation "
+            f"(got {type(reservation).__name__})"
+        )
+    return reservation.is_unlimited is True
 
 
 def extract_usage_from_response(response: object) -> object:
@@ -82,9 +87,13 @@ def extract_usage_from_response(response: object) -> object:
 
 def extract_total_tokens(usage: object) -> float:
     """Extract total_tokens from a usage object (attribute or mapping access)."""
-    if hasattr(usage, "total_tokens"):
-        total_tokens = usage.total_tokens
-    elif isinstance(usage, Mapping):
+    sentinel = object()
+    total_tokens = getattr(usage, "total_tokens", sentinel)
+    if total_tokens is sentinel:
+        if not isinstance(usage, Mapping):
+            raise ValueError(
+                "usage must be an object with total_tokens attribute or a mapping"
+            )
         try:
             total_tokens = usage["total_tokens"]
         except KeyError:
@@ -92,10 +101,6 @@ def extract_total_tokens(usage: object) -> float:
                 "'total_tokens' key not found in usage data — "
                 "pass actual usage via refund_capacity() instead."
             ) from None
-    else:
-        raise ValueError(
-            "usage must be an object with total_tokens attribute or a mapping"
-        )
     if total_tokens is None:
         raise ValueError(
             "total_tokens is None — cannot compute refund. "
@@ -103,6 +108,10 @@ def extract_total_tokens(usage: object) -> float:
         )
     if _is_bool_like(total_tokens):
         raise ValueError("total_tokens must not be a boolean")
+    if not isinstance(total_tokens, (int, float)):
+        raise ValueError(  # noqa: TRY004 - public validators raise ValueError.
+            f"total_tokens must be an int or float (got {type(total_tokens).__name__})"
+        )
     try:
         value = float(total_tokens)
     except (TypeError, ValueError) as exc:
@@ -240,6 +249,10 @@ def validate_timeout(timeout: object) -> float | None:
         return None
     if _is_bool_like(timeout):
         raise ValueError("timeout must not be a boolean")
+    if not isinstance(timeout, (int, float)):
+        raise ValueError(  # noqa: TRY004 - public validators raise ValueError.
+            f"timeout must be finite int, float, or None (got {type(timeout).__name__})"
+        )
     try:
         timeout_value = float(timeout)
     except (TypeError, ValueError) as exc:
@@ -255,6 +268,10 @@ def validate_max_capacity_value(value: object) -> float:
     """Validate the value parameter for set_max_capacity."""
     if _is_bool_like(value):
         raise ValueError("max_capacity must not be a boolean")
+    if not isinstance(value, (int, float)):
+        raise ValueError(  # noqa: TRY004 - public validators raise ValueError.
+            f"max_capacity must be finite and greater than 0 (got {value!r})"
+        )
     try:
         return _validate_max_capacity_finite_positive(value)
     except ValueError as exc:
@@ -331,13 +348,19 @@ def validate_extra_usage(
         raise ValueError(  # noqa: TRY004
             f"extra_usage must be a mapping or None (got {type(extra_usage).__name__})"
         )
-    return extra_usage
+    try:
+        return dict(extra_usage)
+    except Exception as exc:
+        raise ValueError(
+            "extra_usage must yield consistent key/value pairs "
+            f"(got {type(exc).__name__}: {exc})"
+        ) from exc
 
 
 def validate_metric(metric: object) -> str:
     """Validate the metric parameter for set_max_capacity."""
-    if not isinstance(metric, str):
-        raise ValueError(  # noqa: TRY004
+    if type(metric) is not str:
+        raise ValueError(
             f"metric must be a non-empty string (got {type(metric).__name__})"
         )
     if not metric:
@@ -353,13 +376,10 @@ def validate_per_seconds(per_seconds: object) -> int:
     """
     Validate the per_seconds parameter for set_max_capacity.
 
-    Accepts ``int`` directly.  Whole ``float`` values (e.g. ``60.0``) are
-    coerced to ``int`` for parity with Pydantic's lax-mode coercion on
-    ``Quota.per_seconds: int``.  All other types are rejected.
-
-    Note: the float path uses ``int()`` which silently truncates values
-    above 2^53, but any rate-limiting window that large is nonsensical.
-    The int path has no precision issue.
+    Accepts integer values directly.  Float and other numeric-looking
+    objects are rejected so public validation matches strict model
+    construction and cannot be reached through arbitrary ``__float__`` or
+    ``__index__`` implementations.
     """
     if _is_bool_like(per_seconds):
         raise ValueError("per_seconds must not be a boolean")
@@ -369,16 +389,6 @@ def validate_per_seconds(per_seconds: object) -> int:
                 f"per_seconds must be a positive integer (got {per_seconds!r})"
             )
         return per_seconds
-    if isinstance(per_seconds, float):
-        if (
-            not math.isfinite(per_seconds)
-            or per_seconds <= 0
-            or not per_seconds.is_integer()
-        ):
-            raise ValueError(
-                f"per_seconds must be a positive integer (got {per_seconds!r})"
-            )
-        return int(per_seconds)
     raise ValueError(f"per_seconds must be a positive integer (got {per_seconds!r})")
 
 

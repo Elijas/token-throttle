@@ -56,7 +56,11 @@ class Quota(BaseModel):
         gt=0,  # Greater than 0
         description="Time window in seconds. Default: 60 (1 minute). E.g. For requests per minute, set to 60. For requests per hour, set to 3600.",
     )
-    model_config = ConfigDict(arbitrary_types_allowed=True, frozen=True)
+    model_config = ConfigDict(
+        arbitrary_types_allowed=True,
+        frozen=True,
+        strict=True,
+    )
 
     @field_validator("limit", "per_seconds", mode="before")
     @classmethod
@@ -67,6 +71,8 @@ class Quota(BaseModel):
     ) -> object:
         if _is_bool_like(value):
             raise ValueError(f"{info.field_name} must not be a boolean")
+        if info.field_name == "limit" and not isinstance(value, (int, float)):
+            raise ValueError(f"limit must be int or float (got {type(value).__name__})")
         return value
 
     @field_validator("limit")
@@ -90,11 +96,13 @@ class Quota(BaseModel):
     @field_validator("metric", mode="before")
     @classmethod
     def _reject_empty_metric(cls, value: object) -> object:
-        if isinstance(value, str) and not value:
+        if type(value) is not str:
+            raise ValueError(f"metric must be a str (got {type(value).__name__})")
+        if not value:
             raise ValueError("metric must not be empty")
-        if isinstance(value, str) and not value.strip():
+        if not value.strip():
             raise ValueError("metric must not be whitespace-only")
-        if isinstance(value, str) and ":" in value:
+        if ":" in value:
             raise ValueError(
                 "metric must not contain ':' (used as Redis key separator)"
             )
@@ -171,6 +179,11 @@ def _coerce_usage_value(
 ) -> float:
     if _is_bool_like(amount):
         raise ValueError(f"{label} for {metric} must not be a boolean")
+    if not isinstance(amount, (int, float)):
+        raise ValueError(  # noqa: TRY004 - public validators raise ValueError.
+            f"{label} for {metric} must be finite and be int or float "
+            f"(got {type(amount).__name__})"
+        )
     try:
         value = float(amount)
     except (TypeError, ValueError) as exc:
@@ -213,7 +226,11 @@ class CapacityReservation(BaseModel):
     bucket_ids: frozenset[BucketId] | None = None
     model: str | None = None
     is_unlimited: bool = False
-    model_config = ConfigDict(arbitrary_types_allowed=True, frozen=True)
+    model_config = ConfigDict(
+        arbitrary_types_allowed=True,
+        frozen=True,
+        strict=True,
+    )
 
     @field_validator("usage", mode="before")
     @classmethod
@@ -230,6 +247,21 @@ class CapacityReservation(BaseModel):
                         f"Reserved usage value for {metric} must be non-negative"
                     )
             return normalized_usage
+        return value
+
+    @field_validator("model_family", mode="before")
+    @classmethod
+    def _reject_empty_model_family(cls, value: object) -> object:
+        if type(value) is not str:
+            raise ValueError(f"model_family must be a str (got {type(value).__name__})")
+        if not value:
+            raise ValueError("model_family must not be empty")
+        if not value.strip():
+            raise ValueError("model_family must not be whitespace-only")
+        if ":" in value:
+            raise ValueError(
+                "model_family must not contain ':' (used as Redis key separator)"
+            )
         return value
 
     @field_validator("is_unlimited", mode="after")
@@ -286,23 +318,13 @@ class CapacityReservation(BaseModel):
             if not isinstance(item, (list, tuple)) or len(item) != 2:  # noqa: PLR2004
                 raise ValueError("Each bucket_id must be a (metric, per_seconds) pair")
             metric, per_seconds = item
-            if not isinstance(metric, str) or not metric:
+            if type(metric) is not str or not metric:
                 raise ValueError("bucket_id metric must be a non-empty string")
             if _is_bool_like(per_seconds):
                 raise ValueError("bucket_id per_seconds must not be a boolean")
-            try:
-                parsed_per_seconds = float(per_seconds)
-            except (TypeError, ValueError) as exc:
-                raise ValueError(
-                    "bucket_id per_seconds must be a positive integer"
-                ) from exc
-            if (
-                not math.isfinite(parsed_per_seconds)
-                or parsed_per_seconds <= 0
-                or not parsed_per_seconds.is_integer()
-            ):
+            if not isinstance(per_seconds, int) or per_seconds <= 0:
                 raise ValueError("bucket_id per_seconds must be a positive integer")
-            normalized.add((metric, int(parsed_per_seconds)))
+            normalized.add((metric, int(per_seconds)))
         return frozenset(normalized)
 
     def __setstate__(self, state: dict[str, object]) -> None:

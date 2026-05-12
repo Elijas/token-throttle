@@ -81,10 +81,9 @@ class TestQuota:
         with pytest.raises(ValidationError):
             Quota(metric="requests", limit=100.0, per_seconds=0.5)
 
-    def test_coerces_whole_float_to_int(self):
-        q = Quota(metric="requests", limit=100.0, per_seconds=60.0)
-        assert q.per_seconds == 60
-        assert isinstance(q.per_seconds, int)
+    def test_rejects_whole_float_per_seconds(self):
+        with pytest.raises(ValidationError):
+            Quota(metric="requests", limit=100.0, per_seconds=60.0)
 
     @pytest.mark.parametrize(
         "metric",
@@ -287,7 +286,7 @@ class TestCapacityReservation:
         reservation = CapacityReservation(
             usage={"requests": 1.0},
             model_family="gpt-4o",
-            bucket_ids=[("requests", 60.0)],
+            bucket_ids=[("requests", 60)],
         )
 
         assert reservation.bucket_ids == frozenset({("requests", 60)})
@@ -368,25 +367,28 @@ class TestIsBoolLike:
 
 
 class TestNumpyBoolCoercion:
-    """Only exact Python bool is treated as bool-like."""
+    """Numeric-looking impostors are rejected unless they are int/float."""
 
-    def test_quota_limit_accepts_duck_typed_numpy_bool(self):
-        assert Quota(metric="tokens", limit=FAKE_NP_TRUE).limit == 1.0
+    def test_quota_limit_rejects_duck_typed_numpy_bool(self):
+        with pytest.raises(ValidationError, match="limit must be int or float"):
+            Quota(metric="tokens", limit=FAKE_NP_TRUE)
 
     def test_quota_per_seconds_rejects_non_numeric_duck_typed_numpy_bool(self):
         with pytest.raises(ValidationError, match="per_seconds must be int or float"):
             Quota(metric="tokens", limit=100.0, per_seconds=FAKE_NP_TRUE)
 
-    def test_coerce_usage_value_accepts_duck_typed_numpy_bool(self):
-        assert _coerce_usage_value("tokens", FAKE_NP_TRUE) == 1.0
+    def test_coerce_usage_value_rejects_duck_typed_numpy_bool(self):
+        with pytest.raises(ValueError, match="int or float"):
+            _coerce_usage_value("tokens", FAKE_NP_TRUE)
 
-    def test_frozen_usage_accepts_duck_typed_numpy_bool_value(self):
-        assert frozen_usage({"tokens": FAKE_NP_TRUE})["tokens"] == 1.0
+    def test_frozen_usage_rejects_duck_typed_numpy_bool_value(self):
+        with pytest.raises(ValueError, match="int or float"):
+            frozen_usage({"tokens": FAKE_NP_TRUE})
 
-    def test_bucket_ids_per_seconds_accepts_duck_typed_numpy_bool(self):
-        reservation = CapacityReservation(
-            usage={"requests": 1.0},
-            model_family="gpt-4o",
-            bucket_ids=[("requests", FAKE_NP_TRUE)],
-        )
-        assert reservation.bucket_ids == frozenset({("requests", 1)})
+    def test_bucket_ids_per_seconds_rejects_duck_typed_numpy_bool(self):
+        with pytest.raises(ValidationError, match="bucket_id per_seconds"):
+            CapacityReservation(
+                usage={"requests": 1.0},
+                model_family="gpt-4o",
+                bucket_ids=[("requests", FAKE_NP_TRUE)],
+            )

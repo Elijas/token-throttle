@@ -344,35 +344,35 @@ class TestFreshStartCallback:
 
 
 # ---------------------------------------------------------------------------
-# Usage value coercion (string → float)
+# Usage value strictness
 # ---------------------------------------------------------------------------
 
 
 class TestUsageValueCoercion:
-    """Memory backend must coerce usage values (e.g. strings) to float,
-    matching the Redis backend behavior.
-    """
+    """Memory backend rejects numeric-looking strings at the validation boundary."""
 
-    async def test_consume_capacity_coerces_string_values(self):
+    async def test_consume_capacity_rejects_string_values(self):
         builder = MemoryBackendBuilder()
         backend = builder.build(_make_config())
         usage = frozendict({"tokens": "50", "requests": "1"})
-        await backend.consume_capacity(usage)
+        with pytest.raises(ValueError, match="int or float"):
+            await backend.consume_capacity(usage)
 
-    async def test_await_for_capacity_coerces_string_values(self):
+    async def test_await_for_capacity_rejects_string_values(self):
         builder = MemoryBackendBuilder()
         backend = builder.build(_make_config())
         usage = frozendict({"tokens": "50", "requests": "1"})
-        await backend.await_for_capacity(usage)
+        with pytest.raises(ValueError, match="int or float"):
+            await backend.await_for_capacity(usage)
 
-    async def test_await_for_capacity_coerces_string_values_when_waiting(self):
-        """Regression: string usage must not TypeError in _compute_sleep."""
+    async def test_await_for_capacity_rejects_string_values_when_waiting(self):
+        """String usage fails before _compute_sleep sees it."""
         cfg = _make_config(
             quotas=[Quota(metric="tokens", limit=100, per_seconds=SecondsIn.MINUTE)],
         )
         backend = MemoryBackendBuilder().build(cfg)
         await backend.consume_capacity(frozendict({"tokens": 100.0}))
-        with pytest.raises(TimeoutError):
+        with pytest.raises(ValueError, match="int or float"):
             await backend.await_for_capacity(
                 frozendict({"tokens": "50"}),
                 timeout=0.05,

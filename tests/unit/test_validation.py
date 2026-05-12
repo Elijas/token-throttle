@@ -168,10 +168,9 @@ class TestValidatePerSeconds:
         assert validate_per_seconds(60) == 60
         assert validate_per_seconds(1) == 1
 
-    def test_whole_float_per_seconds_is_coerced_to_int(self):
-        result = validate_per_seconds(60.0)
-        assert result == 60
-        assert isinstance(result, int)
+    def test_whole_float_per_seconds_is_rejected(self):
+        with pytest.raises(ValueError, match="positive integer"):
+            validate_per_seconds(60.0)
 
 
 class TestResolveConfig:
@@ -243,12 +242,14 @@ FAKE_NP_TRUE = _FakeNumpyBool(value=1)
 
 
 class TestNumpyBoolCoercionInValidation:
-    def test_extract_total_tokens_accepts_duck_typed_numpy_bool(self):
+    def test_extract_total_tokens_rejects_duck_typed_numpy_bool(self):
         usage = type("Usage", (), {"total_tokens": FAKE_NP_TRUE})()
-        assert extract_total_tokens(usage) == 1
+        with pytest.raises(ValueError, match="int or float"):
+            extract_total_tokens(usage)
 
-    def test_validate_timeout_accepts_duck_typed_numpy_bool(self):
-        assert validate_timeout(FAKE_NP_TRUE) == 1.0
+    def test_validate_timeout_rejects_duck_typed_numpy_bool(self):
+        with pytest.raises(ValueError, match="int, float, or None"):
+            validate_timeout(FAKE_NP_TRUE)
 
     def test_validate_max_capacity_value_rejects_duck_typed_numpy_bool(self):
         with pytest.raises(ValueError, match="max_capacity must be finite"):
@@ -258,6 +259,7 @@ class TestNumpyBoolCoercionInValidation:
         with pytest.raises(ValueError, match="positive integer"):
             validate_per_seconds(FAKE_NP_TRUE)
 
-    def test_merge_extra_usage_accepts_duck_typed_numpy_bool(self):
+    def test_merge_extra_usage_rejects_duck_typed_numpy_bool(self):
         usage = frozendict({"tokens": 100.0})
-        assert merge_extra_usage(usage, {"tokens": FAKE_NP_TRUE})["tokens"] == 101.0
+        with pytest.raises(ValueError, match="int or float"):
+            merge_extra_usage(usage, {"tokens": FAKE_NP_TRUE})

@@ -856,8 +856,8 @@ class TestExtractTotalTokensValidation:
                 reservation, usage={"total_tokens": "abc"}
             )
 
-    def test_numeric_string_total_tokens_is_coerced(self):
-        """Numeric strings (e.g. from JSON) should be coerced to float."""
+    def test_numeric_string_total_tokens_is_rejected(self):
+        """Strict refund extraction rejects numeric strings."""
         builder, mock_backend = make_mock_backend_builder()
         limiter = SyncRateLimiter(make_limited_config(), backend=builder)
         limiter.acquire_capacity({"tokens": 100, "requests": 1}, model="gpt-4")
@@ -865,8 +865,11 @@ class TestExtractTotalTokensValidation:
             usage={"tokens": 100.0, "requests": 1.0},
             model_family="gpt-4",
         )
-        limiter.refund_capacity_from_response(reservation, usage={"total_tokens": "80"})
-        mock_backend.refund_capacity_for_buckets.assert_called_once()
+        with pytest.raises(ValueError, match="int or float"):
+            limiter.refund_capacity_from_response(
+                reservation, usage={"total_tokens": "80"}
+            )
+        mock_backend.refund_capacity_for_buckets.assert_not_called()
 
     def test_zero_total_tokens_is_valid(self):
         builder, mock_backend = make_mock_backend_builder()

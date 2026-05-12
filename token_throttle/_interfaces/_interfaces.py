@@ -59,11 +59,17 @@ class PerModelConfig(BaseModel):
     @field_validator("model_family", mode="before")
     @classmethod
     def _reject_empty_string(cls, value: object) -> object:
-        if isinstance(value, str) and not value:
+        if value is None:
+            return value
+        if type(value) is not str:
+            raise ValueError(
+                f"model_family must be a str or None (got {type(value).__name__})"
+            )
+        if not value:
             raise ValueError("model_family must not be an empty string")
-        if isinstance(value, str) and not value.strip():
+        if not value.strip():
             raise ValueError("model_family must not be whitespace-only")
-        if isinstance(value, str) and ":" in value:
+        if ":" in value:
             raise ValueError(
                 "model_family must not contain ':' (used as Redis key separator)"
             )
@@ -90,7 +96,7 @@ class PerModelConfig(BaseModel):
         return self.quotas.is_unlimited
 
     # Note: in "model_config", "model" means Pydantic Model, not LLM Model like in other fields of this class
-    model_config = ConfigDict(arbitrary_types_allowed=True)
+    model_config = ConfigDict(arbitrary_types_allowed=True, strict=True)
 
 
 @runtime_checkable
