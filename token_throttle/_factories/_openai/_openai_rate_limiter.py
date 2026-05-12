@@ -38,6 +38,24 @@ def create_openai_redis_rate_limiter(
     custom metrics, or non-OpenAI usage shapes, construct ``RateLimiter`` with
     explicit ``Quota`` objects instead.
     """
+    if not isinstance(redis_client, redis.Redis):
+        raise TypeError(
+            f"redis_client must be a redis.asyncio.Redis (async) instance "
+            f"(got {type(redis_client).__name__}). For a sync client, use "
+            f"create_openai_redis_sync_rate_limiter instead."
+        )
+    if isinstance(rpm, bool) or not isinstance(rpm, int):
+        raise TypeError(f"rpm must be an int (got {type(rpm).__name__})")
+    if isinstance(tpm, bool) or not isinstance(tpm, int):
+        raise TypeError(f"tpm must be an int (got {type(tpm).__name__})")
+    if callbacks is not None and not isinstance(callbacks, RateLimiterCallbacks):
+        raise TypeError(
+            f"callbacks must be a RateLimiterCallbacks instance or None "
+            f"(got {type(callbacks).__name__})"
+        )
+    Quota(metric="requests", limit=rpm, per_seconds=SecondsIn.MINUTE)
+    Quota(metric="tokens", limit=tpm, per_seconds=SecondsIn.MINUTE)
+
     return RateLimiter(
         lambda model_name: PerModelConfig(
             quotas=UsageQuotas(
