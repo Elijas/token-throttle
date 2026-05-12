@@ -3,6 +3,7 @@ import uuid
 import warnings
 from collections import defaultdict
 from collections.abc import Iterator, Mapping
+from copy import deepcopy as _deepcopy
 from enum import Enum
 from typing import ClassVar, Self
 
@@ -303,6 +304,25 @@ class CapacityReservation(BaseModel):
                 raise ValueError("bucket_id per_seconds must be a positive integer")
             normalized.add((metric, int(parsed_per_seconds)))
         return frozenset(normalized)
+
+    def __setstate__(self, state: dict[str, object]) -> None:
+        # Re-run validators for pickle/copy/cloudpickle restores.
+        fields = state.get("__dict__", state)
+        validated = type(self).model_validate(fields)
+        object.__setattr__(self, "__dict__", validated.__dict__)
+        for key, value in state.items():
+            if key != "__dict__":
+                object.__setattr__(self, key, value)
+
+    def __copy__(self) -> Self:
+        copied = type(self).__new__(type(self))
+        copied.__setstate__(self.__getstate__())
+        return copied
+
+    def __deepcopy__(self, memo: dict[int, object] | None = None) -> Self:
+        copied = type(self).__new__(type(self))
+        copied.__setstate__(_deepcopy(self.__getstate__(), memo=memo))
+        return copied
 
     def get_usage(self) -> FrozenUsage:
         return self.usage
