@@ -44,7 +44,7 @@ from token_throttle._interfaces._models import (
 from token_throttle._rate_limiter import RateLimiter
 from token_throttle._sync_rate_limiter import SyncRateLimiter
 
-__version__ = "1.4.1"
+__version__ = "1.5.0"
 
 # Lazy imports: these pull in redis or tiktoken at import time.
 # Deferred via __getattr__ so `import token_throttle` works without optional deps.
