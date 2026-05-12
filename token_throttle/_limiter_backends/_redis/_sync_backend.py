@@ -1,3 +1,4 @@
+import asyncio
 import contextlib
 import logging
 import math
@@ -43,6 +44,20 @@ from ._sync_bucket import (
 )
 
 _logger = logging.getLogger("token_throttle")
+
+_CRITICAL_CALLBACK_EXCEPTION_TYPES = (
+    asyncio.CancelledError,
+    KeyboardInterrupt,
+    SystemExit,
+    GeneratorExit,
+)
+
+
+def _callback_exception_group_contains_critical(exc: BaseException) -> bool:
+    if not isinstance(exc, BaseExceptionGroup):
+        return False
+    critical, _non_critical = exc.split(_CRITICAL_CALLBACK_EXCEPTION_TYPES)
+    return critical is not None
 
 
 class SyncCapacitiesGetterResult(typing.NamedTuple):
@@ -1130,12 +1145,16 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         all 4 _invoke_callback_safe implementations.
         Audited 2026-05 (R4 L12:C03): non-group exotic exceptions are swallowed
         or propagated by design; warning filters must not reopen the leak path.
+        Audited 2026-05 (R4 L12:C01/C02): BaseExceptionGroup containing
+        cancellation or process signals must propagate before best-effort logging.
         """
         try:
             callback(**kwargs)
         except (KeyboardInterrupt, SystemExit, GeneratorExit):
             raise
-        except BaseException as exc:  # noqa: BLE001
+        except BaseException as exc:
+            if _callback_exception_group_contains_critical(exc):
+                raise
             msg = f"Rate limiter callback raised {type(exc).__name__}: {exc}"
             with contextlib.suppress(Warning):
                 warnings.warn(msg, RuntimeWarning, stacklevel=3)
