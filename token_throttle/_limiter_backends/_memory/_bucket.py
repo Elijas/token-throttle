@@ -1,8 +1,14 @@
 import math
 import warnings
 
-from token_throttle._capacity import CalculatedCapacity, calculate_capacity
-from token_throttle._interfaces._models import _is_bool_like
+from token_throttle._capacity import (
+    CalculatedCapacity,
+    _calculate_rate_per_sec,
+    _validate_max_capacity_finite_positive,
+    _validate_rate_per_sec_finite_positive,
+    calculate_capacity,
+)
+from token_throttle._validation import validate_per_seconds
 
 
 class MemoryBucket:
@@ -22,11 +28,28 @@ class MemoryBucket:
     ) -> None:
         self.capacity: float | None = None
         self.last_checked: float | None = None
-        self.max_capacity = float(limit)
-        self._rate_per_sec = float(limit) / float(per_seconds)
         self.usage_metric = metric
-        self.per_seconds = per_seconds
-        self._bucket_id = f"memory:{model_family}:{metric}:{int(per_seconds)}"
+        self.per_seconds = validate_per_seconds(per_seconds)
+        self._bucket_id = f"memory:{model_family}:{metric}:{int(self.per_seconds)}"
+        self.max_capacity = limit
+
+    @property
+    def max_capacity(self) -> float:
+        return self._max_capacity
+
+    @max_capacity.setter
+    def max_capacity(self, value: object) -> None:
+        validated = _validate_max_capacity_finite_positive(value)
+        self._max_capacity = validated
+        self._rate_per_sec = _calculate_rate_per_sec(validated, self.per_seconds)
+
+    @property
+    def _rate_per_sec(self) -> float:
+        return self._rate_per_sec_value
+
+    @_rate_per_sec.setter
+    def _rate_per_sec(self, value: object) -> None:
+        self._rate_per_sec_value = _validate_rate_per_sec_finite_positive(value)
 
     def get_capacity(self, current_time: float) -> CalculatedCapacity:
         """Calculate current capacity using shared calculate_capacity()."""
@@ -56,6 +79,8 @@ class MemoryBucket:
         """
         if not math.isfinite(value):
             raise ValueError(f"capacity must be finite (got {value!r})")
+        if value == 0.0:
+            value = 0.0
         self.capacity = value if allow_negative else max(0.0, value)
         self.last_checked = current_time
 
@@ -75,10 +100,7 @@ class MemoryBucket:
         cap sequences recoverable: overflow hidden under the low cap is
         re-exposed when the cap rises.
         """
-        if _is_bool_like(value):
-            raise ValueError("max_capacity must not be a boolean")
-        if not (math.isfinite(value) and value > 0):
-            raise ValueError("max_capacity must be finite and greater than 0")
+        value = _validate_max_capacity_finite_positive(value)
         if self.last_checked is not None and self.capacity is not None:
             time_passed = current_time - self.last_checked
             if time_passed < 0:
@@ -90,7 +112,9 @@ class MemoryBucket:
                     stacklevel=2,
                 )
                 time_passed = 0.0
-            self.capacity = self.capacity + time_passed * self._rate_per_sec
+            new_capacity = self.capacity + time_passed * self._rate_per_sec
+            if not math.isfinite(new_capacity):
+                new_capacity = self.max_capacity
+            self.capacity = new_capacity
             self.last_checked = current_time
         self.max_capacity = value
-        self._rate_per_sec = value / float(self.per_seconds)

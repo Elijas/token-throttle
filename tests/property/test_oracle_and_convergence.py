@@ -375,8 +375,10 @@ class CrossWorkerConvergenceMachine(RuleBasedStateMachine):
         amount=worker_consume_amounts,
     )
     def worker_consume(self, worker_id, amount):
+        before = self.bucket.get_capacity(self.current_time).amount
         self.backend.consume_capacity(frozen_usage({CONVERGENCE_METRIC: amount}))
-        self.total_consumed += amount
+        after = self.bucket.get_capacity(self.current_time).amount
+        self.total_consumed += before - after
 
     @rule(
         worker_id=st.sampled_from([0, 1, 2, 3]),
@@ -408,11 +410,13 @@ class CrossWorkerConvergenceMachine(RuleBasedStateMachine):
             return
         reserved = reservations.pop()
         actual = reserved * actual_fraction
+        before = self.bucket.get_capacity(self.current_time).amount
         self.backend.refund_capacity(
             frozen_usage({CONVERGENCE_METRIC: reserved}),
             frozen_usage({CONVERGENCE_METRIC: actual}),
         )
-        self.total_refunded += reserved - actual
+        after = self.bucket.get_capacity(self.current_time).amount
+        self.total_refunded += after - before
 
     @invariant()
     def capacity_never_exceeds_max(self):

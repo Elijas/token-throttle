@@ -1,4 +1,5 @@
 import logging
+import math
 import threading
 import time
 import warnings
@@ -398,7 +399,13 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
                 raise ValueError(
                     f"No bucket found for metric='{metric}', per_seconds={per_seconds}"
                 )
-            wait = deficit / bucket._rate_per_sec  # noqa: SLF001
+            rate_per_sec = bucket._rate_per_sec  # noqa: SLF001
+            if not math.isfinite(rate_per_sec) or rate_per_sec <= 0:
+                raise ValueError(
+                    "Bucket rate is non-positive/non-finite — likely a "
+                    "misconfigured max_capacity"
+                )
+            wait = deficit / rate_per_sec
             max_wait = max(max_wait, wait)
         return max_wait if max_wait > 0 else self._sleep_interval
 
