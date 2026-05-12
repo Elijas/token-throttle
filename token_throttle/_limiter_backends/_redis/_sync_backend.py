@@ -542,10 +542,15 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                     current_time=current_time,
                 )
         except BaseException:
+            # KI/SystemExit are the sync analogue of asyncio.CancelledError:
+            # they can interrupt mid-statement and need the same best-effort
+            # refund to avoid leaking capacity. Do not narrow to Exception.
             if consumed:
                 try:  # noqa: SIM105
                     self._refund_cancelled_consumption(usage, buckets=buckets)
                 except BaseException:  # noqa: BLE001, S110
+                    # Best-effort: sync interrupts mirror async cancellation
+                    # cleanup. Swallow so the original interrupt propagates.
                     pass
             raise
         return (
@@ -693,9 +698,14 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                                 wait_time_s=wait_time_s,
                             )
                 except BaseException:
+                    # KI/SystemExit are the sync analogue of asyncio.CancelledError:
+                    # they can interrupt mid-statement and need the same best-effort
+                    # refund to avoid leaking capacity. Do not narrow to Exception.
                     try:  # noqa: SIM105
                         self._refund_cancelled_consumption(usage, buckets=buckets)
                     except BaseException:  # noqa: BLE001, S110
+                        # Best-effort: sync interrupts mirror async cancellation
+                        # cleanup. Swallow so the original interrupt propagates.
                         pass
                     raise
                 return
@@ -940,11 +950,13 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         try:
             last_checked = float(last_checked_raw)
             stored = float(stored_raw)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError) as parse_error:
             _logger.warning(
-                "Bucket %s: snapshot skipped due to unparseable Redis state "
+                "Stale Redis bucket state at %r: %r; "
+                "snapshot skipped due to unparseable Redis state "
                 "(last_checked=%r, capacity=%r).",
                 bucket.full_redis_key,
+                parse_error,
                 last_checked_raw,
                 stored_raw,
             )
@@ -1099,7 +1111,12 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         self._limit_config = cfg
 
     def _invoke_callback_safe(self, callback, **kwargs) -> None:
-        """Fire a user callback, suppressing exceptions to prevent capacity leaks."""
+        """
+        Fire a user callback, suppressing exceptions to prevent capacity leaks.
+
+        Audited 2026-05 (R4 L03): exception ladder verified parity-clean across
+        all 4 _invoke_callback_safe implementations.
+        """
         try:
             callback(**kwargs)
         except (KeyboardInterrupt, SystemExit, GeneratorExit):

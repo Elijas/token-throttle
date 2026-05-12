@@ -289,7 +289,7 @@ class CapacityReservation(BaseModel):
             if not isinstance(metric, str) or not metric:
                 raise ValueError("bucket_id metric must be a non-empty string")
             if _is_bool_like(per_seconds):
-                raise TypeError("bucket_id per_seconds must not be a boolean")
+                raise ValueError("bucket_id per_seconds must not be a boolean")
             try:
                 parsed_per_seconds = float(per_seconds)
             except (TypeError, ValueError) as exc:

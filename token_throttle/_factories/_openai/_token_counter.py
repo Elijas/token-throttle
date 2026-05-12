@@ -331,7 +331,7 @@ def _count_request_context_fragments(
 
 def _parse_non_negative_int(value: object, field_name: str) -> int:
     if _is_bool_like(value) or not isinstance(value, int | float):
-        raise TypeError(f"'{field_name}' must be a finite non-negative integer")
+        raise ValueError(f"'{field_name}' must be a finite non-negative integer")
 
     parsed = float(value)
     if not math.isfinite(parsed) or parsed < 0 or not parsed.is_integer():

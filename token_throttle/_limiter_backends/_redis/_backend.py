@@ -1167,11 +1167,13 @@ class RedisBackend(RateLimiterBackend):
         try:
             last_checked = float(last_checked_raw)
             stored = float(stored_raw)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError) as parse_error:
             _logger.warning(
-                "Bucket %s: snapshot skipped due to unparseable Redis state "
+                "Stale Redis bucket state at %r: %r; "
+                "snapshot skipped due to unparseable Redis state "
                 "(last_checked=%r, capacity=%r).",
                 bucket.full_redis_key,
+                parse_error,
                 last_checked_raw,
                 stored_raw,
             )
@@ -1331,7 +1333,12 @@ class RedisBackend(RateLimiterBackend):
         self._limit_config = cfg
 
     async def _invoke_callback_safe(self, callback, **kwargs) -> None:
-        """Fire a user callback, suppressing exceptions to prevent capacity leaks."""
+        """
+        Fire a user callback, suppressing exceptions to prevent capacity leaks.
+
+        Audited 2026-05 (R4 L03): exception ladder verified parity-clean across
+        all 4 _invoke_callback_safe implementations.
+        """
         try:
             await callback(**kwargs)
         except asyncio.CancelledError:

@@ -640,7 +640,12 @@ class MemoryBackend(RateLimiterBackend):
         self._limit_config = cfg
 
     async def _invoke_callback_safe(self, callback, **kwargs) -> None:
-        """Fire a user callback, suppressing exceptions to prevent capacity leaks."""
+        """
+        Fire a user callback, suppressing exceptions to prevent capacity leaks.
+
+        Audited 2026-05 (R4 L03): exception ladder verified parity-clean across
+        all 4 _invoke_callback_safe implementations.
+        """
         try:
             await callback(**kwargs)
         except asyncio.CancelledError:

@@ -1,4 +1,5 @@
 import json
+import logging
 import math
 import time
 import typing
@@ -28,6 +29,8 @@ from token_throttle._validation import validate_per_seconds
 from ._server_time import sync_server_time
 
 __all__ = ["CalculatedCapacity", "SyncRedisBucket"]
+
+_logger = logging.getLogger(__name__)
 
 
 class RedisPipelineResultError(RuntimeError):
@@ -201,10 +204,20 @@ class SyncRedisBucket:
     @staticmethod
     def _parse_positive_finite_value(raw_value: object) -> float | None:
         if type(raw_value) is bool or not isinstance(raw_value, (int, float)):
+            if raw_value is not None:
+                _logger.warning(
+                    "Stale Redis bucket state at %r: expected positive finite value",
+                    raw_value,
+                )
             return None
         try:
             parsed = _validate_max_capacity_finite_positive(raw_value)
-        except ValueError:
+        except ValueError as parse_error:
+            _logger.warning(
+                "Stale Redis bucket state at %r: %r",
+                raw_value,
+                parse_error,
+            )
             return None
         return parsed
 

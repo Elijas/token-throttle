@@ -1,4 +1,5 @@
 import json
+import logging
 import math
 import time
 import typing
@@ -29,6 +30,8 @@ from ._server_time import async_server_time
 
 # Re-export for backwards compatibility
 __all__ = ["CalculatedCapacity", "RedisBucket"]
+
+_logger = logging.getLogger(__name__)
 
 
 class RedisPipelineResultError(RuntimeError):
@@ -219,10 +222,20 @@ class RedisBucket:
     @staticmethod
     def _parse_positive_finite_value(raw_value: object) -> float | None:
         if type(raw_value) is bool or not isinstance(raw_value, (int, float)):
+            if raw_value is not None:
+                _logger.warning(
+                    "Stale Redis bucket state at %r: expected positive finite value",
+                    raw_value,
+                )
             return None
         try:
             parsed = _validate_max_capacity_finite_positive(raw_value)
-        except ValueError:
+        except ValueError as parse_error:
+            _logger.warning(
+                "Stale Redis bucket state at %r: %r",
+                raw_value,
+                parse_error,
+            )
             return None
         return parsed
 

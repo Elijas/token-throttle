@@ -32,6 +32,18 @@ Matrix: Python 3.12 and 3.13. Redis 7 (alpine) as a GitHub service container.
 
 ## Known constraints and assumptions
 
+### API validation raises `ValueError`
+
+At public API boundaries, token-throttle raises `ValueError` for bad-value
+and bad-shape input, including cases that Python's narrower convention might
+classify as `TypeError`. This gives callers one user-facing validation class
+to catch. Ruff's `TRY004` is suppressed at the specific sites that encode this
+choice.
+
+Use `RuntimeError` for broken internal invariants that users cannot correct by
+changing their request arguments. Reserve `TypeError` for places where the code
+is intentionally matching Python's own call-signature convention.
+
 ### `loguru` is optional — stdlib logging is the default
 
 `loguru` is listed under `[project.optional-dependencies]` (`token-throttle[loguru]`), not in runtime deps. The logging layer auto-detects it:
