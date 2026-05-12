@@ -408,6 +408,18 @@ class CapacityReservation(BaseModel):
             if key != "__dict__":
                 object.__setattr__(self, key, value)
 
+    def model_copy(
+        self,
+        *,
+        update: dict[str, object] | None = None,
+        deep: bool = False,
+    ) -> Self:
+        # Pydantic skips validators for model_copy(update=...), so revalidate
+        # updates to preserve the is_unlimited coupling invariant.
+        if update:
+            return type(self).model_validate({**self.model_dump(), **update})
+        return super().model_copy(update=update, deep=deep)
+
     def __copy__(self) -> Self:
         copied = type(self).__new__(type(self))
         copied.__setstate__(self.__getstate__())
