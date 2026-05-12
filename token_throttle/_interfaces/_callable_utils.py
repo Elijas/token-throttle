@@ -3,11 +3,13 @@ import inspect
 
 
 def is_async_callable(value: object) -> bool:
-    if inspect.iscoroutinefunction(value):
+    if inspect.iscoroutinefunction(value) or inspect.isasyncgenfunction(value):
         return True
     if not callable(value):
         return False
-    return inspect.iscoroutinefunction(value.__call__)
+    return inspect.iscoroutinefunction(value.__call__) or inspect.isasyncgenfunction(
+        value.__call__
+    )
 
 
 def close_awaitable_if_possible(value: object) -> None:
