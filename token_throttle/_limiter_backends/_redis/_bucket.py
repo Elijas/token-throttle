@@ -28,6 +28,7 @@ from token_throttle._validation import validate_per_seconds
 
 from ._keys import redis_namespace_key, validate_redis_key_prefix
 from ._server_time import async_server_time
+from ._ttl import DEFAULT_BUCKET_TTL_SECONDS, validate_redis_ttl_seconds
 
 # Re-export for backwards compatibility
 __all__ = ["CalculatedCapacity", "RedisBucket"]
@@ -132,13 +133,14 @@ class RedisBucket:
     PIPELINE_LAST_CHECKED_OFFSET = 0
     PIPELINE_CAPACITY_OFFSET = 1
 
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         quota: Quota,
         limit_config: PerModelConfig,
         redis_client: redis.asyncio.Redis,
         *,
         key_prefix: str,
+        bucket_ttl_seconds: int = DEFAULT_BUCKET_TTL_SECONDS,
         override_ttl_seconds: int | None = None,
     ):
         self.usage_metric = quota.metric
@@ -160,8 +162,16 @@ class RedisBucket:
         self._max_capacity_cached: float | None = None
         self._max_capacity_cache_populated: bool = False
         self._max_capacity_cache_time: float = 0.0
-        self._override_ttl_seconds = self._validate_override_ttl_seconds(
-            override_ttl_seconds
+        self._bucket_ttl_seconds = validate_redis_ttl_seconds(
+            bucket_ttl_seconds, name="bucket_ttl_seconds"
+        )
+        self._override_ttl_seconds = validate_redis_ttl_seconds(
+            (
+                self._bucket_ttl_seconds
+                if override_ttl_seconds is None
+                else override_ttl_seconds
+            ),
+            name="override_ttl_seconds",
         )
 
         self._redis = redis_client
@@ -231,6 +241,7 @@ class RedisBucket:
 
         # Fetch runtime override from Redis
         stored_value = await self._redis.get(self._max_capacity_key)
+        await self._redis.expire(self._max_capacity_key, self._override_ttl_seconds)
         self.update_max_capacity_from_result(stored_value)
         self._max_capacity_cache_time = current_time
         return self.max_capacity
@@ -262,16 +273,6 @@ class RedisBucket:
             )
             return None
         return parsed
-
-    @staticmethod
-    def _validate_override_ttl_seconds(value: object) -> int | None:
-        if value is None:
-            return None
-        if type(value) is bool or not isinstance(value, int):
-            raise TypeError("override_ttl_seconds must be an int number of seconds")
-        if value <= 0:
-            raise ValueError("override_ttl_seconds must be greater than 0")
-        return value
 
     def _handle_corrupt_override(self, reason: str, *, raw_value: object) -> None:
         _logger.warning(
@@ -423,14 +424,11 @@ class RedisBucket:
             }
         )
         await self._redis.set(self._schema_version_key, self._SCHEMA_VERSION, nx=True)
-        if self._override_ttl_seconds is None:
-            await self._redis.set(self._max_capacity_key, payload)
-        else:
-            await self._redis.set(
-                self._max_capacity_key,
-                payload,
-                ex=self._override_ttl_seconds,
-            )
+        await self._redis.set(
+            self._max_capacity_key,
+            payload,
+            ex=self._override_ttl_seconds,
+        )
         # Update runtime override cache immediately
         self._set_cached_max_capacity_override(value)
         self._max_capacity_cache_time = time.time()
@@ -495,6 +493,8 @@ class RedisBucket:
         # Order must match PIPELINE_LAST_CHECKED_OFFSET / PIPELINE_CAPACITY_OFFSET
         pipeline.get(self._last_checked_key)
         pipeline.get(self._capacity_key)
+        pipeline.expire(self._last_checked_key, self._bucket_ttl_seconds)
+        pipeline.expire(self._capacity_key, self._bucket_ttl_seconds)
 
         if own_pipeline:
             # Refresh max_capacity cache before calculating
@@ -506,7 +506,7 @@ class RedisBucket:
             results = _validate_pipeline_results(
                 results,
                 context=f"RedisBucket.get_capacity({self.full_redis_key})",
-                expected_count=2,
+                expected_count=4,
             )
             last_checked, capacity = _normalize_bucket_state_pair(
                 results[self.PIPELINE_LAST_CHECKED_OFFSET],
@@ -550,8 +550,8 @@ class RedisBucket:
         if new_capacity == 0.0:
             new_capacity = 0.0
         new_capacity = new_capacity if allow_negative else max(0, new_capacity)
-        pipeline.set(self._last_checked_key, current_time)
-        pipeline.set(self._capacity_key, new_capacity)
+        pipeline.set(self._last_checked_key, current_time, ex=self._bucket_ttl_seconds)
+        pipeline.set(self._capacity_key, new_capacity, ex=self._bucket_ttl_seconds)
 
         if execute:
             try:

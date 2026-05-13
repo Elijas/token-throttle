@@ -24,20 +24,23 @@ class _NoopPipeline:
     def set(self, key, value):  # pragma: no cover
         pass
 
+    def expire(self, key, seconds):  # pragma: no cover
+        pass
+
     def delete(self, key):  # pragma: no cover
         pass
 
     async def execute(self):
         # Fresh: last_checked + capacity both absent -> skips snapshot write.
-        return [None, None]
+        return [None, None, False, False]
 
     def execute_sync(self):  # pragma: no cover
-        return [None, None]
+        return [None, None, False, False]
 
 
 class _SyncNoopPipeline(_NoopPipeline):
     def execute(self):  # type: ignore[override]
-        return [None, None]
+        return [None, None, False, False]
 
 
 class FakeAsyncRedis:
@@ -60,6 +63,7 @@ class FakeAsyncBucket:
         self._rate_per_sec = max_capacity / per_seconds
         self._last_checked_key = f"{key}:last_checked"
         self._capacity_key = f"{key}:capacity"
+        self._bucket_ttl_seconds = 604800
 
     @property
     def configured_max_capacity(self) -> float:
@@ -107,6 +111,7 @@ class FakeSyncBucket:
         self._rate_per_sec = max_capacity / per_seconds
         self._last_checked_key = f"{key}:last_checked"
         self._capacity_key = f"{key}:capacity"
+        self._bucket_ttl_seconds = 604800
 
     @property
     def configured_max_capacity(self) -> float:

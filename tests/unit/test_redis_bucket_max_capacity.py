@@ -165,6 +165,9 @@ class TestSetMaxCapacity:
         assert mock_redis.set.await_count == 2
         key, payload = mock_redis.set.await_args_list[1].args
         assert key == bucket._max_capacity_key
+        assert mock_redis.set.await_args_list[1].kwargs == {
+            "ex": bucket._override_ttl_seconds
+        }
         assert json.loads(payload) == {
             "configured_max_capacity": 20.0,
             "override_max_capacity": 5.0,

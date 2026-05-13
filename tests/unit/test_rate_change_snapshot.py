@@ -278,25 +278,30 @@ from token_throttle._limiter_backends._redis._sync_bucket import (  # noqa: E402
 class _AsyncPipeline:
     def __init__(self, redis: "_AsyncRedisState") -> None:
         self._redis = redis
-        self._ops: list[tuple[str, tuple]] = []
+        self._ops: list[tuple[str, tuple, dict]] = []
 
     def get(self, key: str) -> None:
-        self._ops.append(("get", (key,)))
+        self._ops.append(("get", (key,), {}))
 
-    def set(self, key: str, value) -> None:
-        self._ops.append(("set", (key, value)))
+    def set(self, key: str, value, **kwargs) -> None:
+        self._ops.append(("set", (key, value), kwargs))
+
+    def expire(self, key: str, seconds: int) -> None:
+        self._ops.append(("expire", (key, seconds), {}))
 
     def delete(self, key: str) -> None:
-        self._ops.append(("delete", (key,)))
+        self._ops.append(("delete", (key,), {}))
 
     async def execute(self) -> list:
         results = []
-        for op, args in self._ops:
+        for op, args, _kwargs in self._ops:
             if op == "get":
                 results.append(self._redis.store.get(args[0]))
             elif op == "set":
                 self._redis.store[args[0]] = args[1]
                 results.append(True)
+            elif op == "expire":
+                results.append(args[0] in self._redis.store)
             elif op == "delete":
                 self._redis.store.pop(args[0], None)
                 results.append(1)
@@ -316,9 +321,12 @@ class _AsyncRedisState:
     async def get(self, key: str):
         return self.store.get(key)
 
-    async def set(self, key: str, value) -> bool:
+    async def set(self, key: str, value, **_kwargs) -> bool:
         self.store[key] = value
         return True
+
+    async def expire(self, key: str, _seconds: int) -> bool:
+        return key in self.store
 
     async def delete(self, key: str) -> int:
         return 1 if self.store.pop(key, None) is not None else 0
@@ -331,25 +339,30 @@ class _AsyncRedisState:
 class _SyncPipeline:
     def __init__(self, redis: "_SyncRedisState") -> None:
         self._redis = redis
-        self._ops: list[tuple[str, tuple]] = []
+        self._ops: list[tuple[str, tuple, dict]] = []
 
     def get(self, key: str) -> None:
-        self._ops.append(("get", (key,)))
+        self._ops.append(("get", (key,), {}))
 
-    def set(self, key: str, value) -> None:
-        self._ops.append(("set", (key, value)))
+    def set(self, key: str, value, **kwargs) -> None:
+        self._ops.append(("set", (key, value), kwargs))
+
+    def expire(self, key: str, seconds: int) -> None:
+        self._ops.append(("expire", (key, seconds), {}))
 
     def delete(self, key: str) -> None:
-        self._ops.append(("delete", (key,)))
+        self._ops.append(("delete", (key,), {}))
 
     def execute(self) -> list:
         results = []
-        for op, args in self._ops:
+        for op, args, _kwargs in self._ops:
             if op == "get":
                 results.append(self._redis.store.get(args[0]))
             elif op == "set":
                 self._redis.store[args[0]] = args[1]
                 results.append(True)
+            elif op == "expire":
+                results.append(args[0] in self._redis.store)
             elif op == "delete":
                 self._redis.store.pop(args[0], None)
                 results.append(1)
@@ -369,9 +382,12 @@ class _SyncRedisState:
     def get(self, key: str):
         return self.store.get(key)
 
-    def set(self, key: str, value) -> bool:
+    def set(self, key: str, value, **_kwargs) -> bool:
         self.store[key] = value
         return True
+
+    def expire(self, key: str, _seconds: int) -> bool:
+        return key in self.store
 
     def delete(self, key: str) -> int:
         return 1 if self.store.pop(key, None) is not None else 0

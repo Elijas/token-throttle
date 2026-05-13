@@ -43,6 +43,9 @@ class AsyncPipeline:
     def get(self, _key: str) -> None:
         return None
 
+    def expire(self, _key: str, _seconds: int) -> None:
+        return None
+
     async def execute(self) -> object:
         if self.exc is not None:
             raise self.exc
@@ -57,6 +60,9 @@ class SyncPipeline:
     def get(self, _key: str) -> None:
         return None
 
+    def expire(self, _key: str, _seconds: int) -> None:
+        return None
+
     def execute(self) -> object:
         if self.exc is not None:
             raise self.exc
@@ -69,7 +75,7 @@ async def test_partial_none_bucket_state_is_normalized_to_cold_start(
     redis_client = AsyncMock()
     bucket = RedisBucket(quota, limit_config, redis_client, key_prefix="test")
     backend = RedisBackend([bucket], redis_client, limit_config)
-    pipeline = AsyncPipeline(result=[b"1000.0", None, None])
+    pipeline = AsyncPipeline(result=[b"1000.0", None, False, False, None, False])
     seen: list[tuple[object, object]] = []
 
     def capture_calculate_capacity(
@@ -143,7 +149,9 @@ async def test_snapshot_bucket_state_logs_hostile_data(
         return 1234.0
 
     redis_client = MagicMock()
-    redis_client.pipeline.return_value = AsyncPipeline(result=[b"abc", b"1.0"])
+    redis_client.pipeline.return_value = AsyncPipeline(
+        result=[b"abc", b"1.0", True, True]
+    )
     bucket = RedisBucket(quota, limit_config, redis_client, key_prefix="test")
     bucket.get_max_capacity = AsyncMock(return_value=bucket.max_capacity)
     backend = RedisBackend([bucket], redis_client, limit_config)

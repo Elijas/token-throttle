@@ -16,15 +16,17 @@ from token_throttle._interfaces._callbacks import (
 from token_throttle._interfaces._interfaces import PerModelConfig
 from token_throttle._interfaces._models import Quota, SecondsIn, UsageQuotas
 from token_throttle._limiter_backends._redis._backend import RedisBackendBuilder
+from token_throttle._limiter_backends._redis._ttl import DEFAULT_BUCKET_TTL_SECONDS
 from token_throttle._rate_limiter import RateLimiter
 
 
-def create_openai_redis_rate_limiter(
+def create_openai_redis_rate_limiter(  # noqa: PLR0913
     redis_client: redis.Redis,
     *,
     key_prefix: str,
     rpm: int,
     tpm: int,
+    bucket_ttl_seconds: int = DEFAULT_BUCKET_TTL_SECONDS,
     callbacks: RateLimiterCallbacks | None = None,
 ) -> RateLimiter:
     """
@@ -37,7 +39,8 @@ def create_openai_redis_rate_limiter(
     tokens, grouped by ``openai_model_family_getter`` so dated model variants
     share a family. User-provided callbacks merge slot-by-slot with the factory
     defaults: non-None user callbacks win, while None slots inherit the default
-    INFO logger for missing consumption data.
+    INFO logger for missing consumption data. ``bucket_ttl_seconds`` controls
+    the required expiry refreshed on Redis bucket-state keys.
 
     The helper is intentionally minute-window-only. For hourly/daily windows,
     custom metrics, or non-OpenAI usage shapes, construct ``RateLimiter`` with
@@ -80,6 +83,10 @@ def create_openai_redis_rate_limiter(
             usage_counter=OpenAIUsageCounter(),
             model_family=openai_model_family_getter(model_name),
         ),
-        backend=RedisBackendBuilder(redis_client, key_prefix=key_prefix),
+        backend=RedisBackendBuilder(
+            redis_client,
+            key_prefix=key_prefix,
+            bucket_ttl_seconds=bucket_ttl_seconds,
+        ),
         callbacks=_merge_rate_limiter_callbacks(callbacks, default_callbacks),
     )

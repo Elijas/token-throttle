@@ -34,6 +34,9 @@ class _AsyncRedisStore:
         self.store[key] = value
         return True
 
+    async def expire(self, key: str, _seconds: int) -> bool:
+        return key in self.store
+
     async def delete(self, key: str) -> int:
         existed = key in self.store
         self.store.pop(key, None)
@@ -52,6 +55,9 @@ class _SyncRedisStore:
             return None
         self.store[key] = value
         return True
+
+    def expire(self, key: str, _seconds: int) -> bool:
+        return key in self.store
 
     def delete(self, key: str) -> int:
         existed = key in self.store

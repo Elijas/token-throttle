@@ -43,6 +43,7 @@ from ._sync_bucket import (
     _raise_pipeline_response_error,
     _validate_pipeline_results,
 )
+from ._ttl import DEFAULT_BUCKET_TTL_SECONDS, validate_redis_ttl_seconds
 
 _logger = logging.getLogger("token_throttle")
 
@@ -68,9 +69,14 @@ class SyncCapacitiesGetterResult(typing.NamedTuple):
 
 LOCK_TIMEOUT_SECONDS = 30
 
-# Each bucket enqueues exactly 2 pipeline commands in get_capacity()
-# (GET last_checked, GET capacity).  Used to index pipeline results.
-_PIPELINE_CMDS_PER_BUCKET = 2
+# Each bucket enqueues 4 pipeline commands in get_capacity()
+# (GET last_checked, GET capacity, EXPIRE last_checked, EXPIRE capacity).
+# Used to index pipeline results.
+_PIPELINE_CMDS_PER_BUCKET = 4
+
+# Each bucket enqueues 2 commands for max-capacity override reads
+# (GET override, EXPIRE override). Used to index pipeline results.
+_PIPELINE_CMDS_PER_OVERRIDE = 2
 
 
 def _raise_lock_timeout_error() -> typing.NoReturn:
@@ -95,6 +101,8 @@ class SyncRedisBackendBuilder(SyncRateLimiterBackendBuilderInterface):
         *,
         key_prefix: str,
         sleep_interval: float | None = None,
+        bucket_ttl_seconds: int = DEFAULT_BUCKET_TTL_SECONDS,
+        override_ttl_seconds: int | None = None,
     ) -> None:
         super().__init__()
         client_module = type(redis_client).__module__
@@ -109,6 +117,17 @@ class SyncRedisBackendBuilder(SyncRateLimiterBackendBuilderInterface):
         self._redis = redis_client
         self._key_prefix = validate_redis_key_prefix(key_prefix)
         self._sleep_interval = validate_sleep_interval(sleep_interval)
+        self._bucket_ttl_seconds = validate_redis_ttl_seconds(
+            bucket_ttl_seconds, name="bucket_ttl_seconds"
+        )
+        self._override_ttl_seconds = validate_redis_ttl_seconds(
+            (
+                self._bucket_ttl_seconds
+                if override_ttl_seconds is None
+                else override_ttl_seconds
+            ),
+            name="override_ttl_seconds",
+        )
 
     def build(
         self,
@@ -123,6 +142,8 @@ class SyncRedisBackendBuilder(SyncRateLimiterBackendBuilderInterface):
                 limit_config=cfg,
                 redis_client=self._redis,
                 key_prefix=self._key_prefix,
+                bucket_ttl_seconds=self._bucket_ttl_seconds,
+                override_ttl_seconds=self._override_ttl_seconds,
             )
             redis_buckets.append(b)
         return SyncRedisBackend(
@@ -306,12 +327,20 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         for bucket in target_buckets:
             bucket.get_capacity(pipeline=pipeline, current_time=current_time)
 
-        # Include max_capacity in the pipeline to avoid extra round-trips
+        # Include max_capacity in the pipeline to avoid extra round-trips.
+        # Refreshing the override TTL is intentionally separate from the
+        # schema-version key, which is a long-lived registry entry.
         for bucket in target_buckets:
             pipeline.get(bucket._max_capacity_key)  # noqa: SLF001
+            pipeline.expire(
+                bucket._max_capacity_key,  # noqa: SLF001
+                bucket._override_ttl_seconds,  # noqa: SLF001
+            )
 
         num_buckets = len(target_buckets)
-        expected_results = num_buckets * _PIPELINE_CMDS_PER_BUCKET + num_buckets
+        expected_results = num_buckets * (
+            _PIPELINE_CMDS_PER_BUCKET + _PIPELINE_CMDS_PER_OVERRIDE
+        )
         try:
             results = pipeline.execute()
         except redis.exceptions.ResponseError as exc:
@@ -335,10 +364,11 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                     f"SyncRedisBackend._get_capacities_unsafe({bucket.full_redis_key})"
                 ),
             )
-            # max_capacity GETs come after all the per-bucket command pairs
-            bucket.update_max_capacity_from_result(
-                results[num_buckets * _PIPELINE_CMDS_PER_BUCKET + i]
+            # max_capacity GETs come after all per-bucket state commands.
+            max_capacity_idx = num_buckets * _PIPELINE_CMDS_PER_BUCKET + (
+                i * _PIPELINE_CMDS_PER_OVERRIDE
             )
+            bucket.update_max_capacity_from_result(results[max_capacity_idx])
             result = bucket.calculate_capacity(
                 last_checked,
                 capacity,
@@ -949,6 +979,8 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         pipeline = self._redis.pipeline()
         pipeline.get(bucket._last_checked_key)  # noqa: SLF001
         pipeline.get(bucket._capacity_key)  # noqa: SLF001
+        pipeline.expire(bucket._last_checked_key, bucket._bucket_ttl_seconds)  # noqa: SLF001
+        pipeline.expire(bucket._capacity_key, bucket._bucket_ttl_seconds)  # noqa: SLF001
         try:
             results = pipeline.execute()
         except redis.exceptions.ResponseError as exc:
@@ -958,7 +990,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         results = _validate_pipeline_results(
             results,
             context=f"SyncRedisBackend._snapshot_bucket_state({bucket.full_redis_key})",
-            expected_count=2,
+            expected_count=4,
         )
         last_checked_raw, stored_raw = _normalize_bucket_state_pair(
             results[SyncRedisBucket.PIPELINE_LAST_CHECKED_OFFSET],

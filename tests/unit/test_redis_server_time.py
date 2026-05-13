@@ -107,7 +107,7 @@ class TestAsyncBucketUsesServerTime:
         mock.time.return_value = (1700000000, 123456)
         mock.get.return_value = None  # get_max_capacity fallback
         pipeline = MagicMock()
-        pipeline.execute = AsyncMock(return_value=[None, None])
+        pipeline.execute = AsyncMock(return_value=[None, None, False, False])
         # pipeline() is sync in redis-py even for async client
         mock.pipeline = MagicMock(return_value=pipeline)
         return mock
@@ -142,6 +142,7 @@ class TestAsyncBucketUsesServerTime:
         pipeline.set.assert_any_call(
             bucket._last_checked_key,
             1700000000.123456,
+            ex=bucket._bucket_ttl_seconds,
         )
 
     async def test_get_capacity_with_explicit_time_skips_redis_time(
@@ -149,7 +150,7 @@ class TestAsyncBucketUsesServerTime:
     ):
         """When current_time is provided, Redis TIME should not be called."""
         pipeline = MagicMock()
-        pipeline.execute = AsyncMock(return_value=[None, None])
+        pipeline.execute = AsyncMock(return_value=[None, None, False, False])
 
         await bucket.get_capacity(pipeline=pipeline, current_time=999.0)
 
@@ -192,7 +193,7 @@ class TestSyncBucketUsesServerTime:
         mock.time.return_value = (1700000000, 123456)
         mock.get.return_value = None  # get_max_capacity fallback
         pipeline = MagicMock()
-        pipeline.execute.return_value = [None, None]
+        pipeline.execute.return_value = [None, None, False, False]
         mock.pipeline.return_value = pipeline
         return mock
 
@@ -223,6 +224,7 @@ class TestSyncBucketUsesServerTime:
         pipeline.set.assert_any_call(
             bucket._last_checked_key,
             1700000000.123456,
+            ex=bucket._bucket_ttl_seconds,
         )
 
     def test_get_capacity_with_explicit_time_skips_redis_time(self, bucket, mock_redis):

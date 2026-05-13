@@ -214,6 +214,12 @@ quota state. Use different prefixes for unrelated deployments sharing one Redis
 DB or Redis Cluster. The prefix and user-controlled key segments cannot contain
 `:`, `{`, `}`, whitespace, or control characters.
 
+Redis bucket state expires by default after 7 days of inactivity. Configure
+`bucket_ttl_seconds` on Redis builders or Redis OpenAI factories to choose a
+different positive TTL. The TTL is refreshed whenever bucket state is read or
+written; Redis schema-version registry keys are intentionally long-lived and do
+not expire.
+
 Custom backends implement `RateLimiterBackend` or `SyncRateLimiterBackend`.
 Required operations are capacity wait/consume/refund and `set_max_capacity`.
 Optional extension points include `refund_capacity_for_buckets`,

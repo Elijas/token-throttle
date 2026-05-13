@@ -66,6 +66,9 @@ def test_set_max_capacity_writes_baseline_metadata(bucket, mock_redis):
     assert schema_call.kwargs == {"nx": True}
     key, payload = mock_redis.set.call_args_list[1].args
     assert key == bucket._max_capacity_key
+    assert mock_redis.set.call_args_list[1].kwargs == {
+        "ex": bucket._override_ttl_seconds
+    }
     assert json.loads(payload) == {
         "configured_max_capacity": 20.0,
         "override_max_capacity": 5.0,

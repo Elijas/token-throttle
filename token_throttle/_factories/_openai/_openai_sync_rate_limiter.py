@@ -18,15 +18,17 @@ from token_throttle._interfaces._models import Quota, SecondsIn, UsageQuotas
 from token_throttle._limiter_backends._redis._sync_backend import (
     SyncRedisBackendBuilder,
 )
+from token_throttle._limiter_backends._redis._ttl import DEFAULT_BUCKET_TTL_SECONDS
 from token_throttle._sync_rate_limiter import SyncRateLimiter
 
 
-def create_openai_redis_sync_rate_limiter(
+def create_openai_redis_sync_rate_limiter(  # noqa: PLR0913
     redis_client: _sync_redis.Redis,
     *,
     key_prefix: str,
     rpm: int,
     tpm: int,
+    bucket_ttl_seconds: int = DEFAULT_BUCKET_TTL_SECONDS,
     callbacks: SyncRateLimiterCallbacks | None = None,
 ) -> SyncRateLimiter:
     """
@@ -54,6 +56,9 @@ def create_openai_redis_sync_rate_limiter(
         slot-by-slot with the factory defaults: non-None user callbacks win,
         while None slots inherit the default INFO logger for missing
         consumption data.
+    bucket_ttl_seconds:
+        Required Redis bucket-state expiry in seconds. The expiry is refreshed
+        when bucket state is read or written.
 
     Notes
     -----
@@ -105,6 +110,10 @@ def create_openai_redis_sync_rate_limiter(
             usage_counter=OpenAIUsageCounter(),
             model_family=openai_model_family_getter(model_name),
         ),
-        backend=SyncRedisBackendBuilder(redis_client, key_prefix=key_prefix),
+        backend=SyncRedisBackendBuilder(
+            redis_client,
+            key_prefix=key_prefix,
+            bucket_ttl_seconds=bucket_ttl_seconds,
+        ),
         callbacks=_merge_sync_rate_limiter_callbacks(callbacks, default_callbacks),
     )
