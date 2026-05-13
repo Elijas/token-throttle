@@ -166,7 +166,12 @@ def test_legacy_reservation_none_limiter_instance_id_reports_drain_step() -> Non
 
 
 def test_capacity_reservation_object_with_legacy_owner_reports_drain_step() -> None:
-    reservation = CapacityReservation(usage={"tokens": 1.0}, model_family="gpt-4o")
+    reservation = CapacityReservation(
+        usage={"tokens": 1.0},
+        model_family="gpt-4o",
+        limiter_instance_id="limiter",
+    )
+    object.__setattr__(reservation, "limiter_instance_id", None)
 
     issue = _issue_by_path(validate_config_for_v2_0(reservation))[
         "reservation.limiter_instance_id"

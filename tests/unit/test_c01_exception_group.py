@@ -41,7 +41,7 @@ def _async_redis_backend():
     cfg = _config()
     quota = next(iter(cfg.quotas))
     bucket = bucket_module.RedisBucket(quota, cfg, AsyncMock(), key_prefix="test")
-    return backend_module.RedisBackend([bucket], AsyncMock(), cfg)
+    return backend_module.RedisBackend([bucket], AsyncMock(), cfg, key_prefix="test")
 
 
 def _sync_redis_backend():
@@ -55,7 +55,9 @@ def _sync_redis_backend():
     cfg = _config()
     quota = next(iter(cfg.quotas))
     bucket = bucket_module.SyncRedisBucket(quota, cfg, MagicMock(), key_prefix="test")
-    return backend_module.SyncRedisBackend([bucket], MagicMock(), cfg)
+    return backend_module.SyncRedisBackend(
+        [bucket], MagicMock(), cfg, key_prefix="test"
+    )
 
 
 ASYNC_BACKENDS: tuple[tuple[str, Callable], ...] = (

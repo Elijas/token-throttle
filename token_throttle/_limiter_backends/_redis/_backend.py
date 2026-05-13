@@ -44,7 +44,12 @@ from ._bucket import (
     _raise_pipeline_response_error,
     _validate_pipeline_results,
 )
-from ._keys import validate_redis_key_prefix
+from ._keys import (
+    DEFAULT_REFUND_DEDUP_TTL_SECONDS,
+    redis_refund_dedup_key,
+    validate_redis_key_prefix,
+    validate_refund_dedup_ttl_seconds,
+)
 from ._server_time import async_server_time
 from ._ttl import DEFAULT_BUCKET_TTL_SECONDS, validate_redis_ttl_seconds
 
@@ -115,9 +120,13 @@ class RedisBackendBuilder(RateLimiterBackendBuilderInterface):
     ``override_ttl_seconds`` can use a distinct runtime max-capacity override
     expiry; when omitted, it inherits ``bucket_ttl_seconds``. The schema-version
     key is intentionally exempt from expiry because it is a long-lived registry.
+
+    ``refund_dedup_ttl_seconds`` controls how long Redis remembers successful
+    refund reservation ids for cross-process idempotency. The default is
+    7 days.
     """
 
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         redis_client: redis.asyncio.Redis,
         *,
@@ -125,6 +134,7 @@ class RedisBackendBuilder(RateLimiterBackendBuilderInterface):
         sleep_interval: float | None = None,
         bucket_ttl_seconds: int = DEFAULT_BUCKET_TTL_SECONDS,
         override_ttl_seconds: int | None = None,
+        refund_dedup_ttl_seconds: int = DEFAULT_REFUND_DEDUP_TTL_SECONDS,
     ) -> None:
         super().__init__()
         client_module = type(redis_client).__module__
@@ -149,6 +159,9 @@ class RedisBackendBuilder(RateLimiterBackendBuilderInterface):
             ),
             name="override_ttl_seconds",
         )
+        self._refund_dedup_ttl_seconds = validate_refund_dedup_ttl_seconds(
+            refund_dedup_ttl_seconds
+        )
 
     def build(
         self,
@@ -170,6 +183,8 @@ class RedisBackendBuilder(RateLimiterBackendBuilderInterface):
         return RedisBackend(
             buckets=redis_buckets,
             redis=self._redis,
+            key_prefix=self._key_prefix,
+            refund_dedup_ttl_seconds=self._refund_dedup_ttl_seconds,
             sleep_interval=self._sleep_interval,
             callbacks=callbacks,
             limit_config=cfg,
@@ -181,18 +196,24 @@ class RedisBackend(RateLimiterBackend):
     # Cross-worker poll ceiling; intra-process wakeup is instant via _local_condition. Audited 2026-04.
     MAX_CROSS_WORKER_POLL: ClassVar[float] = 1.0
 
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         buckets: list[RedisBucket],
         redis: redis.asyncio.Redis,
         limit_config: PerModelConfig,
         *,
+        key_prefix: str,
+        refund_dedup_ttl_seconds: int = DEFAULT_REFUND_DEDUP_TTL_SECONDS,
         sleep_interval: float | None = None,
         callbacks: RateLimiterCallbacks | None = None,
     ) -> None:
         super().__init__()
         self.sorted_buckets = sorted(buckets, key=lambda b: b.full_redis_key)
         self._redis = redis
+        self._key_prefix = validate_redis_key_prefix(key_prefix)
+        self._refund_dedup_ttl_seconds = validate_refund_dedup_ttl_seconds(
+            refund_dedup_ttl_seconds
+        )
         self._sleep_interval: float = (
             self.DEFAULT_SLEEP_INTERVAL
             if sleep_interval is None
@@ -208,6 +229,30 @@ class RedisBackend(RateLimiterBackend):
         # Surviving bucket state lives in Redis under stable keys, so a rebuilt
         # backend can safely point at the same buckets.
         return True
+
+    def supports_durable_refund_dedup(self) -> bool:
+        return True
+
+    async def _claim_refund_dedup(self, reservation_id: str | None) -> bool:
+        if reservation_id is None:
+            return True
+        key = redis_refund_dedup_key(self._key_prefix, reservation_id)
+        claimed = await self._redis.set(
+            key,
+            "1",
+            ex=self._refund_dedup_ttl_seconds,
+            nx=True,
+        )
+        if claimed:
+            return True
+        message = (
+            f"Reservation {reservation_id} has already been refunded according "
+            "to Redis refund dedup. Ignoring duplicate refund to prevent "
+            "double-crediting capacity."
+        )
+        warnings.warn(message, UserWarning, stacklevel=3)
+        _logger.warning(message)
+        return False
 
     async def _probe_legacy_override_keys_once(
         self,
@@ -1016,7 +1061,8 @@ class RedisBackend(RateLimiterBackend):
         actual_usage: FrozenUsage,
         *,
         bucket_ids: set[tuple[str, int]] | frozenset[tuple[str, int]] | None = None,
-    ) -> None:
+        reservation_id: str | None = None,
+    ) -> bool:
         """
         Refund unused capacity back to the rate limiter based on actual usage.
 
@@ -1057,6 +1103,8 @@ class RedisBackend(RateLimiterBackend):
             bucket_ids: If provided, only refund to buckets matching these
                         (metric, per_seconds) pairs. Used during reconfiguration
                         to refund only to surviving buckets.
+            reservation_id: If provided, claimed in Redis before bucket mutation
+                            to make refunds idempotent across processes.
 
         Example:
             TIME N=0: Reserve 100 tokens (assumes all consumed immediately)
@@ -1075,6 +1123,9 @@ class RedisBackend(RateLimiterBackend):
             2. Update the timestamp to N=10
 
         """
+        if not await self._claim_refund_dedup(reservation_id):
+            return False
+
         buckets = self._snapshot_buckets()
         backend_bucket_ids = self._bucket_ids(buckets)
         refund_bucket_ids = (
@@ -1087,7 +1138,7 @@ class RedisBackend(RateLimiterBackend):
             backend_bucket_ids,
         )
         if not refund_bucket_ids:
-            return
+            return True
         # Calculate how much to refund for each metric
         refund_usage_: dict[str, float] = {}
         for metric, reserved_amount in reserved_usage.items():
@@ -1187,7 +1238,7 @@ class RedisBackend(RateLimiterBackend):
                 suppress_current_task_cancellation()
                 async with self._local_condition:
                     self._local_condition.notify_all()
-                return
+                return True
         async with self._local_condition:
             self._local_condition.notify_all()
         await self._fresh_start_buckets_callback(fresh_start_buckets)
@@ -1201,6 +1252,7 @@ class RedisBackend(RateLimiterBackend):
                 prerefund_capacities=prerefund_capacities,
                 postrefund_capacities=updated_capacities,
             )
+        return True
 
     async def _snapshot_bucket_state(self, bucket: RedisBucket) -> None:
         """

@@ -1,6 +1,7 @@
 import unicodedata
 
 _REDIS_NAMESPACE = "rate_limiting"
+DEFAULT_REFUND_DEDUP_TTL_SECONDS = 7 * 24 * 60 * 60
 
 
 def validate_redis_key_prefix(value: object) -> str:
@@ -36,3 +37,15 @@ def redis_namespace_key(key_prefix: str, *segments: object) -> str:
     return ":".join(
         (key_prefix, _REDIS_NAMESPACE, *(str(segment) for segment in segments))
     )
+
+
+def redis_refund_dedup_key(key_prefix: str, reservation_id: str) -> str:
+    return redis_namespace_key(key_prefix, "refund_dedup", reservation_id)
+
+
+def validate_refund_dedup_ttl_seconds(value: object) -> int:
+    if type(value) is not int:
+        raise TypeError("refund_dedup_ttl_seconds must be an int number of seconds")
+    if value <= 0:
+        raise ValueError("refund_dedup_ttl_seconds must be greater than 0")
+    return value

@@ -229,6 +229,7 @@ class TestCapacityReservation:
         reservation = CapacityReservation(
             usage={"requests": 1.0, "tokens": 100.0},
             model_family="gpt-4o",
+            limiter_instance_id="limiter",
         )
         assert reservation.model_family == "gpt-4o"
         assert reservation.usage == {"requests": 1.0, "tokens": 100.0}
@@ -238,6 +239,7 @@ class TestCapacityReservation:
             CapacityReservation(
                 usage={"requests": 1.0, "tokens": True},
                 model_family="gpt-4o",
+                limiter_instance_id="limiter",
             )
 
     def test_rejects_non_numeric_usage_value(self):
@@ -245,6 +247,7 @@ class TestCapacityReservation:
             CapacityReservation(
                 usage={"requests": 1.0, "tokens": object()},
                 model_family="gpt-4o",
+                limiter_instance_id="limiter",
             )
 
     @pytest.mark.parametrize(
@@ -260,12 +263,14 @@ class TestCapacityReservation:
             CapacityReservation(
                 usage={"requests": 1.0, "tokens": raw_value},
                 model_family="gpt-4o",
+                limiter_instance_id="limiter",
             )
 
     def test_get_usage_returns_frozendict(self):
         reservation = CapacityReservation(
             usage={"requests": 1.0, "tokens": 100.0},
             model_family="gpt-4o",
+            limiter_instance_id="limiter",
         )
         result = reservation.get_usage()
         assert isinstance(result, frozendict)
@@ -276,6 +281,7 @@ class TestCapacityReservation:
         reservation = CapacityReservation(
             usage={"requests": 1.0, "tokens": 100.0},
             model_family="gpt-4o",
+            limiter_instance_id="limiter",
         )
 
         assert isinstance(reservation.usage, frozendict)
@@ -287,6 +293,7 @@ class TestCapacityReservation:
             usage={"requests": 1.0},
             model_family="gpt-4o",
             bucket_ids=[("requests", 60)],
+            limiter_instance_id="limiter",
         )
 
         assert reservation.bucket_ids == frozenset({("requests", 60)})
@@ -297,12 +304,14 @@ class TestCapacityReservation:
                 usage={"requests": 1.0},
                 model_family="gpt-4o",
                 bucket_ids=[("requests", 0)],
+                limiter_instance_id="limiter",
             )
 
     def test_frozen_immutability(self):
         reservation = CapacityReservation(
             usage={"requests": 1.0},
             model_family="gpt-4o",
+            limiter_instance_id="limiter",
         )
         with pytest.raises(ValidationError):
             reservation.model_family = "other"
@@ -391,4 +400,5 @@ class TestNumpyBoolCoercion:
                 usage={"requests": 1.0},
                 model_family="gpt-4o",
                 bucket_ids=[("requests", FAKE_NP_TRUE)],
+                limiter_instance_id="limiter",
             )

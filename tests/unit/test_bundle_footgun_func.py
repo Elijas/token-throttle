@@ -54,6 +54,7 @@ def _reservation() -> CapacityReservation:
         model_family="openai-family",
         bucket_ids=frozenset({("tokens", 60), ("requests", 60)}),
         model="gpt-4o",
+        limiter_instance_id="limiter",
     )
 
 

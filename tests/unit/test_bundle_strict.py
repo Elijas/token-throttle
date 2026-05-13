@@ -76,11 +76,19 @@ class TestStrictPydanticModels:
 
     def test_a03_reservation_model_family_bytes_rejected(self):
         with pytest.raises(ValidationError):
-            CapacityReservation(usage={"tokens": 1.0}, model_family=b":bad:")
+            CapacityReservation(
+                usage={"tokens": 1.0},
+                model_family=b":bad:",
+                limiter_instance_id="limiter",
+            )
 
     def test_a03_reservation_model_family_colon_rejected(self):
         with pytest.raises(ValidationError, match="must not contain ':'"):
-            CapacityReservation(usage={"tokens": 1.0}, model_family=":bad:")
+            CapacityReservation(
+                usage={"tokens": 1.0},
+                model_family=":bad:",
+                limiter_instance_id="limiter",
+            )
 
 
 class TestReservationAndResponseGates:
@@ -89,12 +97,14 @@ class TestReservationAndResponseGates:
             await _limiter().refund_capacity({"tokens": 0.0}, MagicMock())
 
     async def test_a05_magicmock_response_rejected(self):
+        limiter = _limiter()
         reservation = CapacityReservation(
             usage={"tokens": 50.0, "requests": 1.0},
             model_family="strict-family",
+            limiter_instance_id=limiter._limiter_instance_id,
         )
         with pytest.raises(ValueError, match="total_tokens"):
-            await _limiter().refund_capacity_from_response(
+            await limiter.refund_capacity_from_response(
                 reservation,
                 response=MagicMock(),
             )
@@ -123,6 +133,7 @@ class TestReservationAndResponseGates:
             usage={"tokens": 50.0},
             model_family="strict-family",
             bucket_ids={("tokens", 60)},
+            limiter_instance_id="limiter",
         )
 
         with pytest.raises(

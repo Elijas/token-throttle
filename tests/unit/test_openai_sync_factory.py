@@ -204,6 +204,7 @@ def test_acquire_refund_round_trip_dict_response():
         model_family=_UNLIMITED_FLAG,
         bucket_ids=None,
         is_unlimited=True,
+        limiter_instance_id=limiter._limiter_instance_id,
     )
     response_dict = {
         "id": "chatcmpl-abc",

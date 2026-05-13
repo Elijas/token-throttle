@@ -208,15 +208,28 @@ class RateLimiterBackend(ABC):
         actual_usage: FrozenUsage,
         *,
         bucket_ids: set[BucketId] | frozenset[BucketId] | None = None,
-    ) -> None:
+        reservation_id: str | None = None,
+    ) -> bool:
         """
         Return unused capacity to a specific subset of buckets.
 
         Backends that support metric-set reconfiguration should override this
         so refunds created before a config rebuild only touch surviving bucket
-        ids. The default falls back to ``refund_capacity()``.
+        ids. Redis-like durable backends should also use ``reservation_id`` for
+        cross-process idempotency. The default falls back to
+        ``refund_capacity()`` and returns ``True`` after applying the refund.
         """
         await self.refund_capacity(reserved_usage, actual_usage)
+        return True
+
+    def supports_durable_refund_dedup(self) -> bool:
+        """
+        Whether backend refund idempotency survives process restarts.
+
+        Memory/custom backends default to ``False`` because their refund state
+        cannot prove whether a non-local reservation was already credited.
+        """
+        return False
 
     @abstractmethod
     async def set_max_capacity(
@@ -366,14 +379,25 @@ class SyncRateLimiterBackend(ABC):
         actual_usage: FrozenUsage,
         *,
         bucket_ids: set[BucketId] | frozenset[BucketId] | None = None,
-    ) -> None:
+        reservation_id: str | None = None,
+    ) -> bool:
         """
         Synchronous counterpart of ``refund_capacity_for_buckets``.
 
-        The default falls back to ``refund_capacity()`` for backwards
-        compatibility with custom backends.
+        The default falls back to ``refund_capacity()`` and returns ``True``
+        for backwards compatibility with custom backends.
         """
         self.refund_capacity(reserved_usage, actual_usage)
+        return True
+
+    def supports_durable_refund_dedup(self) -> bool:
+        """
+        Whether backend refund idempotency survives process restarts.
+
+        Memory/custom backends default to ``False`` because their refund state
+        cannot prove whether a non-local reservation was already credited.
+        """
+        return False
 
     @abstractmethod
     def set_max_capacity(

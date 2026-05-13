@@ -41,6 +41,7 @@ def _reservation() -> CapacityReservation:
         model_family="family",
         bucket_ids=frozenset({("tokens", 60)}),
         model="gpt-4",
+        limiter_instance_id="limiter",
     )
 
 
@@ -181,6 +182,7 @@ class TestCapacityReservationExactTypes:
                 usage=frozendict({"tokens": 1.0}),
                 model_family="family",
                 bucket_ids=bucket_ids,
+                limiter_instance_id="limiter",
             )
 
     def test_model_copy_revalidates_bucket_id_metric(self):
@@ -193,6 +195,7 @@ class TestCapacityReservationExactTypes:
                 usage=frozendict({"tokens": 1.0}),
                 model_family="family",
                 is_unlimited=True,
+                limiter_instance_id="limiter",
             )
 
     def test_unlimited_check_rejects_subclass_override(self):

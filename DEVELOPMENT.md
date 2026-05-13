@@ -70,6 +70,17 @@ alive. After callable-config changes, refunds are scoped to bucket ids captured
 at acquire time; removed buckets are not credited back into unrelated future
 metrics.
 
+v2.0.0 deliberately breaks v1.4.x reservation compatibility. Drain in-flight
+reservations before upgrading; mixed v1.4.x/v2.0.0 fleets are not supported.
+`CapacityReservation` requires a non-empty `limiter_instance_id`, and refund
+raises `ValueError("legacy v1.4.x reservations no longer supported in v2.0.0; drain v1.4.x before upgrade")`
+if a legacy object with `limiter_instance_id is None` reaches the refund path.
+For Redis backends, successful refunds claim
+`{key_prefix}:rate_limiting:refund_dedup:{reservation_id}` with `SET NX EX`;
+the TTL defaults to 7 days and is configurable via
+`refund_dedup_ttl_seconds`. Memory backends have no durable refund dedup and
+reject refunds for reservations missing from local in-flight state.
+
 ### Unlimited configs
 
 `UsageQuotas.unlimited()` is the public way to disable limits for a model.
@@ -110,13 +121,13 @@ is the internal config-rebuild path and is not a public `RateLimiter` method.
 
 ### Reservation lifecycle
 
-`CapacityReservation` is a refund token for the limiter instance that issued it. New reservations carry `limiter_instance_id`, a per-`RateLimiter` / `SyncRateLimiter` UUID generated at construction time. Refund rejects a reservation whose populated `limiter_instance_id` does not match the current limiter, because cross-limiter and cross-process refunds do not share the limiter's in-memory dedup state.
+`CapacityReservation` is a refund token for the limiter instance that issued it. Reservations require `limiter_instance_id`, a per-`RateLimiter` / `SyncRateLimiter` UUID generated at construction time. Refund rejects legacy `limiter_instance_id is None` reservations and rejects populated ids that do not match the current limiter, because cross-limiter refunds are not authoritative.
 
-This is a contract change. Reservations serialized by older versions through pickle, JSON, job queues, or caches do not have `limiter_instance_id`; those are accepted as legacy in back-compat mode and logged at info level. New serialized reservations should preserve the field. If a queue moves reservations across processes, the worker applying the refund must use the same long-lived limiter instance identity; otherwise refund is rejected instead of crediting the wrong backend.
+This is a v2.0.0 contract change. Reservations serialized by v1.4.x through pickle, JSON, job queues, or caches do not have `limiter_instance_id`; those are rejected. Drain in-flight reservations before upgrading and do not run mixed v1.4.x/v2.0.0 fleets. New serialized reservations must preserve the field. If a queue moves reservations across processes, the worker applying the refund must use the same limiter instance identity; otherwise refund is rejected instead of crediting the wrong backend.
 
-Reservations currently have no TTL. A reservation remains eligible until it is refunded, rejected because the issuing limiter no longer matches, rejected because the model now routes differently, or the limiter is closed. `close()` / `aclose()` mark the limiter closed, log the number of reservations still in flight, and block subsequent acquire/refund operations.
+Reservations currently have no reservation TTL. A reservation remains eligible until it is refunded, rejected because the issuing limiter no longer matches, rejected because the model now routes differently, or the limiter is closed. Redis backends add durable refund dedup keys with a configurable TTL (`refund_dedup_ttl_seconds`, default 7 days), so an in-flight reservation can be refunded after local in-memory state is lost if the limiter identity still matches and Redis has not already seen the refund. Memory backends reject that cold-restart case because they cannot prove whether capacity was already credited. `close()` / `aclose()` mark the limiter closed, log the number of reservations still in flight, and block subsequent acquire/refund operations.
 
-Callable config changes are checked at refund time for held limited reservations. A limited-to-unlimited flip raises instead of crediting an obsolete cached backend, and a `model_family` reroute raises instead of crediting the old family backend. Metric-set changes still project refunds onto surviving bucket ids; if the projection is empty, the refund id is committed to the dedup map before returning so queue retries cannot double-credit after a rebuild.
+Callable config changes are checked at refund time for held limited reservations. A limited-to-unlimited flip raises instead of crediting an obsolete cached backend, and a `model_family` reroute raises instead of crediting the old family backend. Metric-set changes still project refunds onto surviving bucket ids; if the projection is empty, the refund id is committed to local dedup and, for Redis backends, durable Redis dedup before returning so queue retries cannot double-credit after a rebuild.
 
 ### `per_seconds` is constrained to integers
 

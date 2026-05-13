@@ -435,6 +435,7 @@ class TestRefundCapacityValidation:
                 usage={"tokens": 5},
                 model_family=_UNLIMITED_FLAG,
                 is_unlimited=True,
+                limiter_instance_id="limiter",
             )
 
     async def test_unlimited_reservation_with_empty_usage_is_noop(self):
@@ -445,6 +446,7 @@ class TestRefundCapacityValidation:
             usage={},
             model_family=_UNLIMITED_FLAG,
             is_unlimited=True,
+            limiter_instance_id=limiter._limiter_instance_id,
         )
 
         result = await limiter.refund_capacity({}, reservation)
@@ -469,6 +471,7 @@ class TestRefundCapacityValidation:
             reservation.get_usage(),
             {"tokens": 80, "requests": 1},
             bucket_ids=ANY,
+            reservation_id=reservation.reservation_id,
         )
 
     async def test_mismatched_usage_keys_raises(self):
@@ -484,6 +487,7 @@ class TestRefundCapacityValidation:
         reservation = CapacityReservation(
             usage={"tokens": 100.0, "requests": 1.0},
             model_family="gpt-4",
+            limiter_instance_id=limiter._limiter_instance_id,
         )
 
         with pytest.raises(ValueError, match="do not match reservation usage keys"):
@@ -496,6 +500,7 @@ class TestRefundCapacityValidation:
         reservation = CapacityReservation(
             usage={"tokens": 100.0, "requests": 1.0},
             model_family="nonexistent-family",
+            limiter_instance_id=limiter._limiter_instance_id,
         )
 
         with pytest.raises(ValueError, match="Backend not found for model family"):
@@ -515,6 +520,7 @@ class TestRefundCapacityValidation:
         reservation = CapacityReservation(
             usage={"tokens": 100.0, "requests": 1.0},
             model_family="gpt-4",
+            limiter_instance_id=limiter._limiter_instance_id,
         )
 
         with pytest.raises(ValueError, match="must not be a boolean"):
@@ -534,6 +540,7 @@ class TestRefundCapacityValidation:
         reservation = CapacityReservation(
             usage={"tokens": 100.0, "requests": 1.0},
             model_family="gpt-4",
+            limiter_instance_id=limiter._limiter_instance_id,
         )
 
         with pytest.raises(ValueError, match="must be finite"):
@@ -553,6 +560,7 @@ class TestRefundCapacityFromResponseValidation:
         reservation = CapacityReservation(
             usage={"tokens": 100.0, "requests": 1.0},
             model_family="gpt-4",
+            limiter_instance_id=limiter._limiter_instance_id,
         )
 
         class FakeResponse:
@@ -570,6 +578,7 @@ class TestRefundCapacityFromResponseValidation:
             usage={},
             model_family=_UNLIMITED_FLAG,
             is_unlimited=True,
+            limiter_instance_id=limiter._limiter_instance_id,
         )
         result = await limiter.refund_capacity_from_response(reservation)
         assert result is None
@@ -600,15 +609,14 @@ class TestRefundCapacityFromResponseValidation:
             reservation.get_usage(),
             {"tokens": 80, "requests": 1},
             bucket_ids=ANY,
+            reservation_id=reservation.reservation_id,
         )
 
     async def test_pydantic_response_object(self):
         builder, mock_backend = make_mock_backend_builder()
         limiter = RateLimiter(make_limited_config(), backend=builder)
-        await limiter.acquire_capacity({"tokens": 100, "requests": 1}, model="gpt-4")
-        reservation = CapacityReservation(
-            usage={"tokens": 100.0, "requests": 1.0},
-            model_family="gpt-4",
+        reservation = await limiter.acquire_capacity(
+            {"tokens": 100, "requests": 1}, model="gpt-4"
         )
 
         class FakeUsage:
@@ -626,10 +634,8 @@ class TestRefundCapacityFromResponseValidation:
         """Response.usage is a dict (not object with attributes)."""
         builder, mock_backend = make_mock_backend_builder()
         limiter = RateLimiter(make_limited_config(), backend=builder)
-        await limiter.acquire_capacity({"tokens": 100, "requests": 1}, model="gpt-4")
-        reservation = CapacityReservation(
-            usage={"tokens": 100.0, "requests": 1.0},
-            model_family="gpt-4",
+        reservation = await limiter.acquire_capacity(
+            {"tokens": 100, "requests": 1}, model="gpt-4"
         )
 
         class FakeResponse:
@@ -643,10 +649,8 @@ class TestRefundCapacityFromResponseValidation:
     async def test_response_dict_with_usage_key(self):
         builder, mock_backend = make_mock_backend_builder()
         limiter = RateLimiter(make_limited_config(), backend=builder)
-        await limiter.acquire_capacity({"tokens": 100, "requests": 1}, model="gpt-4")
-        reservation = CapacityReservation(
-            usage={"tokens": 100.0, "requests": 1.0},
-            model_family="gpt-4",
+        reservation = await limiter.acquire_capacity(
+            {"tokens": 100, "requests": 1}, model="gpt-4"
         )
 
         await limiter.refund_capacity_from_response(
@@ -658,6 +662,7 @@ class TestRefundCapacityFromResponseValidation:
             reservation.get_usage(),
             {"tokens": 80, "requests": 1},
             bucket_ids=ANY,
+            reservation_id=reservation.reservation_id,
         )
 
     async def test_response_dict_missing_usage_key_raises_value_error(self):
@@ -666,6 +671,7 @@ class TestRefundCapacityFromResponseValidation:
         reservation = CapacityReservation(
             usage={"tokens": 100.0, "requests": 1.0},
             model_family="gpt-4",
+            limiter_instance_id=limiter._limiter_instance_id,
         )
 
         with pytest.raises(ValueError, match=r"response.*usage"):
@@ -677,10 +683,8 @@ class TestRefundCapacityFromResponseValidation:
     async def test_kwargs_usage_path(self):
         builder, mock_backend = make_mock_backend_builder()
         limiter = RateLimiter(make_limited_config(), backend=builder)
-        await limiter.acquire_capacity({"tokens": 100, "requests": 1}, model="gpt-4")
-        reservation = CapacityReservation(
-            usage={"tokens": 100.0, "requests": 1.0},
-            model_family="gpt-4",
+        reservation = await limiter.acquire_capacity(
+            {"tokens": 100, "requests": 1}, model="gpt-4"
         )
         await limiter.refund_capacity_from_response(
             reservation, usage={"total_tokens": 80}
@@ -690,10 +694,8 @@ class TestRefundCapacityFromResponseValidation:
     async def test_kwargs_usage_mapping_path(self):
         builder, mock_backend = make_mock_backend_builder()
         limiter = RateLimiter(make_limited_config(), backend=builder)
-        await limiter.acquire_capacity({"tokens": 100, "requests": 1}, model="gpt-4")
-        reservation = CapacityReservation(
-            usage={"tokens": 100.0, "requests": 1.0},
-            model_family="gpt-4",
+        reservation = await limiter.acquire_capacity(
+            {"tokens": 100, "requests": 1}, model="gpt-4"
         )
         await limiter.refund_capacity_from_response(
             reservation,
@@ -703,6 +705,7 @@ class TestRefundCapacityFromResponseValidation:
             reservation.get_usage(),
             {"tokens": 80, "requests": 1},
             bucket_ids=ANY,
+            reservation_id=reservation.reservation_id,
         )
 
     async def test_no_response_no_usage_raises(self):
@@ -711,6 +714,7 @@ class TestRefundCapacityFromResponseValidation:
         reservation = CapacityReservation(
             usage={"tokens": 100.0, "requests": 1.0},
             model_family="gpt-4",
+            limiter_instance_id=limiter._limiter_instance_id,
         )
         with pytest.raises(
             ValueError, match="Either 'response' or 'usage' keyword argument"
@@ -723,6 +727,7 @@ class TestRefundCapacityFromResponseValidation:
         reservation = CapacityReservation(
             usage={"tokens": 100.0, "requests": 1.0},
             model_family="gpt-4",
+            limiter_instance_id=limiter._limiter_instance_id,
         )
 
         class FakeUsage:
@@ -742,6 +747,7 @@ class TestRefundCapacityFromResponseValidation:
         reservation = CapacityReservation(
             usage={"tokens": 100.0, "requests": 1.0},
             model_family="gpt-4",
+            limiter_instance_id=limiter._limiter_instance_id,
         )
         with pytest.raises(ValueError, match="total_tokens is None"):
             await limiter.refund_capacity_from_response(
@@ -755,6 +761,7 @@ class TestRefundCapacityFromResponseValidation:
         reservation = CapacityReservation(
             usage={"tokens": 100.0, "requests": 1.0},
             model_family="gpt-4",
+            limiter_instance_id=limiter._limiter_instance_id,
         )
         with pytest.raises(ValueError, match="total_tokens"):
             await limiter.refund_capacity_from_response(
@@ -768,6 +775,7 @@ class TestRefundCapacityFromResponseValidation:
         reservation = CapacityReservation(
             usage={"tokens": 100.0, "requests": 1.0},
             model_family="gpt-4",
+            limiter_instance_id=limiter._limiter_instance_id,
         )
 
         class FakeResponse:
@@ -826,6 +834,7 @@ class TestExtractTotalTokensValidation:
         reservation = CapacityReservation(
             usage={"tokens": 100.0, "requests": 1.0},
             model_family="gpt-4",
+            limiter_instance_id=limiter._limiter_instance_id,
         )
 
         class FakeUsage:
@@ -845,6 +854,7 @@ class TestExtractTotalTokensValidation:
         reservation = CapacityReservation(
             usage={"tokens": 100.0, "requests": 1.0},
             model_family="gpt-4",
+            limiter_instance_id=limiter._limiter_instance_id,
         )
         with pytest.raises(ValueError, match="total_tokens"):
             await limiter.refund_capacity_from_response(
@@ -857,6 +867,7 @@ class TestExtractTotalTokensValidation:
         reservation = CapacityReservation(
             usage={"tokens": 100.0, "requests": 1.0},
             model_family="gpt-4",
+            limiter_instance_id=limiter._limiter_instance_id,
         )
         with pytest.raises(ValueError, match="total_tokens"):
             await limiter.refund_capacity_from_response(
@@ -869,6 +880,7 @@ class TestExtractTotalTokensValidation:
         reservation = CapacityReservation(
             usage={"tokens": 100.0, "requests": 1.0},
             model_family="gpt-4",
+            limiter_instance_id=limiter._limiter_instance_id,
         )
         with pytest.raises(ValueError, match="total_tokens"):
             await limiter.refund_capacity_from_response(
@@ -881,6 +893,7 @@ class TestExtractTotalTokensValidation:
         reservation = CapacityReservation(
             usage={"tokens": 100.0, "requests": 1.0},
             model_family="gpt-4",
+            limiter_instance_id=limiter._limiter_instance_id,
         )
         with pytest.raises(ValueError, match="total_tokens"):
             await limiter.refund_capacity_from_response(
@@ -893,6 +906,7 @@ class TestExtractTotalTokensValidation:
         reservation = CapacityReservation(
             usage={"tokens": 100.0, "requests": 1.0},
             model_family="gpt-4",
+            limiter_instance_id=limiter._limiter_instance_id,
         )
         with pytest.raises(ValueError, match="total_tokens"):
             await limiter.refund_capacity_from_response(
@@ -907,6 +921,7 @@ class TestExtractTotalTokensValidation:
         reservation = CapacityReservation(
             usage={"tokens": 100.0, "requests": 1.0},
             model_family="gpt-4",
+            limiter_instance_id=limiter._limiter_instance_id,
         )
         with pytest.raises(ValueError, match="int or float"):
             await limiter.refund_capacity_from_response(
@@ -917,10 +932,8 @@ class TestExtractTotalTokensValidation:
     async def test_zero_total_tokens_is_valid(self):
         builder, mock_backend = make_mock_backend_builder()
         limiter = RateLimiter(make_limited_config(), backend=builder)
-        await limiter.acquire_capacity({"tokens": 100, "requests": 1}, model="gpt-4")
-        reservation = CapacityReservation(
-            usage={"tokens": 100.0, "requests": 1.0},
-            model_family="gpt-4",
+        reservation = await limiter.acquire_capacity(
+            {"tokens": 100, "requests": 1}, model="gpt-4"
         )
         await limiter.refund_capacity_from_response(
             reservation, usage={"total_tokens": 0}

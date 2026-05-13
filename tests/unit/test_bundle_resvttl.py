@@ -61,7 +61,7 @@ async def test_n01_async_cross_limiter_refund_is_rejected(
     assert "was issued by limiter" in caplog.text
 
 
-async def test_legacy_reservation_without_limiter_instance_id_is_accepted(
+async def test_legacy_reservation_without_limiter_instance_id_is_rejected(
     caplog: pytest.LogCaptureFixture,
 ):
     limiter = RateLimiter(_limited_config(), backend=MemoryBackendBuilder())
@@ -71,13 +71,19 @@ async def test_legacy_reservation_without_limiter_instance_id_is_accepted(
         model_family="fam",
         bucket_ids={("tokens", 60)},
         model="model",
+        limiter_instance_id=limiter._limiter_instance_id,
     )
+    object.__setattr__(legacy, "limiter_instance_id", None)
+    before = await _async_capacity(limiter, "fam", "tokens")
 
-    with caplog.at_level(logging.INFO, logger="token_throttle"):
+    with (
+        caplog.at_level(logging.WARNING, logger="token_throttle"),
+        pytest.raises(ValueError, match=r"legacy v1\.4\.x reservations"),
+    ):
         await limiter.refund_capacity({"tokens": 0}, legacy)
 
-    assert await _async_capacity(limiter, "fam", "tokens") == 100
-    assert "legacy reservation without limiter_instance_id" in caplog.text
+    assert await _async_capacity(limiter, "fam", "tokens") - before < 1
+    assert "legacy v1.4.x reservations are rejected" in caplog.text
 
 
 async def test_n02_empty_projection_commits_dedup_before_return():

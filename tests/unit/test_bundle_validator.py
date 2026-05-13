@@ -107,6 +107,7 @@ class TestV14HandConstructionRejected:
                 usage=frozendict(),
                 model_family="real-family",
                 is_unlimited=True,
+                limiter_instance_id="limiter",
             )
 
     def test_empty_family_with_is_unlimited_true_rejected(self):
@@ -115,6 +116,7 @@ class TestV14HandConstructionRejected:
                 usage=frozendict(),
                 model_family="",
                 is_unlimited=True,
+                limiter_instance_id="limiter",
             )
 
     def test_canonical_unlimited_construction_still_works(self):
@@ -122,6 +124,7 @@ class TestV14HandConstructionRejected:
             usage=frozendict(),
             model_family=_VALIDATION_FLAG,
             is_unlimited=True,
+            limiter_instance_id="limiter",
         )
         assert is_unlimited_reservation(reservation)
         assert reservation.is_unlimited is True
@@ -141,6 +144,7 @@ class TestV05NonEmptyUsageRejected:
                 usage=frozendict({"tokens": 5.0}),
                 model_family=_VALIDATION_FLAG,
                 is_unlimited=True,
+                limiter_instance_id="limiter",
             )
 
     def test_dump_roundtrip_with_forged_flag_rejected(self):
@@ -152,6 +156,7 @@ class TestV05NonEmptyUsageRejected:
         legit = CapacityReservation(
             usage=frozendict({"tokens": 5.0}),
             model_family="real-family",
+            limiter_instance_id="limiter",
         )
         with pytest.raises(ValidationError, match="empty usage"):
             CapacityReservation.model_validate(
@@ -182,6 +187,7 @@ class TestV10JsonForgeRejected:
                 "bucket_ids": None,
                 "model": "gpt-4",
                 "is_unlimited": True,
+                "limiter_instance_id": "limiter",
             }
         )
         with pytest.raises(ValidationError):
@@ -194,6 +200,7 @@ class TestV10JsonForgeRejected:
             model_family=_VALIDATION_FLAG,
             is_unlimited=True,
             model="gpt-4",
+            limiter_instance_id="limiter",
         )
         recovered = CapacityReservation.model_validate_json(canonical.model_dump_json())
         assert is_unlimited_reservation(recovered)
@@ -212,6 +219,7 @@ class TestI05BucketIdsCoupling:
                 model_family=_VALIDATION_FLAG,
                 bucket_ids=frozenset({("tokens", 60)}),
                 is_unlimited=True,
+                limiter_instance_id="limiter",
             )
 
     def test_empty_frozenset_bucket_ids_with_is_unlimited_rejected(self):
@@ -223,6 +231,7 @@ class TestI05BucketIdsCoupling:
                 model_family=_VALIDATION_FLAG,
                 bucket_ids=frozenset(),
                 is_unlimited=True,
+                limiter_instance_id="limiter",
             )
 
 
@@ -239,6 +248,7 @@ class TestI10LegacyFallbackTightened:
             usage=frozendict(),
             model_family=_VALIDATION_FLAG,
             is_unlimited=False,
+            limiter_instance_id="limiter",
         )
         assert is_unlimited_reservation(legacy) is False
 
@@ -247,6 +257,7 @@ class TestI10LegacyFallbackTightened:
             usage=frozendict(),
             model_family=_VALIDATION_FLAG,
             is_unlimited=True,
+            limiter_instance_id="limiter",
         )
         assert is_unlimited_reservation(canonical) is True
 

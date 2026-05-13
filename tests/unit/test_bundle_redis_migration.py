@@ -49,7 +49,7 @@ async def test_d01_backend_probe_warns_on_era1_legacy_key(
 ) -> None:
     redis_client = AsyncMock()
     bucket = _bucket(quota, limit_config, redis_client)
-    backend = RedisBackend([bucket], redis_client, limit_config)
+    backend = RedisBackend([bucket], redis_client, limit_config, key_prefix="test")
     redis_client.get.return_value = b"85.0"
 
     with caplog.at_level("WARNING"):

@@ -427,7 +427,9 @@ class TestRedisBackendSnapshotOnRateChange:
             redis_client=redis_state,
             key_prefix="test",
         )
-        backend = RedisBackend(buckets=[bucket], redis=redis_state, limit_config=cfg)
+        backend = RedisBackend(
+            buckets=[bucket], redis=redis_state, limit_config=cfg, key_prefix="test"
+        )
 
         # Simulate: at T=0, capacity is 0 (fully drained). Rate is 10/60.
         redis_state.store[bucket._last_checked_key] = 0.0
@@ -454,7 +456,7 @@ class TestRedisBackendSnapshotOnRateChange:
             key_prefix="test",
         )
         backend = SyncRedisBackend(
-            buckets=[bucket], redis=redis_state, limit_config=cfg
+            buckets=[bucket], redis=redis_state, limit_config=cfg, key_prefix="test"
         )
 
         redis_state.store[bucket._last_checked_key] = 0.0

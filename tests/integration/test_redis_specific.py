@@ -169,16 +169,23 @@ class TestRedisBackendSortedLocking:
         config = PerModelConfig(model_family="test-model", quotas=quotas)
 
         bucket_z = RedisBucket(
-            quota=quota_z, limit_config=config, redis_client=redis_client
+            quota=quota_z,
+            limit_config=config,
+            redis_client=redis_client,
+            key_prefix="test",
         )
         bucket_a = RedisBucket(
-            quota=quota_a, limit_config=config, redis_client=redis_client
+            quota=quota_a,
+            limit_config=config,
+            redis_client=redis_client,
+            key_prefix="test",
         )
 
         backend = RedisBackend(
             buckets=[bucket_z, bucket_a],
             redis=redis_client,
             limit_config=config,
+            key_prefix="test",
         )
 
         # Verify the backend sorted the buckets by full_redis_key

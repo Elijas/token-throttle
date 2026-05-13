@@ -74,7 +74,7 @@ async def test_partial_none_bucket_state_is_normalized_to_cold_start(
 ) -> None:
     redis_client = AsyncMock()
     bucket = RedisBucket(quota, limit_config, redis_client, key_prefix="test")
-    backend = RedisBackend([bucket], redis_client, limit_config)
+    backend = RedisBackend([bucket], redis_client, limit_config, key_prefix="test")
     pipeline = AsyncPipeline(result=[b"1000.0", None, False, False, None, False])
     seen: list[tuple[object, object]] = []
 
@@ -130,7 +130,7 @@ async def test_pipeline_response_error_is_translated(
 ) -> None:
     redis_client = AsyncMock()
     bucket = RedisBucket(quota, limit_config, redis_client, key_prefix="test")
-    backend = RedisBackend([bucket], redis_client, limit_config)
+    backend = RedisBackend([bucket], redis_client, limit_config, key_prefix="test")
     pipeline = AsyncPipeline(
         exc=redis.exceptions.ResponseError("WRONGTYPE invalid key type")
     )
@@ -154,7 +154,7 @@ async def test_snapshot_bucket_state_logs_hostile_data(
     )
     bucket = RedisBucket(quota, limit_config, redis_client, key_prefix="test")
     bucket.get_max_capacity = AsyncMock(return_value=bucket.max_capacity)
-    backend = RedisBackend([bucket], redis_client, limit_config)
+    backend = RedisBackend([bucket], redis_client, limit_config, key_prefix="test")
     monkeypatch.setattr(redis_backend_module, "async_server_time", fake_server_time)
 
     with caplog.at_level("WARNING", logger="token_throttle"):
@@ -168,7 +168,7 @@ def test_sync_pipeline_response_error_is_translated(
 ) -> None:
     redis_client = MagicMock()
     bucket = SyncRedisBucket(quota, limit_config, redis_client, key_prefix="test")
-    backend = SyncRedisBackend([bucket], redis_client, limit_config)
+    backend = SyncRedisBackend([bucket], redis_client, limit_config, key_prefix="test")
     pipeline = SyncPipeline(
         exc=redis.exceptions.ResponseError("WRONGTYPE invalid key type")
     )

@@ -16,6 +16,7 @@ def _normal_reservation() -> CapacityReservation:
         model_family="real-family",
         bucket_ids=frozenset({("tokens", 60), ("requests", 60)}),
         model="gpt-4",
+        limiter_instance_id="limiter",
     )
 
 

@@ -68,7 +68,11 @@ def test_model_family_rejects_unsafe_key_segments(model_family):
         )
 
     with pytest.raises(ValidationError):
-        CapacityReservation(usage={"tokens": 1.0}, model_family=model_family)
+        CapacityReservation(
+            usage={"tokens": 1.0},
+            model_family=model_family,
+            limiter_instance_id="limiter",
+        )
 
 
 @pytest.mark.parametrize(

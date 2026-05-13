@@ -122,6 +122,11 @@ boundaries as proof that a caller was rate-limited. For queue-and-retry
 workflows, reserve immediately before dispatching the external request rather
 than storing reservations in a long-lived queue.
 
+v2.0.0 is a clean break from v1.4.x reservation compatibility. Every
+`CapacityReservation` requires a non-empty `limiter_instance_id`; legacy
+v1.4.x reservations without it are rejected. Drain in-flight reservations
+before upgrading and do not run mixed v1.4.x/v2.0.0 fleets.
+
 ## Configuration
 
 ### Quotas
@@ -219,6 +224,12 @@ Redis bucket state expires by default after 7 days of inactivity. Configure
 different positive TTL. The TTL is refreshed whenever bucket state is read or
 written; Redis schema-version registry keys are intentionally long-lived and do
 not expire.
+
+Redis refunds also write a cross-process idempotency key:
+`{key_prefix}:rate_limiting:refund_dedup:{reservation_id}`. The TTL defaults to
+7 days and can be changed with `refund_dedup_ttl_seconds` on Redis backend
+builders. Memory backends keep only process-local refund dedup state and cannot
+safely refund reservations after a cold restart.
 
 Custom backends implement `RateLimiterBackend` or `SyncRateLimiterBackend`.
 Required operations are capacity wait/consume/refund and `set_max_capacity`.

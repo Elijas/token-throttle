@@ -475,13 +475,15 @@ class MemoryBackend(RateLimiterBackend):
         actual_usage: FrozenUsage,
         *,
         bucket_ids: set[tuple[str, int]] | frozenset[tuple[str, int]] | None = None,
-    ) -> None:
+        reservation_id: str | None = None,
+    ) -> bool:
         """
         Refund unused capacity back to the rate limiter based on actual usage.
 
         Handles both positive refunds (used less than reserved) and negative
         refunds (used more than reserved, i.e. overuse).
         """
+        _ = reservation_id
         backend_bucket_ids = self._bucket_ids()
         refund_bucket_ids = (
             backend_bucket_ids if bucket_ids is None else frozenset(bucket_ids)
@@ -493,7 +495,7 @@ class MemoryBackend(RateLimiterBackend):
             backend_bucket_ids,
         )
         if not refund_bucket_ids:
-            return
+            return True
         # Calculate refund amounts per metric
         refund_usage_: dict[str, float] = {}
         for metric, reserved_amount in reserved_usage.items():
@@ -566,6 +568,7 @@ class MemoryBackend(RateLimiterBackend):
                 prerefund_capacities=prerefund_capacities,
                 postrefund_capacities=updated_capacities,
             )
+        return True
 
     async def set_max_capacity(
         self,

@@ -190,6 +190,7 @@ async def test_async_check_and_consume_uses_one_bucket_snapshot_during_reconfigu
         buckets=[FakeAsyncBucket("old:tokens", "tokens", 60, 100.0)],
         redis=FakeAsyncRedis(),
         limit_config=cfg_old,
+        key_prefix="test",
     )
     new_backend = RedisBackend(
         buckets=[
@@ -198,6 +199,7 @@ async def test_async_check_and_consume_uses_one_bucket_snapshot_during_reconfigu
         ],
         redis=FakeAsyncRedis(),
         limit_config=cfg_new,
+        key_prefix="test",
     )
 
     lock_snapshots: list[list[str]] = []
@@ -276,6 +278,7 @@ def test_sync_check_and_consume_uses_one_bucket_snapshot_during_reconfigure(
         buckets=[FakeSyncBucket("old:tokens", "tokens", 60, 100.0)],
         redis=FakeSyncRedis(),
         limit_config=cfg_old,
+        key_prefix="test",
     )
     new_backend = SyncRedisBackend(
         buckets=[
@@ -284,6 +287,7 @@ def test_sync_check_and_consume_uses_one_bucket_snapshot_during_reconfigure(
         ],
         redis=FakeSyncRedis(),
         limit_config=cfg_new,
+        key_prefix="test",
     )
 
     lock_snapshots: list[list[str]] = []
@@ -359,12 +363,14 @@ async def test_async_waiter_fails_cleanly_when_metric_is_removed(monkeypatch):
         buckets=[FakeAsyncBucket("old:tokens", "tokens", 60, 10.0)],
         redis=FakeAsyncRedis(),
         limit_config=cfg_old,
+        key_prefix="test",
         sleep_interval=5.0,
     )
     new_backend = RedisBackend(
         buckets=[FakeAsyncBucket("new:requests", "requests", 60, 10.0)],
         redis=FakeAsyncRedis(),
         limit_config=cfg_new,
+        key_prefix="test",
         sleep_interval=5.0,
     )
 
@@ -435,12 +441,14 @@ def test_sync_waiter_fails_cleanly_when_metric_is_removed(monkeypatch):
         buckets=[FakeSyncBucket("old:tokens", "tokens", 60, 10.0)],
         redis=FakeSyncRedis(),
         limit_config=cfg_old,
+        key_prefix="test",
         sleep_interval=5.0,
     )
     new_backend = SyncRedisBackend(
         buckets=[FakeSyncBucket("new:requests", "requests", 60, 10.0)],
         redis=FakeSyncRedis(),
         limit_config=cfg_new,
+        key_prefix="test",
         sleep_interval=5.0,
     )
 

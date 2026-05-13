@@ -273,6 +273,13 @@ def _raise_limiter_instance_mismatch() -> None:
     )
 
 
+def _raise_legacy_reservation_rejected() -> None:
+    raise ValueError(
+        "legacy v1.4.x reservations no longer supported in v2.0.0; "
+        "drain v1.4.x before upgrade"
+    )
+
+
 def _is_redis_exception(exc: Exception) -> bool:
     return type(exc).__module__.startswith("redis.")
 
@@ -422,11 +429,12 @@ class RateLimiter(BaseRateLimiter):
         reservation: CapacityReservation,
     ) -> None:
         if reservation.limiter_instance_id is None:
-            _logger.info(
-                "legacy reservation without limiter_instance_id; refund accepted "
-                "in back-compat mode."
+            _logger.warning(
+                "Reservation %s has no limiter_instance_id; legacy v1.4.x "
+                "reservations are rejected in v2.0.0.",
+                reservation.reservation_id,
             )
-            return
+            _raise_legacy_reservation_rejected()
         if reservation.limiter_instance_id != self._limiter_instance_id:
             _logger.warning(
                 "Reservation %s was issued by limiter %s, not this limiter %s",
@@ -799,12 +807,21 @@ class RateLimiter(BaseRateLimiter):
             self._refund_in_progress.add(rid)
             try:
                 actual_usage = frozen_usage(actual_usage)
-                if reservation.model_family not in self._model_family_to_backend:
+                await self._refresh_backend_for_reservation(reservation)
+                backend = self._model_family_to_backend.get(reservation.model_family)
+                if backend is None:
                     raise ValueError(
                         f"Backend not found for model family {reservation.model_family}",
                     )
-                await self._refresh_backend_for_reservation(reservation)
-                backend = self._model_family_to_backend[reservation.model_family]
+                if (
+                    rid not in self._in_flight_reservation_ids
+                    and not backend.supports_durable_refund_dedup()
+                ):
+                    raise ValueError(
+                        "Reservation is not in flight for this limiter; "
+                        "cold-restart refunds require a backend with durable "
+                        "refund dedup."
+                    )
                 # If `_refresh_backend_for_reservation` swallowed an exception (it
                 # downgrades refresh failures to RuntimeWarning to keep refunds
                 # unblocked), the snapshot below may still describe the pre-refresh
@@ -827,13 +844,12 @@ class RateLimiter(BaseRateLimiter):
                 if len(self._refunded_reservation_ids) > self._refunded_ids_cap:
                     self._refunded_reservation_ids.popitem(last=False)
                 self._in_flight_reservation_ids.discard(rid)
-                if not reserved_usage:
-                    return
                 try:
                     await backend.refund_capacity_for_buckets(
                         reserved_usage,
                         actual_usage,
                         bucket_ids=refund_bucket_ids,
+                        reservation_id=rid,
                     )
                 except Exception as exc:  # noqa: BLE001 - boundary wrapper preserves cause
                     _raise_backend_external_error(exc)

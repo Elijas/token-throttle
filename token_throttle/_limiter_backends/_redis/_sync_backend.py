@@ -35,7 +35,12 @@ from token_throttle._validation import (
     validate_timeout,
 )
 
-from ._keys import validate_redis_key_prefix
+from ._keys import (
+    DEFAULT_REFUND_DEDUP_TTL_SECONDS,
+    redis_refund_dedup_key,
+    validate_redis_key_prefix,
+    validate_refund_dedup_ttl_seconds,
+)
 from ._server_time import sync_server_time
 from ._sync_bucket import (
     SyncRedisBucket,
@@ -95,7 +100,7 @@ class _SyncRedisLockStack(ExitStack):
 
 
 class SyncRedisBackendBuilder(SyncRateLimiterBackendBuilderInterface):
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         redis_client: redis.Redis,
         *,
@@ -103,6 +108,7 @@ class SyncRedisBackendBuilder(SyncRateLimiterBackendBuilderInterface):
         sleep_interval: float | None = None,
         bucket_ttl_seconds: int = DEFAULT_BUCKET_TTL_SECONDS,
         override_ttl_seconds: int | None = None,
+        refund_dedup_ttl_seconds: int = DEFAULT_REFUND_DEDUP_TTL_SECONDS,
     ) -> None:
         super().__init__()
         client_module = type(redis_client).__module__
@@ -128,6 +134,9 @@ class SyncRedisBackendBuilder(SyncRateLimiterBackendBuilderInterface):
             ),
             name="override_ttl_seconds",
         )
+        self._refund_dedup_ttl_seconds = validate_refund_dedup_ttl_seconds(
+            refund_dedup_ttl_seconds
+        )
 
     def build(
         self,
@@ -149,6 +158,8 @@ class SyncRedisBackendBuilder(SyncRateLimiterBackendBuilderInterface):
         return SyncRedisBackend(
             buckets=redis_buckets,
             redis=self._redis,
+            key_prefix=self._key_prefix,
+            refund_dedup_ttl_seconds=self._refund_dedup_ttl_seconds,
             sleep_interval=self._sleep_interval,
             callbacks=callbacks,
             limit_config=cfg,
@@ -159,18 +170,24 @@ class SyncRedisBackend(SyncRateLimiterBackend):
     DEFAULT_SLEEP_INTERVAL: ClassVar[float] = 0.1
     MAX_CROSS_WORKER_POLL: ClassVar[float] = 1.0
 
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         buckets: list[SyncRedisBucket],
         redis: redis.Redis,
         limit_config: PerModelConfig,
         *,
+        key_prefix: str,
+        refund_dedup_ttl_seconds: int = DEFAULT_REFUND_DEDUP_TTL_SECONDS,
         sleep_interval: float | None = None,
         callbacks: SyncRateLimiterCallbacks | None = None,
     ) -> None:
         super().__init__()
         self.sorted_buckets = sorted(buckets, key=lambda b: b.full_redis_key)
         self._redis = redis
+        self._key_prefix = validate_redis_key_prefix(key_prefix)
+        self._refund_dedup_ttl_seconds = validate_refund_dedup_ttl_seconds(
+            refund_dedup_ttl_seconds
+        )
         self._sleep_interval: float = (
             self.DEFAULT_SLEEP_INTERVAL
             if sleep_interval is None
@@ -185,6 +202,30 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         # Surviving bucket state lives in Redis under stable keys, so a rebuilt
         # backend can safely point at the same buckets.
         return True
+
+    def supports_durable_refund_dedup(self) -> bool:
+        return True
+
+    def _claim_refund_dedup(self, reservation_id: str | None) -> bool:
+        if reservation_id is None:
+            return True
+        key = redis_refund_dedup_key(self._key_prefix, reservation_id)
+        claimed = self._redis.set(
+            key,
+            "1",
+            ex=self._refund_dedup_ttl_seconds,
+            nx=True,
+        )
+        if claimed:
+            return True
+        message = (
+            f"Reservation {reservation_id} has already been refunded according "
+            "to Redis refund dedup. Ignoring duplicate refund to prevent "
+            "double-crediting capacity."
+        )
+        warnings.warn(message, UserWarning, stacklevel=3)
+        _logger.warning(message)
+        return False
 
     def _snapshot_buckets(self) -> tuple[SyncRedisBucket, ...]:
         return tuple(self.sorted_buckets)
@@ -855,8 +896,12 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         actual_usage: FrozenUsage,
         *,
         bucket_ids: set[tuple[str, int]] | frozenset[tuple[str, int]] | None = None,
-    ) -> None:
+        reservation_id: str | None = None,
+    ) -> bool:
         """Refund unused capacity back to the rate limiter based on actual usage."""
+        if not self._claim_refund_dedup(reservation_id):
+            return False
+
         buckets = self._snapshot_buckets()
         backend_bucket_ids = self._bucket_ids(buckets)
         refund_bucket_ids = (
@@ -869,7 +914,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
             backend_bucket_ids,
         )
         if not refund_bucket_ids:
-            return
+            return True
         # Calculate how much to refund for each metric
         refund_usage_: dict[str, float] = {}
         for metric, reserved_amount in reserved_usage.items():
@@ -965,6 +1010,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                 prerefund_capacities=prerefund_capacities,
                 postrefund_capacities=updated_capacities,
             )
+        return True
 
     def _snapshot_bucket_state(self, bucket: SyncRedisBucket) -> None:
         """
