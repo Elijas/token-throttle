@@ -44,6 +44,7 @@ from ._bucket import (
     _raise_pipeline_response_error,
     _validate_pipeline_results,
 )
+from ._keys import validate_redis_key_prefix
 from ._server_time import async_server_time
 
 _logger = logging.getLogger("token_throttle")
@@ -112,6 +113,7 @@ class RedisBackendBuilder(RateLimiterBackendBuilderInterface):
         self,
         redis_client: redis.asyncio.Redis,
         *,
+        key_prefix: str,
         sleep_interval: float | None = None,
         override_ttl_seconds: int | None = None,
     ) -> None:
@@ -125,6 +127,7 @@ class RedisBackendBuilder(RateLimiterBackendBuilderInterface):
                 f"(got {type(redis_client).__name__})"
             )
         self._redis = redis_client
+        self._key_prefix = validate_redis_key_prefix(key_prefix)
         self._sleep_interval = validate_sleep_interval(sleep_interval)
         self._override_ttl_seconds = override_ttl_seconds
 
@@ -140,6 +143,7 @@ class RedisBackendBuilder(RateLimiterBackendBuilderInterface):
                 quota=quota,
                 limit_config=cfg,
                 redis_client=self._redis,
+                key_prefix=self._key_prefix,
                 override_ttl_seconds=self._override_ttl_seconds,
             )
             redis_buckets.append(b)

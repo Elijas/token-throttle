@@ -44,6 +44,7 @@ async def test_async_factory_merges_single_user_callback_with_default_logger():
     user_callbacks = RateLimiterCallbacks(on_wait_start=on_wait_start)
     limiter = create_openai_redis_rate_limiter(
         _async_redis_mock(),
+        key_prefix="test",
         rpm=100,
         tpm=10_000,
         callbacks=user_callbacks,
@@ -57,6 +58,7 @@ async def test_async_factory_merges_single_user_callback_with_default_logger():
 def test_async_factory_empty_callbacks_preserves_factory_defaults():
     limiter = create_openai_redis_rate_limiter(
         _async_redis_mock(),
+        key_prefix="test",
         rpm=100,
         tpm=10_000,
         callbacks=RateLimiterCallbacks(),
@@ -84,6 +86,7 @@ async def test_async_factory_none_slot_falls_through_to_default_logger():
     )
     limiter = create_openai_redis_rate_limiter(
         _async_redis_mock(),
+        key_prefix="test",
         rpm=100,
         tpm=10_000,
         callbacks=user_callbacks,
@@ -105,6 +108,7 @@ def test_sync_factory_merges_single_user_callback_with_default_logger():
     user_callbacks = SyncRateLimiterCallbacks(on_wait_start=on_wait_start)
     limiter = create_openai_redis_sync_rate_limiter(
         _sync_redis_mock(),
+        key_prefix="test",
         rpm=100,
         tpm=10_000,
         callbacks=user_callbacks,
@@ -126,6 +130,7 @@ async def test_async_factory_merged_default_logger_fires(caplog):
 
     limiter = create_openai_redis_rate_limiter(
         _async_redis_mock(),
+        key_prefix="test",
         rpm=100,
         tpm=10_000,
         callbacks=RateLimiterCallbacks(on_wait_start=on_wait_start),

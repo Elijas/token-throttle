@@ -199,6 +199,7 @@ class TestCreateOpenAIRedisRateLimiter:
         mock_redis = _async_redis_mock()
         limiter = create_openai_redis_rate_limiter(
             mock_redis,
+            key_prefix="test",
             rpm=100,
             tpm=10000,
         )
@@ -208,6 +209,7 @@ class TestCreateOpenAIRedisRateLimiter:
         mock_redis = _async_redis_mock()
         limiter = create_openai_redis_rate_limiter(
             mock_redis,
+            key_prefix="test",
             rpm=60,
             tpm=5000,
         )
@@ -220,6 +222,7 @@ class TestCreateOpenAIRedisRateLimiter:
         mock_redis = _async_redis_mock()
         limiter = create_openai_redis_rate_limiter(
             mock_redis,
+            key_prefix="test",
             rpm=100,
             tpm=10000,
         )
@@ -231,6 +234,7 @@ class TestCreateOpenAIRedisRateLimiter:
         mock_redis = _async_redis_mock()
         limiter = create_openai_redis_rate_limiter(
             mock_redis,
+            key_prefix="test",
             rpm=100,
             tpm=10000,
         )
@@ -251,6 +255,7 @@ class TestCreateOpenAIRedisRateLimiter:
         custom_callbacks = RateLimiterCallbacks(on_wait_start=on_wait_start)
         limiter = create_openai_redis_rate_limiter(
             mock_redis,
+            key_prefix="test",
             rpm=100,
             tpm=10000,
             callbacks=custom_callbacks,
@@ -263,6 +268,7 @@ class TestCreateOpenAIRedisRateLimiter:
         mock_redis = _async_redis_mock()
         limiter = create_openai_redis_rate_limiter(
             mock_redis,
+            key_prefix="test",
             rpm=100,
             tpm=10000,
         )
@@ -273,6 +279,7 @@ class TestCreateOpenAIRedisRateLimiter:
         mock_redis = _async_redis_mock()
         limiter = create_openai_redis_rate_limiter(
             mock_redis,
+            key_prefix="test",
             rpm=200,
             tpm=40000,
         )
@@ -288,61 +295,87 @@ class TestCreateOpenAIRedisRateLimiter:
 
     def test_factory_eager_validation_rpm_zero(self):
         with pytest.raises(ValidationError, match="greater than 0"):
-            create_openai_redis_rate_limiter(_async_redis_mock(), rpm=0, tpm=10_000)
+            create_openai_redis_rate_limiter(
+                _async_redis_mock(), key_prefix="test", rpm=0, tpm=10_000
+            )
 
     def test_factory_eager_validation_rpm_negative(self):
         with pytest.raises(ValidationError, match="greater than 0"):
-            create_openai_redis_rate_limiter(_async_redis_mock(), rpm=-1, tpm=10_000)
+            create_openai_redis_rate_limiter(
+                _async_redis_mock(), key_prefix="test", rpm=-1, tpm=10_000
+            )
 
     def test_factory_eager_validation_rpm_inf_nan(self):
         with pytest.raises(TypeError, match="rpm must be an int"):
             create_openai_redis_rate_limiter(
-                _async_redis_mock(), rpm=float("inf"), tpm=10_000
+                _async_redis_mock(), key_prefix="test", rpm=float("inf"), tpm=10_000
             )
         with pytest.raises(TypeError, match="rpm must be an int"):
             create_openai_redis_rate_limiter(
-                _async_redis_mock(), rpm=float("nan"), tpm=10_000
+                _async_redis_mock(), key_prefix="test", rpm=float("nan"), tpm=10_000
             )
 
     def test_factory_eager_validation_rpm_bool(self):
         with pytest.raises(TypeError, match="rpm must be an int"):
-            create_openai_redis_rate_limiter(_async_redis_mock(), rpm=True, tpm=10_000)
+            create_openai_redis_rate_limiter(
+                _async_redis_mock(), key_prefix="test", rpm=True, tpm=10_000
+            )
         with pytest.raises(TypeError, match="tpm must be an int"):
-            create_openai_redis_rate_limiter(_async_redis_mock(), rpm=100, tpm=False)
+            create_openai_redis_rate_limiter(
+                _async_redis_mock(), key_prefix="test", rpm=100, tpm=False
+            )
 
     def test_factory_eager_validation_rpm_non_int(self):
         with pytest.raises(TypeError, match="rpm must be an int"):
-            create_openai_redis_rate_limiter(_async_redis_mock(), rpm=1.5, tpm=10_000)
+            create_openai_redis_rate_limiter(
+                _async_redis_mock(), key_prefix="test", rpm=1.5, tpm=10_000
+            )
         with pytest.raises(TypeError, match="rpm must be an int"):
-            create_openai_redis_rate_limiter(_async_redis_mock(), rpm="100", tpm=10_000)
+            create_openai_redis_rate_limiter(
+                _async_redis_mock(), key_prefix="test", rpm="100", tpm=10_000
+            )
         with pytest.raises(TypeError, match="tpm must be an int"):
-            create_openai_redis_rate_limiter(_async_redis_mock(), rpm=100, tpm=2.5)
+            create_openai_redis_rate_limiter(
+                _async_redis_mock(), key_prefix="test", rpm=100, tpm=2.5
+            )
 
     def test_factory_redis_client_type_check(self):
         with pytest.raises(
             TypeError, match=r"redis_client must be a redis\.asyncio\.Redis"
         ):
-            create_openai_redis_rate_limiter(None, rpm=100, tpm=10_000)
+            create_openai_redis_rate_limiter(
+                None, key_prefix="test", rpm=100, tpm=10_000
+            )
         with pytest.raises(
             TypeError, match=r"redis_client must be a redis\.asyncio\.Redis"
         ):
             create_openai_redis_rate_limiter(
-                "redis://localhost:6379", rpm=100, tpm=10_000
+                "redis://localhost:6379", key_prefix="test", rpm=100, tpm=10_000
             )
         sync_client = MagicMock(spec=_sync_redis.Redis)
         with pytest.raises(
             TypeError, match=r"redis_client must be a redis\.asyncio\.Redis"
         ):
-            create_openai_redis_rate_limiter(sync_client, rpm=100, tpm=10_000)
+            create_openai_redis_rate_limiter(
+                sync_client, key_prefix="test", rpm=100, tpm=10_000
+            )
 
     def test_factory_callbacks_type_check(self):
         with pytest.raises(TypeError, match="callbacks must be a RateLimiterCallbacks"):
             create_openai_redis_rate_limiter(
-                _async_redis_mock(), rpm=100, tpm=10_000, callbacks=False
+                _async_redis_mock(),
+                key_prefix="test",
+                rpm=100,
+                tpm=10_000,
+                callbacks=False,
             )
         with pytest.raises(TypeError, match="callbacks must be a RateLimiterCallbacks"):
             create_openai_redis_rate_limiter(
-                _async_redis_mock(), rpm=100, tpm=10_000, callbacks={}
+                _async_redis_mock(),
+                key_prefix="test",
+                rpm=100,
+                tpm=10_000,
+                callbacks={},
             )
 
 
@@ -359,6 +392,7 @@ class TestL01F04CallbacksDefaultFallbackContract:
         mock_redis = _async_redis_mock()
         limiter = create_openai_redis_rate_limiter(
             mock_redis,
+            key_prefix="test",
             rpm=100,
             tpm=10000,
         )
@@ -370,6 +404,7 @@ class TestL01F04CallbacksDefaultFallbackContract:
         empty = RateLimiterCallbacks()
         limiter = create_openai_redis_rate_limiter(
             mock_redis,
+            key_prefix="test",
             rpm=100,
             tpm=10000,
             callbacks=empty,
@@ -392,6 +427,7 @@ class TestL01F04CallbacksDefaultFallbackContract:
         user_cbs = RateLimiterCallbacks(on_capacity_consumed=on_capacity_consumed)
         limiter = create_openai_redis_rate_limiter(
             mock_redis,
+            key_prefix="test",
             rpm=100,
             tpm=10000,
             callbacks=user_cbs,

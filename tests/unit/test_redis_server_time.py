@@ -116,7 +116,12 @@ class TestAsyncBucketUsesServerTime:
     def bucket(self, mock_redis):
         quota = Quota(metric="requests", limit=10, per_seconds=1)
         config = PerModelConfig(model_family="test/model", quotas=UsageQuotas([quota]))
-        return RedisBucket(quota=quota, limit_config=config, redis_client=mock_redis)
+        return RedisBucket(
+            quota=quota,
+            limit_config=config,
+            redis_client=mock_redis,
+            key_prefix="test",
+        )
 
     async def test_get_capacity_standalone_calls_redis_time(self, bucket, mock_redis):
         """get_capacity() without current_time should call Redis TIME, not time.time()."""
@@ -196,7 +201,10 @@ class TestSyncBucketUsesServerTime:
         quota = Quota(metric="requests", limit=10, per_seconds=1)
         config = PerModelConfig(model_family="test/model", quotas=UsageQuotas([quota]))
         return SyncRedisBucket(
-            quota=quota, limit_config=config, redis_client=mock_redis
+            quota=quota,
+            limit_config=config,
+            redis_client=mock_redis,
+            key_prefix="test",
         )
 
     def test_get_capacity_standalone_calls_redis_time(self, bucket, mock_redis):

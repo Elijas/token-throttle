@@ -205,7 +205,7 @@ from token_throttle import RedisBackendBuilder
 
 pool = aioredis.ConnectionPool.from_url("redis://localhost", max_connections=50)
 client = aioredis.Redis(connection_pool=pool)
-backend = RedisBackendBuilder(client)
+backend = RedisBackendBuilder(client, key_prefix="test")
 limiter = RateLimiter(get_config, backend=backend)
 ```
 

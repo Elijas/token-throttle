@@ -31,7 +31,10 @@ from token_throttle import create_openai_redis_rate_limiter
 redis_client = redis.from_url("redis://localhost:6379")
 client = AsyncOpenAI()
 limiter = create_openai_redis_rate_limiter(
-    redis_client, rpm=10_000, tpm=2_000_000,
+    redis_client,
+    key_prefix="my-service-prod",
+    rpm=10_000,
+    tpm=2_000_000,
 )
 
 # 1. Reserve capacity (blocks until available)
@@ -61,7 +64,7 @@ limiter = RateLimiter(
             Quota(metric="output_tokens", limit=20_000, per_seconds=60),
         ]),
     ),
-    backend=RedisBackendBuilder(redis_client),
+    backend=RedisBackendBuilder(redis_client, key_prefix="my-service-prod"),
 )
 
 # Works with Anthropic, Gemini, local models — anything
@@ -150,7 +153,10 @@ def get_config(model_name: str) -> PerModelConfig:
         )
     # ... other providers
 
-limiter = RateLimiter(get_config, backend=RedisBackendBuilder(redis_client))
+limiter = RateLimiter(
+    get_config,
+    backend=RedisBackendBuilder(redis_client, key_prefix="my-service-prod"),
+)
 ```
 
 Models that share a `model_family` must also share the same live quota definition. If two model names need different limits, give them different `model_family` values instead of reusing one family name.
@@ -192,7 +198,7 @@ not need to accept unrelated kwargs like `model`.
 ```python
 # Distributed (multiple workers/processes)
 from token_throttle import RedisBackendBuilder
-backend = RedisBackendBuilder(redis_client)
+backend = RedisBackendBuilder(redis_client, key_prefix="my-service-prod")
 
 # Single process (no Redis needed)
 from token_throttle import MemoryBackendBuilder
@@ -200,6 +206,13 @@ backend = MemoryBackendBuilder()
 ```
 
 Both backends are available in sync (`SyncRedisBackendBuilder`, `SyncMemoryBackendBuilder`) and async variants.
+
+Redis builders and Redis OpenAI factories require a non-empty `key_prefix`.
+All Redis keys are scoped as `{key_prefix}:rate_limiting:...`; choose a stable
+deployment-scoped value and share it across workers that intentionally share
+quota state. Use different prefixes for unrelated deployments sharing one Redis
+DB or Redis Cluster. The prefix and user-controlled key segments cannot contain
+`:`, `{`, `}`, whitespace, or control characters.
 
 Custom backends implement `RateLimiterBackend` or `SyncRateLimiterBackend`.
 Required operations are capacity wait/consume/refund and `set_max_capacity`.

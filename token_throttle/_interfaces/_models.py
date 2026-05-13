@@ -95,8 +95,8 @@ class Quota(StrictDTO):
         description=(
             "Metric name used in Redis key segments. Must be non-empty, NFC "
             "normalized, printable, contain no whitespace/control characters, "
-            "and cannot contain ':'; the portable recommended character set is "
-            "^[A-Za-z0-9_./-]+$."
+            "and cannot contain ':', '{', or '}'; the portable recommended "
+            "character set is ^[A-Za-z0-9_./-]+$."
         )
     )
     limit: float = Field(
@@ -294,8 +294,8 @@ class CapacityReservation(StrictDTO):
         description=(
             "Model family used in Redis key segments. Must be non-empty, NFC "
             "normalized, printable, contain no whitespace/control characters, "
-            "and cannot contain ':'; the portable recommended character set is "
-            "^[A-Za-z0-9_./-]+$."
+            "and cannot contain ':', '{', or '}'; the portable recommended "
+            "character set is ^[A-Za-z0-9_./-]+$."
         )
     )
     bucket_ids: frozenset[BucketId] | None = Field(

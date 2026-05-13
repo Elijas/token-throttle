@@ -26,6 +26,7 @@ from token_throttle._interfaces._interfaces import PerModelConfig
 from token_throttle._interfaces._models import Quota, _is_bool_like
 from token_throttle._validation import validate_per_seconds
 
+from ._keys import redis_namespace_key, validate_redis_key_prefix
 from ._server_time import sync_server_time
 
 __all__ = ["CalculatedCapacity", "SyncRedisBucket"]
@@ -106,8 +107,8 @@ class SyncRedisBucket:
     """
     Token bucket implementation backed by Redis for distributed rate limiting (sync).
 
-    Runtime override Redis Key Format:
-        rate_limiting:{model_family}:{metric}:{per_seconds}:max_capacity_override
+    Redis key format is
+    ``{key_prefix}:rate_limiting:bucket:{model_family}:{metric}:{per_seconds}:...``.
 
     Uses the same key format as the async RedisBucket, so sync and async
     backends can share the same Redis override state. Static quota limits come
@@ -127,11 +128,20 @@ class SyncRedisBucket:
         quota: Quota,
         limit_config: PerModelConfig,
         redis_client: redis.Redis,
+        *,
+        key_prefix: str,
     ):
         self.usage_metric = quota.metric
         self.per_seconds = validate_per_seconds(quota.per_seconds)
-        self.full_redis_key = f"rate_limiting:{limit_config.model_family}:{self.usage_metric}:{int(self.per_seconds)}"
+        self.key_prefix = validate_redis_key_prefix(key_prefix)
         self.model_family = limit_config.get_model_family()
+        self.full_redis_key = redis_namespace_key(
+            self.key_prefix,
+            "bucket",
+            self.model_family,
+            self.usage_metric,
+            int(self.per_seconds),
+        )
 
         # Default/configured max_capacity from quota (used when no runtime
         # override is present in Redis).
@@ -151,6 +161,10 @@ class SyncRedisBucket:
         self._capacity_key = f"{self.full_redis_key}:capacity"
         self._lock_key = f"{self.full_redis_key}:lock"
         self._max_capacity_key = f"{self.full_redis_key}:max_capacity_override"
+        self._schema_version_key = redis_namespace_key(
+            self.key_prefix,
+            "schema_version",
+        )
 
     @property
     def configured_max_capacity(self) -> float:
@@ -293,6 +307,7 @@ class SyncRedisBucket:
                 self._OVERRIDE_LIMIT_KEY: value,
             }
         )
+        self._redis.set(self._schema_version_key, self._SCHEMA_VERSION, nx=True)
         self._redis.set(self._max_capacity_key, payload)
         # Update runtime override cache immediately
         self._set_cached_max_capacity_override(value)
@@ -437,3 +452,4 @@ class SyncRedisBucket:
 
     _OVERRIDE_LIMIT_KEY = "override_max_capacity"
     _CONFIGURED_LIMIT_KEY = "configured_max_capacity"
+    _SCHEMA_VERSION = "3"

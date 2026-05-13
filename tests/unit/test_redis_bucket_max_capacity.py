@@ -50,6 +50,7 @@ def bucket(mock_redis, quota, limit_config):
         quota=quota,
         limit_config=limit_config,
         redis_client=mock_redis,
+        key_prefix="test",
     )
 
 
@@ -393,20 +394,21 @@ class TestRedisKeyFormat:
 
     def test_max_capacity_key_format(self, bucket):
         """Runtime override key follows the expected format."""
-        expected = "rate_limiting:test/model:requests:1:max_capacity_override"
+        expected = (
+            "test:rate_limiting:bucket:test/model:requests:1:max_capacity_override"
+        )
         assert bucket._max_capacity_key == expected
 
     def test_key_format_matches_token_throttle_convention(self, mock_redis):
-        """Key format matches the convention for external rate limit controllers."""
-        # External controllers set:
-        # rate_limiting:{client}:requests:1:max_capacity_override
-        # This test verifies our key matches that format
+        """Key format keeps the deployment prefix outermost for Redis ACLs."""
         quota = Quota(metric="requests", limit=20, per_seconds=1)
         config = PerModelConfig(
             model_family="anthropic",
             quotas=UsageQuotas([quota]),
         )
-        bucket = RedisBucket(quota, config, mock_redis)
+        bucket = RedisBucket(quota, config, mock_redis, key_prefix="prod")
 
-        expected = "rate_limiting:anthropic:requests:1:max_capacity_override"
+        expected = (
+            "prod:rate_limiting:bucket:anthropic:requests:1:max_capacity_override"
+        )
         assert bucket._max_capacity_key == expected

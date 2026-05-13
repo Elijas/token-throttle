@@ -37,6 +37,7 @@ def _bucket(
         quota=quota,
         limit_config=limit_config,
         redis_client=redis_client or AsyncMock(),
+        key_prefix="test",
         override_ttl_seconds=override_ttl_seconds,
     )
 
@@ -145,5 +146,5 @@ async def test_d06_schema_version_key_written_on_first_override_write(
     await bucket.set_max_capacity(10.0)
 
     schema_call = redis_client.set.await_args_list[0]
-    assert schema_call.args == (bucket._SCHEMA_VERSION_KEY, bucket._SCHEMA_VERSION)
+    assert schema_call.args == (bucket._schema_version_key, bucket._SCHEMA_VERSION)
     assert schema_call.kwargs == {"nx": True}

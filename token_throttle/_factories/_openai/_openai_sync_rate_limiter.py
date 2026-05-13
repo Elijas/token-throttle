@@ -24,6 +24,7 @@ from token_throttle._sync_rate_limiter import SyncRateLimiter
 def create_openai_redis_sync_rate_limiter(
     redis_client: _sync_redis.Redis,
     *,
+    key_prefix: str,
     rpm: int,
     tpm: int,
     callbacks: SyncRateLimiterCallbacks | None = None,
@@ -40,6 +41,10 @@ def create_openai_redis_sync_rate_limiter(
     redis_client:
         A ``redis.Redis`` (sync) instance. For an async event-loop client,
         use ``create_openai_redis_rate_limiter`` instead.
+    key_prefix:
+        Required deployment-scoped Redis namespace. All Redis keys use
+        ``{key_prefix}:rate_limiting:...`` so unrelated deployments sharing
+        Redis do not collide.
     rpm:
         Requests-per-minute limit, applied per resolved model_family.
     tpm:
@@ -100,6 +105,6 @@ def create_openai_redis_sync_rate_limiter(
             usage_counter=OpenAIUsageCounter(),
             model_family=openai_model_family_getter(model_name),
         ),
-        backend=SyncRedisBackendBuilder(redis_client),
+        backend=SyncRedisBackendBuilder(redis_client, key_prefix=key_prefix),
         callbacks=_merge_sync_rate_limiter_callbacks(callbacks, default_callbacks),
     )

@@ -22,6 +22,7 @@ from token_throttle._rate_limiter import RateLimiter
 def create_openai_redis_rate_limiter(
     redis_client: redis.Redis,
     *,
+    key_prefix: str,
     rpm: int,
     tpm: int,
     callbacks: RateLimiterCallbacks | None = None,
@@ -29,12 +30,14 @@ def create_openai_redis_rate_limiter(
     """
     Build an async OpenAI rate limiter backed by Redis.
 
-    ``redis_client`` must be a ``redis.asyncio.Redis`` instance. ``rpm`` and
-    ``tpm`` are per-minute limits for requests and tokens, grouped by
-    ``openai_model_family_getter`` so dated model variants share a family.
-    User-provided callbacks merge slot-by-slot with the factory defaults:
-    non-None user callbacks win, while None slots inherit the default INFO
-    logger for missing consumption data.
+    ``redis_client`` must be a ``redis.asyncio.Redis`` instance. ``key_prefix``
+    is a required deployment-scoped Redis namespace; all Redis keys use
+    ``{key_prefix}:rate_limiting:...`` so unrelated deployments sharing Redis
+    do not collide. ``rpm`` and ``tpm`` are per-minute limits for requests and
+    tokens, grouped by ``openai_model_family_getter`` so dated model variants
+    share a family. User-provided callbacks merge slot-by-slot with the factory
+    defaults: non-None user callbacks win, while None slots inherit the default
+    INFO logger for missing consumption data.
 
     The helper is intentionally minute-window-only. For hourly/daily windows,
     custom metrics, or non-OpenAI usage shapes, construct ``RateLimiter`` with
@@ -77,6 +80,6 @@ def create_openai_redis_rate_limiter(
             usage_counter=OpenAIUsageCounter(),
             model_family=openai_model_family_getter(model_name),
         ),
-        backend=RedisBackendBuilder(redis_client),
+        backend=RedisBackendBuilder(redis_client, key_prefix=key_prefix),
         callbacks=_merge_rate_limiter_callbacks(callbacks, default_callbacks),
     )

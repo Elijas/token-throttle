@@ -20,6 +20,8 @@ from token_throttle._validation import validate_metric
         " tokens",
         "tokens ",
         "requests:per_minute",
+        "tokens{evil}",
+        "{evil}tokens",
     ],
 )
 def test_quota_metric_rejects_unsafe_key_segments(metric):
@@ -36,6 +38,7 @@ def test_quota_metric_rejects_unsafe_key_segments(metric):
         "token s",
         " tokens",
         "requests:per_minute",
+        "tokens{evil}",
     ],
 )
 def test_validate_metric_rejects_unsafe_key_segments(metric):
@@ -53,6 +56,8 @@ def test_validate_metric_rejects_unsafe_key_segments(metric):
         " gpt-4o",
         "gpt-4o ",
         "org:gpt-4o",
+        "gpt{evil}-4o",
+        "{evil}gpt-4o",
     ],
 )
 def test_model_family_rejects_unsafe_key_segments(model_family):

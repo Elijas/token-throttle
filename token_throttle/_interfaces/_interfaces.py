@@ -72,8 +72,9 @@ class PerModelConfig(StrictDTO):
             "expose identical quotas and unlimited-vs-limited behavior within "
             "a limiter instance. Defaults to the model name if not specified. "
             "When set, the value must be non-empty, NFC normalized, printable, "
-            "contain no whitespace/control characters, and cannot contain ':'; "
-            "the portable recommended character set is ^[A-Za-z0-9_./-]+$."
+            "contain no whitespace/control characters, and cannot contain ':', "
+            "'{', or '}'; the portable recommended character set is "
+            "^[A-Za-z0-9_./-]+$."
         ),
     )
 

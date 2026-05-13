@@ -33,7 +33,12 @@ def make_bucket(
         quotas=UsageQuotas([quota]),
     )
     mock_redis = AsyncMock()
-    return RedisBucket(quota=quota, limit_config=config, redis_client=mock_redis)
+    return RedisBucket(
+        quota=quota,
+        limit_config=config,
+        redis_client=mock_redis,
+        key_prefix="test",
+    )
 
 
 class TestFreshStart:
@@ -240,7 +245,10 @@ class TestEdgeCases:
         bucket = make_bucket(
             limit=100, per_seconds=60, model_family="my-model", metric="tokens"
         )
-        with pytest.warns(RuntimeWarning, match="rate_limiting:my-model:tokens:60"):
+        with pytest.warns(
+            RuntimeWarning,
+            match="test:rate_limiting:bucket:my-model:tokens:60",
+        ):
             bucket.calculate_capacity(
                 last_checked=1010.0, outdated_capacity=40.0, current_time=1000.0
             )

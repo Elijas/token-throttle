@@ -112,7 +112,7 @@ def test_redis_backend_builder_rejects_sync_client_shape_for_async_builder():
     )
 
     with pytest.raises(TypeError, match=r"redis\.asyncio\.Redis"):
-        redis_backend.RedisBackendBuilder(redis.Redis())
+        redis_backend.RedisBackendBuilder(redis.Redis(), key_prefix="test")
 
 
 def test_sync_redis_backend_builder_rejects_async_client_shape_for_sync_builder():
@@ -122,4 +122,7 @@ def test_sync_redis_backend_builder_rejects_async_client_shape_for_sync_builder(
     )
 
     with pytest.raises(TypeError, match=r"redis\.Redis"):
-        redis_sync_backend.SyncRedisBackendBuilder(redis_async.Redis())
+        redis_sync_backend.SyncRedisBackendBuilder(
+            redis_async.Redis(),
+            key_prefix="test",
+        )

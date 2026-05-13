@@ -38,6 +38,7 @@ def _sync_redis_mock() -> MagicMock:
 def test_factory_smoke():
     limiter = create_openai_redis_sync_rate_limiter(
         _sync_redis_mock(),
+        key_prefix="test",
         rpm=100,
         tpm=10_000,
     )
@@ -57,12 +58,16 @@ def test_factory_smoke():
 # 2-6. Y01 closure: rpm/tpm validators fire at construction, not at first acquire.
 def test_factory_eager_validation_rpm_zero():
     with pytest.raises(ValidationError, match="greater than 0"):
-        create_openai_redis_sync_rate_limiter(_sync_redis_mock(), rpm=0, tpm=10_000)
+        create_openai_redis_sync_rate_limiter(
+            _sync_redis_mock(), key_prefix="test", rpm=0, tpm=10_000
+        )
 
 
 def test_factory_eager_validation_rpm_negative():
     with pytest.raises(ValidationError, match="greater than 0"):
-        create_openai_redis_sync_rate_limiter(_sync_redis_mock(), rpm=-1, tpm=10_000)
+        create_openai_redis_sync_rate_limiter(
+            _sync_redis_mock(), key_prefix="test", rpm=-1, tpm=10_000
+        )
 
 
 def test_factory_eager_validation_rpm_inf_nan():
@@ -70,68 +75,86 @@ def test_factory_eager_validation_rpm_inf_nan():
     # construction (they are floats, not ints).
     with pytest.raises(TypeError, match="rpm must be an int"):
         create_openai_redis_sync_rate_limiter(
-            _sync_redis_mock(), rpm=float("inf"), tpm=10_000
+            _sync_redis_mock(), key_prefix="test", rpm=float("inf"), tpm=10_000
         )
     with pytest.raises(TypeError, match="rpm must be an int"):
         create_openai_redis_sync_rate_limiter(
-            _sync_redis_mock(), rpm=float("nan"), tpm=10_000
+            _sync_redis_mock(), key_prefix="test", rpm=float("nan"), tpm=10_000
         )
 
 
 def test_factory_eager_validation_rpm_bool():
     # `isinstance(True, int)` is True in Python, so the bool gate runs first.
     with pytest.raises(TypeError, match="rpm must be an int"):
-        create_openai_redis_sync_rate_limiter(_sync_redis_mock(), rpm=True, tpm=10_000)
+        create_openai_redis_sync_rate_limiter(
+            _sync_redis_mock(), key_prefix="test", rpm=True, tpm=10_000
+        )
     with pytest.raises(TypeError, match="tpm must be an int"):
-        create_openai_redis_sync_rate_limiter(_sync_redis_mock(), rpm=100, tpm=False)
+        create_openai_redis_sync_rate_limiter(
+            _sync_redis_mock(), key_prefix="test", rpm=100, tpm=False
+        )
 
 
 def test_factory_eager_validation_rpm_non_int():
     # Y03 closure: floats / strings rejected, not silently coerced.
     with pytest.raises(TypeError, match="rpm must be an int"):
-        create_openai_redis_sync_rate_limiter(_sync_redis_mock(), rpm=1.5, tpm=10_000)
+        create_openai_redis_sync_rate_limiter(
+            _sync_redis_mock(), key_prefix="test", rpm=1.5, tpm=10_000
+        )
     with pytest.raises(TypeError, match="rpm must be an int"):
-        create_openai_redis_sync_rate_limiter(_sync_redis_mock(), rpm="100", tpm=10_000)
+        create_openai_redis_sync_rate_limiter(
+            _sync_redis_mock(), key_prefix="test", rpm="100", tpm=10_000
+        )
     with pytest.raises(TypeError, match="tpm must be an int"):
-        create_openai_redis_sync_rate_limiter(_sync_redis_mock(), rpm=100, tpm=2.5)
+        create_openai_redis_sync_rate_limiter(
+            _sync_redis_mock(), key_prefix="test", rpm=100, tpm=2.5
+        )
 
 
 # 7. Y02 closure: non-redis.Redis instances rejected at construction.
 def test_factory_redis_client_type_check():
     with pytest.raises(TypeError, match=r"redis_client must be a redis\.Redis"):
-        create_openai_redis_sync_rate_limiter(None, rpm=100, tpm=10_000)
+        create_openai_redis_sync_rate_limiter(
+            None, key_prefix="test", rpm=100, tpm=10_000
+        )
     with pytest.raises(TypeError, match=r"redis_client must be a redis\.Redis"):
         create_openai_redis_sync_rate_limiter(
-            "redis://localhost:6379", rpm=100, tpm=10_000
+            "redis://localhost:6379", key_prefix="test", rpm=100, tpm=10_000
         )
     # Async client must NOT be accepted (cross-mode misuse footgun).
     async_client = MagicMock(spec=_async_redis.Redis)
     with pytest.raises(TypeError, match=r"redis_client must be a redis\.Redis"):
-        create_openai_redis_sync_rate_limiter(async_client, rpm=100, tpm=10_000)
+        create_openai_redis_sync_rate_limiter(
+            async_client, key_prefix="test", rpm=100, tpm=10_000
+        )
 
 
 # 8. Y04 closure: non-SyncRateLimiterCallbacks values rejected at construction.
 def test_factory_callbacks_type_check():
     with pytest.raises(TypeError, match="callbacks must be a SyncRateLimiterCallbacks"):
         create_openai_redis_sync_rate_limiter(
-            _sync_redis_mock(), rpm=100, tpm=10_000, callbacks=False
+            _sync_redis_mock(), key_prefix="test", rpm=100, tpm=10_000, callbacks=False
         )
     with pytest.raises(TypeError, match="callbacks must be a SyncRateLimiterCallbacks"):
         create_openai_redis_sync_rate_limiter(
-            _sync_redis_mock(), rpm=100, tpm=10_000, callbacks={}
+            _sync_redis_mock(), key_prefix="test", rpm=100, tpm=10_000, callbacks={}
         )
     # Async RateLimiterCallbacks must not pass — sync field validators differ.
     async_cbs = RateLimiterCallbacks()
     with pytest.raises(TypeError, match="callbacks must be a SyncRateLimiterCallbacks"):
         create_openai_redis_sync_rate_limiter(
-            _sync_redis_mock(), rpm=100, tpm=10_000, callbacks=async_cbs
+            _sync_redis_mock(),
+            key_prefix="test",
+            rpm=100,
+            tpm=10_000,
+            callbacks=async_cbs,
         )
 
 
 # 9-11. R5 F04 merge contract mirrored from the async factory.
 def test_factory_callbacks_none_applies_default_logger():
     limiter = create_openai_redis_sync_rate_limiter(
-        _sync_redis_mock(), rpm=100, tpm=10_000
+        _sync_redis_mock(), key_prefix="test", rpm=100, tpm=10_000
     )
     assert limiter._callbacks is not None
     assert limiter._callbacks.on_missing_consumption_data is not None
@@ -140,7 +163,7 @@ def test_factory_callbacks_none_applies_default_logger():
 def test_factory_callbacks_empty_preserves_default_logger():
     empty = SyncRateLimiterCallbacks()
     limiter = create_openai_redis_sync_rate_limiter(
-        _sync_redis_mock(), rpm=100, tpm=10_000, callbacks=empty
+        _sync_redis_mock(), key_prefix="test", rpm=100, tpm=10_000, callbacks=empty
     )
     assert limiter._callbacks is not empty
     assert limiter._callbacks.on_missing_consumption_data is not None
@@ -159,7 +182,7 @@ def test_factory_callbacks_one_cb_user_preserved_default_merged():
 
     user_cbs = SyncRateLimiterCallbacks(on_capacity_consumed=on_capacity_consumed)
     limiter = create_openai_redis_sync_rate_limiter(
-        _sync_redis_mock(), rpm=100, tpm=10_000, callbacks=user_cbs
+        _sync_redis_mock(), key_prefix="test", rpm=100, tpm=10_000, callbacks=user_cbs
     )
     assert limiter._callbacks is not user_cbs
     assert limiter._callbacks.on_capacity_consumed is on_capacity_consumed
@@ -171,7 +194,7 @@ def test_factory_callbacks_one_cb_user_preserved_default_merged():
 #     4c from the audit (refund path round-trip).
 def test_acquire_refund_round_trip_dict_response():
     limiter = create_openai_redis_sync_rate_limiter(
-        _sync_redis_mock(), rpm=100, tpm=10_000
+        _sync_redis_mock(), key_prefix="test", rpm=100, tpm=10_000
     )
     # Unlimited reservation short-circuits the refund path before any backend
     # call — verifying the method exists and accepts a dict-shaped OpenAI
@@ -195,6 +218,7 @@ def test_factory_extra_kwargs_rejected():
     with pytest.raises(TypeError, match="unexpected keyword argument"):
         create_openai_redis_sync_rate_limiter(
             _sync_redis_mock(),
+            key_prefix="test",
             rpm=100,
             tpm=10_000,
             rate_per_minute=60,  # typo'd kwarg

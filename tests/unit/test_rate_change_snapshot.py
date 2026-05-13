@@ -406,7 +406,10 @@ class TestRedisBackendSnapshotOnRateChange:
         redis_state = _AsyncRedisState()
         cfg = _make_redis_config(limit=10, per_seconds=60)
         bucket = RedisBucket(
-            quota=next(iter(cfg.quotas)), limit_config=cfg, redis_client=redis_state
+            quota=next(iter(cfg.quotas)),
+            limit_config=cfg,
+            redis_client=redis_state,
+            key_prefix="test",
         )
         backend = RedisBackend(buckets=[bucket], redis=redis_state, limit_config=cfg)
 
@@ -429,7 +432,10 @@ class TestRedisBackendSnapshotOnRateChange:
         redis_state = _SyncRedisState()
         cfg = _make_redis_config(limit=10, per_seconds=60)
         bucket = SyncRedisBucket(
-            quota=next(iter(cfg.quotas)), limit_config=cfg, redis_client=redis_state
+            quota=next(iter(cfg.quotas)),
+            limit_config=cfg,
+            redis_client=redis_state,
+            key_prefix="test",
         )
         backend = SyncRedisBackend(
             buckets=[bucket], redis=redis_state, limit_config=cfg

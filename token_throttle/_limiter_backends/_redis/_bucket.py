@@ -26,6 +26,7 @@ from token_throttle._interfaces._interfaces import PerModelConfig
 from token_throttle._interfaces._models import Quota, _is_bool_like
 from token_throttle._validation import validate_per_seconds
 
+from ._keys import redis_namespace_key, validate_redis_key_prefix
 from ._server_time import async_server_time
 
 # Re-export for backwards compatibility
@@ -107,10 +108,10 @@ class RedisBucket:
     """
     Token bucket implementation backed by Redis for distributed rate limiting.
 
-    Runtime override Redis Key Format:
-        rate_limiting:{model_family}:{metric}:{per_seconds}:max_capacity_override
-        Example:
-            rate_limiting:gemini/gemini-2.0-flash:requests:1:max_capacity_override
+    Redis key format is
+    ``{key_prefix}:rate_limiting:bucket:{model_family}:{metric}:{per_seconds}:...``.
+    For example:
+    ``prod-us-east:rate_limiting:bucket:gemini/gemini-2.0-flash:requests:1:max_capacity_override``.
 
     Legacy override formats are intentionally not migrated because they were
     unanchored and cannot be safely applied after a config change. Era 1
@@ -137,12 +138,20 @@ class RedisBucket:
         limit_config: PerModelConfig,
         redis_client: redis.asyncio.Redis,
         *,
+        key_prefix: str,
         override_ttl_seconds: int | None = None,
     ):
         self.usage_metric = quota.metric
         self.per_seconds = validate_per_seconds(quota.per_seconds)
-        self.full_redis_key = f"rate_limiting:{limit_config.model_family}:{self.usage_metric}:{int(self.per_seconds)}"
+        self.key_prefix = validate_redis_key_prefix(key_prefix)
         self.model_family = limit_config.get_model_family()
+        self.full_redis_key = redis_namespace_key(
+            self.key_prefix,
+            "bucket",
+            self.model_family,
+            self.usage_metric,
+            int(self.per_seconds),
+        )
 
         # Default/configured max_capacity from quota (used when no runtime
         # override is present in Redis).
@@ -166,6 +175,10 @@ class RedisBucket:
         self._lock_key = f"{self.full_redis_key}:lock"
         self._max_capacity_key = f"{self.full_redis_key}:max_capacity_override"
         self._legacy_max_capacity_key = f"{self.full_redis_key}:max_capacity"
+        self._schema_version_key = redis_namespace_key(
+            self.key_prefix,
+            "schema_version",
+        )
 
     @property
     def configured_max_capacity(self) -> float:
@@ -409,7 +422,7 @@ class RedisBucket:
                 self._OVERRIDE_LIMIT_KEY: value,
             }
         )
-        await self._redis.set(self._SCHEMA_VERSION_KEY, self._SCHEMA_VERSION, nx=True)
+        await self._redis.set(self._schema_version_key, self._SCHEMA_VERSION, nx=True)
         if self._override_ttl_seconds is None:
             await self._redis.set(self._max_capacity_key, payload)
         else:
@@ -564,4 +577,3 @@ class RedisBucket:
     _OVERRIDE_LIMIT_KEY = "override_max_capacity"
     _CONFIGURED_LIMIT_KEY = "configured_max_capacity"
     _SCHEMA_VERSION = "3"
-    _SCHEMA_VERSION_KEY = "rate_limiting:schema_version"

@@ -32,6 +32,7 @@ def bucket(mock_redis):
         quota=quota,
         limit_config=limit_config,
         redis_client=mock_redis,
+        key_prefix="test",
     )
 
 
@@ -59,8 +60,11 @@ def test_get_max_capacity_ignores_legacy_max_capacity_key(bucket, mock_redis):
 def test_set_max_capacity_writes_baseline_metadata(bucket, mock_redis):
     bucket.set_max_capacity(5.0)
 
-    mock_redis.set.assert_called_once()
-    key, payload = mock_redis.set.call_args.args
+    assert mock_redis.set.call_count == 2
+    schema_call = mock_redis.set.call_args_list[0]
+    assert schema_call.args == (bucket._schema_version_key, bucket._SCHEMA_VERSION)
+    assert schema_call.kwargs == {"nx": True}
+    key, payload = mock_redis.set.call_args_list[1].args
     assert key == bucket._max_capacity_key
     assert json.loads(payload) == {
         "configured_max_capacity": 20.0,
