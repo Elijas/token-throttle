@@ -1748,6 +1748,10 @@ class RateLimiter(BaseRateLimiter):
         model_family: str,
         bucket_ids: set[BucketId],
     ) -> None:
+        # Caller must hold self._lock. All writers to _model_family_to_runtime_max_capacity
+        # (this method, _restore_runtime_max_capacity, _commit_runtime_max_capacity)
+        # serialize on _lock so config rebuilds and runtime overrides stay coherent.
+        # Dropping that invariant reopens the ghost-override race (R4 L11 B01/B02).
         if not bucket_ids:
             return
         overrides = self._model_family_to_runtime_max_capacity.get(model_family)
@@ -1766,6 +1770,7 @@ class RateLimiter(BaseRateLimiter):
         new_snapshot: dict[BucketId, float],
         backend: RateLimiterBackend,
     ) -> None:
+        # Caller must hold self._lock; see _clear_runtime_max_capacity.
         overrides = self._model_family_to_runtime_max_capacity.get(model_family)
         if not overrides:
             return

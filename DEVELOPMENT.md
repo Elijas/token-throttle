@@ -255,6 +255,48 @@ Redis lock polling is also configurable. `lock_sleep_seconds` controls the redis
 
 All capacity values are Python `float` (IEEE 754 double). At limits above ~2^53, integer precision is lost: consecutive integers are indistinguishable, so `capacity - usage` may not change the stored value. This is a known limitation of the float64 representation and is acceptable for all real-world rate-limiting scenarios (token quotas are orders of magnitude below 2^53).
 
+### Redis ACL requirements and `SCRIPT FLUSH` hazard
+
+The minimum Redis ACL permission set for token-throttle:
+
+| Command category | Commands used | Why |
+|---|---|---|
+| `+@read` | `GET` | Read bucket capacity and last-checked state |
+| `+@write` | `SET`, `DEL`, `EXPIRE` | Write bucket state, refund dedup keys, and TTL |
+| `+@string` | included in read/write above | Plain string key/value operations |
+| `+@scripting` | `EVALSHA`, `SCRIPT LOAD` | redis-py lock release and extend Lua scripts |
+| `+TIME` | `TIME` | Server-side clock for elapsed-time calculations |
+
+token-throttle does **not** use `KEYS`, `FLUSHDB`, `FLUSHALL`, `CONFIG`, or any
+Pub/Sub command. A restrictive ACL can safely deny those categories.
+
+**`SCRIPT FLUSH` operational hazard**: `SCRIPT FLUSH` evicts the Lua SHA cache
+used by redis-py's lock release and extend scripts. The next lock operation
+reloads the script, but if scripting commands are denied by ACL, the reload
+fails and lock release silently errors. Schedule `SCRIPT FLUSH` only during
+planned maintenance when token-throttle is not running. Do not issue it on a
+shared Redis DB that token-throttle shares with other services unless all
+Lua-using clients have been stopped.
+
+### Sync `config_getter` reentrancy under `_validation_lock`
+
+`SyncRateLimiter._validate_shared_model_family_config` calls the user-supplied
+`config_getter` (the `cfg` argument to `SyncRateLimiter.__init__`) while
+holding `_validation_lock`. `threading.Lock` is **not reentrant**.
+
+If your `config_getter` calls back into the same `SyncRateLimiter` instance
+(for example, to check current capacity before deciding what config to return),
+the reentrant acquire path will also call `_validate_shared_model_family_config`,
+which will block trying to acquire `_validation_lock` that the outer call
+already holds — deadlock.
+
+This is a user-code contract, not a library bug. The library never calls
+`config_getter` recursively. Safe `config_getter` implementations:
+
+- Return a static or externally-cached `PerModelConfig` without touching the limiter.
+- Call out to an external service or config store.
+- Call into a *different* `SyncRateLimiter` instance.
+
 ### R4 documentation audit cross-references
 
 FIX-21 checked and closed the documentation-only R4 audit gaps across L01-L22:
@@ -264,3 +306,12 @@ X05/X10/X12/X14; Y05/Y08-Y10/Y13/Y14; N03/N07/N09/N11/N14; J06/J09;
 T03/T04/T06; O04. Some lanes were already closed by earlier fix bundles in
 this branch; the status report for FIX-21 records which surfaces were verified
 rather than re-edited.
+
+### R5 documentation audit cross-references
+
+FIX-39 closed the R5 informational findings D16/D18/D19/D20/D32/D33/D34:
+Redis ACL and SCRIPT FLUSH hazard (D16); reservation future-field contract
+(D18); wire-format and Lua continuity v1.4.1–v2.0.0 (D19); callback slot
+compatibility (D20); runtime-override map `_lock` invariant (D32);
+`config_getter` reentrancy under `_validation_lock` (D33); Redis
+`_extend_locks` coverage confirmed clean, lint test added (D34).

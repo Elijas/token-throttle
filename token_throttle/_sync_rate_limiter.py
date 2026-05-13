@@ -1522,6 +1522,10 @@ class SyncRateLimiter:
             if conflicting_signatures:
                 representative = self._model_family_to_model_name.get(model_family)
                 if representative is not None and representative != model:
+                    # config_getter runs while _validation_lock is held. If it calls
+                    # back into this limiter (e.g., acquire_capacity), that path also
+                    # calls _validate_shared_model_family_config which tries to re-acquire
+                    # _validation_lock → self-deadlock (threading.Lock is not reentrant).
                     representative_config = self._config_getter(representative)
                     representative_family = self._validated_model_family(
                         representative,
@@ -1592,6 +1596,10 @@ class SyncRateLimiter:
         model_family: str,
         bucket_ids: set[BucketId],
     ) -> None:
+        # Caller must hold self._lock. All writers to _model_family_to_runtime_max_capacity
+        # (this method, _restore_runtime_max_capacity, _commit_runtime_max_capacity)
+        # serialize on _lock so config rebuilds and runtime overrides stay coherent.
+        # Dropping that invariant reopens the ghost-override race (R4 L11 B01/B02).
         if not bucket_ids:
             return
         overrides = self._model_family_to_runtime_max_capacity.get(model_family)
@@ -1610,6 +1618,7 @@ class SyncRateLimiter:
         new_snapshot: dict[BucketId, float],
         backend: SyncRateLimiterBackend,
     ) -> None:
+        # Caller must hold self._lock; see _clear_runtime_max_capacity.
         overrides = self._model_family_to_runtime_max_capacity.get(model_family)
         if not overrides:
             return
