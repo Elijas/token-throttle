@@ -230,6 +230,16 @@ class SyncRedisBackend(SyncRateLimiterBackend):
     def _snapshot_buckets(self) -> tuple[SyncRedisBucket, ...]:
         return tuple(self.sorted_buckets)
 
+    def _runtime_max_capacity_for_reconciliation(
+        self,
+        metric: str,
+        per_seconds: int,
+    ) -> float | None:
+        bucket = self._find_bucket(self._snapshot_buckets(), metric, per_seconds)
+        if bucket is None:
+            return None
+        return bucket.refresh_max_capacity_from_redis()
+
     def _validation_metric_names(
         self,
         buckets: tuple[SyncRedisBucket, ...] | list[SyncRedisBucket] | None = None,
@@ -1020,7 +1030,15 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         ``max_capacity`` — reads apply ``min(max_capacity, …)`` and a later
         cap raise can re-expose the hidden overflow.
         """
-        bucket.get_max_capacity()
+        refresh_max_capacity = getattr(
+            bucket,
+            "refresh_max_capacity_from_redis",
+            None,
+        )
+        if callable(refresh_max_capacity):
+            refresh_max_capacity()
+        else:  # test fakes and compatible custom bucket shims
+            bucket.get_max_capacity()
         current_time = sync_server_time(self._redis)
         pipeline = self._redis.pipeline()
         pipeline.get(bucket._last_checked_key)  # noqa: SLF001

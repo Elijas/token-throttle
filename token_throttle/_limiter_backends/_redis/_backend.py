@@ -271,6 +271,16 @@ class RedisBackend(RateLimiterBackend):
     def _snapshot_buckets(self) -> tuple[RedisBucket, ...]:
         return tuple(getattr(self, "sorted_buckets", ()))
 
+    async def _runtime_max_capacity_for_reconciliation(
+        self,
+        metric: str,
+        per_seconds: int,
+    ) -> float | None:
+        bucket = self._find_bucket(self._snapshot_buckets(), metric, per_seconds)
+        if bucket is None:
+            return None
+        return await bucket.refresh_max_capacity_from_redis()
+
     def _validation_metric_names(
         self,
         buckets: tuple[RedisBucket, ...] | list[RedisBucket] | None = None,
@@ -1267,9 +1277,17 @@ class RedisBackend(RateLimiterBackend):
         ``min(max_capacity, …)`` and a later cap raise can re-expose the
         hidden overflow.
         """
-        # Refresh the override cache so ``bucket._rate_per_sec`` reflects the
-        # current effective rate in Redis before we snapshot under it.
-        await bucket.get_max_capacity()
+        # Force-refresh the override cache so ``bucket._rate_per_sec`` reflects
+        # the current effective rate in Redis before we snapshot under it.
+        refresh_max_capacity = getattr(
+            bucket,
+            "refresh_max_capacity_from_redis",
+            None,
+        )
+        if callable(refresh_max_capacity):
+            await refresh_max_capacity()
+        else:  # test fakes and compatible custom bucket shims
+            await bucket.get_max_capacity()
         current_time = await async_server_time(self._redis)
         pipeline = self._redis.pipeline()
         pipeline.get(bucket._last_checked_key)  # noqa: SLF001

@@ -1,3 +1,5 @@
+import contextlib
+import inspect
 import json
 import logging
 import math
@@ -218,6 +220,25 @@ class RedisBucket:
     def _rate_per_sec(self, value: object) -> None:
         self._rate_per_sec_value = _validate_rate_per_sec_finite_positive(value)
 
+    async def refresh_max_capacity_from_redis(self) -> float:
+        """
+        Force-refresh the runtime override from Redis, bypassing the local TTL.
+
+        Lock-held rate-change snapshots use this so another worker's recent
+        override cannot be hidden by this process's 1-second convenience cache.
+        """
+        stored_value = self._redis.get(self._max_capacity_key)
+        if inspect.isawaitable(stored_value):
+            stored_value = await stored_value
+        expire_result = self._redis.expire(
+            self._max_capacity_key,
+            self._override_ttl_seconds,
+        )
+        if inspect.isawaitable(expire_result):
+            await expire_result
+        self.update_max_capacity_from_result(stored_value)
+        return self.max_capacity
+
     async def get_max_capacity(self) -> float:
         """
         Fetch the runtime override from Redis (if cache is stale) and return the
@@ -239,12 +260,7 @@ class RedisBucket:
         ) and cache_age < self.MAX_CAPACITY_CACHE_TTL:
             return self.max_capacity
 
-        # Fetch runtime override from Redis
-        stored_value = await self._redis.get(self._max_capacity_key)
-        await self._redis.expire(self._max_capacity_key, self._override_ttl_seconds)
-        self.update_max_capacity_from_result(stored_value)
-        self._max_capacity_cache_time = current_time
-        return self.max_capacity
+        return await self.refresh_max_capacity_from_redis()
 
     def _set_cached_max_capacity_override(self, value: float | None) -> None:
         self._max_capacity_cached = (
@@ -430,8 +446,13 @@ class RedisBucket:
             ex=self._override_ttl_seconds,
         )
         # Update runtime override cache immediately
-        self._set_cached_max_capacity_override(value)
-        self._max_capacity_cache_time = time.time()
+        try:
+            self._set_cached_max_capacity_override(value)
+            self._max_capacity_cache_time = time.time()
+        except BaseException:
+            with contextlib.suppress(BaseException):
+                await self.refresh_max_capacity_from_redis()
+            raise
 
     def set_configured_max_capacity(self, value: float) -> None:
         """

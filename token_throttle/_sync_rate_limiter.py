@@ -1,5 +1,6 @@
 import collections
 import logging
+import math
 import threading
 import uuid
 import warnings
@@ -720,16 +721,109 @@ class SyncRateLimiter:
                 )
             try:
                 backend = self._sync_backend_quotas(limit_config)
-                backend.set_max_capacity(metric, per_seconds, value)
             except Exception as exc:  # noqa: BLE001 - boundary wrapper preserves cause
                 _raise_backend_external_error(exc)
-            self._model_family_to_model_name[model_family] = model
-            self._remember_runtime_max_capacity(
+            self._set_max_capacity_transactional(
+                backend,
+                model_family=model_family,
+                model=model,
+                metric=metric,
+                per_seconds=per_seconds,
+                value=value,
+            )
+
+    def _commit_runtime_max_capacity(
+        self,
+        model_family: str,
+        model: str,
+        metric: str,
+        per_seconds: int,
+        value: float,
+    ) -> None:
+        self._model_family_to_model_name[model_family] = model
+        self._remember_runtime_max_capacity(
+            model_family,
+            metric,
+            per_seconds,
+            value,
+        )
+
+    def _backend_runtime_max_capacity_matches(
+        self,
+        backend: SyncRateLimiterBackend,
+        metric: str,
+        per_seconds: int,
+        value: float,
+    ) -> bool:
+        reader = getattr(backend, "_runtime_max_capacity_for_reconciliation", None)
+        if not callable(reader):
+            return False
+        try:
+            actual_value = reader(metric, per_seconds)
+        except Exception:  # noqa: BLE001 - preserves the original backend error.
+            return False
+        if actual_value is None:
+            return False
+        try:
+            return math.isclose(float(actual_value), value, rel_tol=1e-12)
+        except (TypeError, ValueError):
+            return False
+
+    def _reconcile_runtime_max_capacity_after_failed_set(  # noqa: PLR0913
+        self,
+        backend: SyncRateLimiterBackend,
+        *,
+        model_family: str,
+        model: str,
+        metric: str,
+        per_seconds: int,
+        value: float,
+    ) -> None:
+        if self._backend_runtime_max_capacity_matches(
+            backend,
+            metric,
+            per_seconds,
+            value,
+        ):
+            self._commit_runtime_max_capacity(
                 model_family,
+                model,
                 metric,
                 per_seconds,
                 value,
             )
+
+    def _set_max_capacity_transactional(  # noqa: PLR0913
+        self,
+        backend: SyncRateLimiterBackend,
+        *,
+        model_family: str,
+        model: str,
+        metric: str,
+        per_seconds: int,
+        value: float,
+    ) -> None:
+        try:
+            backend.set_max_capacity(metric, per_seconds, value)
+        except BaseException as exc:
+            self._reconcile_runtime_max_capacity_after_failed_set(
+                backend,
+                model_family=model_family,
+                model=model,
+                metric=metric,
+                per_seconds=per_seconds,
+                value=value,
+            )
+            if isinstance(exc, Exception):
+                _raise_backend_external_error(exc)
+            raise
+        self._commit_runtime_max_capacity(
+            model_family,
+            model,
+            metric,
+            per_seconds,
+            value,
+        )
 
     def _refund_capacity(
         self,

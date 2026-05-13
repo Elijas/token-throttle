@@ -126,6 +126,17 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
             (bucket.usage_metric, int(bucket.per_seconds)) for bucket in self._buckets
         )
 
+    def _runtime_max_capacity_for_reconciliation(
+        self,
+        metric: str,
+        per_seconds: int,
+    ) -> float | None:
+        with self._condition:
+            bucket = self._bucket_registry.get((metric, int(per_seconds)))
+            if bucket is None:
+                return None
+            return bucket.max_capacity
+
     @staticmethod
     def _ensure_usage_metrics_are_active(
         usage: FrozenUsage,

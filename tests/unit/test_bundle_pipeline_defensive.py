@@ -154,6 +154,7 @@ async def test_snapshot_bucket_state_logs_hostile_data(
     )
     bucket = RedisBucket(quota, limit_config, redis_client, key_prefix="test")
     bucket.get_max_capacity = AsyncMock(return_value=bucket.max_capacity)
+    bucket.refresh_max_capacity_from_redis = AsyncMock(return_value=bucket.max_capacity)
     backend = RedisBackend([bucket], redis_client, limit_config, key_prefix="test")
     monkeypatch.setattr(redis_backend_module, "async_server_time", fake_server_time)
 
