@@ -317,6 +317,43 @@ def _resolve_usage_counter_result_for_model(
         raise
 
 
+async def _resolve_usage_counter_result_for_model_async(
+    usage_counter,
+    *,
+    model_name: str,
+    warn_if_sync_counter_blocks_event_loop: bool = False,
+    **kwargs,
+) -> FrozenUsage:
+    async_counter = getattr(usage_counter, "count_request_async", None)
+    if callable(async_counter):
+        try:
+            result = await async_counter(**kwargs)
+            return frozen_usage(result)
+        except KeyError as exc:
+            raise ValueError(
+                "Rate limiter usage_counter failed with KeyError while counting "
+                f"request usage for model {model_name!r}. If this is "
+                "OpenAIUsageCounter, token-throttle could not determine the "
+                "tokenizer for that model; pass an explicit get_encoding_func."
+            ) from exc
+        except ValueError as exc:
+            if isinstance(exc.__cause__, KeyError):
+                raise ValueError(  # noqa: TRY004 - preserving public ValueError contract
+                    "Rate limiter usage_counter failed with KeyError while counting "
+                    f"request usage for model {model_name!r}. If this is "
+                    "OpenAIUsageCounter, token-throttle could not determine the "
+                    "tokenizer for that model; pass an explicit get_encoding_func."
+                ) from exc.__cause__
+            raise
+
+    return _resolve_usage_counter_result_for_model(
+        usage_counter,
+        model_name=model_name,
+        warn_if_sync_counter_blocks_event_loop=warn_if_sync_counter_blocks_event_loop,
+        **kwargs,
+    )
+
+
 class RateLimiter(BaseRateLimiter):
     """
     Top-level async rate limiter — the main public entry point.
@@ -537,7 +574,7 @@ class RateLimiter(BaseRateLimiter):
             # carries empty usage by construction.
             usage = frozendict()
             if limit_config.usage_counter is not None:
-                usage = _resolve_usage_counter_result_for_model(
+                usage = await _resolve_usage_counter_result_for_model_async(
                     limit_config.usage_counter,
                     model_name=model,
                     warn_if_sync_counter_blocks_event_loop=True,
@@ -549,7 +586,7 @@ class RateLimiter(BaseRateLimiter):
             raise ValueError("limit_config.usage_counter cannot be None")
 
         usage = merge_extra_usage(
-            _resolve_usage_counter_result_for_model(
+            await _resolve_usage_counter_result_for_model_async(
                 limit_config.usage_counter,
                 model_name=model,
                 warn_if_sync_counter_blocks_event_loop=True,

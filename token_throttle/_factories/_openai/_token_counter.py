@@ -1,5 +1,9 @@
+from __future__ import annotations
+
+import asyncio
 import json
 import math
+import threading
 import typing
 from typing import Protocol, cast, runtime_checkable
 
@@ -59,7 +63,7 @@ _UNSUPPORTED_CONTENT_FIELDS = (
 
 @runtime_checkable
 class EncodingGetter(Protocol):
-    def __call__(self, model_name: str) -> "Encoding": ...
+    def __call__(self, model_name: str) -> Encoding: ...
 
 
 class OpenAIUsageCounter:
@@ -75,16 +79,55 @@ class OpenAIUsageCounter:
 
     def __init__(self, get_encoding_func: EncodingGetter | None = None):
         self._get_encoding = get_encoding_func or get_encoding
+        self._encoding_cache: dict[str, Encoding] = {}
+        self._encoding_cache_lock = threading.RLock()
 
     def __call__(self, model: str, **request) -> FrozenUsage:
-        if not isinstance(model, str):
-            raise TypeError(
-                f"model must be a non-empty string (got {type(model).__name__})"
-            )
-        if not model:
-            raise ValueError("model must be a non-empty string")
-        _validate_max_kwargs(request)
+        self._validate_model(model)
+        encoding = self._get_cached_encoding(model)
+        return self._count_with_encoding(model, encoding, request)
+
+    async def count_request_async(self, model: str, **request) -> FrozenUsage:
+        self._validate_model(model)
+        encoding = await self._get_cached_encoding_async(model)
+        return self._count_with_encoding(model, encoding, request)
+
+    async def warmup_models(self, models: list[str]) -> None:
+        """Pre-load tokenizers in executor threads during async app startup."""
+        for model in models:
+            self._validate_model(model)
+        await asyncio.gather(
+            *(self._get_cached_encoding_async(model) for model in models)
+        )
+
+    def _get_cached_encoding(self, model: str) -> Encoding:
+        with self._encoding_cache_lock:
+            encoding = self._encoding_cache.get(model)
+        if encoding is not None:
+            return encoding
+
         encoding = self._get_encoding(model)
+        with self._encoding_cache_lock:
+            return self._encoding_cache.setdefault(model, encoding)
+
+    async def _get_cached_encoding_async(self, model: str) -> Encoding:
+        with self._encoding_cache_lock:
+            encoding = self._encoding_cache.get(model)
+        if encoding is not None:
+            return encoding
+
+        encoding = await asyncio.to_thread(self._get_encoding, model)
+        with self._encoding_cache_lock:
+            return self._encoding_cache.setdefault(model, encoding)
+
+    def _count_with_encoding(
+        self,
+        model: str,
+        encoding: Encoding,
+        request: dict[str, object],
+    ) -> FrozenUsage:
+        self._validate_model(model)
+        _validate_max_kwargs(request)
         reserved_output_tokens = _get_reserved_output_tokens(request)
         payload_key = _get_request_payload_key(request)
         request_context_tokens = _count_request_context_tokens(encoding, request)
@@ -147,6 +190,15 @@ class OpenAIUsageCounter:
 
         raise ValueError("Request must contain 'input' or 'messages'")
 
+    @staticmethod
+    def _validate_model(model: object) -> None:
+        if not isinstance(model, str):
+            raise TypeError(
+                f"model must be a non-empty string (got {type(model).__name__})"
+            )
+        if not model:
+            raise ValueError("model must be a non-empty string")
+
 
 def _get_request_payload_key(request: dict[str, object]) -> str:
     payload_keys = [key for key in _REQUEST_PAYLOAD_KEYS if key in request]
@@ -157,7 +209,7 @@ def _get_request_payload_key(request: dict[str, object]) -> str:
     return payload_keys[0]
 
 
-def get_encoding(model_name: str) -> "Encoding":
+def get_encoding(model_name: str) -> Encoding:
     try:
         import tiktoken
     except ImportError as exc:
@@ -198,7 +250,7 @@ def get_encoding(model_name: str) -> "Encoding":
 
 
 def count_structured_input_tokens(
-    encoding: "Encoding",
+    encoding: Encoding,
     input_: object,
 ) -> int:
     """Count tokens for OpenAI Responses-style structured input payloads."""
@@ -295,7 +347,7 @@ def _validate_max_kwargs(request: dict[str, object]) -> None:
 
 
 def _count_request_context_tokens(
-    encoding: "Encoding",
+    encoding: Encoding,
     request: dict[str, object],
 ) -> int:
     total = 0
@@ -320,7 +372,7 @@ def _count_request_context_tokens(
 
 
 def _count_json_serialized_tokens(
-    encoding: "Encoding",
+    encoding: Encoding,
     value: object,
     *,
     invalid_error: str,
@@ -333,7 +385,7 @@ def _count_json_serialized_tokens(
 
 
 def _count_request_context_fragments(
-    encoding: "Encoding",
+    encoding: Encoding,
     value: object,
     *,
     invalid_error: str,
@@ -444,7 +496,7 @@ def _check_nested_unsupported_content(value: object) -> str | None:
 
 
 def _count_text_fragments(
-    encoding: "Encoding",
+    encoding: Encoding,
     value: object,
     *,
     invalid_error: str,
@@ -507,7 +559,7 @@ def _count_text_fragments(
 
 
 def count_chat_input_tokens(
-    encoding: "Encoding",
+    encoding: Encoding,
     messages: list[dict[str, object]],
     **_,
 ) -> int:
