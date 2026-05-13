@@ -49,7 +49,7 @@ from token_throttle._rate_limiter import RateLimiter
 from token_throttle._sync_rate_limiter import SyncRateLimiter
 from token_throttle.migration import ConfigMigrationIssue, validate_config_for_v2_0
 
-__version__ = "1.5.0"
+__version__ = "2.0.0"
 
 # Lazy imports: these pull in redis or tiktoken at import time.
 # Deferred via __getattr__ so `import token_throttle` works without optional deps.
