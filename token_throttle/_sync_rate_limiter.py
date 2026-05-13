@@ -376,6 +376,8 @@ class SyncRateLimiter:
         self._refunded_ids_cap = 131_072
         self._refund_guard = threading.Lock()
         self._refund_in_progress: set[str] = set()
+        self._acquire_guard = threading.Lock()
+        self._pending_acquire_reservations: set[str] = set()
         self._limiter_instance_id = uuid.uuid4().hex
         self._in_flight_reservation_ids: set[str] = set()
         self._closed = False
@@ -556,19 +558,7 @@ class SyncRateLimiter:
         timeout: float | None = None,
     ) -> CapacityReservation:
         validate_acquire_usage(usage, limit_config.quotas)
-
-        try:
-            backend = self._get_backend(limit_config)
-            if _block:
-                backend.wait_for_capacity(usage, timeout=timeout)
-            else:
-                backend.consume_capacity(usage)
-        except Exception as exc:  # noqa: BLE001 - boundary wrapper preserves cause
-            _raise_backend_external_error(exc)
         model_family = limit_config.get_model_family()
-        # Only registered after a successful acquire — failed acquires don't
-        # need refund routing, so skipping the cache on failure is intentional.
-        self._model_family_to_model_name[model_family] = model
         reservation = CapacityReservation(
             usage=usage,
             model_family=model_family,
@@ -576,8 +566,37 @@ class SyncRateLimiter:
             model=model,
             limiter_instance_id=self._limiter_instance_id,
         )
-        self._in_flight_reservation_ids.add(reservation.reservation_id)
+
+        self._begin_pending_acquire(reservation)
+        try:
+            backend = self._get_backend(limit_config)
+            if _block:
+                backend.wait_for_capacity(usage, timeout=timeout)
+            else:
+                backend.consume_capacity(usage)
+        except Exception as exc:  # noqa: BLE001 - boundary wrapper preserves cause
+            self._rollback_pending_acquire(reservation.reservation_id)
+            _raise_backend_external_error(exc)
+        self._finalize_pending_acquire(reservation, model)
         return reservation
+
+    def _begin_pending_acquire(self, reservation: CapacityReservation) -> None:
+        with self._acquire_guard:
+            self._pending_acquire_reservations.add(reservation.reservation_id)
+
+    def _finalize_pending_acquire(
+        self,
+        reservation: CapacityReservation,
+        model: str,
+    ) -> None:
+        with self._acquire_guard:
+            self._pending_acquire_reservations.discard(reservation.reservation_id)
+            self._model_family_to_model_name[reservation.model_family] = model
+            self._in_flight_reservation_ids.add(reservation.reservation_id)
+
+    def _rollback_pending_acquire(self, reservation_id: str) -> None:
+        with self._acquire_guard:
+            self._pending_acquire_reservations.discard(reservation_id)
 
     def refund_capacity(
         self,

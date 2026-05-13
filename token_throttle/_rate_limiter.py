@@ -416,6 +416,8 @@ class RateLimiter(BaseRateLimiter):
         self._refunded_ids_cap = 131_072
         self._refund_guard = asyncio.Lock()
         self._refund_in_progress: set[str] = set()
+        self._acquire_guard = asyncio.Lock()
+        self._pending_acquire_reservations: set[str] = set()
         self._limiter_instance_id = uuid.uuid4().hex
         self._in_flight_reservation_ids: set[str] = set()
         self._closed = False
@@ -619,19 +621,7 @@ class RateLimiter(BaseRateLimiter):
         timeout: float | None = None,
     ) -> CapacityReservation:
         validate_acquire_usage(usage, limit_config.quotas)
-
-        try:
-            backend = await self._get_backend(limit_config)
-            if _block:
-                await backend.await_for_capacity(usage, timeout=timeout)
-            else:
-                await backend.consume_capacity(usage)
-        except Exception as exc:  # noqa: BLE001 - boundary wrapper preserves cause
-            _raise_backend_external_error(exc)
         model_family = limit_config.get_model_family()
-        # Only registered after a successful acquire — failed acquires don't
-        # need refund routing, so skipping the cache on failure is intentional.
-        self._model_family_to_model_name[model_family] = model
         reservation = CapacityReservation(
             usage=usage,
             model_family=model_family,
@@ -639,8 +629,91 @@ class RateLimiter(BaseRateLimiter):
             model=model,
             limiter_instance_id=self._limiter_instance_id,
         )
-        self._in_flight_reservation_ids.add(reservation.reservation_id)
+
+        await self._begin_pending_acquire(reservation)
+        backend_task: asyncio.Task[None] | None = None
+        try:
+            backend = await self._get_backend(limit_config)
+            backend_task = asyncio.create_task(
+                backend.await_for_capacity(usage, timeout=timeout)
+                if _block
+                else backend.consume_capacity(usage)
+            )
+            await backend_task
+        except asyncio.CancelledError:
+            consumed = (
+                backend_task is not None
+                and await self._backend_task_succeeded_after_cancel(backend_task)
+            )
+            if consumed:
+                await self._complete_acquire_state_update(
+                    self._finalize_pending_acquire(reservation, model)
+                )
+            else:
+                await self._complete_acquire_state_update(
+                    self._rollback_pending_acquire(reservation.reservation_id)
+                )
+            raise
+        except Exception as exc:
+            interrupted = await self._complete_acquire_state_update(
+                self._rollback_pending_acquire(reservation.reservation_id)
+            )
+            if interrupted:
+                raise asyncio.CancelledError from exc
+            _raise_backend_external_error(exc)
+        interrupted = await self._complete_acquire_state_update(
+            self._finalize_pending_acquire(reservation, model)
+        )
+        if interrupted:
+            raise asyncio.CancelledError
         return reservation
+
+    async def _begin_pending_acquire(self, reservation: CapacityReservation) -> None:
+        async with self._acquire_guard:
+            self._pending_acquire_reservations.add(reservation.reservation_id)
+
+    async def _finalize_pending_acquire(
+        self,
+        reservation: CapacityReservation,
+        model: str,
+    ) -> None:
+        async with self._acquire_guard:
+            self._pending_acquire_reservations.discard(reservation.reservation_id)
+            self._model_family_to_model_name[reservation.model_family] = model
+            self._in_flight_reservation_ids.add(reservation.reservation_id)
+
+    async def _rollback_pending_acquire(self, reservation_id: str) -> None:
+        async with self._acquire_guard:
+            self._pending_acquire_reservations.discard(reservation_id)
+
+    async def _complete_acquire_state_update(self, awaitable) -> bool:
+        task = asyncio.create_task(awaitable)
+        interrupted = False
+        while True:
+            try:
+                await asyncio.shield(task)
+                break
+            except asyncio.CancelledError:
+                interrupted = True
+                if task.done():
+                    break
+        task.result()
+        return interrupted
+
+    async def _backend_task_succeeded_after_cancel(
+        self,
+        task: asyncio.Task[None],
+    ) -> bool:
+        while True:
+            try:
+                await asyncio.shield(task)
+                break
+            except asyncio.CancelledError:
+                if task.done():
+                    break
+            except Exception:  # noqa: BLE001
+                break
+        return task.done() and not task.cancelled() and task.exception() is None
 
     async def refund_capacity(
         self,
