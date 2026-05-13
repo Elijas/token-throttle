@@ -84,9 +84,41 @@ _PIPELINE_CMDS_PER_BUCKET = 4
 # (GET override, EXPIRE override). Used to index pipeline results.
 _PIPELINE_CMDS_PER_OVERRIDE = 2
 
+DEFAULT_LOCK_BLOCKING_TIMEOUT_SECONDS = 5.0
+DEFAULT_LOCK_SLEEP_SECONDS = 0.05
+DEFAULT_LOCK_BLOCKING_THREAD_SLEEP_SECONDS = 0.05
+_MIN_PRODUCTION_REDIS_POOL_CONNECTIONS = 10
+
 
 def _raise_lock_timeout_error() -> typing.NoReturn:
     raise redis.exceptions.LockError("Unable to acquire lock within the time specified")
+
+
+def _validate_positive_seconds(value: object, *, name: str) -> float:
+    if value is None or isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{name} must be finite and greater than 0")
+    value_float = float(value)
+    if not math.isfinite(value_float) or value_float <= 0:
+        raise ValueError(f"{name} must be finite and greater than 0")
+    return value_float
+
+
+def _warn_if_small_redis_pool(redis_client: object, *, stacklevel: int = 3) -> None:
+    pool = getattr(redis_client, "connection_pool", None)
+    max_connections = getattr(pool, "max_connections", None)
+    if (
+        isinstance(max_connections, int)
+        and not isinstance(max_connections, bool)
+        and max_connections < _MIN_PRODUCTION_REDIS_POOL_CONNECTIONS
+    ):
+        warnings.warn(
+            "Redis connection_pool.max_connections is less than 10. "
+            "This is likely too small for production token-throttle workloads; "
+            "prefer a BlockingConnectionPool sized to at least "
+            "max_concurrent_acquires plus Redis command headroom.",
+            RuntimeWarning,
+            stacklevel=stacklevel,
+        )
 
 
 class _SyncRedisLockStack(ExitStack):
@@ -108,6 +140,10 @@ class SyncRedisBackendBuilder(SyncRateLimiterBackendBuilderInterface):
     shared across limiters. Set it to ``True`` only when this builder is the
     lifecycle owner for ``redis_client``; then limiter ``close()`` cascades to
     ``redis_client.close()``.
+
+    For bounded Redis deployments, prefer ``redis.BlockingConnectionPool`` and
+    size ``max_connections`` to at least ``max_concurrent_acquires`` plus
+    headroom for lock acquire/release, ``TIME``, and pipeline commands.
     """
 
     def __init__(  # noqa: PLR0913
@@ -120,6 +156,11 @@ class SyncRedisBackendBuilder(SyncRateLimiterBackendBuilderInterface):
         override_ttl_seconds: int | None = None,
         refund_dedup_ttl_seconds: int = DEFAULT_REFUND_DEDUP_TTL_SECONDS,
         owns_redis_client: bool = False,
+        lock_blocking_timeout_seconds: float = DEFAULT_LOCK_BLOCKING_TIMEOUT_SECONDS,
+        lock_sleep_seconds: float = DEFAULT_LOCK_SLEEP_SECONDS,
+        lock_blocking_thread_sleep_seconds: float = (
+            DEFAULT_LOCK_BLOCKING_THREAD_SLEEP_SECONDS
+        ),
     ) -> None:
         super().__init__()
         client_module = type(redis_client).__module__
@@ -148,6 +189,18 @@ class SyncRedisBackendBuilder(SyncRateLimiterBackendBuilderInterface):
         )
         self._refund_dedup_ttl_seconds = validate_refund_dedup_ttl_seconds(
             refund_dedup_ttl_seconds
+        )
+        self._lock_blocking_timeout_seconds = _validate_positive_seconds(
+            lock_blocking_timeout_seconds,
+            name="lock_blocking_timeout_seconds",
+        )
+        self._lock_sleep_seconds = _validate_positive_seconds(
+            lock_sleep_seconds,
+            name="lock_sleep_seconds",
+        )
+        self._lock_blocking_thread_sleep_seconds = _validate_positive_seconds(
+            lock_blocking_thread_sleep_seconds,
+            name="lock_blocking_thread_sleep_seconds",
         )
 
     def close(self) -> None:
@@ -182,6 +235,9 @@ class SyncRedisBackendBuilder(SyncRateLimiterBackendBuilderInterface):
             key_prefix=self._key_prefix,
             refund_dedup_ttl_seconds=self._refund_dedup_ttl_seconds,
             sleep_interval=self._sleep_interval,
+            lock_blocking_timeout_seconds=self._lock_blocking_timeout_seconds,
+            lock_sleep_seconds=self._lock_sleep_seconds,
+            lock_blocking_thread_sleep_seconds=self._lock_blocking_thread_sleep_seconds,
             callbacks=callbacks,
             limit_config=cfg,
         )
@@ -200,6 +256,11 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         key_prefix: str,
         refund_dedup_ttl_seconds: int = DEFAULT_REFUND_DEDUP_TTL_SECONDS,
         sleep_interval: float | None = None,
+        lock_blocking_timeout_seconds: float = DEFAULT_LOCK_BLOCKING_TIMEOUT_SECONDS,
+        lock_sleep_seconds: float = DEFAULT_LOCK_SLEEP_SECONDS,
+        lock_blocking_thread_sleep_seconds: float = (
+            DEFAULT_LOCK_BLOCKING_THREAD_SLEEP_SECONDS
+        ),
         callbacks: SyncRateLimiterCallbacks | None = None,
     ) -> None:
         super().__init__()
@@ -214,10 +275,34 @@ class SyncRedisBackend(SyncRateLimiterBackend):
             if sleep_interval is None
             else validate_sleep_interval(sleep_interval)
         )
+        _warn_if_small_redis_pool(redis)
+        self._lock_blocking_timeout_seconds = _validate_positive_seconds(
+            lock_blocking_timeout_seconds,
+            name="lock_blocking_timeout_seconds",
+        )
+        self._lock_sleep_seconds = _validate_positive_seconds(
+            lock_sleep_seconds,
+            name="lock_sleep_seconds",
+        )
+        self._lock_blocking_thread_sleep_seconds = _validate_positive_seconds(
+            lock_blocking_thread_sleep_seconds,
+            name="lock_blocking_thread_sleep_seconds",
+        )
         self._callbacks = callbacks
         self._limit_config = limit_config
         self._usage_metric_names: set[str] = {bucket.usage_metric for bucket in buckets}
         self._local_condition = threading.Condition()
+
+    def _effective_lock_blocking_timeout(
+        self,
+        blocking_timeout: float | None,
+    ) -> float:
+        if blocking_timeout is None:
+            return self._lock_blocking_timeout_seconds
+        requested_timeout = validate_timeout(blocking_timeout)
+        if requested_timeout is None:
+            return self._lock_blocking_timeout_seconds
+        return min(requested_timeout, self._lock_blocking_timeout_seconds)
 
     def supports_metric_set_change(self) -> bool:
         # Surviving bucket state lives in Redis under stable keys, so a rebuilt
@@ -327,20 +412,17 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         """Acquire locks for a fixed bucket snapshot in a consistent order."""
         stack = _SyncRedisLockStack()
         target_buckets = self.sorted_buckets if buckets is None else buckets
-        stop_trying_at = (
-            None if blocking_timeout is None else time.monotonic() + blocking_timeout
+        effective_blocking_timeout = self._effective_lock_blocking_timeout(
+            blocking_timeout
         )
+        stop_trying_at = time.monotonic() + effective_blocking_timeout
 
         try:
             for bucket in target_buckets:
                 if stack.locks:
                     self._extend_locks(stack)
-                remaining = (
-                    None
-                    if stop_trying_at is None
-                    else max(0.0, stop_trying_at - time.monotonic())
-                )
-                lock = bucket.lock(timeout=timeout)
+                remaining = max(0.0, stop_trying_at - time.monotonic())
+                lock = bucket.lock(timeout=timeout, sleep=self._lock_sleep_seconds)
                 # Generate the token ourselves so a best-effort CAS
                 # release after a KeyboardInterrupt-style cancel can run
                 # without relying on lock.local.token (which is only
@@ -348,7 +430,11 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                 # window would otherwise orphan the lock for its TTL).
                 token = uuid.uuid4().hex.encode()
                 try:
-                    acquired = lock.acquire(blocking_timeout=remaining, token=token)
+                    acquired = lock.acquire(
+                        sleep=self._lock_blocking_thread_sleep_seconds,
+                        blocking_timeout=remaining,
+                        token=token,
+                    )
                 except BaseException:
                     # Best-effort CAS release; only deletes the key if
                     # its value still matches our token.
@@ -803,6 +889,10 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                     )
                 )
             except redis.exceptions.LockError as exc:
+                # When deadline is None (no caller timeout), the configured
+                # Redis lock blocking timeout still bounds lock polling.
+                # Propagating raw LockError preserves that distinction from
+                # a caller-level wait timeout.
                 if deadline is None:  # pragma: no cover
                     raise
                 raise TimeoutError("Timed out waiting for capacity") from exc

@@ -216,17 +216,23 @@ This is intentional self-healing: an override created under a previous quota con
 
 The Redis backend accepts a user-provided `redis.asyncio.Redis` (or `redis.Redis`) client and uses its connection pool as-is. By default, `redis-py` creates a pool with `max_connections=2**31` (effectively unlimited). In high-fanout applications (many concurrent `await_for_capacity` calls), the actual connection count may spike because each pipeline/lock acquisition can consume a connection.
 
-If you need to bound connection usage, configure `max_connections` on the Redis client before passing it to the rate limiter:
+If you need to bound connection usage, use `BlockingConnectionPool` before passing the client to the rate limiter. Size `max_connections` to at least your expected `max_concurrent_acquires` plus headroom for Redis lock acquire/release, the `TIME` command, and pipeline reads/writes. As a starting point, use `max_connections >= max_concurrent_acquires + 10` and tune from Redis pool wait time and server connection metrics. The Redis backend emits a `RuntimeWarning` when it sees `max_connections < 10`, because that is usually too small for production traffic.
 
 ```python
 import redis.asyncio as aioredis
 from token_throttle import RedisBackendBuilder
 
-pool = aioredis.ConnectionPool.from_url("redis://localhost", max_connections=50)
+pool = aioredis.BlockingConnectionPool.from_url(
+    "redis://localhost",
+    max_connections=110,
+    timeout=5,
+)
 client = aioredis.Redis(connection_pool=pool)
 backend = RedisBackendBuilder(client, key_prefix="test")
 limiter = RateLimiter(get_config, backend=backend)
 ```
+
+Redis lock polling is also configurable. `lock_sleep_seconds` controls the redis-py lock polling interval and defaults to `0.05` seconds instead of redis-py's `0.1` second default. `lock_blocking_timeout_seconds` defaults to `5.0` seconds and bounds a Redis lock acquisition even when the caller waits for rate-limit capacity without an overall timeout. The sync Redis builder also accepts `lock_blocking_thread_sleep_seconds` for redis-py's sync `Lock.acquire(sleep=...)` override.
 
 ### Fork safety (Redis backend)
 

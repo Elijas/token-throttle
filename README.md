@@ -219,6 +219,12 @@ quota state. Use different prefixes for unrelated deployments sharing one Redis
 DB or Redis Cluster. The prefix and user-controlled key segments cannot contain
 `:`, `{`, `}`, whitespace, or control characters.
 
+For bounded Redis deployments, prefer `redis.asyncio.BlockingConnectionPool`
+or `redis.BlockingConnectionPool` and size `max_connections` to at least
+`max_concurrent_acquires` plus headroom for Redis lock acquire/release, `TIME`,
+and pipeline commands. A pool below 10 connections triggers a runtime warning
+because it is usually too small for production traffic.
+
 Redis bucket state expires by default after 7 days of inactivity. Configure
 `bucket_ttl_seconds` on Redis builders or Redis OpenAI factories to choose a
 different positive TTL. The TTL is refreshed whenever bucket state is read or
