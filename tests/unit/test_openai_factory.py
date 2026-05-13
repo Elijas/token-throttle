@@ -239,14 +239,25 @@ class TestCreateOpenAIRedisRateLimiter:
 
     def test_custom_callbacks_are_passed(self):
         mock_redis = _async_redis_mock()
-        custom_callbacks = RateLimiterCallbacks()
+
+        async def on_wait_start(
+            *,
+            model_family,
+            usage,
+            preconsumption_capacities,
+        ):
+            pass
+
+        custom_callbacks = RateLimiterCallbacks(on_wait_start=on_wait_start)
         limiter = create_openai_redis_rate_limiter(
             mock_redis,
             rpm=100,
             tpm=10000,
             callbacks=custom_callbacks,
         )
-        assert limiter._callbacks is custom_callbacks
+        assert limiter._callbacks is not custom_callbacks
+        assert limiter._callbacks.on_wait_start is on_wait_start
+        assert limiter._callbacks.on_missing_consumption_data is not None
 
     def test_default_callbacks_when_none_provided(self):
         mock_redis = _async_redis_mock()
@@ -336,26 +347,10 @@ class TestCreateOpenAIRedisRateLimiter:
 
 
 class TestL01F04CallbacksDefaultFallbackContract:
-    """Regression tests for L01 F04 footgun: callbacks default-fallback contract.
+    """Regression tests for L01 F04 callbacks default merging.
 
-    The factory used `callbacks or create_logging_callbacks(...)` which relied on
-    Python truthiness. `RateLimiterCallbacks()` (empty model with all-None fields)
-    is truthy, so the `or` short-circuit and the fixed `if callbacks is not None`
-    behave identically for any value typed as `RateLimiterCallbacks | None`. The
-    swap is a *semantic* fix: it makes the contract explicit in the code that
-    defaults trigger only on the sentinel `None`, never on a "truthy-but-empty"
-    instance, and never via auto-merging user callbacks with defaults.
-
-    These tests lock in that contract:
-      * `callbacks=None`           -> factory's default logging callbacks applied
-      * `callbacks=RateLimiterCallbacks()`            -> user's empty preserved
-      * `callbacks=RateLimiterCallbacks(on_x=...)`    -> user's instance preserved
-        (the factory does NOT auto-fill missing slots with its defaults)
-
-    The third case captures the *user-facing observability footgun*: a user
-    adding ONE callback does NOT silently inherit the factory's default
-    `missing_consumption_data="INFO"` logger. This is now the documented
-    contract, not an accidental side-effect of truthiness.
+    User-provided callback bundles merge with the factory defaults slot by slot:
+    non-None user callbacks win, and None slots inherit default callbacks.
 
     See: capsules/260510-r4-full-bugs-and-footguns/findings/01-footgun-catalog.md
     """
@@ -370,7 +365,7 @@ class TestL01F04CallbacksDefaultFallbackContract:
         assert limiter._callbacks is not None
         assert limiter._callbacks.on_missing_consumption_data is not None
 
-    def test_empty_callbacks_model_preserved_without_default_merge(self):
+    def test_empty_callbacks_model_preserves_default_missing_logger(self):
         mock_redis = _async_redis_mock()
         empty = RateLimiterCallbacks()
         limiter = create_openai_redis_rate_limiter(
@@ -379,10 +374,10 @@ class TestL01F04CallbacksDefaultFallbackContract:
             tpm=10000,
             callbacks=empty,
         )
-        assert limiter._callbacks is empty
-        assert limiter._callbacks.on_missing_consumption_data is None
+        assert limiter._callbacks is not empty
+        assert limiter._callbacks.on_missing_consumption_data is not None
 
-    def test_user_callback_preserved_without_default_logger_merged_in(self):
+    def test_user_callback_preserved_with_default_logger_merged_in(self):
         async def on_capacity_consumed(
             *,
             model_family: str,
@@ -401,9 +396,9 @@ class TestL01F04CallbacksDefaultFallbackContract:
             tpm=10000,
             callbacks=user_cbs,
         )
-        assert limiter._callbacks is user_cbs
+        assert limiter._callbacks is not user_cbs
         assert limiter._callbacks.on_capacity_consumed is on_capacity_consumed
-        assert limiter._callbacks.on_missing_consumption_data is None
+        assert limiter._callbacks.on_missing_consumption_data is not None
         assert limiter._callbacks.on_wait_start is None
         assert limiter._callbacks.after_wait_end_consumption is None
         assert limiter._callbacks.on_capacity_refunded is None

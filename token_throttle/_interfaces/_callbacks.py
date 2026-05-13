@@ -473,6 +473,24 @@ class RateLimiterCallbacks(BaseModel):
         return value
 
 
+def _merge_rate_limiter_callbacks(
+    user_callbacks: RateLimiterCallbacks | None,
+    default_callbacks: RateLimiterCallbacks,
+) -> RateLimiterCallbacks:
+    if user_callbacks is None:
+        return default_callbacks
+
+    merged = {
+        field_name: (
+            user_value
+            if (user_value := getattr(user_callbacks, field_name)) is not None
+            else getattr(default_callbacks, field_name)
+        )
+        for field_name in RateLimiterCallbacks.model_fields
+    }
+    return RateLimiterCallbacks(**merged)
+
+
 # ---------------------------------------------------------------------------
 # Sync callback protocols
 # ---------------------------------------------------------------------------
@@ -591,6 +609,24 @@ class SyncRateLimiterCallbacks(BaseModel):
         if value is not None and info.field_name is not None:
             _validate_callback_signature(value, info.field_name)
         return value
+
+
+def _merge_sync_rate_limiter_callbacks(
+    user_callbacks: SyncRateLimiterCallbacks | None,
+    default_callbacks: SyncRateLimiterCallbacks,
+) -> SyncRateLimiterCallbacks:
+    if user_callbacks is None:
+        return default_callbacks
+
+    merged = {
+        field_name: (
+            user_value
+            if (user_value := getattr(user_callbacks, field_name)) is not None
+            else getattr(default_callbacks, field_name)
+        )
+        for field_name in SyncRateLimiterCallbacks.model_fields
+    }
+    return SyncRateLimiterCallbacks(**merged)
 
 
 # ---------------------------------------------------------------------------

@@ -10,6 +10,7 @@ from token_throttle._factories._openai._model_family import openai_model_family_
 from token_throttle._factories._openai._token_counter import OpenAIUsageCounter
 from token_throttle._interfaces._callbacks import (
     RateLimiterCallbacks,
+    _merge_rate_limiter_callbacks,
     create_logging_callbacks,
 )
 from token_throttle._interfaces._interfaces import PerModelConfig
@@ -31,8 +32,9 @@ def create_openai_redis_rate_limiter(
     ``redis_client`` must be a ``redis.asyncio.Redis`` instance. ``rpm`` and
     ``tpm`` are per-minute limits for requests and tokens, grouped by
     ``openai_model_family_getter`` so dated model variants share a family.
-    Pass ``callbacks=None`` to keep the factory's default INFO logger for
-    missing consumption data; passing a callbacks object uses it verbatim.
+    User-provided callbacks merge slot-by-slot with the factory defaults:
+    non-None user callbacks win, while None slots inherit the default INFO
+    logger for missing consumption data.
 
     The helper is intentionally minute-window-only. For hourly/daily windows,
     custom metrics, or non-OpenAI usage shapes, construct ``RateLimiter`` with
@@ -56,6 +58,14 @@ def create_openai_redis_rate_limiter(
     Quota(metric="requests", limit=rpm, per_seconds=SecondsIn.MINUTE)
     Quota(metric="tokens", limit=tpm, per_seconds=SecondsIn.MINUTE)
 
+    default_callbacks = create_logging_callbacks(
+        wait_start=None,
+        wait_end_consumption=None,
+        capacity_consumed=None,
+        capacity_refunded=None,
+        missing_consumption_data="INFO",
+    )
+
     return RateLimiter(
         lambda model_name: PerModelConfig(
             quotas=UsageQuotas(
@@ -68,13 +78,5 @@ def create_openai_redis_rate_limiter(
             model_family=openai_model_family_getter(model_name),
         ),
         backend=RedisBackendBuilder(redis_client),
-        callbacks=callbacks
-        if callbacks is not None
-        else create_logging_callbacks(
-            wait_start=None,
-            wait_end_consumption=None,
-            capacity_consumed=None,
-            capacity_refunded=None,
-            missing_consumption_data="INFO",
-        ),
+        callbacks=_merge_rate_limiter_callbacks(callbacks, default_callbacks),
     )

@@ -128,7 +128,7 @@ def test_factory_callbacks_type_check():
         )
 
 
-# 9-11. FIX-02 default-fallback contract mirrored from the async factory.
+# 9-11. R5 F04 merge contract mirrored from the async factory.
 def test_factory_callbacks_none_applies_default_logger():
     limiter = create_openai_redis_sync_rate_limiter(
         _sync_redis_mock(), rpm=100, tpm=10_000
@@ -137,19 +137,16 @@ def test_factory_callbacks_none_applies_default_logger():
     assert limiter._callbacks.on_missing_consumption_data is not None
 
 
-def test_factory_callbacks_empty_preserved():
+def test_factory_callbacks_empty_preserves_default_logger():
     empty = SyncRateLimiterCallbacks()
     limiter = create_openai_redis_sync_rate_limiter(
         _sync_redis_mock(), rpm=100, tpm=10_000, callbacks=empty
     )
-    assert limiter._callbacks is empty
-    assert limiter._callbacks.on_missing_consumption_data is None
+    assert limiter._callbacks is not empty
+    assert limiter._callbacks.on_missing_consumption_data is not None
 
 
-def test_factory_callbacks_one_cb_user_preserved_default_lost():
-    # Y06 contract documentation: a user adding ONE callback silently loses
-    # the factory's default missing_consumption_data logger.  Matches the
-    # async factory's TestL01F04CallbacksDefaultFallbackContract test.
+def test_factory_callbacks_one_cb_user_preserved_default_merged():
     def on_capacity_consumed(
         *,
         model_family,
@@ -164,9 +161,9 @@ def test_factory_callbacks_one_cb_user_preserved_default_lost():
     limiter = create_openai_redis_sync_rate_limiter(
         _sync_redis_mock(), rpm=100, tpm=10_000, callbacks=user_cbs
     )
-    assert limiter._callbacks is user_cbs
+    assert limiter._callbacks is not user_cbs
     assert limiter._callbacks.on_capacity_consumed is on_capacity_consumed
-    assert limiter._callbacks.on_missing_consumption_data is None
+    assert limiter._callbacks.on_missing_consumption_data is not None
 
 
 # 12. Integration smoke: refund_capacity_from_response is wired and short-circuits

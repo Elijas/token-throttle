@@ -10,6 +10,7 @@ from token_throttle._factories._openai._model_family import openai_model_family_
 from token_throttle._factories._openai._token_counter import OpenAIUsageCounter
 from token_throttle._interfaces._callbacks import (
     SyncRateLimiterCallbacks,
+    _merge_sync_rate_limiter_callbacks,
     create_sync_logging_callbacks,
 )
 from token_throttle._interfaces._interfaces import PerModelConfig
@@ -44,11 +45,10 @@ def create_openai_redis_sync_rate_limiter(
     tpm:
         Tokens-per-minute limit, applied per resolved model_family.
     callbacks:
-        Optional ``SyncRateLimiterCallbacks``. If ``None``, a default logging
-        callbacks bundle is installed with ``missing_consumption_data="INFO"``.
-        If provided, the user's instance is used verbatim — the factory does
-        NOT auto-merge user fields with defaults, so passing a single callback
-        will silently drop the default observability logger.
+        Optional ``SyncRateLimiterCallbacks``. User-provided callbacks merge
+        slot-by-slot with the factory defaults: non-None user callbacks win,
+        while None slots inherit the default INFO logger for missing
+        consumption data.
 
     Notes
     -----
@@ -81,6 +81,14 @@ def create_openai_redis_sync_rate_limiter(
     Quota(metric="requests", limit=rpm, per_seconds=SecondsIn.MINUTE)
     Quota(metric="tokens", limit=tpm, per_seconds=SecondsIn.MINUTE)
 
+    default_callbacks = create_sync_logging_callbacks(
+        wait_start=None,
+        wait_end_consumption=None,
+        capacity_consumed=None,
+        capacity_refunded=None,
+        missing_consumption_data="INFO",
+    )
+
     return SyncRateLimiter(
         lambda model_name: PerModelConfig(
             quotas=UsageQuotas(
@@ -93,13 +101,5 @@ def create_openai_redis_sync_rate_limiter(
             model_family=openai_model_family_getter(model_name),
         ),
         backend=SyncRedisBackendBuilder(redis_client),
-        callbacks=callbacks
-        if callbacks is not None
-        else create_sync_logging_callbacks(
-            wait_start=None,
-            wait_end_consumption=None,
-            capacity_consumed=None,
-            capacity_refunded=None,
-            missing_consumption_data="INFO",
-        ),
+        callbacks=_merge_sync_rate_limiter_callbacks(callbacks, default_callbacks),
     )
