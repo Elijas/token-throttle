@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import inspect
 import logging
 import math
 import threading
@@ -100,6 +101,15 @@ class _SyncRedisLockStack(ExitStack):
 
 
 class SyncRedisBackendBuilder(SyncRateLimiterBackendBuilderInterface):
+    """
+    Build synchronous Redis limiter backends.
+
+    ``owns_redis_client`` defaults to ``False`` because Redis clients are often
+    shared across limiters. Set it to ``True`` only when this builder is the
+    lifecycle owner for ``redis_client``; then limiter ``close()`` cascades to
+    ``redis_client.close()``.
+    """
+
     def __init__(  # noqa: PLR0913
         self,
         redis_client: redis.Redis,
@@ -109,6 +119,7 @@ class SyncRedisBackendBuilder(SyncRateLimiterBackendBuilderInterface):
         bucket_ttl_seconds: int = DEFAULT_BUCKET_TTL_SECONDS,
         override_ttl_seconds: int | None = None,
         refund_dedup_ttl_seconds: int = DEFAULT_REFUND_DEDUP_TTL_SECONDS,
+        owns_redis_client: bool = False,
     ) -> None:
         super().__init__()
         client_module = type(redis_client).__module__
@@ -121,6 +132,7 @@ class SyncRedisBackendBuilder(SyncRateLimiterBackendBuilderInterface):
                 f"(got {type(redis_client).__name__})"
             )
         self._redis = redis_client
+        self._owns_redis_client = owns_redis_client
         self._key_prefix = validate_redis_key_prefix(key_prefix)
         self._sleep_interval = validate_sleep_interval(sleep_interval)
         self._bucket_ttl_seconds = validate_redis_ttl_seconds(
@@ -137,6 +149,15 @@ class SyncRedisBackendBuilder(SyncRateLimiterBackendBuilderInterface):
         self._refund_dedup_ttl_seconds = validate_refund_dedup_ttl_seconds(
             refund_dedup_ttl_seconds
         )
+
+    def close(self) -> None:
+        if not self._owns_redis_client:
+            return
+        close = getattr(self._redis, "close", None)
+        if callable(close):
+            result = close()
+            if inspect.isawaitable(result):
+                result.close()
 
     def build(
         self,

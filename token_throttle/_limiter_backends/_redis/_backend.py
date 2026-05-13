@@ -124,6 +124,11 @@ class RedisBackendBuilder(RateLimiterBackendBuilderInterface):
     ``refund_dedup_ttl_seconds`` controls how long Redis remembers successful
     refund reservation ids for cross-process idempotency. The default is
     7 days.
+
+    ``owns_redis_client`` defaults to ``False`` because Redis clients are often
+    shared across limiters. Set it to ``True`` only when this builder is the
+    lifecycle owner for ``redis_client``; then limiter ``aclose()`` cascades to
+    ``redis_client.aclose()``.
     """
 
     def __init__(  # noqa: PLR0913
@@ -135,6 +140,7 @@ class RedisBackendBuilder(RateLimiterBackendBuilderInterface):
         bucket_ttl_seconds: int = DEFAULT_BUCKET_TTL_SECONDS,
         override_ttl_seconds: int | None = None,
         refund_dedup_ttl_seconds: int = DEFAULT_REFUND_DEDUP_TTL_SECONDS,
+        owns_redis_client: bool = False,
     ) -> None:
         super().__init__()
         client_module = type(redis_client).__module__
@@ -146,6 +152,7 @@ class RedisBackendBuilder(RateLimiterBackendBuilderInterface):
                 f"(got {type(redis_client).__name__})"
             )
         self._redis = redis_client
+        self._owns_redis_client = owns_redis_client
         self._key_prefix = validate_redis_key_prefix(key_prefix)
         self._sleep_interval = validate_sleep_interval(sleep_interval)
         self._bucket_ttl_seconds = validate_redis_ttl_seconds(
@@ -162,6 +169,28 @@ class RedisBackendBuilder(RateLimiterBackendBuilderInterface):
         self._refund_dedup_ttl_seconds = validate_refund_dedup_ttl_seconds(
             refund_dedup_ttl_seconds
         )
+
+    async def aclose(self) -> None:
+        if not self._owns_redis_client:
+            return
+        aclose = getattr(self._redis, "aclose", None)
+        if callable(aclose):
+            await aclose()
+            return
+        close = getattr(self._redis, "close", None)
+        if callable(close):
+            result = close()
+            if inspect.isawaitable(result):
+                await result
+
+    def close(self) -> None:
+        if not self._owns_redis_client:
+            return
+        close = getattr(self._redis, "close", None)
+        if callable(close):
+            result = close()
+            if inspect.isawaitable(result):
+                result.close()
 
     def build(
         self,

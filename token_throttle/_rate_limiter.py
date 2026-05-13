@@ -376,6 +376,10 @@ class RateLimiter(BaseRateLimiter):
          ``record_usage`` consumes immediately (capacity may go negative).
          Both return a ``CapacityReservation`` that must be passed to
          ``refund_capacity`` after the API call completes.
+
+    ``close_drain_timeout_seconds`` bounds how long ``aclose()`` waits for
+    acquire calls that already registered a pending reservation to finish their
+    limiter-side state update before the limiter is marked closed.
     """
 
     def __init__(
@@ -386,6 +390,7 @@ class RateLimiter(BaseRateLimiter):
         *,
         callbacks: RateLimiterCallbacks | None = None,
         callback_timeout: float | None = 30.0,
+        close_drain_timeout_seconds: float = 5.0,
     ):
         if callable(cfg) and is_async_callable(cfg):
             raise ValueError("cfg must be a synchronous PerModelConfig getter")
@@ -419,12 +424,22 @@ class RateLimiter(BaseRateLimiter):
         self._refund_in_progress: set[str] = set()
         self._acquire_guard = asyncio.Lock()
         self._pending_acquire_reservations: set[str] = set()
+        self._pending_drained = asyncio.Event()
+        self._pending_drained.set()
+        self._close_drain_timeout_seconds = validate_timeout(
+            close_drain_timeout_seconds
+        )
         self._limiter_instance_id = uuid.uuid4().hex
         self._in_flight_reservation_ids: set[str] = set()
+        self._closing = False
         self._closed = False
 
     def _raise_if_closed(self) -> None:
         if self._closed:
+            raise RuntimeError("RateLimiter is closed")
+
+    def _raise_if_closed_or_closing(self) -> None:
+        if self._closed or self._closing:
             raise RuntimeError("RateLimiter is closed")
 
     def _verify_reservation_limiter_instance(
@@ -455,11 +470,31 @@ class RateLimiter(BaseRateLimiter):
         acquire/record/refund operations raise ``RuntimeError``; reservations
         that remain unrefunded may no longer be refundable.
         """
-        if self._closed:
-            return
-        async with self._refund_guard:
+        async with self._acquire_guard:
+            if self._closed:
+                return
+            self._closing = True
+            if not self._pending_acquire_reservations:
+                self._pending_drained.set()
+
+        try:
+            await asyncio.wait_for(
+                self._pending_drained.wait(),
+                timeout=self._close_drain_timeout_seconds,
+            )
+        except TimeoutError as exc:
+            raise TimeoutError(
+                "Timed out waiting for pending acquire reservations to drain"
+            ) from exc
+
+        await self._backend.aclose()
+
+        async with self._acquire_guard:
             self._closed = True
+            self._closing = False
+        async with self._refund_guard:
             in_flight_count = len(self._in_flight_reservation_ids)
+        self._clear_retained_state_after_close()
         _logger.warning(
             "limiter closed; %d reservations still in flight may not be refundable.",
             in_flight_count,
@@ -469,17 +504,30 @@ class RateLimiter(BaseRateLimiter):
         """
         Synchronous close helper for async ``RateLimiter`` instances.
 
-        Use ``await aclose()`` when coordinating with active refund tasks.
-        This method marks the limiter closed and logs the current outstanding
-        reservation count without awaiting the async refund guard.
+        Use ``await aclose()`` when calling from an active event loop.
+        Outside an event loop, this runs ``aclose()`` to drain pending acquires
+        and release owned backend resources.
         """
-        if self._closed:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            asyncio.run(self.aclose())
             return
-        self._closed = True
-        _logger.warning(
-            "limiter closed; %d reservations still in flight may not be refundable.",
-            len(self._in_flight_reservation_ids),
+        raise RuntimeError(
+            "RateLimiter.close() cannot run inside an event loop; use await aclose()"
         )
+
+    def _clear_retained_state_after_close(self) -> None:
+        self._model_family_to_backend.clear()
+        self._model_family_to_model_name.clear()
+        self._model_family_to_quotas.clear()
+        self._model_name_to_model_family.clear()
+        self._model_family_to_runtime_max_capacity.clear()
+        self._model_family_to_validated_signature.clear()
+        self._refunded_reservation_ids.clear()
+        self._refund_in_progress.clear()
+        self._pending_acquire_reservations.clear()
+        self._in_flight_reservation_ids.clear()
 
     async def acquire_capacity(
         self, usage: Usage, model: str, *, timeout: float | None = None
@@ -524,7 +572,7 @@ class RateLimiter(BaseRateLimiter):
         self._validated_model_family(model, limit_config)
         self._validate_shared_model_family_config(model, limit_config)
         if limit_config.is_unlimited:
-            return self._unlimited_reservation(model)
+            return await self._unlimited_reservation(model)
         return await self._acquire_capacity(
             model, usage, limit_config, _block=_block, timeout=timeout
         )
@@ -592,7 +640,7 @@ class RateLimiter(BaseRateLimiter):
                     **kwargs,
                 )
             merge_extra_usage_unrestricted(usage, extra_usage)
-            return self._unlimited_reservation(model)
+            return await self._unlimited_reservation(model)
         if limit_config.usage_counter is None:
             raise ValueError("limit_config.usage_counter cannot be None")
 
@@ -671,6 +719,9 @@ class RateLimiter(BaseRateLimiter):
 
     async def _begin_pending_acquire(self, reservation: CapacityReservation) -> None:
         async with self._acquire_guard:
+            self._raise_if_closed_or_closing()
+            if not self._pending_acquire_reservations:
+                self._pending_drained.clear()
             self._pending_acquire_reservations.add(reservation.reservation_id)
 
     async def _finalize_pending_acquire(
@@ -682,10 +733,14 @@ class RateLimiter(BaseRateLimiter):
             self._pending_acquire_reservations.discard(reservation.reservation_id)
             self._model_family_to_model_name[reservation.model_family] = model
             self._in_flight_reservation_ids.add(reservation.reservation_id)
+            if not self._pending_acquire_reservations:
+                self._pending_drained.set()
 
     async def _rollback_pending_acquire(self, reservation_id: str) -> None:
         async with self._acquire_guard:
             self._pending_acquire_reservations.discard(reservation_id)
+            if not self._pending_acquire_reservations:
+                self._pending_drained.set()
 
     async def _complete_acquire_state_update(self, awaitable) -> bool:
         task = asyncio.create_task(awaitable)
@@ -1060,7 +1115,7 @@ class RateLimiter(BaseRateLimiter):
             finally:
                 self._refund_in_progress.discard(rid)
 
-    def _unlimited_reservation(self, model: str) -> CapacityReservation:
+    async def _unlimited_reservation(self, model: str) -> CapacityReservation:
         # Unlimited reservations bypass metering, so their ``usage`` is
         # never read. The ``CapacityReservation`` field validator
         # requires empty ``usage`` when ``is_unlimited=True``; passing
@@ -1074,7 +1129,9 @@ class RateLimiter(BaseRateLimiter):
             is_unlimited=True,
             limiter_instance_id=self._limiter_instance_id,
         )
-        self._in_flight_reservation_ids.add(reservation.reservation_id)
+        async with self._acquire_guard:
+            self._raise_if_closed_or_closing()
+            self._in_flight_reservation_ids.add(reservation.reservation_id)
         return reservation
 
     async def _refresh_backend_for_reservation(

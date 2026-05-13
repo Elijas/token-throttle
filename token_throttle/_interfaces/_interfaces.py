@@ -133,6 +133,14 @@ class RateLimiterBackendBuilderInterface(ABC):
         callbacks: RateLimiterCallbacks | None = None,
     ) -> RateLimiterBackend: ...
 
+    async def aclose(self) -> None:
+        """Release resources owned by this backend builder, if any."""
+        _ = self
+
+    def close(self) -> None:
+        """Synchronously release resources owned by this backend builder, if any."""
+        _ = self
+
 
 class RateLimiterBackend(ABC):
     """
@@ -476,3 +484,7 @@ class SyncRateLimiterBackendBuilderInterface(ABC):
         *,
         callbacks: SyncRateLimiterCallbacks | None = None,
     ) -> SyncRateLimiterBackend: ...
+
+    def close(self) -> None:
+        """Release resources owned by this backend builder, if any."""
+        _ = self
