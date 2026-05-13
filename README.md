@@ -16,9 +16,9 @@ Works with any LLM provider and any client library — token-throttle limits the
 > **v2.0.0** is a breaking release. See [MIGRATION.md](MIGRATION.md) for the upgrade guide.
 
 ```bash
-pip install "token-throttle[redis,tiktoken]>=2.0.0,<3.0.0"   # OpenAI + Redis (recommended)
-pip install "token-throttle[redis]>=2.0.0,<3.0.0"            # Any provider + Redis
-pip install "token-throttle>=2.0.0,<3.0.0"                   # Any provider + in-memory
+pip install "token-throttle[redis,tiktoken]>=2.0.0,<2.1.0"   # OpenAI + Redis (recommended)
+pip install "token-throttle[redis]>=2.0.0,<2.1.0"            # Any provider + Redis
+pip install "token-throttle>=2.0.0,<2.1.0"                   # Any provider + in-memory
 ```
 
 ## Quickstart
