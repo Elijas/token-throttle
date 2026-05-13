@@ -2,11 +2,13 @@ import collections
 import logging
 import math
 import threading
+import time
 import uuid
 import warnings
 
 from frozendict import frozendict
 
+from token_throttle._exceptions import CardinalityLimitExceededError
 from token_throttle._interfaces._callable_utils import is_async_callable
 from token_throttle._interfaces._callbacks import (
     SyncRateLimiterCallbacks,
@@ -20,6 +22,9 @@ from token_throttle._interfaces._interfaces import (
     sync_backend_uses_default_prepare_reconfigured_backend,
 )
 from token_throttle._interfaces._models import (
+    MAX_ALIAS_LENGTH,
+    MAX_METRIC_LENGTH,
+    MAX_MODEL_FAMILY_LENGTH,
     BucketId,
     CapacityReservation,
     FrozenUsage,
@@ -47,6 +52,26 @@ from token_throttle._validation import (
 )
 
 _logger = logging.getLogger("token_throttle")
+
+DEFAULT_MAX_MODEL_FAMILIES = 10_000
+DEFAULT_MAX_METRICS_PER_FAMILY = 100
+DEFAULT_MAX_ALIASES = 10_000
+DEFAULT_MAX_IN_FLIGHT_RESERVATIONS = 100_000
+
+
+def _validate_positive_int_cap(
+    value: object,
+    *,
+    name: str,
+    max_value: int | None = None,
+) -> int:
+    if type(value) is not int:
+        raise ValueError(f"{name} must be an int (got {type(value).__name__})")
+    if value <= 0:
+        raise ValueError(f"{name} must be greater than 0 (got {value!r})")
+    if max_value is not None and value > max_value:
+        raise ValueError(f"{name} must be <= {max_value} (got {value!r})")
+    return value
 
 
 def _raise_if_set_max_capacity_args_look_swapped(
@@ -334,7 +359,7 @@ class SyncRateLimiter:
     limiter-side state update before the limiter is marked closed.
     """
 
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         cfg: PerModelConfig | PerModelConfigGetter,
         /,
@@ -343,6 +368,13 @@ class SyncRateLimiter:
         callbacks: SyncRateLimiterCallbacks | None = None,
         callback_timeout: float | None = 30.0,
         close_drain_timeout_seconds: float = 5.0,
+        max_model_families: int = DEFAULT_MAX_MODEL_FAMILIES,
+        max_metrics_per_family: int = DEFAULT_MAX_METRICS_PER_FAMILY,
+        max_aliases: int = DEFAULT_MAX_ALIASES,
+        max_in_flight_reservations: int = DEFAULT_MAX_IN_FLIGHT_RESERVATIONS,
+        max_model_family_length: int = MAX_MODEL_FAMILY_LENGTH,
+        max_metric_length: int = MAX_METRIC_LENGTH,
+        max_alias_length: int = MAX_ALIAS_LENGTH,
     ):
         if callable(cfg) and is_async_callable(cfg):
             raise ValueError("cfg must be a synchronous PerModelConfig getter")
@@ -360,7 +392,43 @@ class SyncRateLimiter:
             callbacks, callback_timeout
         )
         self._callback_timeout = callback_timeout
-        self._config_getter = lambda model_name: resolve_config(cfg, model_name)
+        self._max_model_families = _validate_positive_int_cap(
+            max_model_families,
+            name="max_model_families",
+        )
+        self._max_metrics_per_family = _validate_positive_int_cap(
+            max_metrics_per_family,
+            name="max_metrics_per_family",
+        )
+        self._max_aliases = _validate_positive_int_cap(
+            max_aliases,
+            name="max_aliases",
+        )
+        self._max_in_flight_reservations = _validate_positive_int_cap(
+            max_in_flight_reservations,
+            name="max_in_flight_reservations",
+        )
+        self._max_model_family_length = _validate_positive_int_cap(
+            max_model_family_length,
+            name="max_model_family_length",
+            max_value=MAX_MODEL_FAMILY_LENGTH,
+        )
+        self._max_metric_length = _validate_positive_int_cap(
+            max_metric_length,
+            name="max_metric_length",
+            max_value=MAX_METRIC_LENGTH,
+        )
+        self._max_alias_length = _validate_positive_int_cap(
+            max_alias_length,
+            name="max_alias_length",
+            max_value=MAX_ALIAS_LENGTH,
+        )
+        self._config_getter = lambda model_name: resolve_config(
+            cfg,
+            model_name,
+            max_model_family_length=self._max_model_family_length,
+            max_alias_length=self._max_alias_length,
+        )
         # Dict mutations below happen both under self._lock and outside it
         # (e.g. _acquire_capacity, set_max_capacity).  Single-key dict
         # assignment is GIL-atomic in CPython, so these lock-free writes are
@@ -376,6 +444,13 @@ class SyncRateLimiter:
         self._model_family_to_validated_signature: dict[
             str, tuple[bool, tuple[tuple[str, int, float], ...]]
         ] = {}
+        self._model_name_to_validated_signature: dict[
+            str, tuple[bool, tuple[tuple[str, int, float], ...]]
+        ] = {}
+        self._model_family_signature_counts: dict[
+            str, dict[tuple[bool, tuple[tuple[str, int, float], ...]], int]
+        ] = {}
+        self._model_family_alias_counts: dict[str, int] = {}
         self._refunded_reservation_ids: collections.OrderedDict[str, None] = (
             collections.OrderedDict()
         )
@@ -394,6 +469,8 @@ class SyncRateLimiter:
         self._limiter_instance_id = uuid.uuid4().hex
         self._in_flight_reservation_ids: set[str] = set()
         self._closing = False
+        self._in_flight_reservation_family: dict[str, str] = {}
+        self._model_family_last_touched: dict[str, float] = {}
         self._closed = False
 
     def _raise_if_closed(self) -> None:
@@ -403,6 +480,90 @@ class SyncRateLimiter:
     def _raise_if_closed_or_closing(self) -> None:
         if self._closed or self._closing:
             raise RuntimeError("SyncRateLimiter is closed")
+
+    def _touch_model_family(self, model_family: str) -> None:
+        self._model_family_last_touched[model_family] = time.monotonic()
+
+    def _enforce_resolved_config_caps(
+        self,
+        *,
+        model: str,
+        model_family: str,
+        limit_config: PerModelConfig,
+    ) -> None:
+        if len(model) > self._max_alias_length:
+            raise CardinalityLimitExceededError(
+                "max_alias_length exceeded: "
+                f"model alias is {len(model)} characters; "
+                f"limit is {self._max_alias_length}"
+            )
+        if len(model_family) > self._max_model_family_length:
+            raise CardinalityLimitExceededError(
+                "max_model_family_length exceeded: "
+                f"model_family is {len(model_family)} characters; "
+                f"limit is {self._max_model_family_length}"
+            )
+        metrics = {quota.metric for quota in limit_config.quotas}
+        oversized_metrics = [
+            metric for metric in metrics if len(metric) > self._max_metric_length
+        ]
+        if oversized_metrics:
+            metric = oversized_metrics[0]
+            raise CardinalityLimitExceededError(
+                "max_metric_length exceeded: "
+                f"metric is {len(metric)} characters; "
+                f"limit is {self._max_metric_length}"
+            )
+        if len(metrics) > self._max_metrics_per_family:
+            raise CardinalityLimitExceededError(
+                "max_metrics_per_family exceeded: "
+                f"model_family {model_family!r} has {len(metrics)} metrics; "
+                f"limit is {self._max_metrics_per_family}"
+            )
+
+    def _enforce_new_model_family_cap(self, model_family: str) -> None:
+        if (
+            model_family not in self._model_family_to_validated_signature
+            and len(self._model_family_to_validated_signature)
+            >= self._max_model_families
+        ):
+            raise CardinalityLimitExceededError(
+                f"max_model_families exceeded: limit is {self._max_model_families}"
+            )
+
+    def _enforce_new_alias_cap(self, model: str) -> None:
+        if (
+            model not in self._model_name_to_model_family
+            and len(self._model_name_to_model_family) >= self._max_aliases
+        ):
+            raise CardinalityLimitExceededError(
+                f"max_aliases exceeded: limit is {self._max_aliases}"
+            )
+
+    def _remember_in_flight_reservation(
+        self,
+        reservation: CapacityReservation,
+    ) -> None:
+        if (
+            reservation.reservation_id not in self._in_flight_reservation_ids
+            and reservation.reservation_id not in self._pending_acquire_reservations
+            and len(self._in_flight_reservation_ids)
+            + len(self._pending_acquire_reservations)
+            >= self._max_in_flight_reservations
+        ):
+            raise CardinalityLimitExceededError(
+                "max_in_flight_reservations exceeded: "
+                f"limit is {self._max_in_flight_reservations}"
+            )
+        self._in_flight_reservation_ids.add(reservation.reservation_id)
+        self._in_flight_reservation_family[reservation.reservation_id] = (
+            reservation.model_family
+        )
+
+    def _forget_in_flight_reservation(self, reservation_id: str) -> None:
+        self._in_flight_reservation_ids.discard(reservation_id)
+        self._pending_acquire_reservations.discard(reservation_id)
+        self._in_flight_reservation_family.pop(reservation_id, None)
 
     def _verify_reservation_limiter_instance(
         self,
@@ -476,12 +637,65 @@ class SyncRateLimiter:
         self._model_name_to_model_family.clear()
         self._model_family_to_runtime_max_capacity.clear()
         self._model_family_to_validated_signature.clear()
+        self._model_name_to_validated_signature.clear()
+        self._model_family_signature_counts.clear()
+        self._model_family_alias_counts.clear()
         self._refunded_reservation_ids.clear()
         self._refund_locks.clear()
         self._refund_lock_refcounts.clear()
         self._refund_in_progress.clear()
         self._pending_acquire_reservations.clear()
         self._in_flight_reservation_ids.clear()
+        self._in_flight_reservation_family.clear()
+        self._model_family_last_touched.clear()
+
+    def clear_unused_model_families(self, unused_for_seconds: int) -> int:
+        """
+        Evict idle in-process model-family state.
+
+        This is the operator-driven cleanup path for long-lived limiters that
+        accept many dynamic model aliases. Families with in-flight reservations
+        are skipped so refunds can still route to their original backend.
+
+        Redis-backed limiter state is not deleted here; Redis bucket keys have
+        their own inactivity TTL and expire independently.
+        """
+        if type(unused_for_seconds) is not int:
+            raise ValueError(
+                "unused_for_seconds must be an int "
+                f"(got {type(unused_for_seconds).__name__})"
+            )
+        if unused_for_seconds < 0:
+            raise ValueError(
+                f"unused_for_seconds must be non-negative (got {unused_for_seconds!r})"
+            )
+
+        with self._validation_lock:
+            cutoff = time.monotonic() - unused_for_seconds
+            in_flight_families = set(self._in_flight_reservation_family.values())
+            expired_families = [
+                model_family
+                for model_family, last_touched in self._model_family_last_touched.items()
+                if model_family not in in_flight_families and last_touched <= cutoff
+            ]
+
+            for model_family in expired_families:
+                self._model_family_to_backend.pop(model_family, None)
+                self._model_family_to_model_name.pop(model_family, None)
+                self._model_family_to_quotas.pop(model_family, None)
+                self._model_family_to_runtime_max_capacity.pop(model_family, None)
+                self._model_family_to_validated_signature.pop(model_family, None)
+                self._model_family_last_touched.pop(model_family, None)
+                for model_name, known_family in list(
+                    self._model_name_to_model_family.items()
+                ):
+                    if known_family == model_family:
+                        self._model_name_to_model_family.pop(model_name, None)
+                        self._model_name_to_validated_signature.pop(model_name, None)
+                self._model_family_signature_counts.pop(model_family, None)
+                self._model_family_alias_counts.pop(model_family, None)
+
+        return len(expired_families)
 
     def acquire_capacity(
         self, usage: Usage, model: str, *, timeout: float | None = None
@@ -617,6 +831,7 @@ class SyncRateLimiter:
         timeout: float | None = None,
     ) -> CapacityReservation:
         validate_acquire_usage(usage, limit_config.quotas)
+
         model_family = limit_config.get_model_family()
         reservation = CapacityReservation(
             usage=usage,
@@ -636,6 +851,9 @@ class SyncRateLimiter:
         except Exception as exc:  # noqa: BLE001 - boundary wrapper preserves cause
             self._rollback_pending_acquire(reservation.reservation_id)
             _raise_backend_external_error(exc)
+        except BaseException:
+            self._rollback_pending_acquire(reservation.reservation_id)
+            raise
         self._finalize_pending_acquire(reservation, model)
         return reservation
 
@@ -644,7 +862,21 @@ class SyncRateLimiter:
             self._raise_if_closed_or_closing()
             if not self._pending_acquire_reservations:
                 self._pending_drained.clear()
+            if (
+                reservation.reservation_id not in self._pending_acquire_reservations
+                and reservation.reservation_id not in self._in_flight_reservation_ids
+                and len(self._in_flight_reservation_ids)
+                + len(self._pending_acquire_reservations)
+                >= self._max_in_flight_reservations
+            ):
+                raise CardinalityLimitExceededError(
+                    "max_in_flight_reservations exceeded: "
+                    f"limit is {self._max_in_flight_reservations}"
+                )
             self._pending_acquire_reservations.add(reservation.reservation_id)
+            self._in_flight_reservation_family[reservation.reservation_id] = (
+                reservation.model_family
+            )
 
     def _finalize_pending_acquire(
         self,
@@ -655,12 +887,17 @@ class SyncRateLimiter:
             self._pending_acquire_reservations.discard(reservation.reservation_id)
             self._model_family_to_model_name[reservation.model_family] = model
             self._in_flight_reservation_ids.add(reservation.reservation_id)
+            self._in_flight_reservation_family[reservation.reservation_id] = (
+                reservation.model_family
+            )
+            self._touch_model_family(reservation.model_family)
             if not self._pending_acquire_reservations:
                 self._pending_drained.set()
 
     def _rollback_pending_acquire(self, reservation_id: str) -> None:
         with self._acquire_guard:
             self._pending_acquire_reservations.discard(reservation_id)
+            self._in_flight_reservation_family.pop(reservation_id, None)
             if not self._pending_acquire_reservations:
                 self._pending_drained.set()
 
@@ -687,7 +924,7 @@ class SyncRateLimiter:
         is_unlimited = is_unlimited_reservation(reservation)
         self._verify_reservation_limiter_instance(reservation)
         if is_unlimited:
-            self._in_flight_reservation_ids.discard(reservation.reservation_id)
+            self._forget_in_flight_reservation(reservation.reservation_id)
             return
         validate_refund_usage(actual_usage, set(reservation.usage))
         self._refund_capacity(actual_usage, reservation)
@@ -709,7 +946,7 @@ class SyncRateLimiter:
         is_unlimited = is_unlimited_reservation(reservation)
         self._verify_reservation_limiter_instance(reservation)
         if is_unlimited:
-            self._in_flight_reservation_ids.discard(reservation.reservation_id)
+            self._forget_in_flight_reservation(reservation.reservation_id)
             return
         reservation_metrics = set(reservation.usage)
         expected_metrics = {"tokens", "requests"}
@@ -762,7 +999,7 @@ class SyncRateLimiter:
         max-capacity cache window.
         """
         self._raise_if_closed()
-        metric = validate_metric(metric)
+        metric = validate_metric(metric, max_length=self._max_metric_length)
         per_seconds = validate_per_seconds(per_seconds)
         value = validate_max_capacity_value(value)
         _raise_if_set_max_capacity_args_look_swapped(
@@ -961,7 +1198,7 @@ class SyncRateLimiter:
                     self._refunded_reservation_ids[rid] = None
                     if len(self._refunded_reservation_ids) > self._refunded_ids_cap:
                         self._refunded_reservation_ids.popitem(last=False)
-                    self._in_flight_reservation_ids.discard(rid)
+                    self._forget_in_flight_reservation(rid)
                 try:
                     backend.refund_capacity_for_buckets(
                         reserved_usage,
@@ -969,6 +1206,7 @@ class SyncRateLimiter:
                         bucket_ids=refund_bucket_ids,
                         reservation_id=rid,
                     )
+                    self._touch_model_family(reservation.model_family)
                 except Exception as exc:  # noqa: BLE001 - boundary wrapper preserves cause
                     _raise_backend_external_error(exc)
             finally:
@@ -1038,7 +1276,7 @@ class SyncRateLimiter:
         )
         with self._acquire_guard:
             self._raise_if_closed_or_closing()
-            self._in_flight_reservation_ids.add(reservation.reservation_id)
+            self._remember_in_flight_reservation(reservation)
         return reservation
 
     def _refresh_backend_for_reservation(
@@ -1216,6 +1454,11 @@ class SyncRateLimiter:
         limit_config: PerModelConfig,
     ) -> str:
         resolved_model_family = _resolved_model_family(limit_config)
+        self._enforce_resolved_config_caps(
+            model=model,
+            model_family=resolved_model_family,
+            limit_config=limit_config,
+        )
         previous_model_family = self._model_name_to_model_family.get(model)
         if (
             previous_model_family is not None
@@ -1243,79 +1486,93 @@ class SyncRateLimiter:
         # Steady-state fast path: the cache check runs lock-free. Only the
         # first acquire of a new model (or a signature change) takes the lock.
         #
-        # Complexity: O(1) steady-state via cache check. O(M) on first
-        # acquire of a new model or after a config-signature change (re-calls
-        # config_getter for every sibling). O(M^2) aggregate across first-
-        # time acquires of M distinct models in one family.
+        # Complexity: O(1) per acquire. Once a family signature has been
+        # established, a new alias only checks per-family signature counts.
+        # Existing aliases can change signature only when no sibling remains
+        # on a different signature.
         model_family = limit_config.get_model_family()
         current_signature = _config_signature(limit_config)
 
-        cached = self._model_family_to_validated_signature.get(model_family)
-        if (
-            cached is not None
-            and cached == current_signature
-            and model in self._model_name_to_model_family
-        ):
+        previous_signature = self._model_name_to_validated_signature.get(model)
+        if previous_signature == current_signature:
+            self._touch_model_family(model_family)
             return
 
         with self._validation_lock:
-            cached = self._model_family_to_validated_signature.get(model_family)
-            if (
-                cached is not None
-                and cached == current_signature
-                and model in self._model_name_to_model_family
-            ):
+            previous_signature = self._model_name_to_validated_signature.get(model)
+            if previous_signature == current_signature:
+                self._touch_model_family(model_family)
                 return
 
-            conflicts: list[tuple[str, str]] = []
+            current_counts = self._model_family_signature_counts.get(model_family, {})
+            next_counts = dict(current_counts)
+            if previous_signature is not None:
+                previous_count = next_counts.get(previous_signature, 0)
+                if previous_count <= 1:
+                    next_counts.pop(previous_signature, None)
+                else:
+                    next_counts[previous_signature] = previous_count - 1
 
-            # config_getter is called unchecked here: if it raises, the error
-            # propagates to the caller. This is intentional — the model was
-            # previously registered successfully, so a config_getter failure
-            # now indicates a programming error or broken config, not a
-            # transient condition that should be papered over.
-            for known_model, known_family in sorted(
-                self._model_name_to_model_family.items()
-            ):
-                if known_family != model_family or known_model == model:
-                    continue
-
-                known_config = self._config_getter(known_model)
-                try:
-                    known_resolved_family = self._validated_model_family(
-                        known_model, known_config
+            conflicting_signatures = [
+                signature
+                for signature, count in next_counts.items()
+                if count > 0 and signature != current_signature
+            ]
+            reset_counts_to_current = False
+            if conflicting_signatures:
+                representative = self._model_family_to_model_name.get(model_family)
+                if representative is not None and representative != model:
+                    representative_config = self._config_getter(representative)
+                    representative_family = self._validated_model_family(
+                        representative,
+                        representative_config,
                     )
-                except ValueError as exc:
+                    representative_signature = _config_signature(representative_config)
+                    if (
+                        representative_family == model_family
+                        and representative_signature == current_signature
+                    ):
+                        next_counts = {
+                            current_signature: self._model_family_alias_counts.get(
+                                model_family,
+                                0,
+                            )
+                        }
+                        conflicting_signatures = []
+                        reset_counts_to_current = True
+
+                if conflicting_signatures:
+                    conflict_signature = conflicting_signatures[0]
                     raise ValueError(
-                        f"While validating shared-model_family config for "
-                        f"'{model}', detected a routing change in sibling "
-                        f"'{known_model}': {exc}"
-                    ) from exc
-                if known_resolved_family != model_family:
-                    continue
-
-                known_signature = _config_signature(known_config)
-                if known_signature != current_signature:
-                    conflicts.append(
-                        (known_model, _describe_config_signature(known_signature))
+                        f"Config for model_family '{model_family}' is inconsistent "
+                        f"across models. Model '{model}' resolves to "
+                        f"{_describe_config_signature(current_signature)}, but the "
+                        "family is already registered as "
+                        f"{_describe_config_signature(conflict_signature)}. "
+                        "Models sharing a model_family must return identical quotas "
+                        "and unlimited behavior for a limiter instance. Use different "
+                        "model_family values for different limits."
                     )
 
-            if conflicts:
-                conflicts_desc = "; ".join(
-                    f"{conflict_model} -> {conflict_signature}"
-                    for conflict_model, conflict_signature in conflicts
+            self._enforce_new_model_family_cap(model_family)
+            self._enforce_new_alias_cap(model)
+            is_new_alias = model not in self._model_name_to_model_family
+            already_counted = previous_signature is not None and (
+                reset_counts_to_current or previous_signature not in current_counts
+            )
+            if is_new_alias or not already_counted:
+                next_counts[current_signature] = (
+                    next_counts.get(current_signature, 0) + 1
                 )
-                raise ValueError(
-                    f"Config for model_family '{model_family}' is inconsistent across "
-                    f"models. Model '{model}' resolves to "
-                    f"{_describe_config_signature(current_signature)}, but {conflicts_desc}. "
-                    "Models sharing a model_family must return identical quotas and "
-                    "unlimited behavior for a limiter instance. Use different "
-                    "model_family values for different limits."
-                )
-
             self._model_name_to_model_family[model] = model_family
+            self._model_name_to_validated_signature[model] = current_signature
+            self._model_family_signature_counts[model_family] = next_counts
+            if is_new_alias:
+                self._model_family_alias_counts[model_family] = (
+                    self._model_family_alias_counts.get(model_family, 0) + 1
+                )
             self._model_family_to_validated_signature[model_family] = current_signature
+            self._touch_model_family(model_family)
 
     def _remember_runtime_max_capacity(
         self,

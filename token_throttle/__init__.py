@@ -1,6 +1,7 @@
 import importlib
 import importlib.util
 
+from token_throttle._exceptions import CardinalityLimitExceededError
 from token_throttle._interfaces._callbacks import (
     OnCapacityConsumedCallback,
     OnCapacityRefundedCallback,
@@ -29,6 +30,9 @@ from token_throttle._interfaces._interfaces import (
     UsageCounter,
 )
 from token_throttle._interfaces._models import (
+    MAX_ALIAS_LENGTH,
+    MAX_METRIC_LENGTH,
+    MAX_MODEL_FAMILY_LENGTH,
     BucketId,
     Capacities,
     CapacityReservation,
@@ -112,10 +116,14 @@ _REDIS_ALL = [
 ]
 
 __all__ = [
+    "MAX_ALIAS_LENGTH",
+    "MAX_METRIC_LENGTH",
+    "MAX_MODEL_FAMILY_LENGTH",
     "BucketId",
     "CalculatedCapacity",
     "Capacities",
     "CapacityReservation",
+    "CardinalityLimitExceededError",
     "ConfigMigrationIssue",
     "EncodingGetter",
     "FrozenUsage",

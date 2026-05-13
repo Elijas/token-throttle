@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from collections.abc import Set as AbstractSet
 
 from token_throttle._capacity import _validate_max_capacity_finite_positive
+from token_throttle._exceptions import CardinalityLimitExceededError
 from token_throttle._interfaces._callable_utils import (
     close_awaitable_if_possible,
     is_async_callable,
@@ -14,6 +15,9 @@ from token_throttle._interfaces._callable_utils import (
 from token_throttle._interfaces._interfaces import PerModelConfig, PerModelConfigGetter
 from token_throttle._interfaces._models import (
     _UNLIMITED_FLAG,
+    MAX_ALIAS_LENGTH,
+    MAX_METRIC_LENGTH,
+    MAX_MODEL_FAMILY_LENGTH,
     BucketId,
     CapacityReservation,
     FrozenUsage,
@@ -445,9 +449,9 @@ def _coerce_extra_usage_value(metric: str, raw_amount: object) -> float:
         raise
 
 
-def validate_metric(metric: object) -> str:
+def validate_metric(metric: object, *, max_length: int = MAX_METRIC_LENGTH) -> str:
     """Validate the metric parameter for set_max_capacity."""
-    return _validate_key_segment(metric, field_name="metric")
+    return _validate_key_segment(metric, field_name="metric", max_length=max_length)
 
 
 def validate_per_seconds(per_seconds: object) -> int:
@@ -471,7 +475,11 @@ def validate_per_seconds(per_seconds: object) -> int:
 
 
 def resolve_config(
-    cfg: PerModelConfig | PerModelConfigGetter, model_name: str
+    cfg: PerModelConfig | PerModelConfigGetter,
+    model_name: str,
+    *,
+    max_model_family_length: int = MAX_MODEL_FAMILY_LENGTH,
+    max_alias_length: int = MAX_ALIAS_LENGTH,
 ) -> PerModelConfig:
     """
     Resolve a config (static or callable) and default model_family to model_name.
@@ -483,6 +491,12 @@ def resolve_config(
     if not isinstance(model_name, str):
         raise ValueError(  # noqa: TRY004
             f"model_name must be a string (got {type(model_name).__name__})"
+        )
+    if len(model_name) > max_alias_length:
+        raise CardinalityLimitExceededError(
+            f"max_alias_length exceeded: model_name must be at most "
+            f"{max_alias_length} characters "
+            f"(got {len(model_name)})"
         )
     if not model_name:
         raise ValueError("model_name cannot be empty")
@@ -505,7 +519,11 @@ def resolve_config(
         else r.model_copy(update={"model_family": model_name})
     )
     model_family = resolved.get_model_family()
-    _validate_key_segment(model_family, field_name="model_family")
+    _validate_key_segment(
+        model_family,
+        field_name="model_family",
+        max_length=max_model_family_length,
+    )
     return resolved
 
 

@@ -167,9 +167,19 @@ limiter = RateLimiter(
 Models that share a `model_family` must also share the same live quota definition. If two model names need different limits, give them different `model_family` values instead of reusing one family name.
 
 `model_family` defaults to the request model name. A typo such as
-`"gpt-4o-mini-prod"` therefore creates a distinct family instead of failing
-closed; validate model names in your application if they come from users or
-configuration.
+`"gpt-4o-mini-prod"` therefore creates a distinct family. Limiters fail closed
+once mandatory in-process caps are reached: by default 10,000 model families,
+100 metrics per family, 10,000 model aliases, and 100,000 in-flight
+reservations. Key-segment length is also capped by default: model families and
+aliases at 256 characters, metrics at 64 characters. Tune these constructor
+arguments lower for tighter deployments and validate model names in your
+application if they come from users or configuration.
+
+Long-lived dynamic deployments should periodically call
+`limiter.clear_unused_model_families(unused_for_seconds)` (or the sync method
+with the same name) from an operator-controlled maintenance path. It evicts idle
+in-process family caches and skips families with in-flight reservations. Redis
+bucket keys expire separately through the Redis bucket TTL.
 
 To disable rate limiting for a model while keeping the same API surface, return
 an unlimited config:

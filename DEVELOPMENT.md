@@ -202,9 +202,18 @@ In the async Redis backend, `consume_capacity` shields the Redis write so that a
 
 `RateLimiter` extends `BaseRateLimiter` (ABC); `SyncRateLimiter` does not extend any abstract base. Adding a `BaseSyncRateLimiter` would be a public API change. The sync interface is documented by its method signatures and mirrors the async API.
 
-### Model-family caches grow without eviction
+### Model-family caches are bounded and explicitly evictable
 
-`RateLimiter` and `SyncRateLimiter` maintain six per-model-family dicts (`_model_family_to_backend`, `_model_family_to_model_name`, etc.) that grow with each distinct model name seen. For bounded deployments (a handful of model families), this is fine. For applications that generate unbounded unique model names (e.g. per-user model aliases), consider using a single rate limiter per model family or periodically creating fresh limiter instances.
+`RateLimiter` and `SyncRateLimiter` maintain per-model-family dicts
+(`_model_family_to_backend`, `_model_family_to_model_name`, etc.) and a
+model-alias reverse map. These are guarded by mandatory fail-closed caps:
+`max_model_families`, `max_metrics_per_family`, `max_aliases`, and
+`max_in_flight_reservations`. Length caps are enforced for model families,
+metrics, and aliases. Applications that generate dynamic user-controlled model
+names should still prefer allowlists where possible and should run
+`clear_unused_model_families(unused_for_seconds)` from an operator-controlled
+maintenance path to evict idle in-process rows. The cleanup API skips families
+with in-flight reservations; Redis bucket state uses its own inactivity TTL.
 
 ### Redis `max_capacity_override` self-heals on config mismatch
 

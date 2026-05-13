@@ -11,6 +11,7 @@ from pydantic import Field, ValidationInfo, field_validator
 
 from token_throttle._capacity import MIN_MAX_CAPACITY
 from token_throttle._dto import StrictDTO
+from token_throttle._exceptions import CardinalityLimitExceededError
 
 _UNLIMITED_FLAG = "__rate_limiting_disabled__"
 """
@@ -22,9 +23,24 @@ Lives in this module (not ``_validation``) so ``CapacityReservation``'s
 """
 
 
+MAX_MODEL_FAMILY_LENGTH = 256
+MAX_METRIC_LENGTH = 64
+MAX_ALIAS_LENGTH = 256
+
+
 def _is_bool_like(value: object) -> bool:
     """Reject Python bool values without duck-typing numeric lookalikes."""
     return type(value) is bool
+
+
+def _default_max_length_for_field(field_name: str) -> int | None:
+    if field_name in {"metric", "bucket_id metric"}:
+        return MAX_METRIC_LENGTH
+    if field_name == "model_family":
+        return MAX_MODEL_FAMILY_LENGTH
+    if field_name in {"model_name", "alias"}:
+        return MAX_ALIAS_LENGTH
+    return None
 
 
 def _validate_key_segment(
@@ -33,6 +49,7 @@ def _validate_key_segment(
     *,
     field_name: str,
     allow_none: bool = False,
+    max_length: int | None = None,
 ) -> str | None:
     """Validate Redis-key path segments used for metrics and model families."""
     if value is None and allow_none:
@@ -46,6 +63,14 @@ def _validate_key_segment(
         raise ValueError(f"{field_name} must not be empty")
 
     normalized = unicodedata.normalize("NFC", value)
+    max_length = (
+        _default_max_length_for_field(field_name) if max_length is None else max_length
+    )
+    if max_length is not None and len(normalized) > max_length:
+        raise CardinalityLimitExceededError(
+            f"{field_name} must be at most {max_length} characters "
+            f"(got {len(normalized)})"
+        )
     if not normalized.strip():
         raise ValueError(f"{field_name} must not be whitespace-only")
     if normalized != normalized.strip():
