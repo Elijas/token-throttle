@@ -46,8 +46,8 @@ def is_unlimited_reservation(reservation: object) -> bool:
     bypass vector beyond V05; closing it requires this tightening AND
     the validator above.
     """
-    if not isinstance(reservation, CapacityReservation):
-        raise ValueError(  # noqa: TRY004 - public validators raise ValueError.
+    if type(reservation) is not CapacityReservation:
+        raise ValueError(
             "reservation must be a CapacityReservation "
             f"(got {type(reservation).__name__})"
         )
@@ -497,16 +497,12 @@ def resolve_config(
     if inspect.isawaitable(r):
         close_awaitable_if_possible(r)
         raise ValueError("cfg must be a synchronous PerModelConfig getter")
-    if not isinstance(r, PerModelConfig):
-        raise ValueError(  # noqa: TRY004
-            f"cfg must resolve to PerModelConfig (got {type(r).__name__})"
-        )
+    if type(r) is not PerModelConfig:
+        raise ValueError(f"cfg must resolve to PerModelConfig (got {type(r).__name__})")
     resolved = (
-        r
+        r.model_copy()
         if r.model_family
-        else PerModelConfig.model_validate(
-            {**r.model_dump(), "model_family": model_name}, strict=True
-        )
+        else r.model_copy(update={"model_family": model_name})
     )
     model_family = resolved.get_model_family()
     _validate_key_segment(model_family, field_name="model_family")

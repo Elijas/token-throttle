@@ -60,7 +60,7 @@ def _raise_if_set_max_capacity_args_look_swapped(
         cfg_for_metric_as_model = config_getter(metric)
     except Exception:  # noqa: BLE001 - best-effort footgun detection only.
         return
-    if not isinstance(cfg_for_metric_as_model, PerModelConfig):
+    if type(cfg_for_metric_as_model) is not PerModelConfig:
         return
     if cfg_for_metric_as_model.is_unlimited:
         return
@@ -333,6 +333,11 @@ class SyncRateLimiter:
     ):
         if callable(cfg) and is_async_callable(cfg):
             raise ValueError("cfg must be a synchronous PerModelConfig getter")
+        if callbacks is not None and type(callbacks) is not SyncRateLimiterCallbacks:
+            raise TypeError(
+                "callbacks must be a SyncRateLimiterCallbacks instance or None "
+                f"(got {type(callbacks).__name__})"
+            )
         self._backend = backend
         self._lock = threading.Lock()
         self._validation_lock = threading.Lock()

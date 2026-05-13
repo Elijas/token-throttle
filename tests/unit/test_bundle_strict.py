@@ -125,7 +125,10 @@ class TestReservationAndResponseGates:
             bucket_ids={("tokens", 60)},
         )
 
-        assert is_unlimited_reservation(reservation) is False
+        with pytest.raises(
+            ValueError, match="reservation must be a CapacityReservation"
+        ):
+            is_unlimited_reservation(reservation)
 
 
 class TestStrictRuntimeValidators:

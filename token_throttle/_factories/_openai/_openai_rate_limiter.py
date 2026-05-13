@@ -50,7 +50,7 @@ def create_openai_redis_rate_limiter(
         raise TypeError(f"rpm must be an int (got {type(rpm).__name__})")
     if isinstance(tpm, bool) or not isinstance(tpm, int):
         raise TypeError(f"tpm must be an int (got {type(tpm).__name__})")
-    if callbacks is not None and not isinstance(callbacks, RateLimiterCallbacks):
+    if callbacks is not None and type(callbacks) is not RateLimiterCallbacks:
         raise TypeError(
             f"callbacks must be a RateLimiterCallbacks instance or None "
             f"(got {type(callbacks).__name__})"

@@ -3,14 +3,14 @@ import unicodedata
 import uuid
 from collections import defaultdict
 from collections.abc import Iterator, Mapping
-from copy import deepcopy as _deepcopy
 from enum import Enum
 from typing import ClassVar, Self
 
 from frozendict import frozendict
-from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
+from pydantic import Field, ValidationInfo, field_validator
 
 from token_throttle._capacity import MIN_MAX_CAPACITY
+from token_throttle._dto import StrictDTO
 
 _UNLIMITED_FLAG = "__rate_limiting_disabled__"
 """
@@ -60,6 +60,11 @@ def _validate_key_segment(
         raise ValueError(
             f"{field_name} must not contain ':' (used as Redis key separator)"
         )
+    if any(char in normalized for char in "{}"):
+        raise ValueError(
+            f"{field_name} must not contain '{{' or '}}' "
+            "(used as Redis Cluster hash tag delimiters)"
+        )
     return normalized
 
 
@@ -69,9 +74,14 @@ class SecondsIn(int, Enum):
     DAY = 86400
 
 
-class Quota(BaseModel):
+class Quota(StrictDTO):
     """
-    Immutable rate-limit quota (frozen Pydantic model).
+    Exact-type immutable rate-limit quota (frozen Pydantic DTO).
+
+    v2.0.0 contract: ``Quota`` is a data-transfer object, not a subclass
+    extension point. Construction, assignment, copy, pickle restore,
+    ``model_copy()``, and ``model_construct()`` all preserve the same
+    validators; ``model_construct()`` is disabled.
 
     ``frozen=True`` prevents mutation via normal attribute assignment.
     Direct ``object.__setattr__`` or ``__dict__`` writes bypass this at
@@ -98,11 +108,6 @@ class Quota(BaseModel):
         default=DEFAULT_SECONDS,
         gt=0,  # Greater than 0
         description="Time window in seconds. Default: 60 (1 minute). E.g. For requests per minute, set to 60. For requests per hour, set to 3600.",
-    )
-    model_config = ConfigDict(
-        arbitrary_types_allowed=True,
-        frozen=True,
-        strict=True,
     )
 
     @field_validator("limit", "per_seconds", mode="before")
@@ -143,7 +148,13 @@ class Quota(BaseModel):
 
 
 class UsageQuotas:
-    """Collection of per-metric quotas; empty only via ``unlimited()``."""
+    """
+    Exact-type collection of per-metric quotas; empty only via ``unlimited()``.
+
+    v2.0.0 contract: ``UsageQuotas`` is a data-transfer collection, not a
+    subclass extension point. Security-sensitive callers accept the exact
+    class and exact ``Quota`` instances only.
+    """
 
     def __init__(
         self,
@@ -171,8 +182,8 @@ class UsageQuotas:
         return not bool(self._metrics)
 
     def add_metric(self, quota: Quota) -> None:
-        if not isinstance(quota, Quota):
-            raise ValueError(  # noqa: TRY004
+        if type(quota) is not Quota:
+            raise ValueError(
                 f"Each quota must be a Quota instance (got {type(quota).__name__})"
             )
         if (
@@ -251,9 +262,14 @@ def frozen_usage(usage: Usage) -> FrozenUsage:
     return frozendict(converted)
 
 
-class CapacityReservation(BaseModel):
+class CapacityReservation(StrictDTO):
     """
-    Frozen reservation returned by acquire/record operations.
+    Exact-type frozen reservation returned by acquire/record operations.
+
+    v2.0.0 contract: ``CapacityReservation`` is a data-transfer object, not a
+    subclass extension point. Construction, assignment, copy, pickle restore,
+    ``model_copy()``, and ``model_construct()`` all preserve the same
+    validators; ``model_construct()`` is disabled.
 
     Reservations bind to the limiter/backend workflow that issued them and
     should be refunded while that limiter is still alive. They are not durable
@@ -298,11 +314,6 @@ class CapacityReservation(BaseModel):
             "None means a legacy serialized reservation created before this "
             "field existed; refund accepts it in back-compat mode."
         ),
-    )
-    model_config = ConfigDict(
-        arbitrary_types_allowed=True,
-        frozen=True,
-        strict=True,
     )
 
     @field_validator("usage", mode="before")
@@ -390,45 +401,13 @@ class CapacityReservation(BaseModel):
             if not isinstance(item, (list, tuple)) or len(item) != 2:  # noqa: PLR2004
                 raise ValueError("Each bucket_id must be a (metric, per_seconds) pair")
             metric, per_seconds = item
-            if type(metric) is not str or not metric:
-                raise ValueError("bucket_id metric must be a non-empty string")
+            metric = _validate_key_segment(metric, field_name="bucket_id metric")
             if _is_bool_like(per_seconds):
                 raise ValueError("bucket_id per_seconds must not be a boolean")
             if not isinstance(per_seconds, int) or per_seconds <= 0:
                 raise ValueError("bucket_id per_seconds must be a positive integer")
             normalized.add((metric, int(per_seconds)))
         return frozenset(normalized)
-
-    def __setstate__(self, state: dict[str, object]) -> None:
-        # Re-run validators for pickle/copy/cloudpickle restores.
-        fields = state.get("__dict__", state)
-        validated = type(self).model_validate(fields)
-        object.__setattr__(self, "__dict__", validated.__dict__)
-        for key, value in state.items():
-            if key != "__dict__":
-                object.__setattr__(self, key, value)
-
-    def model_copy(
-        self,
-        *,
-        update: dict[str, object] | None = None,
-        deep: bool = False,
-    ) -> Self:
-        # Pydantic skips validators for model_copy(update=...), so revalidate
-        # updates to preserve the is_unlimited coupling invariant.
-        if update:
-            return type(self).model_validate({**self.model_dump(), **update})
-        return super().model_copy(update=update, deep=deep)
-
-    def __copy__(self) -> Self:
-        copied = type(self).__new__(type(self))
-        copied.__setstate__(self.__getstate__())
-        return copied
-
-    def __deepcopy__(self, memo: dict[int, object] | None = None) -> Self:
-        copied = type(self).__new__(type(self))
-        copied.__setstate__(_deepcopy(self.__getstate__(), memo=memo))
-        return copied
 
     def get_usage(self) -> FrozenUsage:
         return self.usage

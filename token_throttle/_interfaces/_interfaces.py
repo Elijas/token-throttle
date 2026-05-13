@@ -4,8 +4,9 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
+from pydantic import Field, ValidationInfo, field_validator
 
+from token_throttle._dto import StrictDTO
 from token_throttle._interfaces._callable_utils import is_async_callable
 from token_throttle._interfaces._callbacks import RateLimiterCallbacks
 from token_throttle._interfaces._models import (
@@ -27,9 +28,14 @@ are filtered out before the counter is called.
 """
 
 
-class PerModelConfig(BaseModel):
+class PerModelConfig(StrictDTO):
     """
     Configuration for limiting API requests to a model.
+
+    v2.0.0 contract: ``PerModelConfig`` is an exact-type immutable DTO, not
+    a subclass extension point. Construction, assignment, copy, pickle
+    restore, ``model_copy()``, and ``model_construct()`` all preserve the
+    same validators; ``model_construct()`` is disabled.
 
     Use ``PerModelConfig(quotas=UsageQuotas.unlimited(), ...)`` to disable
     rate limiting for a model while preserving the normal limiter API.
@@ -76,6 +82,15 @@ class PerModelConfig(BaseModel):
     def _reject_empty_string(cls, value: object) -> object:
         return _validate_key_segment(value, field_name="model_family", allow_none=True)
 
+    @field_validator("quotas", mode="after")
+    @classmethod
+    def _require_exact_usage_quotas(cls, value: UsageQuotas) -> UsageQuotas:
+        if type(value) is not UsageQuotas:
+            raise ValueError(
+                f"quotas must be a UsageQuotas instance (got {type(value).__name__})"
+            )
+        return value
+
     @field_validator("usage_counter", mode="after")
     @classmethod
     def _reject_async_usage_counter(
@@ -94,10 +109,11 @@ class PerModelConfig(BaseModel):
 
     @property
     def is_unlimited(self) -> bool:
+        if type(self.quotas) is not UsageQuotas:
+            raise ValueError(
+                f"quotas must be a UsageQuotas instance (got {type(self.quotas).__name__})"
+            )
         return self.quotas.is_unlimited
-
-    # Note: in "model_config", "model" means Pydantic Model, not LLM Model like in other fields of this class
-    model_config = ConfigDict(arbitrary_types_allowed=True, strict=True)
 
 
 @runtime_checkable

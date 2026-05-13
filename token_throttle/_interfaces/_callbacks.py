@@ -30,8 +30,9 @@ import os
 import threading
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
+from pydantic import Field, ValidationInfo, field_validator
 
+from token_throttle._dto import StrictDTO
 from token_throttle._interfaces._callable_utils import is_async_callable
 
 if TYPE_CHECKING:
@@ -428,8 +429,15 @@ class OnMissingConsumptionDataCallback(Protocol):
         """Called when no previous consumption data is detected, assuming full quota"""
 
 
-class RateLimiterCallbacks(BaseModel):
-    model_config = ConfigDict(arbitrary_types_allowed=True)
+class RateLimiterCallbacks(StrictDTO):
+    """
+    Exact-type immutable async callback bundle.
+
+    v2.0.0 contract: ``RateLimiterCallbacks`` is a data-transfer object, not
+    a subclass extension point. Construction, assignment, copy, pickle
+    restore, ``model_copy()``, and ``model_construct()`` all preserve the
+    async-callable validators; ``model_construct()`` is disabled.
+    """
 
     on_wait_start: OnWaitStartCallback | None = Field(
         default=None,
@@ -566,8 +574,15 @@ class SyncOnMissingConsumptionDataCallback(Protocol):
     ) -> None: ...
 
 
-class SyncRateLimiterCallbacks(BaseModel):
-    model_config = ConfigDict(arbitrary_types_allowed=True)
+class SyncRateLimiterCallbacks(StrictDTO):
+    """
+    Exact-type immutable sync callback bundle.
+
+    v2.0.0 contract: ``SyncRateLimiterCallbacks`` is a data-transfer object,
+    not a subclass extension point. Construction, assignment, copy, pickle
+    restore, ``model_copy()``, and ``model_construct()`` all preserve the
+    sync-callable validators; ``model_construct()`` is disabled.
+    """
 
     on_wait_start: SyncOnWaitStartCallback | None = Field(
         default=None,

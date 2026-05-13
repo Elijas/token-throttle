@@ -4,7 +4,9 @@ import math
 import time
 import warnings
 
-from pydantic import BaseModel
+from pydantic import Field, field_validator
+
+from token_throttle._dto import StrictDTO
 
 _backward_clock_warned: bool = False
 _backward_clock_last_warning_at: float | None = None
@@ -12,9 +14,14 @@ _BACKWARD_CLOCK_WARNING_INTERVAL_SECONDS = 300.0
 MIN_MAX_CAPACITY = 1e-9
 
 
-class CalculatedCapacity(BaseModel):
+class CalculatedCapacity(StrictDTO):
     """
     Result of a token-bucket capacity calculation.
+
+    v2.0.0 contract: ``CalculatedCapacity`` is an exact-type immutable DTO,
+    not a subclass extension point. Construction, assignment, copy, pickle
+    restore, ``model_copy()``, and ``model_construct()`` all preserve finite
+    capacity validation; ``model_construct()`` is disabled.
 
     ``is_fresh_start`` is True when no prior capacity data exists
     (``last_checked`` or ``outdated_capacity`` is None).  Backends use
@@ -23,8 +30,15 @@ class CalculatedCapacity(BaseModel):
     refill from.
     """
 
-    amount: float
+    amount: float = Field(allow_inf_nan=False)
     is_fresh_start: bool
+
+    @field_validator("amount", mode="after")
+    @classmethod
+    def _require_finite_amount(cls, value: float) -> float:
+        if not math.isfinite(value):
+            raise ValueError(f"amount must be finite (got {value!r})")
+        return value
 
 
 def _validate_plain_number(value: object, *, name: str) -> float:
