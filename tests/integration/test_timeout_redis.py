@@ -208,7 +208,7 @@ async def test_async_timeout_zero_includes_redis_lock_wait(
 ):
     """timeout=0 must fail fast even if another worker holds the Redis lock."""
     config = _make_config(limit=10, per_seconds=60)
-    backend = RedisBackendBuilder(redis_client).build(config)
+    backend = RedisBackendBuilder(redis_client, key_prefix="test").build(config)
 
     lock_client = redis.from_url(redis_url)
     lock = None
@@ -217,6 +217,7 @@ async def test_async_timeout_zero_includes_redis_lock_wait(
             quota=Quota(metric="requests", limit=10, per_seconds=60),
             limit_config=config,
             redis_client=lock_client,
+            key_prefix="test",
         )
         lock = bucket.lock(timeout=1.2)
         assert await lock.acquire() is True
@@ -256,7 +257,7 @@ async def test_async_timeout_zero_multi_metric_with_lock_contention(
             ]
         ),
     )
-    backend = RedisBackendBuilder(redis_client).build(config)
+    backend = RedisBackendBuilder(redis_client, key_prefix="test").build(config)
 
     # Hold ONE bucket's lock from a separate client (simulating another worker)
     lock_client = redis.from_url(redis_url)
@@ -267,6 +268,7 @@ async def test_async_timeout_zero_multi_metric_with_lock_contention(
             quota=Quota(metric="requests", limit=10, per_seconds=60),
             limit_config=config,
             redis_client=lock_client,
+            key_prefix="test",
         )
         lock = bucket.lock(timeout=1.2)
         assert await lock.acquire() is True
@@ -295,7 +297,9 @@ def test_sync_timeout_zero_includes_redis_lock_wait(
 ):
     """Sync timeout=0 must fail fast even if another worker holds the Redis lock."""
     config = _make_config(limit=10, per_seconds=60)
-    backend = SyncRedisBackendBuilder(sync_redis_client).build(config)
+    backend = SyncRedisBackendBuilder(sync_redis_client, key_prefix="test").build(
+        config
+    )
 
     lock_client = sync_redis.from_url(redis_url)
     lock = None
@@ -304,6 +308,7 @@ def test_sync_timeout_zero_includes_redis_lock_wait(
             quota=Quota(metric="requests", limit=10, per_seconds=60),
             limit_config=config,
             redis_client=lock_client,
+            key_prefix="test",
         )
         lock = bucket.lock(timeout=1.2)
         assert lock.acquire() is True

@@ -33,7 +33,7 @@ def backend_builder(request: pytest.FixtureRequest):
     """Parameterized backend builder — runs tests against all backends."""
     if request.param == "redis":
         redis_client = request.getfixturevalue("redis_client")
-        return RedisBackendBuilder(redis_client)
+        return RedisBackendBuilder(redis_client, key_prefix="test")
     if request.param == "memory":
         return MemoryBackendBuilder()
     raise ValueError(f"Unknown backend: {request.param}")
@@ -57,5 +57,5 @@ def sync_backend_builder(request: pytest.FixtureRequest):
         return SyncMemoryBackendBuilder()
     if request.param == "redis":
         client = request.getfixturevalue("sync_redis_client")
-        return SyncRedisBackendBuilder(client)
+        return SyncRedisBackendBuilder(client, key_prefix="test")
     raise ValueError(f"Unknown backend: {request.param}")

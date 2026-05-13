@@ -34,7 +34,7 @@ def test_dynamic_max_capacity_change(sync_redis_client):
             ],
         ),
     )
-    builder = SyncRedisBackendBuilder(sync_redis_client)
+    builder = SyncRedisBackendBuilder(sync_redis_client, key_prefix="test")
     backend = builder.build(config)
 
     # Initial acquire to populate cache.
@@ -42,7 +42,7 @@ def test_dynamic_max_capacity_change(sync_redis_client):
 
     # Reduce max_capacity for requests from 10 to 3 via Redis directly.
     sync_redis_client.set(
-        "rate_limiting:dynamic_sync:requests:1:max_capacity_override",
+        "test:rate_limiting:bucket:dynamic_sync:requests:1:max_capacity_override",
         json.dumps({"configured_max_capacity": 10, "override_max_capacity": 3}),
     )
 
@@ -83,7 +83,7 @@ def test_metric_set_reconfigure_rewrites_surviving_max_capacity(sync_redis_clien
 
     limiter = SyncRateLimiter(
         config_getter,
-        backend=SyncRedisBackendBuilder(sync_redis_client),
+        backend=SyncRedisBackendBuilder(sync_redis_client, key_prefix="test"),
     )
 
     reservation = limiter.acquire_capacity({"tokens": 1}, "test-model")
@@ -120,7 +120,7 @@ def test_metric_set_reconfigure_preserves_runtime_override_when_static_unchanged
 
     limiter = SyncRateLimiter(
         config_getter,
-        backend=SyncRedisBackendBuilder(sync_redis_client),
+        backend=SyncRedisBackendBuilder(sync_redis_client, key_prefix="test"),
     )
 
     limiter.acquire_capacity({"tokens": 0}, "test-model")
@@ -157,7 +157,7 @@ def test_metric_remove_and_readd_drops_runtime_override(sync_redis_client):
 
     limiter = SyncRateLimiter(
         config_getter,
-        backend=SyncRedisBackendBuilder(sync_redis_client),
+        backend=SyncRedisBackendBuilder(sync_redis_client, key_prefix="test"),
     )
 
     limiter.acquire_capacity({"tokens": 0}, "test-model")

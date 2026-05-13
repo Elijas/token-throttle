@@ -61,7 +61,7 @@ class TestWaitTaskOutcomeExceptionBranch:
     async def test_connection_error_in_write_reports_not_consumed(self, redis_client):
         """ConnectionError during shielded write → consumed=False → CancelledError propagates."""
         config = _make_config(limit=1000, model_family="test-conn-err")
-        backend = RedisBackendBuilder(redis_client).build(config)
+        backend = RedisBackendBuilder(redis_client, key_prefix="test").build(config)
 
         cap_before = await _get_redis_capacity(backend)
 
@@ -94,7 +94,7 @@ class TestWaitTaskOutcomeExceptionBranch:
     async def test_connection_error_in_check_and_consume_write(self, redis_client):
         """Same scenario via _check_and_consume_capacity (await_for_capacity path)."""
         config = _make_config(limit=1000, model_family="test-conn-err-check")
-        backend = RedisBackendBuilder(redis_client).build(config)
+        backend = RedisBackendBuilder(redis_client, key_prefix="test").build(config)
 
         cap_before = await _get_redis_capacity(backend)
 
@@ -132,7 +132,7 @@ class TestSuppressTaskCancellationOnSuccessfulWrite:
     async def test_cancel_after_consume_write_lands_is_absorbed(self, redis_client):
         """Task cancellation absorbed if consume_capacity's write already landed."""
         config = _make_config(limit=1000, model_family="test-suppress-consume")
-        backend = RedisBackendBuilder(redis_client).build(config)
+        backend = RedisBackendBuilder(redis_client, key_prefix="test").build(config)
 
         cap_before = await _get_redis_capacity(backend)
 
@@ -168,7 +168,7 @@ class TestSuppressTaskCancellationOnSuccessfulWrite:
     async def test_cancel_after_refund_write_lands_is_absorbed(self, redis_client):
         """Task cancellation absorbed if refund_capacity's write already landed."""
         config = _make_config(limit=1000, model_family="test-suppress-refund")
-        backend = RedisBackendBuilder(redis_client).build(config)
+        backend = RedisBackendBuilder(redis_client, key_prefix="test").build(config)
 
         # Consume capacity first so we can refund
         await backend.consume_capacity(frozendict({"requests": 100.0}))

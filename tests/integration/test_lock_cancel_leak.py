@@ -79,7 +79,7 @@ class TestLockCancelDoesNotLeakKey:
             model_family=f"test-{secrets.token_hex(4)}",
             quotas=UsageQuotas([Quota(metric="requests", limit=100, per_seconds=3600)]),
         )
-        backend = RedisBackendBuilder(redis_client).build(
+        backend = RedisBackendBuilder(redis_client, key_prefix="test").build(
             config, callbacks=RateLimiterCallbacks()
         )
         lock_key_pattern = f"*{config.model_family}*lock*"

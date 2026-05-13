@@ -46,7 +46,7 @@ class TestLockExtensionHelper:
 
     async def test_extend_locks_refreshes_ttl(self, redis_client):
         """Reacquire via ``_extend_locks`` resets the TTL to the configured timeout."""
-        backend = RedisBackendBuilder(redis_client).build(
+        backend = RedisBackendBuilder(redis_client, key_prefix="test").build(
             _make_config(), callbacks=RateLimiterCallbacks()
         )
         async with await backend._lock(timeout=LOCK_TIMEOUT_SECONDS) as stack:
@@ -80,7 +80,7 @@ class TestMutatingPathsCallExtendLocks:
     async def test_consume_capacity_extends_lock_before_write(
         self, redis_client, monkeypatch
     ):
-        backend = RedisBackendBuilder(redis_client).build(
+        backend = RedisBackendBuilder(redis_client, key_prefix="test").build(
             _make_config(), callbacks=RateLimiterCallbacks()
         )
         calls = []
@@ -98,7 +98,7 @@ class TestMutatingPathsCallExtendLocks:
     async def test_await_for_capacity_extends_lock_before_write(
         self, redis_client, monkeypatch
     ):
-        backend = RedisBackendBuilder(redis_client).build(
+        backend = RedisBackendBuilder(redis_client, key_prefix="test").build(
             _make_config(), callbacks=RateLimiterCallbacks()
         )
         calls = []
@@ -118,7 +118,7 @@ class TestMutatingPathsCallExtendLocks:
     async def test_refund_capacity_extends_lock_before_write(
         self, redis_client, monkeypatch
     ):
-        backend = RedisBackendBuilder(redis_client).build(
+        backend = RedisBackendBuilder(redis_client, key_prefix="test").build(
             _make_config(), callbacks=RateLimiterCallbacks()
         )
         await backend.consume_capacity(frozendict({"requests": 5.0}))

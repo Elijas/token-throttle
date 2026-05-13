@@ -568,7 +568,9 @@ def make_redis_bucket(limit: float = 100.0, per_seconds_val: int = 60) -> RedisB
     config = PerModelConfig(
         model_family="redis-oracle-test", quotas=UsageQuotas([quota])
     )
-    return RedisBucket(quota=quota, limit_config=config, redis_client=AsyncMock())
+    return RedisBucket(
+        quota=quota, limit_config=config, redis_client=AsyncMock(), key_prefix="test"
+    )
 
 
 class TestRedisBucketOracleAgreement:

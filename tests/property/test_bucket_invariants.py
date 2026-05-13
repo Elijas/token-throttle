@@ -39,7 +39,9 @@ def make_bucket(limit: float = 100.0, per_seconds_val: int = 60) -> RedisBucket:
     """Create a RedisBucket with a mock Redis client for pure-math testing."""
     quota = Quota(metric="requests", limit=limit, per_seconds=per_seconds_val)
     config = PerModelConfig(model_family="test", quotas=UsageQuotas([quota]))
-    return RedisBucket(quota=quota, limit_config=config, redis_client=AsyncMock())
+    return RedisBucket(
+        quota=quota, limit_config=config, redis_client=AsyncMock(), key_prefix="test"
+    )
 
 
 # ---------------------------------------------------------------------------

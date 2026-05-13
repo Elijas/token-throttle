@@ -684,7 +684,7 @@ def _build_async_redis_backend(
     per_seconds: int = SLOW_WINDOW,
     metric: str = METRIC,
 ):
-    builder = RedisBackendBuilder(redis_client)
+    builder = RedisBackendBuilder(redis_client, key_prefix="test")
     config = PerModelConfig(
         model_family="test-concurrent-redis",
         quotas=UsageQuotas(
@@ -701,7 +701,7 @@ def _build_sync_redis_backend(
     per_seconds: int = SLOW_WINDOW,
     metric: str = METRIC,
 ):
-    builder = SyncRedisBackendBuilder(redis_client)
+    builder = SyncRedisBackendBuilder(redis_client, key_prefix="test")
     config = PerModelConfig(
         model_family="test-concurrent-redis-sync",
         quotas=UsageQuotas(

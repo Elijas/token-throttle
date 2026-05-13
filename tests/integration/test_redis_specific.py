@@ -30,7 +30,9 @@ def make_bucket(
 ):
     quota = Quota(metric=metric, limit=limit, per_seconds=per_seconds)
     config = PerModelConfig(model_family=model_family, quotas=UsageQuotas([quota]))
-    return RedisBucket(quota=quota, limit_config=config, redis_client=redis_client)
+    return RedisBucket(
+        quota=quota, limit_config=config, redis_client=redis_client, key_prefix="test"
+    )
 
 
 @pytest.mark.redis
@@ -137,9 +139,9 @@ class TestRedisBucketKeyFormat:
             model_family=family,
         )
 
-        expected_prefix = f"rate_limiting:{family}:{metric}:{per_seconds}"
+        expected_prefix = f"test:rate_limiting:bucket:{family}:{metric}:{per_seconds}"
         key_pattern = re.compile(
-            rf"^rate_limiting:{re.escape(family)}:{re.escape(metric)}:{per_seconds}:\w+$"
+            rf"^test:rate_limiting:bucket:{re.escape(family)}:{re.escape(metric)}:{per_seconds}:\w+$"
         )
 
         all_keys = [
@@ -220,7 +222,9 @@ class TestRedisCallableConfigRefresh:
                 )
             return PerModelConfig(quotas=quotas, model_family="callable-refresh-redis")
 
-        limiter = RateLimiter(config_getter, backend=RedisBackendBuilder(redis_client))
+        limiter = RateLimiter(
+            config_getter, backend=RedisBackendBuilder(redis_client, key_prefix="test")
+        )
 
         reservation = await limiter.acquire_capacity({"tokens": 1}, "test-model")
         await limiter.refund_capacity({"tokens": 0}, reservation)
@@ -253,7 +257,9 @@ class TestRedisCallableConfigRefresh:
                 model_family="callable-refresh-redis-preserve",
             )
 
-        limiter = RateLimiter(config_getter, backend=RedisBackendBuilder(redis_client))
+        limiter = RateLimiter(
+            config_getter, backend=RedisBackendBuilder(redis_client, key_prefix="test")
+        )
 
         await limiter.acquire_capacity({"tokens": 0}, "test-model")
         await limiter.set_max_capacity("test-model", "tokens", 60, 20)
@@ -292,7 +298,9 @@ class TestRedisCallableConfigRefresh:
                 model_family="callable-refresh-redis-readd",
             )
 
-        limiter = RateLimiter(config_getter, backend=RedisBackendBuilder(redis_client))
+        limiter = RateLimiter(
+            config_getter, backend=RedisBackendBuilder(redis_client, key_prefix="test")
+        )
 
         await limiter.acquire_capacity({"tokens": 0}, "test-model")
         await limiter.set_max_capacity("test-model", "tokens", 3600, 20)

@@ -70,7 +70,7 @@ class TestConnectionErrorMidPipeline:
 
     async def test_connection_error_during_write_surfaces_as_error(self, redis_client):
         """ConnectionError during _set_capacities_unsafe propagates, no corruption."""
-        builder = RedisBackendBuilder(redis_client)
+        builder = RedisBackendBuilder(redis_client, key_prefix="test")
         config = _make_config()
         backend = builder.build(config, callbacks=RateLimiterCallbacks())
 
@@ -101,7 +101,7 @@ class TestConnectionErrorMidPipeline:
         self, redis_client
     ):
         """ConnectionError during _get_capacities_unsafe propagates immediately."""
-        builder = RedisBackendBuilder(redis_client)
+        builder = RedisBackendBuilder(redis_client, key_prefix="test")
         config = _make_config()
         backend = builder.build(config, callbacks=RateLimiterCallbacks())
 
@@ -128,7 +128,7 @@ class TestConnectionErrorDuringLockAcquisition:
         self, redis_client
     ):
         """Lock is cleaned up if ConnectionError fires during acquire."""
-        builder = RedisBackendBuilder(redis_client)
+        builder = RedisBackendBuilder(redis_client, key_prefix="test")
         config = _make_config()
         backend = builder.build(config, callbacks=RateLimiterCallbacks())
         bucket = backend.sorted_buckets[0]
@@ -154,7 +154,7 @@ class TestConnectionErrorDuringLockAcquisition:
         self, redis_client
     ):
         """After ConnectionError during acquire, the next acquire works normally."""
-        builder = RedisBackendBuilder(redis_client)
+        builder = RedisBackendBuilder(redis_client, key_prefix="test")
         config = _make_config()
         backend = builder.build(config, callbacks=RateLimiterCallbacks())
 
@@ -190,7 +190,7 @@ class TestSlowRedisLatencyInjection:
         self, redis_client
     ):
         """timeout=0 (try-acquire) must fail fast when capacity is exhausted."""
-        builder = RedisBackendBuilder(redis_client)
+        builder = RedisBackendBuilder(redis_client, key_prefix="test")
         config = _make_config(limit=100, per_seconds=3600)
         backend = builder.build(config, callbacks=RateLimiterCallbacks())
 
@@ -204,7 +204,7 @@ class TestSlowRedisLatencyInjection:
 
     async def test_slow_pipeline_with_sufficient_timeout_succeeds(self, redis_client):
         """Operations with a generous timeout survive slow pipelines."""
-        builder = RedisBackendBuilder(redis_client)
+        builder = RedisBackendBuilder(redis_client, key_prefix="test")
         config = _make_config(limit=100, per_seconds=3600)
         backend = builder.build(config, callbacks=RateLimiterCallbacks())
 
@@ -232,7 +232,7 @@ class TestServerTimeSkew:
 
     async def test_backward_time_jump_clamps_to_zero_refill(self, redis_client):
         """calculate_capacity clamps negative time_passed to 0 on clock skew."""
-        builder = RedisBackendBuilder(redis_client)
+        builder = RedisBackendBuilder(redis_client, key_prefix="test")
         config = _make_config(limit=100, per_seconds=60)
         backend = builder.build(config, callbacks=RateLimiterCallbacks())
 
@@ -270,7 +270,7 @@ class TestServerTimeSkew:
 
     async def test_forward_time_jump_does_not_exceed_max_capacity(self, redis_client):
         """A large forward time jump refills to max_capacity, not beyond."""
-        builder = RedisBackendBuilder(redis_client)
+        builder = RedisBackendBuilder(redis_client, key_prefix="test")
         config = _make_config(limit=100, per_seconds=60)
         backend = builder.build(config, callbacks=RateLimiterCallbacks())
 
@@ -307,7 +307,7 @@ class TestLockTTLExpiry:
 
     async def test_extend_locks_detects_expired_lock(self, redis_client):
         """_extend_locks raises LockError when the lock has expired."""
-        builder = RedisBackendBuilder(redis_client)
+        builder = RedisBackendBuilder(redis_client, key_prefix="test")
         config = _make_config()
         backend = builder.build(config, callbacks=RateLimiterCallbacks())
 
@@ -325,7 +325,7 @@ class TestLockTTLExpiry:
 
     async def test_expired_lock_aborts_consume_cleanly(self, redis_client):
         """If the lock expires between read and write, the operation fails cleanly."""
-        builder = RedisBackendBuilder(redis_client)
+        builder = RedisBackendBuilder(redis_client, key_prefix="test")
         config = _make_config(limit=100)
         backend = builder.build(config, callbacks=RateLimiterCallbacks())
 
@@ -358,7 +358,7 @@ class TestLockTTLExpiry:
 
     async def test_lock_stolen_by_another_worker_detected(self, redis_client):
         """If another worker steals the lock, _extend_locks raises LockError."""
-        builder = RedisBackendBuilder(redis_client)
+        builder = RedisBackendBuilder(redis_client, key_prefix="test")
         config = _make_config()
         backend = builder.build(config, callbacks=RateLimiterCallbacks())
 
@@ -380,7 +380,7 @@ class TestLockTTLExpiry:
 
     async def test_consume_capacity_with_short_lock_ttl(self, redis_client):
         """Very short lock TTL does not corrupt state even if extend is needed."""
-        builder = RedisBackendBuilder(redis_client)
+        builder = RedisBackendBuilder(redis_client, key_prefix="test")
         config = _make_config(limit=100)
         backend = builder.build(config, callbacks=RateLimiterCallbacks())
 
@@ -415,7 +415,7 @@ class TestConnectionErrorDuringRefund:
 
     async def test_connection_error_during_refund_surfaces_cleanly(self, redis_client):
         """Refund fails cleanly if Redis dies mid-refund pipeline."""
-        builder = RedisBackendBuilder(redis_client)
+        builder = RedisBackendBuilder(redis_client, key_prefix="test")
         config = _make_config(limit=100, per_seconds=3600)
         backend = builder.build(config, callbacks=RateLimiterCallbacks())
 

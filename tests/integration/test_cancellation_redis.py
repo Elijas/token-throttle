@@ -75,7 +75,7 @@ class TestRedisCallbackCancellationRefundsCapacity:
             await asyncio.sleep(10)
 
         callbacks = RateLimiterCallbacks(on_capacity_consumed=slow_callback)
-        builder = RedisBackendBuilder(redis_client)
+        builder = RedisBackendBuilder(redis_client, key_prefix="test")
         config = _make_config(limit=100)
         backend = builder.build(config, callbacks=callbacks)
 
@@ -116,7 +116,9 @@ class TestRedisCallbackCancellationRefundsCapacity:
         callbacks = RateLimiterCallbacks(
             after_wait_end_consumption=slow_wait_end_callback
         )
-        builder = RedisBackendBuilder(redis_client, sleep_interval=0.01)
+        builder = RedisBackendBuilder(
+            redis_client, key_prefix="test", sleep_interval=0.01
+        )
         config = _make_config(limit=100, per_seconds=1)  # fast refill
         backend = builder.build(config, callbacks=callbacks)
 
@@ -153,7 +155,7 @@ class TestRedisCallbackCancellationRefundsCapacity:
             await asyncio.sleep(10)
 
         callbacks = RateLimiterCallbacks(on_capacity_consumed=slow_callback)
-        builder = RedisBackendBuilder(redis_client)
+        builder = RedisBackendBuilder(redis_client, key_prefix="test")
         config = _make_config(limit=100)
         backend = builder.build(config, callbacks=callbacks)
 
@@ -203,7 +205,7 @@ class TestRedisLockReleaseCancellationRefundsCapacity:
                 entered_release.set()
                 await asyncio.sleep(10)
 
-        builder = RedisBackendBuilder(redis_client)
+        builder = RedisBackendBuilder(redis_client, key_prefix="test")
         config = _make_config(limit=100)
         backend = builder.build(config)
 
@@ -258,7 +260,7 @@ class TestRedisCancellationDebtPreservation:
             await asyncio.sleep(10)
 
         callbacks = RateLimiterCallbacks(on_capacity_consumed=slow_callback)
-        builder = RedisBackendBuilder(redis_client)
+        builder = RedisBackendBuilder(redis_client, key_prefix="test")
         config = _make_config(limit=100)
         backend = builder.build(config, callbacks=callbacks)
 
@@ -325,7 +327,7 @@ class TestRedisConsumeCapacityNoRefundOnCancellation:
             await asyncio.sleep(10)
 
         callbacks = RateLimiterCallbacks(on_capacity_consumed=slow_callback)
-        builder = RedisBackendBuilder(redis_client)
+        builder = RedisBackendBuilder(redis_client, key_prefix="test")
         config = _make_config(limit=100)
         backend = builder.build(config, callbacks=callbacks)
 
@@ -374,7 +376,7 @@ class TestRedisDoubleCancellationNoCapacityLeak:
             await asyncio.sleep(10)
 
         callbacks = RateLimiterCallbacks(on_capacity_consumed=slow_callback)
-        builder = RedisBackendBuilder(redis_client)
+        builder = RedisBackendBuilder(redis_client, key_prefix="test")
         config = _make_config(limit=100)
         backend = builder.build(config, callbacks=callbacks)
 
@@ -416,7 +418,7 @@ class TestRedisPreCommitCancellationDoesNotOverRefund:
         self,
         redis_client,
     ):
-        builder = RedisBackendBuilder(redis_client)
+        builder = RedisBackendBuilder(redis_client, key_prefix="test")
         config = _make_config(limit=100)
         backend = builder.build(config)
 
@@ -462,7 +464,7 @@ class TestRedisPipelineExecuteCancellationRefundsCapacity:
         redis_client,
     ):
         """CancelledError after the write commits still triggers refund."""
-        builder = RedisBackendBuilder(redis_client)
+        builder = RedisBackendBuilder(redis_client, key_prefix="test")
         config = _make_config(limit=100)
         backend = builder.build(config)
 
@@ -557,7 +559,7 @@ class TestRedisMultiMetricCancellationRefundsAllMetrics:
             await asyncio.sleep(10)
 
         callbacks = RateLimiterCallbacks(on_capacity_consumed=slow_callback)
-        builder = RedisBackendBuilder(redis_client)
+        builder = RedisBackendBuilder(redis_client, key_prefix="test")
         config = _make_multi_metric_config(requests_limit=100, tokens_limit=500)
         backend = builder.build(config, callbacks=callbacks)
 
@@ -617,7 +619,9 @@ class TestRedisCancellationDuringLocalConditionWait:
         self, redis_client
     ):
         """A task cancelled during _local_condition.wait() must not consume capacity."""
-        builder = RedisBackendBuilder(redis_client, sleep_interval=5.0)
+        builder = RedisBackendBuilder(
+            redis_client, key_prefix="test", sleep_interval=5.0
+        )
         config = _make_config(limit=100)
         backend = builder.build(config)
 
@@ -644,7 +648,9 @@ class TestRedisCancellationDuringLocalConditionWait:
 
     async def test_cancel_multiple_local_condition_waiters(self, redis_client):
         """Cancelling several waiters in _local_condition.wait() doesn't leak capacity."""
-        builder = RedisBackendBuilder(redis_client, sleep_interval=5.0)
+        builder = RedisBackendBuilder(
+            redis_client, key_prefix="test", sleep_interval=5.0
+        )
         config = _make_config(limit=100)
         backend = builder.build(config)
 
@@ -672,7 +678,9 @@ class TestRedisCancellationDuringLocalConditionWait:
 
     async def test_cancel_does_not_block_subsequent_acquire(self, redis_client):
         """After cancelling a local-condition waiter, a new caller can still acquire."""
-        builder = RedisBackendBuilder(redis_client, sleep_interval=5.0)
+        builder = RedisBackendBuilder(
+            redis_client, key_prefix="test", sleep_interval=5.0
+        )
         config = _make_config(limit=100)
         backend = builder.build(config)
 

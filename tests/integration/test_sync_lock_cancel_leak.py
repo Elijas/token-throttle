@@ -72,7 +72,9 @@ class TestSyncLockCancelDoesNotLeakKey:
             model_family=f"test-{secrets.token_hex(4)}",
             quotas=UsageQuotas([Quota(metric="requests", limit=100, per_seconds=3600)]),
         )
-        backend = SyncRedisBackendBuilder(sync_redis_client).build(config)
+        backend = SyncRedisBackendBuilder(sync_redis_client, key_prefix="test").build(
+            config
+        )
         lock_key_pattern = f"*{config.model_family}*lock*"
 
         original_acquire = sync_redis.lock.Lock.acquire

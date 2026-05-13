@@ -37,7 +37,7 @@ class TestAsyncApplyConfiguredMaxCapacity:
     async def test_updates_bucket_max(self, redis_client):
         """apply_configured_max_capacity updates the bucket's configured max."""
         config = _make_config()
-        backend = RedisBackendBuilder(redis_client).build(config)
+        backend = RedisBackendBuilder(redis_client, key_prefix="test").build(config)
 
         assert backend.sorted_buckets[0].max_capacity == 100.0
 
@@ -48,7 +48,7 @@ class TestAsyncApplyConfiguredMaxCapacity:
     async def test_clears_runtime_override(self, redis_client):
         """apply_configured_max_capacity clears any existing runtime override."""
         config = _make_config(model_family="test-apply-clear")
-        backend = RedisBackendBuilder(redis_client).build(config)
+        backend = RedisBackendBuilder(redis_client, key_prefix="test").build(config)
 
         await backend.set_max_capacity("requests", 3600, 50.0)
         assert backend.sorted_buckets[0].max_capacity == 50.0
@@ -62,7 +62,7 @@ class TestAsyncApplyConfiguredMaxCapacity:
     async def test_capacity_reflects_new_max(self, redis_client):
         """After apply_configured_max_capacity, acquirable capacity reflects the new max."""
         config = _make_config(model_family="test-apply-cap")
-        backend = RedisBackendBuilder(redis_client).build(config)
+        backend = RedisBackendBuilder(redis_client, key_prefix="test").build(config)
 
         await backend.apply_configured_max_capacity("requests", 3600, 500.0)
 
@@ -71,7 +71,7 @@ class TestAsyncApplyConfiguredMaxCapacity:
     async def test_nonexistent_bucket_raises(self, redis_client):
         """apply_configured_max_capacity raises ValueError for unknown metric."""
         config = _make_config(model_family="test-apply-missing")
-        backend = RedisBackendBuilder(redis_client).build(config)
+        backend = RedisBackendBuilder(redis_client, key_prefix="test").build(config)
 
         with pytest.raises(ValueError, match="not found"):
             await backend.apply_configured_max_capacity("nonexistent", 3600, 100.0)
@@ -82,7 +82,9 @@ class TestSyncApplyConfiguredMaxCapacity:
     def test_updates_bucket_max(self, sync_redis_client):
         """Sync apply_configured_max_capacity updates the bucket's configured max."""
         config = _make_config(model_family="test-apply-max-sync")
-        backend = SyncRedisBackendBuilder(sync_redis_client).build(config)
+        backend = SyncRedisBackendBuilder(sync_redis_client, key_prefix="test").build(
+            config
+        )
 
         assert backend.sorted_buckets[0].max_capacity == 100.0
 
@@ -93,7 +95,9 @@ class TestSyncApplyConfiguredMaxCapacity:
     def test_clears_runtime_override(self, sync_redis_client):
         """Sync apply_configured_max_capacity clears runtime overrides."""
         config = _make_config(model_family="test-apply-clear-sync")
-        backend = SyncRedisBackendBuilder(sync_redis_client).build(config)
+        backend = SyncRedisBackendBuilder(sync_redis_client, key_prefix="test").build(
+            config
+        )
 
         backend.set_max_capacity("requests", 3600, 50.0)
         assert backend.sorted_buckets[0].max_capacity == 50.0
@@ -107,7 +111,9 @@ class TestSyncApplyConfiguredMaxCapacity:
     def test_capacity_reflects_new_max(self, sync_redis_client):
         """Sync: acquirable capacity reflects the new max after apply."""
         config = _make_config(model_family="test-apply-cap-sync")
-        backend = SyncRedisBackendBuilder(sync_redis_client).build(config)
+        backend = SyncRedisBackendBuilder(sync_redis_client, key_prefix="test").build(
+            config
+        )
 
         backend.apply_configured_max_capacity("requests", 3600, 500.0)
 
@@ -116,7 +122,9 @@ class TestSyncApplyConfiguredMaxCapacity:
     def test_nonexistent_bucket_raises(self, sync_redis_client):
         """Sync apply_configured_max_capacity raises ValueError for unknown metric."""
         config = _make_config(model_family="test-apply-missing-sync")
-        backend = SyncRedisBackendBuilder(sync_redis_client).build(config)
+        backend = SyncRedisBackendBuilder(sync_redis_client, key_prefix="test").build(
+            config
+        )
 
         with pytest.raises(ValueError, match="not found"):
             backend.apply_configured_max_capacity("nonexistent", 3600, 100.0)
