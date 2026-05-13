@@ -380,7 +380,9 @@ class SyncRateLimiter:
             collections.OrderedDict()
         )
         self._refunded_ids_cap = 131_072
-        self._refund_guard = threading.Lock()
+        self._refund_state_lock = threading.Lock()
+        self._refund_locks: dict[str, threading.Lock] = {}
+        self._refund_lock_refcounts: dict[str, int] = {}
         self._refund_in_progress: set[str] = set()
         self._acquire_guard = threading.Lock()
         self._pending_acquire_reservations: set[str] = set()
@@ -449,8 +451,18 @@ class SyncRateLimiter:
         with self._acquire_guard:
             self._closed = True
             self._closing = False
-        with self._refund_guard:
-            in_flight_count = len(self._in_flight_reservation_ids)
+        with self._refund_state_lock:
+            refund_locks = list(self._refund_locks.values())
+        acquired_locks = []
+        try:
+            for lock in refund_locks:
+                lock.acquire()
+                acquired_locks.append(lock)
+            with self._refund_state_lock:
+                in_flight_count = len(self._in_flight_reservation_ids)
+        finally:
+            for lock in reversed(acquired_locks):
+                lock.release()
         self._clear_retained_state_after_close()
         _logger.warning(
             "limiter closed; %d reservations still in flight may not be refundable.",
@@ -465,6 +477,8 @@ class SyncRateLimiter:
         self._model_family_to_runtime_max_capacity.clear()
         self._model_family_to_validated_signature.clear()
         self._refunded_reservation_ids.clear()
+        self._refund_locks.clear()
+        self._refund_lock_refcounts.clear()
         self._refund_in_progress.clear()
         self._pending_acquire_reservations.clear()
         self._in_flight_reservation_ids.clear()
@@ -882,26 +896,30 @@ class SyncRateLimiter:
         reservation: CapacityReservation,
     ) -> None:
         rid = reservation.reservation_id
-        with self._refund_guard:
-            self._raise_if_closed()
-            if rid in self._refunded_reservation_ids:
-                warnings.warn(
-                    f"Reservation {rid} has already been "
-                    "refunded. Ignoring duplicate refund to prevent "
-                    "double-crediting capacity.",
-                    UserWarning,
-                    stacklevel=3,
-                )
-                return
-            if rid in self._refund_in_progress:
-                warnings.warn(
-                    f"Reservation {rid} is already being refunded. "
-                    "Ignoring duplicate refund to prevent double-crediting capacity.",
-                    UserWarning,
-                    stacklevel=3,
-                )
-                return
-            self._refund_in_progress.add(rid)
+        refund_lock = self._acquire_reservation_refund_lock(rid)
+        refund_started = False
+        try:
+            with self._refund_state_lock:
+                self._raise_if_closed()
+                if rid in self._refunded_reservation_ids:
+                    warnings.warn(
+                        f"Reservation {rid} has already been "
+                        "refunded. Ignoring duplicate refund to prevent "
+                        "double-crediting capacity.",
+                        UserWarning,
+                        stacklevel=3,
+                    )
+                    return
+                if rid in self._refund_in_progress:
+                    warnings.warn(
+                        f"Reservation {rid} is already being refunded. "
+                        "Ignoring duplicate refund to prevent double-crediting capacity.",
+                        UserWarning,
+                        stacklevel=3,
+                    )
+                    return
+                self._refund_in_progress.add(rid)
+                refund_started = True
             try:
                 actual_usage = frozen_usage(actual_usage)
                 self._refresh_backend_for_reservation(reservation)
@@ -910,8 +928,10 @@ class SyncRateLimiter:
                     raise ValueError(
                         f"Backend not found for model family {reservation.model_family}",
                     )
+                with self._refund_state_lock:
+                    reservation_in_flight = rid in self._in_flight_reservation_ids
                 if (
-                    rid not in self._in_flight_reservation_ids
+                    not reservation_in_flight
                     and not backend.supports_durable_refund_dedup()
                 ):
                     raise ValueError(
@@ -937,10 +957,11 @@ class SyncRateLimiter:
                     reservation.bucket_ids,
                     active_bucket_ids,
                 )
-                self._refunded_reservation_ids[rid] = None
-                if len(self._refunded_reservation_ids) > self._refunded_ids_cap:
-                    self._refunded_reservation_ids.popitem(last=False)
-                self._in_flight_reservation_ids.discard(rid)
+                with self._refund_state_lock:
+                    self._refunded_reservation_ids[rid] = None
+                    if len(self._refunded_reservation_ids) > self._refunded_ids_cap:
+                        self._refunded_reservation_ids.popitem(last=False)
+                    self._in_flight_reservation_ids.discard(rid)
                 try:
                     backend.refund_capacity_for_buckets(
                         reserved_usage,
@@ -951,7 +972,55 @@ class SyncRateLimiter:
                 except Exception as exc:  # noqa: BLE001 - boundary wrapper preserves cause
                     _raise_backend_external_error(exc)
             finally:
-                self._refund_in_progress.discard(rid)
+                if refund_started:
+                    with self._refund_state_lock:
+                        self._refund_in_progress.discard(rid)
+        finally:
+            self._release_reservation_refund_lock(rid, refund_lock)
+
+    def _acquire_reservation_refund_lock(
+        self,
+        reservation_id: str,
+    ) -> threading.Lock:
+        # Lock order: do not wait for a per-reservation lock while holding
+        # _refund_state_lock. Refund work holds at most one per-reservation
+        # lock, then briefly takes _refund_state_lock for metadata; refresh and
+        # backend calls happen without _refund_state_lock held.
+        with self._refund_state_lock:
+            lock = self._refund_locks.get(reservation_id)
+            if lock is None:
+                lock = threading.Lock()
+                self._refund_locks[reservation_id] = lock
+                self._refund_lock_refcounts[reservation_id] = 0
+            self._refund_lock_refcounts[reservation_id] += 1
+        try:
+            lock.acquire()
+        except BaseException:
+            self._release_reservation_refund_lock_reference(reservation_id, lock)
+            raise
+        return lock
+
+    def _release_reservation_refund_lock(
+        self,
+        reservation_id: str,
+        lock: threading.Lock,
+    ) -> None:
+        lock.release()
+        self._release_reservation_refund_lock_reference(reservation_id, lock)
+
+    def _release_reservation_refund_lock_reference(
+        self,
+        reservation_id: str,
+        lock: threading.Lock,
+    ) -> None:
+        with self._refund_state_lock:
+            count = self._refund_lock_refcounts.get(reservation_id, 0) - 1
+            if count <= 0:
+                if self._refund_locks.get(reservation_id) is lock:
+                    self._refund_locks.pop(reservation_id, None)
+                    self._refund_lock_refcounts.pop(reservation_id, None)
+                return
+            self._refund_lock_refcounts[reservation_id] = count
 
     def _unlimited_reservation(self, model: str) -> CapacityReservation:
         # Unlimited reservations bypass metering, so their ``usage`` is
