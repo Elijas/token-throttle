@@ -43,6 +43,7 @@ from token_throttle._interfaces._models import (
 )
 from token_throttle._rate_limiter import RateLimiter
 from token_throttle._sync_rate_limiter import SyncRateLimiter
+from token_throttle.migration import ConfigMigrationIssue, validate_config_for_v2_0
 
 __version__ = "1.5.0"
 
@@ -115,6 +116,7 @@ __all__ = [
     "CalculatedCapacity",
     "Capacities",
     "CapacityReservation",
+    "ConfigMigrationIssue",
     "EncodingGetter",
     "FrozenUsage",
     "MemoryBackend",
@@ -158,6 +160,7 @@ __all__ = [
     "frozen_usage",
     "get_encoding",
     "openai_model_family_getter",
+    "validate_config_for_v2_0",
 ]
 
 if _HAS_REDIS:
