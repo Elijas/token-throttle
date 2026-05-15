@@ -238,6 +238,7 @@ async def test_async_check_and_consume_uses_one_bucket_snapshot_during_reconfigu
         *,
         allow_negative=False,
         buckets=None,
+        **_kwargs,
     ) -> None:
         return None
 
@@ -325,6 +326,7 @@ def test_sync_check_and_consume_uses_one_bucket_snapshot_during_reconfigure(
         *,
         allow_negative=False,
         buckets=None,
+        **_kwargs,
     ) -> None:
         return None
 

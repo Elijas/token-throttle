@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from token_throttle._exceptions import DuplicateRefundError
 from token_throttle._interfaces._interfaces import PerModelConfig
 from token_throttle._interfaces._models import (
     Quota,
@@ -76,8 +77,10 @@ class TestConcurrentDuplicateRefundAsync:
         async def refund_once():
             await limiter.refund_capacity({"tokens": 5}, reservation)
 
-        with pytest.warns(UserWarning, match="has already been refunded"):
-            await asyncio.gather(refund_once(), refund_once())
+        results = await asyncio.gather(
+            refund_once(), refund_once(), return_exceptions=True
+        )
+        assert sum(isinstance(result, DuplicateRefundError) for result in results) == 1
         assert mock_backend.refund_capacity_for_buckets.await_count == 1
 
     async def test_failed_refund_retry_is_not_deduplicated_until_success(self):
@@ -124,7 +127,7 @@ class TestConcurrentDuplicateRefundSync:
         def refund_b():
             hit_refund.wait()
             try:
-                with pytest.warns(UserWarning, match="has already been refunded"):
+                with pytest.raises(DuplicateRefundError):
                     limiter.refund_capacity({"tokens": 5}, reservation)
             except Exception as exc:
                 errors.append(exc)

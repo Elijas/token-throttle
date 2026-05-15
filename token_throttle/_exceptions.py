@@ -29,3 +29,11 @@ class AcquireRefundFailedError(asyncio.CancelledError):
 
 class CardinalityLimitExceededError(ValueError):
     """Raised when a mandatory limiter cardinality or length cap is exceeded."""
+
+
+class DuplicateRefundError(ValueError):
+    """Raised when a reservation has already been refunded."""
+
+
+class UnknownReservationError(ValueError):
+    """Raised when a backend has no record that a reservation was acquired."""

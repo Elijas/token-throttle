@@ -165,7 +165,12 @@ class RateLimiterBackend(ABC):
 
     @abstractmethod
     async def await_for_capacity(
-        self, usage: FrozenUsage, *, timeout: float | None = None
+        self,
+        usage: FrozenUsage,
+        *,
+        timeout: float | None = None,
+        reservation_id: str | None = None,
+        reservation_lifetime_seconds: float | None = None,
     ) -> None:
         """
         Wait until all buckets can satisfy *usage*, then consume atomically.
@@ -182,15 +187,27 @@ class RateLimiterBackend(ABC):
         Raises ``ValueError`` immediately (fail-fast) if any single metric
         in *usage* exceeds that bucket's ``max_capacity``, because waiting
         would be infinite.
+
+        Built-in backends use ``reservation_id`` and
+        ``reservation_lifetime_seconds`` to bind the consumption write to a
+        backend-local acquire marker that must later be presented for refund.
         """
 
     @abstractmethod
-    async def consume_capacity(self, usage: FrozenUsage) -> None:
+    async def consume_capacity(
+        self,
+        usage: FrozenUsage,
+        *,
+        reservation_id: str | None = None,
+        reservation_lifetime_seconds: float | None = None,
+    ) -> None:
         """
         Consume capacity unconditionally.
 
         Capacity may go negative by design (speedometer pattern); this tracks
-        overshoot rather than blocking.
+        overshoot rather than blocking. When ``reservation_id`` is supplied,
+        the built-in backends create the same acquire marker as
+        ``await_for_capacity``.
         """
 
     @abstractmethod
@@ -213,13 +230,15 @@ class RateLimiterBackend(ABC):
         created by the speedometer / ``record_usage`` path.
         """
 
-    async def refund_capacity_for_buckets(
+    async def refund_capacity_for_buckets(  # noqa: PLR0913
         self,
         reserved_usage: FrozenUsage,
         actual_usage: FrozenUsage,
         *,
         bucket_ids: set[BucketId] | frozenset[BucketId] | None = None,
         reservation_id: str | None = None,
+        reservation_model_family: str | None = None,
+        reservation_bucket_ids: set[BucketId] | frozenset[BucketId] | None = None,
     ) -> bool:
         """
         Return unused capacity to a specific subset of buckets.
@@ -227,9 +246,10 @@ class RateLimiterBackend(ABC):
         Backends that support metric-set reconfiguration should override this
         so refunds created before a config rebuild only touch surviving bucket
         ids. Redis-like durable backends should also use ``reservation_id`` for
-        cross-process idempotency. The default falls back to
-        ``refund_capacity()`` and returns ``True`` after applying the refund.
+        cross-process acquire authority and idempotency. The default falls back
+        to ``refund_capacity()`` and returns ``True`` after applying the refund.
         """
+        _ = reservation_model_family, reservation_bucket_ids
         await self.refund_capacity(reserved_usage, actual_usage)
         return True
 
@@ -239,6 +259,17 @@ class RateLimiterBackend(ABC):
 
         Memory/custom backends default to ``False`` because their refund state
         cannot prove whether a non-local reservation was already credited.
+        """
+        return False
+
+    def supports_acquire_marker_authority(self) -> bool:
+        """
+        Whether backend refunds can prove a reservation was acquired out of process.
+
+        Redis backends return ``True`` because they store acquire markers in
+        shared Redis state. Local-memory and opaque custom backends default to
+        ``False``; public limiters only allow their non-local reservations when
+        this is true.
         """
         return False
 
@@ -353,7 +384,12 @@ class SyncRateLimiterBackend(ABC):
 
     @abstractmethod
     def wait_for_capacity(
-        self, usage: FrozenUsage, *, timeout: float | None = None
+        self,
+        usage: FrozenUsage,
+        *,
+        timeout: float | None = None,
+        reservation_id: str | None = None,
+        reservation_lifetime_seconds: float | None = None,
     ) -> None:
         """
         Wait until all buckets can satisfy *usage*, then consume atomically.
@@ -369,7 +405,13 @@ class SyncRateLimiterBackend(ABC):
         """
 
     @abstractmethod
-    def consume_capacity(self, usage: FrozenUsage) -> None:
+    def consume_capacity(
+        self,
+        usage: FrozenUsage,
+        *,
+        reservation_id: str | None = None,
+        reservation_lifetime_seconds: float | None = None,
+    ) -> None:
         """
         Consume capacity unconditionally.
 
@@ -384,13 +426,15 @@ class SyncRateLimiterBackend(ABC):
         actual_usage: FrozenUsage,
     ) -> None: ...
 
-    def refund_capacity_for_buckets(
+    def refund_capacity_for_buckets(  # noqa: PLR0913
         self,
         reserved_usage: FrozenUsage,
         actual_usage: FrozenUsage,
         *,
         bucket_ids: set[BucketId] | frozenset[BucketId] | None = None,
         reservation_id: str | None = None,
+        reservation_model_family: str | None = None,
+        reservation_bucket_ids: set[BucketId] | frozenset[BucketId] | None = None,
     ) -> bool:
         """
         Synchronous counterpart of ``refund_capacity_for_buckets``.
@@ -398,6 +442,7 @@ class SyncRateLimiterBackend(ABC):
         The default falls back to ``refund_capacity()`` and returns ``True``
         for backwards compatibility with custom backends.
         """
+        _ = reservation_model_family, reservation_bucket_ids
         self.refund_capacity(reserved_usage, actual_usage)
         return True
 
@@ -407,6 +452,12 @@ class SyncRateLimiterBackend(ABC):
 
         Memory/custom backends default to ``False`` because their refund state
         cannot prove whether a non-local reservation was already credited.
+        """
+        return False
+
+    def supports_acquire_marker_authority(self) -> bool:
+        """
+        Synchronous counterpart of ``supports_acquire_marker_authority``.
         """
         return False
 

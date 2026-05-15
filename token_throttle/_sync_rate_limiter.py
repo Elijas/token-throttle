@@ -12,6 +12,8 @@ from frozendict import frozendict
 from token_throttle._exceptions import (
     AcquireRefundFailedError,
     CardinalityLimitExceededError,
+    DuplicateRefundError,
+    UnknownReservationError,
 )
 from token_throttle._interfaces._callable_utils import is_async_callable
 from token_throttle._interfaces._callbacks import (
@@ -311,18 +313,15 @@ def _warn_refund_refresh_failed(
     )
 
 
-def _raise_limiter_instance_mismatch() -> None:
-    raise ValueError(
-        "Reservation was issued by a different limiter; refund cross-limiter "
-        "is not supported. See L13 N01."
-    )
-
-
 def _raise_legacy_reservation_rejected() -> None:
     raise ValueError(
         "legacy v1.4.x reservations no longer supported in v2.0.0; "
         "drain v1.4.x before upgrade"
     )
+
+
+def _raise_duplicate_refund(_reservation_id: str) -> None:
+    raise DuplicateRefundError("reservation already refunded")
 
 
 def _get_backend_lifetime_hook(
@@ -636,7 +635,7 @@ class SyncRateLimiter:
         self._pending_acquire_reservations.discard(reservation_id)
         self._in_flight_reservation_family.pop(reservation_id, None)
 
-    def _verify_reservation_limiter_instance(
+    def _verify_reservation_has_limiter_instance(
         self,
         reservation: CapacityReservation,
     ) -> None:
@@ -647,14 +646,6 @@ class SyncRateLimiter:
                 reservation.reservation_id,
             )
             _raise_legacy_reservation_rejected()
-        if reservation.limiter_instance_id != self._limiter_instance_id:
-            _logger.warning(
-                "Reservation %s was issued by limiter %s, not this limiter %s",
-                reservation.reservation_id,
-                reservation.limiter_instance_id,
-                self._limiter_instance_id,
-            )
-            _raise_limiter_instance_mismatch()
 
     def _reject_legacy_reservation_before_revalidation(
         self,
@@ -668,7 +659,7 @@ class SyncRateLimiter:
             and fields["limiter_instance_id"] is None
             and "reservation_id" in fields
         ):
-            self._verify_reservation_limiter_instance(reservation)
+            self._verify_reservation_has_limiter_instance(reservation)
 
     def close(self) -> None:
         """
@@ -962,9 +953,22 @@ class SyncRateLimiter:
             self._validate_shared_model_family_config(model, limit_config)
             backend = self._get_backend(limit_config)
             if _block:
-                backend.wait_for_capacity(usage, timeout=timeout)
+                backend.wait_for_capacity(
+                    usage,
+                    timeout=timeout,
+                    reservation_id=reservation.reservation_id,
+                    reservation_lifetime_seconds=(
+                        self._max_reservation_lifetime_seconds
+                    ),
+                )
             else:
-                backend.consume_capacity(usage)
+                backend.consume_capacity(
+                    usage,
+                    reservation_id=reservation.reservation_id,
+                    reservation_lifetime_seconds=(
+                        self._max_reservation_lifetime_seconds
+                    ),
+                )
         except Exception as exc:  # noqa: BLE001 - boundary wrapper preserves cause
             self._rollback_pending_acquire(reservation.reservation_id)
             _raise_backend_external_error(exc)
@@ -1069,7 +1073,7 @@ class SyncRateLimiter:
         self._reject_legacy_reservation_before_revalidation(reservation)
         reservation = _revalidate_dto(reservation)
         is_unlimited = is_unlimited_reservation(reservation)
-        self._verify_reservation_limiter_instance(reservation)
+        self._verify_reservation_has_limiter_instance(reservation)
         if is_unlimited:
             self._forget_in_flight_reservation(reservation.reservation_id)
             return
@@ -1096,7 +1100,7 @@ class SyncRateLimiter:
         self._reject_legacy_reservation_before_revalidation(reservation)
         reservation = _revalidate_dto(reservation)
         is_unlimited = is_unlimited_reservation(reservation)
-        self._verify_reservation_limiter_instance(reservation)
+        self._verify_reservation_has_limiter_instance(reservation)
         if is_unlimited:
             self._forget_in_flight_reservation(reservation.reservation_id)
             return
@@ -1304,22 +1308,9 @@ class SyncRateLimiter:
                 if refund_state is not _REFUND_STATE_MISSING and (
                     _refund_state_is_committed(refund_state)
                 ):
-                    warnings.warn(
-                        f"Reservation {rid} has already been "
-                        "refunded. Ignoring duplicate refund to prevent "
-                        "double-crediting capacity.",
-                        UserWarning,
-                        stacklevel=3,
-                    )
-                    return
+                    _raise_duplicate_refund(rid)
                 if rid in self._refund_in_progress:
-                    warnings.warn(
-                        f"Reservation {rid} is already being refunded. "
-                        "Ignoring duplicate refund to prevent double-crediting capacity.",
-                        UserWarning,
-                        stacklevel=3,
-                    )
-                    return
+                    raise DuplicateRefundError("reservation refund already in progress")
                 self._remember_refund_state(rid, _REFUND_STATE_PENDING)
                 self._refund_in_progress.add(rid)
                 refund_started = True
@@ -1335,12 +1326,10 @@ class SyncRateLimiter:
                     reservation_in_flight = rid in self._in_flight_reservation_ids
                 if (
                     not reservation_in_flight
-                    and not backend.supports_durable_refund_dedup()
+                    and not backend.supports_acquire_marker_authority()
                 ):
-                    raise ValueError(  # noqa: TRY301
-                        "Reservation is not in flight for this limiter; "
-                        "cold-restart refunds require a backend with durable "
-                        "refund dedup."
+                    raise UnknownReservationError(  # noqa: TRY301
+                        "reservation was never acquired by this backend"
                     )
                 # If `_refresh_backend_for_reservation` swallowed an exception (it
                 # downgrades refresh failures to RuntimeWarning to keep refunds
@@ -1373,7 +1362,15 @@ class SyncRateLimiter:
                         actual_usage,
                         bucket_ids=refund_bucket_ids,
                         reservation_id=rid,
+                        reservation_model_family=reservation.model_family,
+                        reservation_bucket_ids=reservation.bucket_ids,
                     )
+                except DuplicateRefundError:
+                    self._commit_refund_state(rid, reservation.model_family)
+                    raise
+                except UnknownReservationError:
+                    self._clear_refund_state_if_pending(rid)
+                    raise
                 except Exception as exc:  # noqa: BLE001 - boundary wrapper preserves cause
                     if self._refund_backend_state_changed(
                         refund_backend,

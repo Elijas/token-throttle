@@ -228,6 +228,8 @@ class TestRefundCapacityValidation:
             {"tokens": 80, "requests": 1},
             bucket_ids=ANY,
             reservation_id=reservation.reservation_id,
+            reservation_model_family=reservation.model_family,
+            reservation_bucket_ids=reservation.bucket_ids,
         )
 
     def test_mismatched_usage_keys_raises(self):
@@ -576,6 +578,8 @@ class TestRefundCapacityFromResponseValidation:
             {"tokens": 80, "requests": 1},
             bucket_ids=ANY,
             reservation_id=reservation.reservation_id,
+            reservation_model_family=reservation.model_family,
+            reservation_bucket_ids=reservation.bucket_ids,
         )
 
     def test_pydantic_response_object(self):
@@ -649,6 +653,8 @@ class TestRefundCapacityFromResponseValidation:
             {"tokens": 80, "requests": 1},
             bucket_ids=ANY,
             reservation_id=reservation.reservation_id,
+            reservation_model_family=reservation.model_family,
+            reservation_bucket_ids=reservation.bucket_ids,
         )
 
     def test_dict_response_object(self):
@@ -682,6 +688,8 @@ class TestRefundCapacityFromResponseValidation:
             {"tokens": 80, "requests": 1},
             bucket_ids=ANY,
             reservation_id=reservation.reservation_id,
+            reservation_model_family=reservation.model_family,
+            reservation_bucket_ids=reservation.bucket_ids,
         )
 
     def test_response_dict_missing_usage_key_raises_value_error(self):

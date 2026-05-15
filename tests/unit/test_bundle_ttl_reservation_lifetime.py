@@ -89,11 +89,19 @@ class _AsyncDedupBackend(RateLimiterBackend):
         usage: FrozenUsage,
         *,
         timeout: float | None = None,
+        reservation_id: str | None = None,
+        reservation_lifetime_seconds: float | None = None,
     ) -> None:
-        _ = usage, timeout
+        _ = usage, timeout, reservation_id, reservation_lifetime_seconds
 
-    async def consume_capacity(self, usage: FrozenUsage) -> None:
-        _ = usage
+    async def consume_capacity(
+        self,
+        usage: FrozenUsage,
+        *,
+        reservation_id: str | None = None,
+        reservation_lifetime_seconds: float | None = None,
+    ) -> None:
+        _ = usage, reservation_id, reservation_lifetime_seconds
 
     async def refund_capacity(
         self,
@@ -102,15 +110,23 @@ class _AsyncDedupBackend(RateLimiterBackend):
     ) -> None:
         await self.refund_capacity_for_buckets(reserved_usage, actual_usage)
 
-    async def refund_capacity_for_buckets(
+    async def refund_capacity_for_buckets(  # noqa: PLR0913
         self,
         reserved_usage: FrozenUsage,
         actual_usage: FrozenUsage,
         *,
         bucket_ids: set[BucketId] | frozenset[BucketId] | None = None,
         reservation_id: str | None = None,
+        reservation_model_family: str | None = None,
+        reservation_bucket_ids: set[BucketId] | frozenset[BucketId] | None = None,
     ) -> bool:
-        _ = reserved_usage, actual_usage, bucket_ids
+        _ = (
+            reserved_usage,
+            actual_usage,
+            bucket_ids,
+            reservation_model_family,
+            reservation_bucket_ids,
+        )
         if reservation_id is not None:
             key = redis_refund_dedup_key("tenant", reservation_id)
             claimed = await self.redis.set(

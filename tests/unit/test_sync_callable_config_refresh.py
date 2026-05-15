@@ -1066,10 +1066,10 @@ class TestSyncCallableConfigMetricSetRebuildIntegrity:
 
 
 class SimpleSyncBackend(SyncRateLimiterBackend):
-    def wait_for_capacity(self, usage, *, timeout=None) -> None:
+    def wait_for_capacity(self, usage, *, timeout=None, **kwargs) -> None:
         return None
 
-    def consume_capacity(self, usage) -> None:
+    def consume_capacity(self, usage, **kwargs) -> None:
         return None
 
     def refund_capacity(self, reserved_usage, actual_usage) -> None:

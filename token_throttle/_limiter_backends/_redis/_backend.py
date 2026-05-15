@@ -21,6 +21,7 @@ except ImportError as exc:
     ) from exc
 from frozendict import frozendict
 
+from token_throttle._exceptions import DuplicateRefundError, UnknownReservationError
 from token_throttle._interfaces._callable_utils import (
     suppress_current_task_cancellation,
 )
@@ -48,6 +49,8 @@ from ._bucket import (
 )
 from ._keys import (
     DEFAULT_REFUND_DEDUP_TTL_SECONDS,
+    redis_acquired_marker_key,
+    redis_acquired_marker_value,
     redis_refund_dedup_key,
     validate_redis_key_prefix,
     validate_refund_dedup_ttl_seconds,
@@ -98,6 +101,42 @@ DEFAULT_LOCK_BLOCKING_TIMEOUT_SECONDS = 5.0
 DEFAULT_LOCK_SLEEP_SECONDS = 0.05
 _MIN_PRODUCTION_REDIS_POOL_CONNECTIONS = 10
 _MISSING = object()
+_ACQUIRE_MARKER_SET_SCRIPT = """
+local claimed = redis.call('SET', KEYS[1], ARGV[2], 'PX', ARGV[1], 'NX')
+if not claimed then
+    return 'duplicate_acquire'
+end
+local arg_index = 3
+for key_index = 2, #KEYS, 2 do
+    redis.call('SET', KEYS[key_index], ARGV[arg_index], 'EX', ARGV[arg_index + 2])
+    redis.call('SET', KEYS[key_index + 1], ARGV[arg_index + 1], 'EX', ARGV[arg_index + 2])
+    arg_index = arg_index + 3
+end
+return 'ok'
+"""
+_REFUND_WITH_MARKER_SCRIPT = """
+local marker = redis.call('GETDEL', KEYS[1])
+if not marker then
+    if redis.call('EXISTS', KEYS[2]) == 1 then
+        return 'duplicate_refund'
+    end
+    return 'unknown_reservation'
+end
+if marker ~= ARGV[1] then
+    return 'marker_mismatch'
+end
+local claimed = redis.call('SET', KEYS[2], '1', 'EX', ARGV[2], 'NX')
+if not claimed then
+    return 'duplicate_refund'
+end
+local arg_index = 3
+for key_index = 3, #KEYS, 2 do
+    redis.call('SET', KEYS[key_index], ARGV[arg_index], 'EX', ARGV[arg_index + 2])
+    redis.call('SET', KEYS[key_index + 1], ARGV[arg_index + 1], 'EX', ARGV[arg_index + 2])
+    arg_index = arg_index + 3
+end
+return 'ok'
+"""
 
 
 def _raise_lock_timeout_error() -> typing.NoReturn:
@@ -111,6 +150,26 @@ def _validate_positive_seconds(value: object, *, name: str) -> float:
     if not math.isfinite(value_float) or value_float <= 0:
         raise ValueError(f"{name} must be finite and greater than 0")
     return value_float
+
+
+def _reservation_lifetime_ttl_ms(value: float | None) -> int:
+    if value is None:
+        raise ValueError(
+            "reservation_lifetime_seconds is required when reservation_id is supplied"
+        )
+    value_float = _validate_positive_seconds(
+        value,
+        name="reservation_lifetime_seconds",
+    )
+    return max(1, math.ceil(value_float * 1000.0))
+
+
+def _decode_redis_script_status(value: object) -> str:
+    if isinstance(value, bytes):
+        return value.decode()
+    if isinstance(value, str):
+        return value
+    raise RuntimeError(f"Redis script returned unexpected status {value!r}")
 
 
 def _warn_if_small_redis_pool(redis_client: object, *, stacklevel: int = 3) -> None:
@@ -436,11 +495,20 @@ class RedisBackend(RateLimiterBackend):
     def supports_durable_refund_dedup(self) -> bool:
         return True
 
+    def supports_acquire_marker_authority(self) -> bool:
+        return True
+
     def _refund_dedup_key(self, reservation_id: str | None) -> str | None:
         if reservation_id is None:
             return None
         reservation_id = _validate_reservation_id(reservation_id)
         return redis_refund_dedup_key(self._key_prefix, reservation_id)
+
+    def _acquired_marker_key(self, reservation_id: str | None) -> str | None:
+        if reservation_id is None:
+            return None
+        reservation_id = _validate_reservation_id(reservation_id)
+        return redis_acquired_marker_key(self._key_prefix, reservation_id)
 
     async def _refund_dedup_exists(self, reservation_id: str | None) -> bool:
         key = self._refund_dedup_key(reservation_id)
@@ -747,6 +815,10 @@ class RedisBackend(RateLimiterBackend):
         refund_dedup_key: str | None = None,
         refund_dedup_reservation_id: str | None = None,
         refund_dedup_ttl_seconds: int | None = None,
+        acquired_marker_key: str | None = None,
+        acquired_marker_value: str | None = None,
+        acquired_marker_ttl_ms: int | None = None,
+        delete_acquired_marker_key: str | None = None,
     ) -> bool:
         """
         Set capacities for all buckets. Caller must hold the distributed lock.
@@ -760,6 +832,52 @@ class RedisBackend(RateLimiterBackend):
 
         if current_time is None:
             current_time = await async_server_time(self._redis)
+
+        if acquired_marker_key is not None:
+            if acquired_marker_value is None or acquired_marker_ttl_ms is None:
+                raise ValueError("acquired marker writes require marker value and TTL")
+            keys: list[str] = [acquired_marker_key]
+            args: list[object] = [acquired_marker_ttl_ms, acquired_marker_value]
+            for (usage_metric, per_seconds), amount in new_capacities.items():
+                bucket = self._find_bucket(
+                    target_buckets,
+                    usage_metric,
+                    per_seconds,
+                )
+                if bucket is None:
+                    raise ValueError(
+                        f"Bucket '{usage_metric}/{per_seconds}s' not found"
+                    )
+                if not math.isfinite(float(amount)):
+                    raise ValueError(f"capacity must be finite (got {amount!r})")
+                normalized_amount = amount if allow_negative else max(0, amount)
+                if normalized_amount == 0.0:
+                    normalized_amount = 0.0
+                keys.extend(
+                    [
+                        bucket._last_checked_key,  # noqa: SLF001
+                        bucket._capacity_key,  # noqa: SLF001
+                    ]
+                )
+                args.extend(
+                    [
+                        current_time,
+                        normalized_amount,
+                        bucket._bucket_ttl_seconds,  # noqa: SLF001
+                    ]
+                )
+            result = await self._redis.eval(
+                _ACQUIRE_MARKER_SET_SCRIPT,
+                len(keys),
+                *keys,
+                *args,
+            )
+            status = _decode_redis_script_status(result)
+            if status == "ok":
+                return True
+            if status == "duplicate_acquire":
+                raise DuplicateRefundError("reservation already acquired")
+            raise RuntimeError(f"Redis acquire marker script failed: {status}")
 
         for (usage_metric, per_seconds), amount in new_capacities.items():
             bucket = self._find_bucket(
@@ -783,6 +901,8 @@ class RedisBackend(RateLimiterBackend):
                 ex=refund_dedup_ttl_seconds,
                 nx=True,
             )
+        if delete_acquired_marker_key is not None:
+            pipeline.delete(delete_acquired_marker_key)
         try:
             results = await pipeline.execute()
         except redis.exceptions.ResponseError as exc:
@@ -792,13 +912,73 @@ class RedisBackend(RateLimiterBackend):
         results = _validate_pipeline_results(
             results,
             context="RedisBackend._set_capacities_unsafe",
-            expected_count=(len(new_capacities) * 2) + 1,
+            expected_count=(len(new_capacities) * 2)
+            + 1
+            + int(delete_acquired_marker_key is not None),
         )
         if results[-1]:
             return True
         if refund_dedup_reservation_id is not None:
             self._warn_refund_dedup_duplicate(refund_dedup_reservation_id)
         return False
+
+    async def _commit_refund_with_acquire_marker_unsafe(  # noqa: PLR0913
+        self,
+        new_capacities: Capacities,
+        *,
+        current_time: float,
+        buckets: tuple[RedisBucket, ...] | list[RedisBucket],
+        acquired_marker_key: str,
+        acquired_marker_value: str,
+        refund_dedup_key: str,
+    ) -> None:
+        keys: list[str] = [acquired_marker_key, refund_dedup_key]
+        args: list[object] = [
+            acquired_marker_value,
+            self._refund_dedup_ttl_seconds,
+        ]
+        for (usage_metric, per_seconds), amount in new_capacities.items():
+            bucket = self._find_bucket(
+                buckets,
+                usage_metric,
+                per_seconds,
+            )
+            if bucket is None:
+                raise ValueError(f"Bucket '{usage_metric}/{per_seconds}s' not found")
+            if not math.isfinite(float(amount)):
+                raise ValueError(f"capacity must be finite (got {amount!r})")
+            normalized_amount = amount
+            if normalized_amount == 0.0:
+                normalized_amount = 0.0
+            keys.extend(
+                [
+                    bucket._last_checked_key,  # noqa: SLF001
+                    bucket._capacity_key,  # noqa: SLF001
+                ]
+            )
+            args.extend(
+                [
+                    current_time,
+                    normalized_amount,
+                    bucket._bucket_ttl_seconds,  # noqa: SLF001
+                ]
+            )
+        result = await self._redis.eval(
+            _REFUND_WITH_MARKER_SCRIPT,
+            len(keys),
+            *keys,
+            *args,
+        )
+        status = _decode_redis_script_status(result)
+        if status == "ok":
+            return
+        if status == "duplicate_refund":
+            raise DuplicateRefundError("reservation already refunded")
+        if status in {"unknown_reservation", "marker_mismatch"}:
+            raise UnknownReservationError(
+                "reservation was never acquired by this backend"
+            )
+        raise RuntimeError(f"Redis refund marker script failed: {status}")
 
     def _bucket_ids(
         self,
@@ -891,6 +1071,8 @@ class RedisBackend(RateLimiterBackend):
         usage_: FrozenUsage,
         *,
         lock_blocking_timeout: float | None = None,
+        reservation_id: str | None = None,
+        reservation_lifetime_seconds: float | None = None,
     ) -> tuple[bool, Capacities, Capacities, float | None, tuple[RedisBucket, ...]]:
         """Check if there's enough capacity and consume it if available."""
         usage: FrozenUsage = frozendict(
@@ -989,6 +1171,20 @@ class RedisBackend(RateLimiterBackend):
                         current_time=current_time,
                         allow_negative=False,
                         buckets=buckets,
+                        acquired_marker_key=self._acquired_marker_key(reservation_id),
+                        acquired_marker_value=(
+                            redis_acquired_marker_value(
+                                model_family=self._limit_config.get_model_family(),
+                                bucket_ids=self._bucket_ids(buckets),
+                            )
+                            if reservation_id is not None
+                            else None
+                        ),
+                        acquired_marker_ttl_ms=(
+                            _reservation_lifetime_ttl_ms(reservation_lifetime_seconds)
+                            if reservation_id is not None
+                            else None
+                        ),
                     )
                 )
                 try:
@@ -1013,7 +1209,11 @@ class RedisBackend(RateLimiterBackend):
         except asyncio.CancelledError:
             if consumed:
                 try:  # noqa: SIM105
-                    await self._refund_cancelled_consumption(usage, buckets=buckets)
+                    await self._refund_cancelled_consumption(
+                        usage,
+                        buckets=buckets,
+                        acquired_marker_key=self._acquired_marker_key(reservation_id),
+                    )
                 except BaseException:  # noqa: BLE001, S110
                     # Best-effort: shield ensures background completion.
                     # Swallow so CancelledError always propagates for
@@ -1028,7 +1228,13 @@ class RedisBackend(RateLimiterBackend):
             buckets,
         )
 
-    async def consume_capacity(self, usage: FrozenUsage) -> None:
+    async def consume_capacity(
+        self,
+        usage: FrozenUsage,
+        *,
+        reservation_id: str | None = None,
+        reservation_lifetime_seconds: float | None = None,
+    ) -> None:
         """
         Consume capacity unconditionally.
 
@@ -1099,6 +1305,20 @@ class RedisBackend(RateLimiterBackend):
                     current_time=current_time,
                     allow_negative=True,
                     buckets=buckets,
+                    acquired_marker_key=self._acquired_marker_key(reservation_id),
+                    acquired_marker_value=(
+                        redis_acquired_marker_value(
+                            model_family=self._limit_config.get_model_family(),
+                            bucket_ids=self._bucket_ids(buckets),
+                        )
+                        if reservation_id is not None
+                        else None
+                    ),
+                    acquired_marker_ttl_ms=(
+                        _reservation_lifetime_ttl_ms(reservation_lifetime_seconds)
+                        if reservation_id is not None
+                        else None
+                    ),
                 )
             )
             try:
@@ -1146,6 +1366,8 @@ class RedisBackend(RateLimiterBackend):
         usage: FrozenUsage,
         *,
         timeout: float | None = None,
+        reservation_id: str | None = None,
+        reservation_lifetime_seconds: float | None = None,
     ) -> None:
         """Wait until all buckets have the required capacity."""
         validate_backend_usage(usage, self._validation_metric_names())
@@ -1170,6 +1392,8 @@ class RedisBackend(RateLimiterBackend):
                     await self._check_and_consume_capacity(
                         usage,
                         lock_blocking_timeout=remaining,
+                        reservation_id=reservation_id,
+                        reservation_lifetime_seconds=reservation_lifetime_seconds,
                     )
                 )
             except redis.exceptions.LockError as exc:
@@ -1206,7 +1430,13 @@ class RedisBackend(RateLimiterBackend):
                             )
                 except asyncio.CancelledError:
                     try:  # noqa: SIM105
-                        await self._refund_cancelled_consumption(usage, buckets=buckets)
+                        await self._refund_cancelled_consumption(
+                            usage,
+                            buckets=buckets,
+                            acquired_marker_key=self._acquired_marker_key(
+                                reservation_id
+                            ),
+                        )
                     except BaseException:  # noqa: BLE001, S110
                         # Best-effort: shield ensures background completion.
                         # Swallow so CancelledError always propagates for
@@ -1309,13 +1539,17 @@ class RedisBackend(RateLimiterBackend):
             bucket_ids=self._bucket_ids(),
         )
 
-    async def refund_capacity_for_buckets(
+    async def refund_capacity_for_buckets(  # noqa: PLR0913
         self,
         reserved_usage: FrozenUsage,
         actual_usage: FrozenUsage,
         *,
         bucket_ids: set[tuple[str, int]] | frozenset[tuple[str, int]] | None = None,
         reservation_id: str | None = None,
+        reservation_model_family: str | None = None,
+        reservation_bucket_ids: set[tuple[str, int]]
+        | frozenset[tuple[str, int]]
+        | None = None,
     ) -> bool:
         """
         Refund unused capacity back to the rate limiter based on actual usage.
@@ -1360,6 +1594,10 @@ class RedisBackend(RateLimiterBackend):
             reservation_id: If provided, checked before bucket mutation and
                             committed in Redis only after the refund write is
                             queued successfully.
+            reservation_model_family: Model-family identity captured on the
+                                      reservation for acquire-marker validation.
+            reservation_bucket_ids: Bucket identity set captured on the
+                                    reservation for acquire-marker validation.
 
         Example:
             TIME N=0: Reserve 100 tokens (assumes all consumed immediately)
@@ -1389,8 +1627,40 @@ class RedisBackend(RateLimiterBackend):
             refund_bucket_ids,
             backend_bucket_ids,
         )
+        expected_marker_value: str | None = None
+        acquired_marker_key = self._acquired_marker_key(reservation_id)
+        refund_dedup_key = self._refund_dedup_key(reservation_id)
+        if reservation_id is not None:
+            if acquired_marker_key is None or refund_dedup_key is None:
+                raise UnknownReservationError(
+                    "reservation was never acquired by this backend"
+                )
+            expected_marker_value = redis_acquired_marker_value(
+                model_family=(
+                    reservation_model_family or self._limit_config.get_model_family()
+                ),
+                bucket_ids=(
+                    frozenset(reservation_bucket_ids)
+                    if reservation_bucket_ids is not None
+                    else backend_bucket_ids
+                ),
+            )
         if not refund_bucket_ids:
-            return await self._commit_refund_dedup(reservation_id)
+            if (
+                reservation_id is not None
+                and acquired_marker_key is not None
+                and refund_dedup_key is not None
+                and expected_marker_value is not None
+            ):
+                await self._commit_refund_with_acquire_marker_unsafe(
+                    frozendict(),
+                    current_time=await async_server_time(self._redis),
+                    buckets=(),
+                    acquired_marker_key=acquired_marker_key,
+                    acquired_marker_value=expected_marker_value,
+                    refund_dedup_key=refund_dedup_key,
+                )
+            return True
         # Calculate how much to refund for each metric
         refund_usage_: dict[str, float] = {}
         for metric, reserved_amount in reserved_usage.items():
@@ -1416,10 +1686,6 @@ class RedisBackend(RateLimiterBackend):
         async with await self._lock(
             timeout=LOCK_TIMEOUT_SECONDS, buckets=buckets
         ) as lock_stack:
-            if await self._refund_dedup_exists(reservation_id):
-                if reservation_id is not None:
-                    self._warn_refund_dedup_duplicate(reservation_id)
-                return False
             pipeline = self._redis.pipeline()
             current_time = await async_server_time(self._redis)
 
@@ -1479,21 +1745,32 @@ class RedisBackend(RateLimiterBackend):
             # permanent lost-refund failure where SET NX succeeds and the later
             # bucket mutation fails; exact concurrent retries are serialized by
             # the bucket locks, while lock expiry/manual writers can still race.
-            refund_dedup_key = self._refund_dedup_key(reservation_id)
-            write_task = asyncio.create_task(
-                self._set_capacities_unsafe(
-                    frozendict(updated_capacities),
-                    pipeline=pipeline,
-                    current_time=current_time,
-                    allow_negative=True,
-                    buckets=buckets,
-                    refund_dedup_key=refund_dedup_key,
-                    refund_dedup_reservation_id=reservation_id,
-                    refund_dedup_ttl_seconds=self._refund_dedup_ttl_seconds,
+            if reservation_id is None:
+                write_task = asyncio.create_task(
+                    self._set_capacities_unsafe(
+                        frozendict(updated_capacities),
+                        pipeline=pipeline,
+                        current_time=current_time,
+                        allow_negative=True,
+                        buckets=buckets,
+                    )
                 )
-            )
+            else:
+                assert acquired_marker_key is not None  # noqa: S101
+                assert refund_dedup_key is not None  # noqa: S101
+                assert expected_marker_value is not None  # noqa: S101
+                write_task = asyncio.create_task(
+                    self._commit_refund_with_acquire_marker_unsafe(
+                        frozendict(updated_capacities),
+                        current_time=current_time,
+                        buckets=buckets,
+                        acquired_marker_key=acquired_marker_key,
+                        acquired_marker_value=expected_marker_value,
+                        refund_dedup_key=refund_dedup_key,
+                    )
+                )
             try:
-                dedup_committed = await asyncio.shield(write_task)
+                await asyncio.shield(write_task)
             except asyncio.CancelledError:
                 refunded = await self._wait_for_task_outcome_while_cancelled(write_task)
                 if not refunded:
@@ -1503,9 +1780,8 @@ class RedisBackend(RateLimiterBackend):
                 suppress_current_task_cancellation()
                 async with self._local_condition:
                     self._local_condition.notify_all()
-                return bool(write_task.result())
-            if not dedup_committed:
-                return False
+                write_task.result()
+                return True
         async with self._local_condition:
             self._local_condition.notify_all()
         await self._fresh_start_buckets_callback(fresh_start_buckets)
@@ -1781,6 +2057,7 @@ class RedisBackend(RateLimiterBackend):
         usage: FrozenUsage,
         *,
         buckets: tuple[RedisBucket, ...] | list[RedisBucket] | None = None,
+        acquired_marker_key: str | None = None,
     ) -> None:
         """
         Refund capacity consumed before a CancelledError hit callbacks.
@@ -1835,6 +2112,7 @@ class RedisBackend(RateLimiterBackend):
                     current_time=current_time,
                     allow_negative=True,
                     buckets=target_buckets,
+                    delete_acquired_marker_key=acquired_marker_key,
                 )
             async with self._local_condition:
                 self._local_condition.notify_all()

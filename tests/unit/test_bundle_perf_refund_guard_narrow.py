@@ -8,6 +8,7 @@ import time
 
 import pytest
 
+from token_throttle._exceptions import DuplicateRefundError
 from token_throttle._interfaces._interfaces import PerModelConfig
 from token_throttle._interfaces._models import Quota, UsageQuotas
 from token_throttle._limiter_backends._memory._backend import MemoryBackendBuilder
@@ -53,7 +54,7 @@ class TestRefundCorrectnessStillMatchesFix07:
         with pytest.raises(RuntimeError, match="simulated post-write failure"):
             await limiter.refund_capacity({"tokens": 10}, reservation)
 
-        with pytest.warns(UserWarning, match="has already been refunded"):
+        with pytest.raises(DuplicateRefundError, match="reservation already refunded"):
             await limiter.refund_capacity({"tokens": 10}, reservation)
 
         assert calls == 1
@@ -83,7 +84,7 @@ class TestRefundCorrectnessStillMatchesFix07:
         with pytest.raises(asyncio.CancelledError):
             await task
 
-        with pytest.warns(UserWarning, match="has already been refunded"):
+        with pytest.raises(DuplicateRefundError, match="reservation already refunded"):
             await limiter.refund_capacity({"tokens": 10}, reservation)
 
         assert calls == 1
@@ -107,7 +108,7 @@ class TestRefundCorrectnessStillMatchesFix07:
         assert reservation.reservation_id in limiter._refunded_reservation_ids
 
         current_config = _two_metric_config()
-        with pytest.warns(UserWarning, match="has already been refunded"):
+        with pytest.raises(DuplicateRefundError, match="reservation already refunded"):
             await limiter.refund_capacity({"tokens": 10, "requests": 1}, reservation)
 
         assert limiter._refund_locks == {}
@@ -130,7 +131,7 @@ class TestRefundCorrectnessStillMatchesFix07:
         with pytest.raises(RuntimeError, match="simulated post-write failure"):
             limiter.refund_capacity({"tokens": 10}, reservation)
 
-        with pytest.warns(UserWarning, match="has already been refunded"):
+        with pytest.raises(DuplicateRefundError, match="reservation already refunded"):
             limiter.refund_capacity({"tokens": 10}, reservation)
 
         assert calls == 1
@@ -204,10 +205,14 @@ class TestPerReservationRefundLocks:
 
         async def release_and_collect_refunds() -> None:
             release.set()
-            await asyncio.gather(first_task, second_task)
+            results = await asyncio.gather(
+                first_task, second_task, return_exceptions=True
+            )
+            assert (
+                sum(isinstance(result, DuplicateRefundError) for result in results) == 1
+            )
 
-        with pytest.warns(UserWarning, match="has already been refunded"):
-            await release_and_collect_refunds()
+        await release_and_collect_refunds()
 
         assert calls == 1
         assert limiter._refund_locks == {}
@@ -283,7 +288,7 @@ class TestPerReservationRefundLocks:
 
         def duplicate_refund() -> None:
             try:
-                with pytest.warns(UserWarning, match="has already been refunded"):
+                with pytest.raises(DuplicateRefundError):
                     limiter.refund_capacity({"tokens": 0}, reservation)
             except BaseException as exc:  # pragma: no cover - surfaced below
                 errors.append(exc)

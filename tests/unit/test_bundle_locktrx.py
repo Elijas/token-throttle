@@ -8,6 +8,7 @@ import threading
 
 import pytest
 
+from token_throttle._exceptions import DuplicateRefundError
 from token_throttle._interfaces._interfaces import PerModelConfig
 from token_throttle._interfaces._models import Quota, UsageQuotas
 from token_throttle._limiter_backends._memory._backend import MemoryBackendBuilder
@@ -76,7 +77,7 @@ class TestRefundLockTransaction:
         with pytest.raises(RuntimeError, match="simulated post-write failure"):
             await limiter.refund_capacity({"tokens": 10}, reservation)
 
-        with pytest.warns(UserWarning, match="has already been refunded"):
+        with pytest.raises(DuplicateRefundError, match="reservation already refunded"):
             await limiter.refund_capacity({"tokens": 10}, reservation)
 
         assert calls == 1
@@ -105,7 +106,7 @@ class TestRefundLockTransaction:
         with pytest.raises(asyncio.CancelledError):
             await task
 
-        with pytest.warns(UserWarning, match="has already been refunded"):
+        with pytest.raises(DuplicateRefundError, match="reservation already refunded"):
             await limiter.refund_capacity({"tokens": 10}, reservation)
 
         assert calls == 1
@@ -127,7 +128,7 @@ class TestRefundLockTransaction:
         assert reservation.reservation_id in limiter._refunded_reservation_ids
 
         current_config = _two_metric_config()
-        with pytest.warns(UserWarning, match="has already been refunded"):
+        with pytest.raises(DuplicateRefundError, match="reservation already refunded"):
             await limiter.refund_capacity({"tokens": 10, "requests": 1}, reservation)
 
     def test_sync_post_write_failure_keeps_refund_deduped(self):
@@ -148,7 +149,7 @@ class TestRefundLockTransaction:
         with pytest.raises(RuntimeError, match="simulated post-write failure"):
             limiter.refund_capacity({"tokens": 10}, reservation)
 
-        with pytest.warns(UserWarning, match="has already been refunded"):
+        with pytest.raises(DuplicateRefundError, match="reservation already refunded"):
             limiter.refund_capacity({"tokens": 10}, reservation)
 
         assert calls == 1

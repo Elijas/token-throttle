@@ -3,6 +3,7 @@ import time
 
 import pytest
 
+from token_throttle._exceptions import DuplicateRefundError, UnknownReservationError
 from token_throttle._interfaces._interfaces import PerModelConfig
 from token_throttle._interfaces._models import CapacityReservation, Quota, UsageQuotas
 from token_throttle._limiter_backends._memory._backend import MemoryBackendBuilder
@@ -39,9 +40,7 @@ def _sync_capacity(limiter: SyncRateLimiter, family: str, metric: str) -> float:
     return capacities[(metric, 60)]
 
 
-async def test_n01_async_cross_limiter_refund_is_rejected(
-    caplog: pytest.LogCaptureFixture,
-):
+async def test_n01_async_cross_limiter_memory_refund_is_unknown():
     limiter_a = RateLimiter(_limited_config(), backend=MemoryBackendBuilder())
     limiter_b = RateLimiter(_limited_config(), backend=MemoryBackendBuilder())
 
@@ -49,16 +48,12 @@ async def test_n01_async_cross_limiter_refund_is_rejected(
     await limiter_b.acquire_capacity({"tokens": 1}, "model")
     before = await _async_capacity(limiter_b, "fam", "tokens")
 
-    with (
-        caplog.at_level(logging.WARNING, logger="token_throttle"),
-        pytest.raises(ValueError, match=r"different limiter.*L13 N01"),
-    ):
+    with pytest.raises(UnknownReservationError):
         await limiter_b.refund_capacity({"tokens": 0}, reservation)
 
     assert reservation.limiter_instance_id == limiter_a._limiter_instance_id
     assert reservation.reservation_id not in limiter_b._refunded_reservation_ids
     assert await _async_capacity(limiter_b, "fam", "tokens") - before < 1
-    assert "was issued by limiter" in caplog.text
 
 
 async def test_legacy_reservation_without_limiter_instance_id_is_rejected(
@@ -104,7 +99,7 @@ async def test_n02_empty_projection_commits_dedup_before_return():
 
     state = "tokens"
     await limiter.record_usage({"tokens": 0}, "model")
-    with pytest.warns(UserWarning, match="already been refunded"):
+    with pytest.raises(DuplicateRefundError, match="reservation already refunded"):
         await limiter.refund_capacity({"tokens": 0}, reservation)
 
     assert await _async_capacity(limiter, "fam", "tokens") == 100
@@ -165,7 +160,7 @@ async def test_n09_async_close_logs_outstanding_reservations_and_blocks_use(
         await limiter.acquire_capacity({"tokens": 1}, "model")
 
 
-def test_n01_sync_cross_limiter_refund_is_rejected():
+def test_n01_sync_cross_limiter_memory_refund_is_unknown():
     limiter_a = SyncRateLimiter(_limited_config(), backend=SyncMemoryBackendBuilder())
     limiter_b = SyncRateLimiter(_limited_config(), backend=SyncMemoryBackendBuilder())
 
@@ -173,7 +168,7 @@ def test_n01_sync_cross_limiter_refund_is_rejected():
     limiter_b.acquire_capacity({"tokens": 1}, "model")
     before = _sync_capacity(limiter_b, "fam", "tokens")
 
-    with pytest.raises(ValueError, match=r"different limiter.*L13 N01"):
+    with pytest.raises(UnknownReservationError):
         limiter_b.refund_capacity({"tokens": 0}, reservation)
 
     assert reservation.reservation_id not in limiter_b._refunded_reservation_ids

@@ -9,6 +9,7 @@ from frozendict import frozendict
 from pydantic import ValidationError
 
 from token_throttle._capacity import CalculatedCapacity
+from token_throttle._exceptions import UnknownReservationError
 from token_throttle._interfaces._callbacks import (
     RateLimiterCallbacks,
     SyncRateLimiterCallbacks,
@@ -209,11 +210,19 @@ class _DurableRefundBackend(RateLimiterBackend):
         usage: FrozenUsage,
         *,
         timeout: float | None = None,
+        reservation_id: str | None = None,
+        reservation_lifetime_seconds: float | None = None,
     ) -> None:
-        _ = usage, timeout
+        _ = usage, timeout, reservation_id, reservation_lifetime_seconds
 
-    async def consume_capacity(self, usage: FrozenUsage) -> None:
-        _ = usage
+    async def consume_capacity(
+        self,
+        usage: FrozenUsage,
+        *,
+        reservation_id: str | None = None,
+        reservation_lifetime_seconds: float | None = None,
+    ) -> None:
+        _ = usage, reservation_id, reservation_lifetime_seconds
 
     async def refund_capacity(
         self,
@@ -222,14 +231,19 @@ class _DurableRefundBackend(RateLimiterBackend):
     ) -> None:
         await self.refund_capacity_for_buckets(reserved_usage, actual_usage)
 
-    async def refund_capacity_for_buckets(
+    async def refund_capacity_for_buckets(  # noqa: PLR0913
         self,
         reserved_usage: FrozenUsage,
         actual_usage: FrozenUsage,
         *,
         bucket_ids: set[tuple[str, int]] | frozenset[tuple[str, int]] | None = None,
         reservation_id: str | None = None,
+        reservation_model_family: str | None = None,
+        reservation_bucket_ids: set[tuple[str, int]]
+        | frozenset[tuple[str, int]]
+        | None = None,
     ) -> bool:
+        _ = reservation_model_family, reservation_bucket_ids
         self.refunds.append(
             (
                 reserved_usage,
@@ -266,19 +280,12 @@ class _DurableRefundBackendBuilder(RateLimiterBackendBuilderInterface):
         return self.backend
 
 
-async def test_valid_manual_modern_reservation_still_refunds() -> None:
+async def test_manual_modern_reservation_without_acquire_marker_is_unknown() -> None:
     builder = _DurableRefundBackendBuilder()
     limiter = RateLimiter(_config(), backend=builder)
     await limiter.acquire_capacity({"tokens": 1.0}, "model")
     reservation = _reservation(limiter._limiter_instance_id)
 
-    await limiter.refund_capacity({"tokens": 3.0}, reservation)
-
-    assert builder.backend.refunds == [
-        (
-            frozendict({"tokens": 5.0}),
-            frozendict({"tokens": 3.0}),
-            frozenset({("tokens", 60)}),
-            reservation.reservation_id,
-        )
-    ]
+    with pytest.raises(UnknownReservationError):
+        await limiter.refund_capacity({"tokens": 3.0}, reservation)
+    assert builder.backend.refunds == []

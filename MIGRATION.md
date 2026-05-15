@@ -1,4 +1,23 @@
-# Migrating from v1.4.x to v2.0.0
+# Migration Guide
+
+## Migrating from v2.x to v3.0.0
+
+v3.0.0 requires Redis-backed refunds to prove that the backend previously issued
+the reservation. Acquires now write a durable marker in Redis, and refunds
+consume that marker before crediting capacity.
+
+Drain or refund all in-flight v2.x reservations before upgrading Redis-backed
+fleets. Reservations created by v2.x processes do not have acquire markers, so a
+v3 process cannot distinguish them from manually forged reservations. Refunding
+one after the upgrade fails closed with `UnknownReservationError` and does not
+credit capacity.
+
+Duplicate refunds still fail as duplicates: once a legitimate v3 refund consumes
+the acquire marker and writes the refund tombstone, a retry raises
+`DuplicateRefundError`. Mixed v2/v3 Redis fleets are not supported because v2
+processes do not write acquire markers for v3 processes to consume.
+
+## Migrating from v1.4.x to v2.0.0
 
 v2.0.0 keeps the strict runtime validation introduced before this release.
 Do not rely on construction-time coercion during the upgrade. Run the
@@ -51,14 +70,14 @@ same migration signal: drain or refund in-flight reservations before moving
 traffic to v2.0.0+ processes.
 
 v2.1.0 adds an optional `max_reservation_lifetime_seconds` constructor
-argument on `RateLimiter` and `SyncRateLimiter`. The default is `None`, which
-preserves the v2.0.0 unbounded lifetime behavior. If you enable a bounded
-lifetime with Redis backends, `bucket_ttl_seconds` and
-`refund_dedup_ttl_seconds` must both be greater than
-`max_reservation_lifetime_seconds * 2`; construction raises `ValueError`
-otherwise. Drain old serialized reservations before enabling the bound because
-v2.0.0 reservations do not carry the `created_at_seconds` timestamp required to
-enforce it.
+argument on `RateLimiter` and `SyncRateLimiter`. Memory backends preserve the
+v2.0.0 unbounded lifetime behavior when this is omitted. Redis backends derive a
+default bounded lifetime from `bucket_ttl_seconds` and
+`refund_dedup_ttl_seconds`; if you pass an explicit bound, both TTLs must be
+greater than `max_reservation_lifetime_seconds * 2`; construction raises
+`ValueError` otherwise. Drain old serialized reservations before enabling the
+bound because v2.0.0 reservations do not carry the `created_at_seconds`
+timestamp required to enforce it.
 
 ## 3. Add Redis Key Prefixes
 
@@ -81,14 +100,15 @@ factory functions, or explicit `PerModelConfig` construction before upgrading.
 
 ## 6. Redis ACL Requirements
 
-token-throttle uses `GET`, `SET`, `DEL`, `TIME`, `EXPIRE`, and pipeline
+token-throttle uses `GET`, `SET`, `DEL`, `GETDEL`, `TIME`, `EXPIRE`, and pipeline
 operations. No `KEYS`, `FLUSHDB`, `FLUSHALL`, `CONFIG`, or Pub/Sub commands
 are issued by the library.
 
-Redis lock acquire and release (via redis-py) also require scripting commands:
-`EVALSHA` and `SCRIPT LOAD`. These are typically covered by the
-`+@scripting` ACL category. If your managed Redis restricts scripting, ensure
-that category is allowed for the token-throttle connection user.
+Redis acquire-marker and refund transactions use Lua `EVAL`. Redis lock release
+and extension (via redis-py) also require `EVALSHA` and `SCRIPT LOAD`. These are
+typically covered by the `+@scripting` ACL category. If your managed Redis
+restricts scripting, ensure that category is allowed for the token-throttle
+connection user.
 
 **`SCRIPT FLUSH` operational hazard**: avoid running `SCRIPT FLUSH` on a
 Redis instance shared with token-throttle. It evicts the cached Lua SHA for
@@ -132,18 +152,25 @@ drain in-flight reservations before exposing old processes to new ones.
 
 ### 7b. Redis key format and Lua compatibility
 
-The Redis key format is stable across v1.4.1, v1.5.0, and v2.0.0:
+The Redis bucket key format is stable across v1.4.1, v1.5.0, v2.0.0, and
+v3.0.0:
 
 ```
 {key_prefix}:rate_limiting:{model_family}:{metric}:{per_seconds}:{suffix}
 ```
 
-token-throttle does not register custom Lua scripts. The only Lua in normal
-operation is redis-py's standard lock release, extend, and reacquire scripts.
-If you write custom scripts that interact with token-throttle's bucket keys,
-version them or use redis-py's `Script` object (which retries `EVALSHA` with
-`SCRIPT LOAD` on `NOSCRIPT` errors) so that script-cache eviction does not
-silently break your writes.
+v3.0.0 also uses acquire-marker keys:
+
+```
+{key_prefix}:rate_limiting:acquired:{reservation_id}
+```
+
+token-throttle runs Lua for atomic acquire-marker writes and refunds, and
+redis-py's lock implementation runs its standard lock release, extend, and
+reacquire scripts. If you write custom scripts that interact with token-throttle
+bucket keys, version them or use redis-py's `Script` object (which retries
+`EVALSHA` with `SCRIPT LOAD` on `NOSCRIPT` errors) so that script-cache eviction
+does not silently break your writes.
 
 ### 7c. Callback slot compatibility
 

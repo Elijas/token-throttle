@@ -108,7 +108,7 @@ def test_sync_callback_warning_filter_error_does_not_escape(caplog):
 async def test_acquire_timeout_bounds_capacity_wait_not_backend_latency():
     backend = AsyncMock()
 
-    async def slow_backend(_usage, *, timeout=None) -> None:
+    async def slow_backend(_usage, *, timeout=None, **_kwargs) -> None:
         assert timeout == 0.01
         await asyncio.sleep(0.05)
 

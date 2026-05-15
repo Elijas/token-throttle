@@ -81,13 +81,16 @@ the TTL defaults to 7 days and is configurable via
 `refund_dedup_ttl_seconds`. Memory backends have no durable refund dedup and
 reject refunds for reservations missing from local in-flight state.
 
-`max_reservation_lifetime_seconds` is optional on both public limiters and
-defaults to `None` for v2.0.0 compatibility. When set, every new reservation
-records `created_at_seconds`, and refund rejects reservations older than the
-configured bound. Redis builders validate the bound at limiter construction:
+`max_reservation_lifetime_seconds` is optional on both public limiters. Memory
+backends leave it unbounded when omitted. Redis builders derive a default from
+the shorter of `bucket_ttl_seconds` and `refund_dedup_ttl_seconds` so every
+Redis reservation has a finite lifetime. Every new reservation records
+`created_at_seconds`, and refund rejects reservations older than the configured
+or derived bound. Redis builders validate the bound at limiter construction:
 `bucket_ttl_seconds` and `refund_dedup_ttl_seconds` must both be greater than
-`max_reservation_lifetime_seconds * 2`. This keeps bucket state and refund
-dedup tombstones alive longer than any refundable reservation.
+`max_reservation_lifetime_seconds * 2`. This keeps bucket state, acquire
+markers, and refund dedup tombstones alive for the expected reservation
+lifecycle.
 
 ### Unlimited configs
 
@@ -129,11 +132,11 @@ is the internal config-rebuild path and is not a public `RateLimiter` method.
 
 ### Reservation lifecycle
 
-`CapacityReservation` is a refund token for the limiter instance that issued it. Reservations require `limiter_instance_id`, a per-`RateLimiter` / `SyncRateLimiter` UUID generated at construction time. Refund rejects legacy `limiter_instance_id is None` reservations and rejects populated ids that do not match the current limiter, because cross-limiter refunds are not authoritative.
+`CapacityReservation` is a refund token for the backend that issued it. Reservations require `limiter_instance_id`, a per-`RateLimiter` / `SyncRateLimiter` UUID generated at construction time, so v1.4.x legacy objects remain distinguishable. Redis refund authority comes from the durable acquire marker written atomically with bucket consumption. Memory refund authority comes from the in-process acquire table.
 
-This is a v2.0.0 contract change. Reservations serialized by v1.4.x through pickle, JSON, job queues, or caches do not have `limiter_instance_id`; those are rejected. Drain in-flight reservations before upgrading and do not run mixed v1.4.x/v2.0.0 fleets. New serialized reservations must preserve the field. If a queue moves reservations across processes, the worker applying the refund must use the same limiter instance identity; otherwise refund is rejected instead of crediting the wrong backend.
+This is a v2.0.0 contract change. Reservations serialized by v1.4.x through pickle, JSON, job queues, or caches do not have `limiter_instance_id`; those are rejected. Drain in-flight reservations before upgrading and do not run mixed v1.4.x/v2.0.0 fleets. New serialized reservations must preserve the field. Starting in v3.0.0, Redis-backed cross-process refunds are allowed when the refunding process uses the same Redis deployment and key prefix, because the backend verifies and consumes the acquire marker before crediting capacity.
 
-Reservations have no TTL by default. A reservation remains eligible until it is refunded, rejected because the issuing limiter no longer matches, rejected because the model now routes differently, rejected because `max_reservation_lifetime_seconds` has elapsed, or the limiter is closed. Redis backends add durable refund dedup keys with a configurable TTL (`refund_dedup_ttl_seconds`, default 7 days), so an in-flight reservation can be refunded after local in-memory state is lost if the limiter identity still matches, Redis has not already seen the refund, and the optional lifetime bound has not expired. Memory backends reject that cold-restart case because they cannot prove whether capacity was already credited. `close()` / `aclose()` mark the limiter closed, log the number of reservations still in flight, and block subsequent acquire/refund operations.
+Memory reservations have no TTL by default. Redis reservations always have a finite lifetime: either the caller's `max_reservation_lifetime_seconds` or the backend-derived default from Redis TTLs. A reservation remains eligible until it is refunded, rejected because the model now routes differently, rejected because its lifetime has elapsed, rejected because its acquire marker is missing, or the limiter is closed. Redis backends write durable acquire markers and refund dedup keys, so an in-flight reservation can be refunded by another process sharing the same Redis deployment and key prefix while the marker exists. Memory backends reject cold-restart and cross-process cases because they cannot prove whether capacity was acquired or already credited. `close()` / `aclose()` mark the limiter closed, log the number of reservations still in flight, and block subsequent acquire/refund operations.
 
 Callable config changes are checked at refund time for held limited reservations. A limited-to-unlimited flip raises instead of crediting an obsolete cached backend, and a `model_family` reroute raises instead of crediting the old family backend. Metric-set changes still project refunds onto surviving bucket ids; if the projection is empty, the refund id is committed to local dedup and, for Redis backends, durable Redis dedup before returning so queue retries cannot double-credit after a rebuild.
 
@@ -270,9 +273,9 @@ The minimum Redis ACL permission set for token-throttle:
 | Command category | Commands used | Why |
 |---|---|---|
 | `+@read` | `GET` | Read bucket capacity and last-checked state |
-| `+@write` | `SET`, `DEL`, `EXPIRE` | Write bucket state, refund dedup keys, and TTL |
+| `+@write` | `SET`, `DEL`, `EXPIRE`, `GETDEL` | Write bucket state, acquire markers, refund dedup keys, and TTL |
 | `+@string` | included in read/write above | Plain string key/value operations |
-| `+@scripting` | `EVALSHA`, `SCRIPT LOAD` | redis-py lock release and extend Lua scripts |
+| `+@scripting` | `EVAL`, `EVALSHA`, `SCRIPT LOAD` | Atomic acquire/refund Lua plus redis-py lock release and extend Lua scripts |
 | `+TIME` | `TIME` | Server-side clock for elapsed-time calculations |
 
 token-throttle does **not** use `KEYS`, `FLUSHDB`, `FLUSHALL`, `CONFIG`, or any

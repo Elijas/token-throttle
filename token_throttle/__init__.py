@@ -4,6 +4,8 @@ import importlib.util
 from token_throttle._exceptions import (
     AcquireRefundFailedError,
     CardinalityLimitExceededError,
+    DuplicateRefundError,
+    UnknownReservationError,
 )
 from token_throttle._interfaces._callbacks import (
     OnCapacityConsumedCallback,
@@ -140,6 +142,7 @@ __all__ = [
     "CapacityReservation",
     "CardinalityLimitExceededError",
     "ConfigMigrationIssue",
+    "DuplicateRefundError",
     "EncodingGetter",
     "FrozenUsage",
     "MemoryBackend",
@@ -172,6 +175,7 @@ __all__ = [
     "SyncRateLimiterBackend",
     "SyncRateLimiterBackendBuilderInterface",
     "SyncRateLimiterCallbacks",
+    "UnknownReservationError",
     "Usage",
     "UsageCounter",
     "UsageQuotas",

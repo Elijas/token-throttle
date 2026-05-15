@@ -9,6 +9,7 @@ from contextlib import AbstractAsyncContextManager, AbstractContextManager
 
 import pytest
 
+from token_throttle._exceptions import DuplicateRefundError
 from token_throttle._interfaces._interfaces import PerModelConfig
 from token_throttle._interfaces._models import Quota, UsageQuotas
 from token_throttle._limiter_backends._memory._backend import MemoryBackendBuilder
@@ -41,6 +42,8 @@ def _redis_modules():
         RedisBucket,
     )
     from token_throttle._limiter_backends._redis._keys import (  # noqa: PLC0415
+        redis_acquired_marker_key,
+        redis_acquired_marker_value,
         redis_refund_dedup_key,
     )
     from token_throttle._limiter_backends._redis._sync_backend import (  # noqa: PLC0415
@@ -53,10 +56,27 @@ def _redis_modules():
     return {
         "redis_backend": RedisBackend,
         "redis_bucket": RedisBucket,
+        "redis_acquired_marker_key": redis_acquired_marker_key,
+        "redis_acquired_marker_value": redis_acquired_marker_value,
         "redis_refund_dedup_key": redis_refund_dedup_key,
         "sync_redis_backend": SyncRedisBackend,
         "sync_redis_bucket": SyncRedisBucket,
     }
+
+
+def _acquire_marker_value() -> str:
+    return _redis_modules()["redis_acquired_marker_value"](
+        model_family=MODEL_FAMILY,
+        bucket_ids=frozenset({BUCKET_ID}),
+    )
+
+
+def _acquire_marker_key(reservation_id: str) -> str:
+    return _redis_modules()["redis_acquired_marker_key"]("tenant", reservation_id)
+
+
+def _seed_acquire_marker(redis_client: object, reservation_id: str) -> None:
+    redis_client.store[_acquire_marker_key(reservation_id)] = _acquire_marker_value()
 
 
 async def test_async_cancel_before_backend_write_leaves_local_guard_retryable() -> None:
@@ -87,7 +107,7 @@ async def test_async_cancel_before_backend_write_leaves_local_guard_retryable() 
     await limiter.refund_capacity({"tokens": 10}, reservation)
 
     assert limiter._refunded_reservation_ids[reservation.reservation_id] == "committed"
-    with pytest.warns(UserWarning, match="already been refunded"):
+    with pytest.raises(DuplicateRefundError, match="reservation already refunded"):
         await limiter.refund_capacity({"tokens": 10}, reservation)
 
 
@@ -114,7 +134,7 @@ async def test_async_failed_backend_write_leaves_local_guard_retryable() -> None
     backend.refund_capacity_for_buckets = original_refund
     await limiter.refund_capacity({"tokens": 10}, reservation)
 
-    with pytest.warns(UserWarning, match="already been refunded"):
+    with pytest.raises(DuplicateRefundError, match="reservation already refunded"):
         await limiter.refund_capacity({"tokens": 10}, reservation)
 
 
@@ -141,7 +161,7 @@ def test_sync_failed_backend_write_leaves_local_guard_retryable() -> None:
     backend.refund_capacity_for_buckets = original_refund
     limiter.refund_capacity({"tokens": 10}, reservation)
 
-    with pytest.warns(UserWarning, match="already been refunded"):
+    with pytest.raises(DuplicateRefundError, match="reservation already refunded"):
         limiter.refund_capacity({"tokens": 10}, reservation)
 
 
@@ -166,7 +186,7 @@ def test_sync_base_exception_before_backend_write_leaves_local_guard_retryable()
     backend.refund_capacity_for_buckets = original_refund
     limiter.refund_capacity({"tokens": 10}, reservation)
 
-    with pytest.warns(UserWarning, match="already been refunded"):
+    with pytest.raises(DuplicateRefundError, match="reservation already refunded"):
         limiter.refund_capacity({"tokens": 10}, reservation)
 
 
@@ -233,8 +253,43 @@ class _AsyncRedis:
     async def expire(self, key: str, seconds: int) -> bool:
         return key in self.store
 
+    async def delete(self, key: str) -> int:
+        existed = key in self.store
+        self.store.pop(key, None)
+        return int(existed)
+
     async def time(self) -> tuple[int, int]:
         return int(self.now), 0
+
+    async def eval(self, _script: str, numkeys: int, *keys_and_args: object) -> str:
+        keys = [str(key) for key in keys_and_args[:numkeys]]
+        argv = list(keys_and_args[numkeys:])
+        marker_key, dedup_key = keys[0], keys[1]
+        marker = await self.get(marker_key)
+        await self.delete(marker_key)
+        if marker is None:
+            return (
+                "duplicate_refund"
+                if await self.exists(dedup_key)
+                else "unknown_reservation"
+            )
+        if marker != argv[0]:
+            return "marker_mismatch"
+        claimed = await self.set(dedup_key, "1", ex=int(argv[1]), nx=True)
+        if not claimed:
+            return "duplicate_refund"
+        arg_index = 2
+        for key_index in range(2, len(keys), 2):
+            await self.set(
+                keys[key_index], argv[arg_index], ex=int(argv[arg_index + 2])
+            )
+            await self.set(
+                keys[key_index + 1],
+                argv[arg_index + 1],
+                ex=int(argv[arg_index + 2]),
+            )
+            arg_index += 3
+        return "ok"
 
     def pipeline(self) -> _AsyncPipeline:
         return _AsyncPipeline(self)
@@ -289,8 +344,39 @@ class _SyncRedis:
     def expire(self, key: str, seconds: int) -> bool:
         return key in self.store
 
+    def delete(self, key: str) -> int:
+        existed = key in self.store
+        self.store.pop(key, None)
+        return int(existed)
+
     def time(self) -> tuple[int, int]:
         return int(self.now), 0
+
+    def eval(self, _script: str, numkeys: int, *keys_and_args: object) -> str:
+        keys = [str(key) for key in keys_and_args[:numkeys]]
+        argv = list(keys_and_args[numkeys:])
+        marker_key, dedup_key = keys[0], keys[1]
+        marker = self.get(marker_key)
+        self.delete(marker_key)
+        if marker is None:
+            return (
+                "duplicate_refund" if self.exists(dedup_key) else "unknown_reservation"
+            )
+        if marker != argv[0]:
+            return "marker_mismatch"
+        claimed = self.set(dedup_key, "1", ex=int(argv[1]), nx=True)
+        if not claimed:
+            return "duplicate_refund"
+        arg_index = 2
+        for key_index in range(2, len(keys), 2):
+            self.set(keys[key_index], argv[arg_index], ex=int(argv[arg_index + 2]))
+            self.set(
+                keys[key_index + 1],
+                argv[arg_index + 1],
+                ex=int(argv[arg_index + 2]),
+            )
+            arg_index += 3
+        return "ok"
 
     def pipeline(self) -> _SyncPipeline:
         return _SyncPipeline(self)
@@ -401,7 +487,8 @@ def _sync_redis_backend(
 async def test_async_redis_failed_bucket_write_does_not_claim_tombstone() -> None:
     redis_client = _AsyncRedis()
     backend, bucket = _async_redis_backend(redis_client)
-    original_set = backend._set_capacities_unsafe
+    _seed_acquire_marker(redis_client, "redis-r1")
+    original_commit = backend._commit_refund_with_acquire_marker_unsafe
     calls = 0
 
     async def fail_once(*args, **kwargs):
@@ -409,9 +496,9 @@ async def test_async_redis_failed_bucket_write_does_not_claim_tombstone() -> Non
         calls += 1
         if calls == 1:
             raise RuntimeError("simulated redis write failure")
-        return await original_set(*args, **kwargs)
+        return await original_commit(*args, **kwargs)
 
-    backend._set_capacities_unsafe = fail_once
+    backend._commit_refund_with_acquire_marker_unsafe = fail_once
     dedup_key = _redis_modules()["redis_refund_dedup_key"]("tenant", "redis-r1")
 
     with pytest.raises(RuntimeError, match="simulated redis write failure"):
@@ -434,8 +521,8 @@ async def test_async_redis_failed_bucket_write_does_not_claim_tombstone() -> Non
     assert redis_client.store[bucket._capacity_key] == 90.0
     assert redis_client.store[dedup_key] == "1"
 
-    with pytest.warns(UserWarning, match="already been refunded according to Redis"):
-        assert not await backend.refund_capacity_for_buckets(
+    with pytest.raises(DuplicateRefundError, match="reservation already refunded"):
+        await backend.refund_capacity_for_buckets(
             RESERVED,
             ACTUAL,
             bucket_ids=frozenset({BUCKET_ID}),
@@ -447,7 +534,8 @@ async def test_async_redis_failed_bucket_write_does_not_claim_tombstone() -> Non
 def test_sync_redis_failed_bucket_write_does_not_claim_tombstone() -> None:
     redis_client = _SyncRedis()
     backend, bucket = _sync_redis_backend(redis_client)
-    original_set = backend._set_capacities_unsafe
+    _seed_acquire_marker(redis_client, "redis-r2")
+    original_commit = backend._commit_refund_with_acquire_marker_unsafe
     calls = 0
 
     def fail_once(*args, **kwargs):
@@ -455,9 +543,9 @@ def test_sync_redis_failed_bucket_write_does_not_claim_tombstone() -> None:
         calls += 1
         if calls == 1:
             raise RuntimeError("simulated redis write failure")
-        return original_set(*args, **kwargs)
+        return original_commit(*args, **kwargs)
 
-    backend._set_capacities_unsafe = fail_once
+    backend._commit_refund_with_acquire_marker_unsafe = fail_once
     dedup_key = _redis_modules()["redis_refund_dedup_key"]("tenant", "redis-r2")
 
     with pytest.raises(RuntimeError, match="simulated redis write failure"):
@@ -480,8 +568,8 @@ def test_sync_redis_failed_bucket_write_does_not_claim_tombstone() -> None:
     assert redis_client.store[bucket._capacity_key] == 90.0
     assert redis_client.store[dedup_key] == "1"
 
-    with pytest.warns(UserWarning, match="already been refunded according to Redis"):
-        assert not backend.refund_capacity_for_buckets(
+    with pytest.raises(DuplicateRefundError, match="reservation already refunded"):
+        backend.refund_capacity_for_buckets(
             RESERVED,
             ACTUAL,
             bucket_ids=frozenset({BUCKET_ID}),
@@ -495,6 +583,7 @@ async def test_async_redis_deferred_tombstone_serializes_concurrent_retries() ->
     release_first_dedup_set = asyncio.Event()
     redis_client.pause_first_dedup_set = release_first_dedup_set
     backend, bucket = _async_redis_backend(redis_client, test_lock=asyncio.Lock())
+    _seed_acquire_marker(redis_client, "redis-r3")
     dedup_key = _redis_modules()["redis_refund_dedup_key"]("tenant", "redis-r3")
 
     first = asyncio.create_task(
@@ -516,9 +605,9 @@ async def test_async_redis_deferred_tombstone_serializes_concurrent_retries() ->
     )
 
     release_first_dedup_set.set()
-    with pytest.warns(UserWarning, match="already been refunded according to Redis"):
-        results = await asyncio.gather(first, second)
+    results = await asyncio.gather(first, second, return_exceptions=True)
 
-    assert sorted(results) == [False, True]
+    assert results.count(True) == 1
+    assert sum(isinstance(result, DuplicateRefundError) for result in results) == 1
     assert redis_client.store[dedup_key] == "1"
     assert redis_client.store[bucket._capacity_key] == 90.0

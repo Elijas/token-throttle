@@ -9,6 +9,7 @@ from typing import ClassVar
 
 from frozendict import frozendict
 
+from token_throttle._exceptions import DuplicateRefundError, UnknownReservationError
 from token_throttle._interfaces._callbacks import SyncRateLimiterCallbacks
 from token_throttle._interfaces._interfaces import (
     PerModelConfig,
@@ -107,6 +108,8 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
         self._bucket_registry: dict[tuple[str, int], MemoryBucket] = {
             (bucket.usage_metric, int(bucket.per_seconds)): bucket for bucket in buckets
         }
+        self._acquired_reservation_ids: set[str] = set()
+        self._refunded_reservation_ids: set[str] = set()
 
     def supports_metric_set_change(self) -> bool:
         return True
@@ -229,18 +232,29 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
         self._set_capacities(postconsumption, current_time)
         return True, postconsumption
 
-    def consume_capacity(self, usage: FrozenUsage) -> None:
+    def consume_capacity(
+        self,
+        usage: FrozenUsage,
+        *,
+        reservation_id: str | None = None,
+        reservation_lifetime_seconds: float | None = None,
+    ) -> None:
         """
         Consume capacity unconditionally.
 
         Capacity may go negative by design (speedometer pattern); this tracks
         overshoot rather than blocking.
         """
+        _ = reservation_lifetime_seconds
         validate_backend_usage(usage, self._usage_metric_names)
         usage = frozendict({metric: float(amount) for metric, amount in usage.items()})
         fresh_start_buckets: list[MemoryBucket] = []
 
         with self._condition:
+            if reservation_id is not None and (
+                reservation_id in self._acquired_reservation_ids
+            ):
+                raise DuplicateRefundError("reservation already acquired")
             # time.time() (wall-clock) is intentional: the memory backend
             # runs in a single process, so there is no cross-worker clock
             # skew concern. monotonic() would avoid NTP jumps but would
@@ -288,6 +302,8 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
                 current_time,
                 allow_negative=True,
             )
+            if reservation_id is not None:
+                self._acquired_reservation_ids.add(reservation_id)
 
         # Callbacks fired outside the lock
         self._fresh_start_buckets_callback(fresh_start_buckets)
@@ -306,8 +322,11 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
         usage: FrozenUsage,
         *,
         timeout: float | None = None,
+        reservation_id: str | None = None,
+        reservation_lifetime_seconds: float | None = None,
     ) -> None:
         """Wait until all buckets have the required capacity."""
+        _ = reservation_lifetime_seconds
         validate_backend_usage(usage, self._usage_metric_names)
         timeout = validate_timeout(timeout)
         usage = frozendict({metric: float(amount) for metric, amount in usage.items()})
@@ -328,6 +347,10 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
             with self._condition:
                 while True:
                     current_time = time.time()
+                    if reservation_id is not None and (
+                        reservation_id in self._acquired_reservation_ids
+                    ):
+                        raise DuplicateRefundError("reservation already acquired")
                     preconsumption, fresh = self._get_capacities(current_time)
                     ok, postconsumption = self._try_consume_locked(
                         usage,
@@ -335,6 +358,8 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
                         current_time,
                     )
                     if ok:
+                        if reservation_id is not None:
+                            self._acquired_reservation_ids.add(reservation_id)
                         consumed_monotonic = time.monotonic()
                         consumed_buckets = list(self._buckets)
                         break
@@ -412,7 +437,11 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
             # they can interrupt mid-statement and need the same best-effort
             # refund to avoid leaking capacity. Do not narrow to Exception.
             try:  # noqa: SIM105
-                self._refund_cancelled_consumption(usage, buckets=consumed_buckets)
+                self._refund_cancelled_consumption(
+                    usage,
+                    buckets=consumed_buckets,
+                    reservation_id=reservation_id,
+                )
             except BaseException:  # noqa: BLE001, S110
                 # Best-effort refund: in sync code, KI/SystemExit are the
                 # interrupt analogue of asyncio.shield() cancellation cleanup.
@@ -463,13 +492,17 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
             bucket_ids=self._bucket_ids(),
         )
 
-    def refund_capacity_for_buckets(
+    def refund_capacity_for_buckets(  # noqa: PLR0913
         self,
         reserved_usage: FrozenUsage,
         actual_usage: FrozenUsage,
         *,
         bucket_ids: set[tuple[str, int]] | frozenset[tuple[str, int]] | None = None,
         reservation_id: str | None = None,
+        reservation_model_family: str | None = None,
+        reservation_bucket_ids: set[tuple[str, int]]
+        | frozenset[tuple[str, int]]
+        | None = None,
     ) -> bool:
         """
         Refund unused capacity back to the rate limiter based on actual usage.
@@ -477,7 +510,7 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
         Handles both positive refunds (used less than reserved) and negative
         refunds (used more than reserved, i.e. overuse).
         """
-        _ = reservation_id
+        _ = reservation_model_family, reservation_bucket_ids
         backend_bucket_ids = self._bucket_ids()
         refund_bucket_ids = (
             backend_bucket_ids if bucket_ids is None else frozenset(bucket_ids)
@@ -510,6 +543,15 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
         refund_usage: frozendict[str, float] = frozendict(refund_usage_)
 
         with self._condition:
+            if (
+                reservation_id is not None
+                and reservation_id not in self._acquired_reservation_ids
+            ):
+                if reservation_id in self._refunded_reservation_ids:
+                    raise DuplicateRefundError("reservation already refunded")
+                raise UnknownReservationError(
+                    "reservation was never acquired by this backend"
+                )
             current_time = time.time()
             prerefund_capacities, fresh_start_buckets = self._get_capacities(
                 current_time,
@@ -548,6 +590,9 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
             updated_capacities = frozendict(updated_capacities_)
 
             self._set_capacities(updated_capacities, current_time, allow_negative=True)
+            if reservation_id is not None:
+                self._acquired_reservation_ids.remove(reservation_id)
+                self._refunded_reservation_ids.add(reservation_id)
             self._condition.notify_all()
 
         # Callbacks fired outside the lock
@@ -681,6 +726,7 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
         usage: FrozenUsage,
         *,
         buckets: list[MemoryBucket] | None = None,
+        reservation_id: str | None = None,
     ) -> None:
         """
         Refund capacity consumed before a BaseException hit callbacks.
@@ -721,6 +767,8 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
                 allow_negative=True,
                 buckets=target_buckets,
             )
+            if reservation_id is not None:
+                self._acquired_reservation_ids.discard(reservation_id)
             self._condition.notify_all()
 
     def _fresh_start_buckets_callback(

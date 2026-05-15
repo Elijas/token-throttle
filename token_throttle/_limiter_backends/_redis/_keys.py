@@ -1,3 +1,6 @@
+import json
+
+from token_throttle._interfaces._models import BucketId
 from token_throttle._validation import (
     _validate_key_prefix,
     _validate_reservation_id,
@@ -6,6 +9,7 @@ from token_throttle._validation import (
 
 _REDIS_NAMESPACE = "rate_limiting"
 DEFAULT_REFUND_DEDUP_TTL_SECONDS = 7 * 24 * 60 * 60
+_ACQUIRED_MARKER_VERSION = 1
 
 
 def validate_redis_key_prefix(value: object) -> str:
@@ -35,6 +39,35 @@ def redis_refund_dedup_key(key_prefix: str, reservation_id: str) -> str:
         key_prefix,
         "refund_dedup",
         _validate_reservation_id(reservation_id),
+    )
+
+
+def redis_acquired_marker_key(key_prefix: str, reservation_id: str) -> str:
+    return redis_namespace_key(
+        key_prefix,
+        "acquired",
+        _validate_reservation_id(reservation_id),
+    )
+
+
+def redis_acquired_marker_value(
+    *,
+    model_family: str,
+    bucket_ids: set[BucketId] | frozenset[BucketId],
+) -> str:
+    # KNOWN UNKNOWN: this internal JSON marker schema is intentionally stricter
+    # than the public CapacityReservation shape; no external compatibility is
+    # promised until a future release documents marker payloads as operator API.
+    return json.dumps(
+        {
+            "v": _ACQUIRED_MARKER_VERSION,
+            "model_family": model_family,
+            "buckets": [
+                [metric, int(per_seconds)] for metric, per_seconds in sorted(bucket_ids)
+            ],
+        },
+        separators=(",", ":"),
+        sort_keys=True,
     )
 
 

@@ -8,6 +8,7 @@ import types
 import pytest
 from pydantic import ValidationError
 
+from token_throttle._exceptions import DuplicateRefundError, UnknownReservationError
 from token_throttle._interfaces._interfaces import PerModelConfig
 from token_throttle._interfaces._models import CapacityReservation, Quota, UsageQuotas
 from token_throttle._limiter_backends._memory._backend import MemoryBackendBuilder
@@ -50,22 +51,22 @@ async def test_capacity_reservation_requires_limiter_instance_id() -> None:
         )
 
 
-async def test_cross_limiter_refund_is_rejected() -> None:
+async def test_cross_limiter_memory_refund_is_unknown() -> None:
     limiter_a = RateLimiter(_config(), backend=MemoryBackendBuilder())
     limiter_b = RateLimiter(_config(), backend=MemoryBackendBuilder())
     reservation = await limiter_a.acquire_capacity({"tokens": 30}, "model")
 
-    with pytest.raises(ValueError, match="different limiter"):
+    with pytest.raises(UnknownReservationError):
         await limiter_b.refund_capacity({"tokens": 0}, reservation)
 
 
-async def test_duplicate_refund_is_local_noop() -> None:
+async def test_duplicate_refund_raises_duplicate() -> None:
     limiter = RateLimiter(_config(), backend=MemoryBackendBuilder())
     reservation = await limiter.acquire_capacity({"tokens": 30}, "model")
 
     await limiter.refund_capacity({"tokens": 0}, reservation)
 
-    with pytest.warns(UserWarning, match="already been refunded"):
+    with pytest.raises(DuplicateRefundError, match="reservation already refunded"):
         await limiter.refund_capacity({"tokens": 0}, reservation)
 
 
@@ -74,10 +75,7 @@ async def test_memory_backend_rejects_cold_restart_refund() -> None:
     reservation = await issuing_limiter.acquire_capacity({"tokens": 30}, "model")
 
     restarted_limiter = RateLimiter(_config(), backend=MemoryBackendBuilder())
-    # Keep the owner id aligned so this isolates the local in-flight check.
-    restarted_limiter._limiter_instance_id = reservation.limiter_instance_id
-
-    with pytest.raises(ValueError, match="cold-restart refunds require"):
+    with pytest.raises(UnknownReservationError):
         await restarted_limiter.refund_capacity({"tokens": 0}, reservation)
 
 
@@ -120,6 +118,9 @@ class _AsyncDedupRedis:
             return None
         self.store[key] = value
         return True
+
+    async def exists(self, key: str) -> int:
+        return int(key in self.store)
 
 
 class _SyncDedupRedis:
@@ -193,12 +194,7 @@ async def test_redis_refund_dedup_ttl_default_and_configurable() -> None:
         key_prefix="tenant",
         refund_dedup_ttl_seconds=123,
     )
-    await configured.refund_capacity_for_buckets(
-        reserved_usage={},
-        actual_usage={},
-        bucket_ids=frozenset(),
-        reservation_id="ttl-check",
-    )
+    assert await configured._claim_refund_dedup("ttl-check")
 
     assert redis_client.set_calls[-1] == (
         "tenant:rate_limiting:refund_dedup:ttl-check",
@@ -215,7 +211,7 @@ async def test_redis_refund_dedup_ttl_default_and_configurable() -> None:
     assert sync_builder._refund_dedup_ttl_seconds == 456
 
 
-async def test_redis_cold_restart_refund_uses_durable_dedup() -> None:
+async def test_redis_cold_restart_refund_without_acquire_marker_is_unknown() -> None:
     redis_modules = _redis_modules()
 
     class StubRedisBackend(redis_modules.redis_backend):
@@ -230,11 +226,14 @@ async def test_redis_cold_restart_refund_uses_durable_dedup() -> None:
             *,
             bucket_ids=None,
             reservation_id=None,
+            **_kwargs,
         ) -> bool:
-            if not await self._claim_refund_dedup(reservation_id):
-                return False
-            self.applied_refunds += 1
-            return True
+            _ = reserved_usage, actual_usage, bucket_ids
+            if await self._refund_dedup_exists(reservation_id):
+                raise DuplicateRefundError("reservation already refunded")
+            raise UnknownReservationError(
+                "reservation was never acquired by this backend"
+            )
 
     class StubRedisBuilder:
         def __init__(self, redis_client: _AsyncDedupRedis) -> None:
@@ -260,23 +259,11 @@ async def test_redis_cold_restart_refund_uses_durable_dedup() -> None:
     redis_client = _AsyncDedupRedis()
 
     restarted_limiter = RateLimiter(_config(), backend=StubRedisBuilder(redis_client))
-    # v2.0.0 still rejects cross-limiter owner mismatches; this simulates a
-    # restarted worker that preserved the reservation owner id but lost local
-    # in-flight memory.
     restarted_limiter._limiter_instance_id = reservation.limiter_instance_id
-    await restarted_limiter.refund_capacity({"tokens": 0}, reservation)
+    with pytest.raises(UnknownReservationError):
+        await restarted_limiter.refund_capacity({"tokens": 0}, reservation)
     backend = restarted_limiter._model_family_to_backend["fam"]
-    assert backend.applied_refunds == 1
-
-    second_restarted_limiter = RateLimiter(
-        _config(),
-        backend=StubRedisBuilder(redis_client),
-    )
-    second_restarted_limiter._limiter_instance_id = reservation.limiter_instance_id
-    with pytest.warns(UserWarning, match="already been refunded according to Redis"):
-        await second_restarted_limiter.refund_capacity({"tokens": 0}, reservation)
-    second_backend = second_restarted_limiter._model_family_to_backend["fam"]
-    assert second_backend.applied_refunds == 0
+    assert backend.applied_refunds == 0
 
 
 async def test_refund_storm_fifo_eviction_does_not_reopen_redis_duplicate() -> None:
@@ -294,11 +281,14 @@ async def test_refund_storm_fifo_eviction_does_not_reopen_redis_duplicate() -> N
             *,
             bucket_ids=None,
             reservation_id=None,
+            **_kwargs,
         ) -> bool:
-            if not await self._claim_refund_dedup(reservation_id):
-                return False
-            self.applied_refunds += 1
-            return True
+            _ = reserved_usage, actual_usage, bucket_ids
+            if await self._refund_dedup_exists(reservation_id):
+                raise DuplicateRefundError("reservation already refunded")
+            raise UnknownReservationError(
+                "reservation was never acquired by this backend"
+            )
 
     class StubRedisBuilder:
         def __init__(self, redis_client: _AsyncDedupRedis) -> None:
@@ -335,7 +325,7 @@ async def test_refund_storm_fifo_eviction_does_not_reopen_redis_duplicate() -> N
     limiter._refunded_reservation_ids = local_fifo
     evicted = _reservation(reservation_id="r0", limiter_instance_id="limiter")
 
-    with pytest.warns(UserWarning, match="already been refunded according to Redis"):
+    with pytest.raises(DuplicateRefundError, match="reservation already refunded"):
         await limiter.refund_capacity({"tokens": 0}, evicted)
 
     backend = limiter._model_family_to_backend["fam"]

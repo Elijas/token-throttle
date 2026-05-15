@@ -1055,7 +1055,7 @@ class SimpleAsyncBackend(RateLimiterBackend):
     async def await_for_capacity(self, usage, **kwargs) -> None:
         return None
 
-    async def consume_capacity(self, usage) -> None:
+    async def consume_capacity(self, usage, **kwargs) -> None:
         return None
 
     async def refund_capacity(self, reserved_usage, actual_usage) -> None:
