@@ -437,6 +437,7 @@ class RateLimiter(BaseRateLimiter):
             )
         self._backend = backend
         self._lock = asyncio.Lock()
+        self._lifecycle_lock = asyncio.Lock()
         callback_timeout = validate_timeout(callback_timeout)
         self._callbacks = callbacks
         self._backend_callbacks = with_callback_timeout(callbacks, callback_timeout)
@@ -636,6 +637,10 @@ class RateLimiter(BaseRateLimiter):
         Reservations are bound to this limiter instance. After close, new
         acquire/record/refund operations raise ``RuntimeError``; reservations
         that remain unrefunded may no longer be refundable.
+
+        Close is terminal once started: if draining pending acquires or closing
+        backend resources fails, the limiter is still marked closed so future
+        operations fail cleanly instead of observing a permanent closing state.
         """
         async with self._acquire_guard:
             if self._closed:
@@ -650,11 +655,21 @@ class RateLimiter(BaseRateLimiter):
                 timeout=self._close_drain_timeout_seconds,
             )
         except TimeoutError as exc:
+            async with self._acquire_guard:
+                self._closed = True
+                self._closing = False
             raise TimeoutError(
                 "Timed out waiting for pending acquire reservations to drain"
             ) from exc
 
-        await self._backend.aclose()
+        try:
+            async with self._lifecycle_lock:
+                await self._backend.aclose()
+        except BaseException:
+            async with self._acquire_guard:
+                self._closed = True
+                self._closing = False
+            raise
 
         async with self._acquire_guard:
             self._closed = True
@@ -1159,7 +1174,7 @@ class RateLimiter(BaseRateLimiter):
         Cross-process Redis visibility is bounded by the backend's short
         max-capacity cache window.
         """
-        self._raise_if_closed()
+        self._raise_if_closed_or_closing()
         metric = validate_metric(metric, max_length=self._max_metric_length)
         per_seconds = validate_per_seconds(per_seconds)
         value = validate_max_capacity_value(value)
@@ -1177,24 +1192,26 @@ class RateLimiter(BaseRateLimiter):
             # semantic "unlimited model" error instead of "no backend".
             raise ValueError("Cannot set max capacity: model has unlimited quotas")
         model_family = limit_config.get_model_family()
-        async with self._lock:
-            if self._model_family_to_backend.get(model_family) is None:
-                raise ValueError(
-                    f"No backend for model family '{model_family}'. "
-                    "Call acquire_capacity or record_usage first."
+        async with self._lifecycle_lock:
+            self._raise_if_closed_or_closing()
+            async with self._lock:
+                if self._model_family_to_backend.get(model_family) is None:
+                    raise ValueError(
+                        f"No backend for model family '{model_family}'. "
+                        "Call acquire_capacity or record_usage first."
+                    )
+                try:
+                    backend = await self._sync_backend_quotas(limit_config)
+                except Exception as exc:  # noqa: BLE001 - boundary wrapper preserves cause
+                    _raise_backend_external_error(exc)
+                await self._set_max_capacity_transactional(
+                    backend,
+                    model_family=model_family,
+                    model=model,
+                    metric=metric,
+                    per_seconds=per_seconds,
+                    value=value,
                 )
-            try:
-                backend = await self._sync_backend_quotas(limit_config)
-            except Exception as exc:  # noqa: BLE001 - boundary wrapper preserves cause
-                _raise_backend_external_error(exc)
-            await self._set_max_capacity_transactional(
-                backend,
-                model_family=model_family,
-                model=model,
-                metric=metric,
-                per_seconds=per_seconds,
-                value=value,
-            )
 
     def _commit_runtime_max_capacity(
         self,
