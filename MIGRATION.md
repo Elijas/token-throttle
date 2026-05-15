@@ -34,6 +34,22 @@ reservations may have `limiter_instance_id=None`; v2.0.0 reports this as a
 migration issue because those reservations cannot provide the same ownership
 signal as new reservations.
 
+At runtime, refunding a legacy v1.4.x reservation without
+`limiter_instance_id` fails closed. The canonical operator-facing error is:
+
+```text
+legacy v1.4.x reservations no longer supported in v2.0.0; drain v1.4.x before upgrade
+```
+
+Depending on the entry path, this may surface as either a Pydantic validation
+error while loading or constructing the `CapacityReservation`, or as a
+`ValueError` from `RateLimiter.refund_capacity(...)` /
+`SyncRateLimiter.refund_capacity(...)` when a previously serialized object is
+presented for refund. Logs use the shorter wording
+`legacy v1.4.x reservations are rejected in v2.0.0`. Treat both shapes as the
+same migration signal: drain or refund in-flight reservations before moving
+traffic to v2.0.0+ processes.
+
 v2.1.0 adds an optional `max_reservation_lifetime_seconds` constructor
 argument on `RateLimiter` and `SyncRateLimiter`. The default is `None`, which
 preserves the v2.0.0 unbounded lifetime behavior. If you enable a bounded

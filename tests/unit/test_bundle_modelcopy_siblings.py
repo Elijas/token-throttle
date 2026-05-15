@@ -53,6 +53,56 @@ def _sync_callback(**_kwargs) -> None:
     return None
 
 
+STRICT_DTO_REPLACE_CASES = [
+    pytest.param(
+        _quota,
+        {"metric": "x:y"},
+        "must not contain ':'",
+        id="quota",
+    ),
+    pytest.param(
+        _config,
+        {"quotas": object()},
+        "quotas",
+        id="per-model-config",
+    ),
+    pytest.param(
+        lambda: RateLimiterCallbacks(on_wait_start=_async_callback),
+        {"on_wait_start": _sync_callback},
+        "must be an async callable",
+        id="async-callbacks",
+    ),
+    pytest.param(
+        lambda: SyncRateLimiterCallbacks(on_wait_start=_sync_callback),
+        {"on_wait_start": _async_callback},
+        "must be a synchronous callable",
+        id="sync-callbacks",
+    ),
+    pytest.param(
+        _reservation,
+        {"bucket_ids": {("x:y", 60)}},
+        "bucket_id metric",
+        id="capacity-reservation",
+    ),
+    pytest.param(
+        lambda: CalculatedCapacity(amount=1.0, is_fresh_start=False),
+        {"amount": float("nan")},
+        "finite",
+        id="calculated-capacity",
+    ),
+]
+
+
+@pytest.mark.skipif(
+    not hasattr(copy, "replace"),
+    reason="copy.replace is available on Python 3.13+",
+)
+@pytest.mark.parametrize(("factory", "changes", "message"), STRICT_DTO_REPLACE_CASES)
+def test_copy_replace_revalidates_each_strict_dto(factory, changes, message):
+    with pytest.raises(ValidationError, match=message):
+        copy.replace(factory(), **changes)
+
+
 class TestQuotaCopyAndState:
     @pytest.mark.parametrize(
         ("update", "message"),
