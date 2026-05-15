@@ -90,14 +90,14 @@ def test_update_max_capacity_from_result_ignores_stale_metadata(bucket):
 
 
 def test_bare_numeric_string_rejected(bucket):
-    """Bare numeric strings are rejected — all overrides must use anchored JSON."""
-    with pytest.raises(ValueError, match="JSON must decode to an object"):
-        bucket.update_max_capacity_from_result(b"15.0")
+    """Bare numeric strings are ignored as legacy unanchored overrides."""
+    bucket.update_max_capacity_from_result(b"15.0")
+    assert bucket.max_capacity == pytest.approx(20.0)
 
 
 def test_dict_missing_configured_max_capacity_rejected(bucket):
-    """Dict without configured_max_capacity is rejected to prevent anchor bypass."""
+    """Dict without configured_max_capacity is ignored as a legacy override."""
     payload = json.dumps({"override_max_capacity": 5.0}).encode()
 
-    with pytest.raises(ValueError, match="invalid configured_max_capacity"):
-        bucket.update_max_capacity_from_result(payload)
+    bucket.update_max_capacity_from_result(payload)
+    assert bucket.max_capacity == pytest.approx(20.0)

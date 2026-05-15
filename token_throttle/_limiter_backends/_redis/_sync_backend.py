@@ -81,9 +81,10 @@ LOCK_TIMEOUT_SECONDS = 30
 # Used to index pipeline results.
 _PIPELINE_CMDS_PER_BUCKET = 4
 
-# Each bucket enqueues 2 commands for max-capacity override reads
-# (GET override, EXPIRE override). Used to index pipeline results.
-_PIPELINE_CMDS_PER_OVERRIDE = 2
+# Each bucket enqueues 1 command for max-capacity override reads (GET override).
+# Valid overrides have their TTL refreshed after parsing so legacy/corrupt
+# payloads are not kept alive.
+_PIPELINE_CMDS_PER_OVERRIDE = 1
 
 DEFAULT_LOCK_BLOCKING_TIMEOUT_SECONDS = 5.0
 DEFAULT_LOCK_SLEEP_SECONDS = 0.05
@@ -576,14 +577,10 @@ class SyncRedisBackend(SyncRateLimiterBackend):
             bucket.get_capacity(pipeline=pipeline, current_time=current_time)
 
         # Include max_capacity in the pipeline to avoid extra round-trips.
-        # Refreshing the override TTL is intentionally separate from the
-        # schema-version key, which is a long-lived registry entry.
+        # Override TTL refresh happens after parsing so invalid legacy payloads
+        # are not kept alive.
         for bucket in target_buckets:
             pipeline.get(bucket._max_capacity_key)  # noqa: SLF001
-            pipeline.expire(
-                bucket._max_capacity_key,  # noqa: SLF001
-                bucket._override_ttl_seconds,  # noqa: SLF001
-            )
 
         num_buckets = len(target_buckets)
         expected_results = num_buckets * (
@@ -616,7 +613,11 @@ class SyncRedisBackend(SyncRateLimiterBackend):
             max_capacity_idx = num_buckets * _PIPELINE_CMDS_PER_BUCKET + (
                 i * _PIPELINE_CMDS_PER_OVERRIDE
             )
-            bucket.update_max_capacity_from_result(results[max_capacity_idx])
+            if bucket.update_max_capacity_from_result(results[max_capacity_idx]):
+                self._redis.expire(
+                    bucket._max_capacity_key,  # noqa: SLF001
+                    bucket._override_ttl_seconds,  # noqa: SLF001
+                )
             result = bucket.calculate_capacity(
                 last_checked,
                 capacity,

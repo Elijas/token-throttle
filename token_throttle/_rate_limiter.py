@@ -1,5 +1,6 @@
 import asyncio
 import collections
+import contextlib
 import logging
 import math
 import time
@@ -1258,6 +1259,30 @@ class RateLimiter(BaseRateLimiter):
         except (TypeError, ValueError):
             return False
 
+    async def _backend_runtime_max_capacity_matches_while_cancelled(
+        self,
+        backend: RateLimiterBackend,
+        metric: str,
+        per_seconds: int,
+        value: float,
+    ) -> bool:
+        read_task = asyncio.create_task(
+            self._backend_runtime_max_capacity_matches(
+                backend,
+                metric,
+                per_seconds,
+                value,
+            )
+        )
+        while True:
+            try:
+                return await asyncio.shield(read_task)
+            except asyncio.CancelledError:
+                if read_task.done():
+                    with contextlib.suppress(BaseException):
+                        return read_task.result()
+                    return False
+
     async def _reconcile_runtime_max_capacity_after_failed_set(  # noqa: PLR0913
         self,
         backend: RateLimiterBackend,
@@ -1267,13 +1292,23 @@ class RateLimiter(BaseRateLimiter):
         metric: str,
         per_seconds: int,
         value: float,
+        while_cancelled: bool = False,
     ) -> None:
-        if await self._backend_runtime_max_capacity_matches(
-            backend,
-            metric,
-            per_seconds,
-            value,
-        ):
+        if while_cancelled:
+            matches = await self._backend_runtime_max_capacity_matches_while_cancelled(
+                backend,
+                metric,
+                per_seconds,
+                value,
+            )
+        else:
+            matches = await self._backend_runtime_max_capacity_matches(
+                backend,
+                metric,
+                per_seconds,
+                value,
+            )
+        if matches:
             self._commit_runtime_max_capacity(
                 model_family,
                 model,
@@ -1313,7 +1348,17 @@ class RateLimiter(BaseRateLimiter):
             await asyncio.shield(write_task)
         except asyncio.CancelledError:
             await self._wait_for_set_max_capacity_task_while_cancelled(write_task)
-            if write_task.done() and not write_task.cancelled():
+            if write_task.done() and write_task.cancelled():
+                await self._reconcile_runtime_max_capacity_after_failed_set(
+                    backend,
+                    model_family=model_family,
+                    model=model,
+                    metric=metric,
+                    per_seconds=per_seconds,
+                    value=value,
+                    while_cancelled=True,
+                )
+            elif write_task.done():
                 exc = write_task.exception()
                 if exc is None:
                     self._commit_runtime_max_capacity(
@@ -1331,6 +1376,7 @@ class RateLimiter(BaseRateLimiter):
                         metric=metric,
                         per_seconds=per_seconds,
                         value=value,
+                        while_cancelled=True,
                     )
             raise
         except Exception as exc:  # noqa: BLE001 - boundary wrapper preserves cause

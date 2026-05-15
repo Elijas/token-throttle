@@ -236,13 +236,16 @@ class RedisBucket:
         stored_value = self._redis.get(self._max_capacity_key)
         if inspect.isawaitable(stored_value):
             stored_value = await stored_value
-        expire_result = self._redis.expire(
-            self._max_capacity_key,
-            self._override_ttl_seconds,
-        )
-        if inspect.isawaitable(expire_result):
-            await expire_result
-        self.update_max_capacity_from_result(stored_value)
+        override_value = self._deserialize_max_capacity_override(stored_value)
+        if override_value is not None:
+            expire_result = self._redis.expire(
+                self._max_capacity_key,
+                self._override_ttl_seconds,
+            )
+            if inspect.isawaitable(expire_result):
+                await expire_result
+        self._set_cached_max_capacity_override(override_value)
+        self._max_capacity_cache_time = time.time()
         return self.max_capacity
 
     async def get_max_capacity(self) -> float:
@@ -416,11 +419,12 @@ class RedisBucket:
             return None
         return override_value
 
-    def update_max_capacity_from_result(self, raw_value: object) -> None:
+    def update_max_capacity_from_result(self, raw_value: object) -> bool:
         """Update the runtime-override cache from a pre-fetched pipeline result."""
         new_value = self._deserialize_max_capacity_override(raw_value)
         self._set_cached_max_capacity_override(new_value)
         self._max_capacity_cache_time = time.time()
+        return new_value is not None
 
     async def set_max_capacity(self, value: float) -> None:
         """
@@ -455,10 +459,17 @@ class RedisBucket:
         try:
             self._set_cached_max_capacity_override(value)
             self._max_capacity_cache_time = time.time()
-        except BaseException:
-            with contextlib.suppress(BaseException):
+        except Exception as exc:  # noqa: BLE001 - Redis write already committed.
+            _logger.warning(
+                "Redis max_capacity override write for bucket %s at key %s "
+                "succeeded, but local cache repair failed: %r. Treating the "
+                "override as committed.",
+                self.full_redis_key,
+                self._max_capacity_key,
+                exc,
+            )
+            with contextlib.suppress(Exception):
                 await self.refresh_max_capacity_from_redis()
-            raise
 
     def set_configured_max_capacity(self, value: float) -> None:
         """

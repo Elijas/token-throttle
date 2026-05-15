@@ -75,7 +75,7 @@ async def test_partial_none_bucket_state_is_normalized_to_cold_start(
     redis_client = AsyncMock()
     bucket = RedisBucket(quota, limit_config, redis_client, key_prefix="test")
     backend = RedisBackend([bucket], redis_client, limit_config, key_prefix="test")
-    pipeline = AsyncPipeline(result=[b"1000.0", None, False, False, None, False])
+    pipeline = AsyncPipeline(result=[b"1000.0", None, False, False, None])
     seen: list[tuple[object, object]] = []
 
     def capture_calculate_capacity(

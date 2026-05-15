@@ -215,8 +215,11 @@ class SyncRedisBucket:
         override cannot be hidden by this process's 1-second convenience cache.
         """
         stored_value = self._redis.get(self._max_capacity_key)
-        self._redis.expire(self._max_capacity_key, self._override_ttl_seconds)
-        self.update_max_capacity_from_result(stored_value)
+        override_value = self._deserialize_max_capacity_override(stored_value)
+        if override_value is not None:
+            self._redis.expire(self._max_capacity_key, self._override_ttl_seconds)
+        self._set_cached_max_capacity_override(override_value)
+        self._max_capacity_cache_time = time.time()
         return self.max_capacity
 
     def get_max_capacity(self) -> float:
@@ -262,6 +265,34 @@ class SyncRedisBucket:
             return None
         return parsed
 
+    def _handle_corrupt_override(self, reason: str, *, raw_value: object) -> None:
+        _logger.warning(
+            "Ignoring corrupt Redis max_capacity override for bucket %s at key %s: "
+            "%s (raw=%r). Treating it as missing override.",
+            self.full_redis_key,
+            self._max_capacity_key,
+            reason,
+            raw_value,
+        )
+
+    def _handle_legacy_override(
+        self,
+        era: str,
+        reason: str,
+        *,
+        raw_value: object,
+    ) -> None:
+        _logger.warning(
+            "Ignoring legacy Redis max_capacity override for bucket %s at key %s: "
+            "%s format detected (%s, raw=%r). Re-set the override after upgrade "
+            "to write the current anchored format.",
+            self.full_redis_key,
+            self._max_capacity_key,
+            era,
+            reason,
+            raw_value,
+        )
+
     def _deserialize_max_capacity_override(self, raw_value: object) -> float | None:
         if raw_value is None:
             return None
@@ -279,48 +310,68 @@ class SyncRedisBucket:
         if isinstance(raw_value, bytes):
             try:
                 decoded = raw_value.decode()
-            except UnicodeDecodeError as exc:
-                raise MaxCapacityOverrideParseError(
-                    "Redis max_capacity override is not valid UTF-8"
-                ) from exc
+            except UnicodeDecodeError:
+                self._handle_corrupt_override("not valid UTF-8", raw_value=raw_value)
+                return None
 
         if isinstance(decoded, str):
             try:
                 decoded = json.loads(decoded)
-            except json.JSONDecodeError as exc:
-                raise MaxCapacityOverrideParseError(
-                    "Redis max_capacity override is not valid JSON"
-                ) from exc
+            except json.JSONDecodeError:
+                self._handle_corrupt_override("not valid JSON", raw_value=raw_value)
+                return None
 
         if not isinstance(decoded, dict):
-            raise MaxCapacityOverrideParseError(
-                "Redis max_capacity override JSON must decode to an object"
+            if self._parse_positive_finite_value(decoded) is not None:
+                self._handle_legacy_override(
+                    "Era 2",
+                    "bare numeric override without configured_max_capacity anchor",
+                    raw_value=raw_value,
+                )
+                return None
+            self._handle_corrupt_override(
+                "JSON must decode to an object", raw_value=raw_value
             )
+            return None
 
         override_value = self._parse_positive_finite_value(
             decoded.get(self._OVERRIDE_LIMIT_KEY)
         )
         if override_value is None:
-            raise MaxCapacityOverrideParseError(
-                "Redis max_capacity override has invalid override_max_capacity"
+            self._handle_corrupt_override(
+                "invalid override_max_capacity", raw_value=raw_value
             )
+            return None
 
         configured_limit = self._parse_positive_finite_value(
             decoded.get(self._CONFIGURED_LIMIT_KEY)
         )
         if configured_limit is None:
-            raise MaxCapacityOverrideParseError(
-                "Redis max_capacity override has invalid configured_max_capacity"
+            if self._CONFIGURED_LIMIT_KEY not in decoded:
+                self._handle_legacy_override(
+                    "Era 2",
+                    "JSON override without configured_max_capacity anchor",
+                    raw_value=raw_value,
+                )
+                return None
+            self._handle_corrupt_override(
+                "invalid configured_max_capacity", raw_value=raw_value
             )
-        if configured_limit != self._max_capacity_default:
+            return None
+        if not math.isclose(
+            configured_limit,
+            self._max_capacity_default,
+            rel_tol=1e-12,
+        ):
             return None
         return override_value
 
-    def update_max_capacity_from_result(self, raw_value: object) -> None:
+    def update_max_capacity_from_result(self, raw_value: object) -> bool:
         """Update the runtime-override cache from a pre-fetched pipeline result."""
         new_value = self._deserialize_max_capacity_override(raw_value)
         self._set_cached_max_capacity_override(new_value)
         self._max_capacity_cache_time = time.time()
+        return new_value is not None
 
     def set_max_capacity(self, value: float) -> None:
         """Persist a runtime max-capacity override in Redis."""
@@ -344,10 +395,17 @@ class SyncRedisBucket:
         try:
             self._set_cached_max_capacity_override(value)
             self._max_capacity_cache_time = time.time()
-        except BaseException:
-            with contextlib.suppress(BaseException):
+        except Exception as exc:  # noqa: BLE001 - Redis write already committed.
+            _logger.warning(
+                "Redis max_capacity override write for bucket %s at key %s "
+                "succeeded, but local cache repair failed: %r. Treating the "
+                "override as committed.",
+                self.full_redis_key,
+                self._max_capacity_key,
+                exc,
+            )
+            with contextlib.suppress(Exception):
                 self.refresh_max_capacity_from_redis()
-            raise
 
     def set_configured_max_capacity(self, value: float) -> None:
         """
