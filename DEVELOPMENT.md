@@ -81,6 +81,14 @@ the TTL defaults to 7 days and is configurable via
 `refund_dedup_ttl_seconds`. Memory backends have no durable refund dedup and
 reject refunds for reservations missing from local in-flight state.
 
+`max_reservation_lifetime_seconds` is optional on both public limiters and
+defaults to `None` for v2.0.0 compatibility. When set, every new reservation
+records `created_at_seconds`, and refund rejects reservations older than the
+configured bound. Redis builders validate the bound at limiter construction:
+`bucket_ttl_seconds` and `refund_dedup_ttl_seconds` must both be greater than
+`max_reservation_lifetime_seconds * 2`. This keeps bucket state and refund
+dedup tombstones alive longer than any refundable reservation.
+
 ### Unlimited configs
 
 `UsageQuotas.unlimited()` is the public way to disable limits for a model.
@@ -125,7 +133,7 @@ is the internal config-rebuild path and is not a public `RateLimiter` method.
 
 This is a v2.0.0 contract change. Reservations serialized by v1.4.x through pickle, JSON, job queues, or caches do not have `limiter_instance_id`; those are rejected. Drain in-flight reservations before upgrading and do not run mixed v1.4.x/v2.0.0 fleets. New serialized reservations must preserve the field. If a queue moves reservations across processes, the worker applying the refund must use the same limiter instance identity; otherwise refund is rejected instead of crediting the wrong backend.
 
-Reservations currently have no reservation TTL. A reservation remains eligible until it is refunded, rejected because the issuing limiter no longer matches, rejected because the model now routes differently, or the limiter is closed. Redis backends add durable refund dedup keys with a configurable TTL (`refund_dedup_ttl_seconds`, default 7 days), so an in-flight reservation can be refunded after local in-memory state is lost if the limiter identity still matches and Redis has not already seen the refund. Memory backends reject that cold-restart case because they cannot prove whether capacity was already credited. `close()` / `aclose()` mark the limiter closed, log the number of reservations still in flight, and block subsequent acquire/refund operations.
+Reservations have no TTL by default. A reservation remains eligible until it is refunded, rejected because the issuing limiter no longer matches, rejected because the model now routes differently, rejected because `max_reservation_lifetime_seconds` has elapsed, or the limiter is closed. Redis backends add durable refund dedup keys with a configurable TTL (`refund_dedup_ttl_seconds`, default 7 days), so an in-flight reservation can be refunded after local in-memory state is lost if the limiter identity still matches, Redis has not already seen the refund, and the optional lifetime bound has not expired. Memory backends reject that cold-restart case because they cannot prove whether capacity was already credited. `close()` / `aclose()` mark the limiter closed, log the number of reservations still in flight, and block subsequent acquire/refund operations.
 
 Callable config changes are checked at refund time for held limited reservations. A limited-to-unlimited flip raises instead of crediting an obsolete cached backend, and a `model_family` reroute raises instead of crediting the old family backend. Metric-set changes still project refunds onto surviving bucket ids; if the projection is empty, the refund id is committed to local dedup and, for Redis backends, durable Redis dedup before returning so queue retries cannot double-credit after a rebuild.
 
@@ -269,6 +277,10 @@ The minimum Redis ACL permission set for token-throttle:
 
 token-throttle does **not** use `KEYS`, `FLUSHDB`, `FLUSHALL`, `CONFIG`, or any
 Pub/Sub command. A restrictive ACL can safely deny those categories.
+
+The migration helper `cleanup_legacy_buckets()` is an operator-run maintenance
+tool, not part of limiter hot paths. It uses `SCAN`, `TTL`, and `DEL` to remove
+pre-FIX-38 bucket `:last_checked` / `:capacity` keys that have no expiry.
 
 **`SCRIPT FLUSH` operational hazard**: `SCRIPT FLUSH` evicts the Lua SHA cache
 used by redis-py's lock release and extend scripts. The next lock operation

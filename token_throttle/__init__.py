@@ -50,7 +50,12 @@ from token_throttle._interfaces._models import (
 from token_throttle._rate_limiter import RateLimiter
 from token_throttle._sync_rate_limiter import SyncRateLimiter
 from token_throttle._validation import MAX_TOTAL_KEY_LENGTH
-from token_throttle.migration import ConfigMigrationIssue, validate_config_for_v2_0
+from token_throttle.migration import (
+    ConfigMigrationIssue,
+    async_cleanup_legacy_buckets,
+    cleanup_legacy_buckets,
+    validate_config_for_v2_0,
+)
 
 __version__ = "2.0.0"
 
@@ -166,6 +171,8 @@ __all__ = [
     "Usage",
     "UsageCounter",
     "UsageQuotas",
+    "async_cleanup_legacy_buckets",
+    "cleanup_legacy_buckets",
     "count_chat_input_tokens",
     "create_logging_callbacks",
     "create_loguru_callbacks",

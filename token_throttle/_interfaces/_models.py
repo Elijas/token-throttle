@@ -379,6 +379,14 @@ class CapacityReservation(StrictDTO):
             "field are no longer accepted."
         ),
     )
+    created_at_seconds: float | None = Field(
+        default=None,
+        description=(
+            "Wall-clock Unix timestamp recorded by the limiter when the "
+            "reservation is issued. None is accepted for backward-compatible "
+            "deserialization, but bounded reservation lifetimes require it."
+        ),
+    )
 
     @field_validator("reservation_id", mode="before")
     @classmethod
@@ -414,6 +422,18 @@ class CapacityReservation(StrictDTO):
             value,
             field_name="limiter_instance_id",
         )
+
+    @field_validator("created_at_seconds", mode="before")
+    @classmethod
+    def _validate_created_at_seconds(cls, value: object) -> object:
+        if value is None:
+            return None
+        if _is_bool_like(value) or not isinstance(value, (int, float)):
+            raise ValueError("created_at_seconds must be finite")
+        value_float = float(value)
+        if not math.isfinite(value_float):
+            raise ValueError("created_at_seconds must be finite")
+        return value_float
 
     @field_validator("is_unlimited", mode="after")
     @classmethod

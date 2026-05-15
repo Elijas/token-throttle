@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import inspect
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -15,6 +16,7 @@ from token_throttle._interfaces._models import (
     Quota,
     UsageQuotas,
 )
+from token_throttle._limiter_backends._redis._keys import redis_namespace_key
 from token_throttle._validation import _validate_key_prefix
 
 
@@ -592,4 +594,102 @@ def _lookup_path(value: Any, loc: Iterable[Any]) -> Any:
     return current
 
 
-__all__ = ["ConfigMigrationIssue", "validate_config_for_v2_0"]
+_LEGACY_BUCKET_STATE_SUFFIXES = (":last_checked", ":capacity")
+
+
+def _validate_scan_count(value: object) -> int:
+    if type(value) is not int:
+        raise ValueError(f"count must be an int (got {type(value).__name__})")
+    if value <= 0:
+        raise ValueError("count must be greater than 0")
+    return value
+
+
+def _bucket_scan_match(key_prefix: str) -> str:
+    return f"{redis_namespace_key(_validate_key_prefix(key_prefix), 'bucket')}:*"
+
+
+def _is_legacy_bucket_state_key(key: object) -> bool:
+    if isinstance(key, bytes):
+        try:
+            key = key.decode()
+        except UnicodeDecodeError:
+            return False
+    if not isinstance(key, str):
+        key = str(key)
+    return key.endswith(_LEGACY_BUCKET_STATE_SUFFIXES)
+
+
+async def async_cleanup_legacy_buckets(
+    redis_client: Any,
+    key_prefix: str,
+    *,
+    count: int = 1000,
+) -> int:
+    """
+    Delete pre-FIX-38 Redis bucket state keys that have no expiry.
+
+    Only ``:last_checked`` and ``:capacity`` keys under the configured
+    token-throttle bucket namespace are considered, and only when Redis reports
+    ``TTL == -1``. Keys with a positive TTL, missing keys, locks, runtime
+    overrides, and schema-version keys are left untouched.
+    """
+    count = _validate_scan_count(count)
+    match = _bucket_scan_match(key_prefix)
+    deleted = 0
+    iterator = redis_client.scan_iter(match=match, count=count)
+    if inspect.isawaitable(iterator):
+        iterator = await iterator
+    if hasattr(iterator, "__aiter__"):
+        async for key in iterator:
+            deleted += await _async_cleanup_legacy_bucket_key(redis_client, key)
+        return deleted
+    for key in iterator:
+        deleted += await _async_cleanup_legacy_bucket_key(redis_client, key)
+    return deleted
+
+
+async def _async_cleanup_legacy_bucket_key(redis_client: Any, key: object) -> int:
+    if not _is_legacy_bucket_state_key(key):
+        return 0
+    ttl = redis_client.ttl(key)
+    if inspect.isawaitable(ttl):
+        ttl = await ttl
+    if ttl != -1:
+        return 0
+    result = redis_client.delete(key)
+    if inspect.isawaitable(result):
+        result = await result
+    return int(result or 0)
+
+
+def cleanup_legacy_buckets(
+    redis_client: Any,
+    key_prefix: str,
+    *,
+    count: int = 1000,
+) -> int:
+    """
+    Synchronous cleanup for pre-FIX-38 Redis bucket state keys without expiry.
+
+    Run during a maintenance window after draining in-flight reservations.
+    Async Redis clients should use :func:`async_cleanup_legacy_buckets`.
+    """
+    count = _validate_scan_count(count)
+    match = _bucket_scan_match(key_prefix)
+    deleted = 0
+    for key in redis_client.scan_iter(match=match, count=count):
+        if not _is_legacy_bucket_state_key(key):
+            continue
+        if redis_client.ttl(key) != -1:
+            continue
+        deleted += int(redis_client.delete(key) or 0)
+    return deleted
+
+
+__all__ = [
+    "ConfigMigrationIssue",
+    "async_cleanup_legacy_buckets",
+    "cleanup_legacy_buckets",
+    "validate_config_for_v2_0",
+]

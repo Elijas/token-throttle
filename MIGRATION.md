@@ -34,6 +34,16 @@ reservations may have `limiter_instance_id=None`; v2.0.0 reports this as a
 migration issue because those reservations cannot provide the same ownership
 signal as new reservations.
 
+v2.1.0 adds an optional `max_reservation_lifetime_seconds` constructor
+argument on `RateLimiter` and `SyncRateLimiter`. The default is `None`, which
+preserves the v2.0.0 unbounded lifetime behavior. If you enable a bounded
+lifetime with Redis backends, `bucket_ttl_seconds` and
+`refund_dedup_ttl_seconds` must both be greater than
+`max_reservation_lifetime_seconds * 2`; construction raises `ValueError`
+otherwise. Drain old serialized reservations before enabling the bound because
+v2.0.0 reservations do not carry the `created_at_seconds` timestamp required to
+enforce it.
+
 ## 3. Add Redis Key Prefixes
 
 Redis backend builders and OpenAI Redis factories require a deployment-scoped
@@ -72,6 +82,24 @@ blocked by an ACL, permanently breaks lock release until the process restarts.
 Schedule `SCRIPT FLUSH` only during planned maintenance windows when token-throttle
 is not running, or use a dedicated Redis DB that is not shared with other
 services that flush the script cache.
+
+## 6a. Clean Up Pre-FIX-38 Redis Bucket Keys
+
+FIX-38 added expiries to bucket state when keys are touched. Idle keys written
+before that fix may still have no TTL. After draining in-flight reservations
+and during a maintenance window, run the cleanup helper for each deployment
+prefix:
+
+```python
+from token_throttle.migration import cleanup_legacy_buckets
+
+deleted = cleanup_legacy_buckets(redis_client, key_prefix="prod-api")
+print(f"deleted {deleted} legacy bucket state keys")
+```
+
+For `redis.asyncio.Redis`, use `async_cleanup_legacy_buckets(...)`. The helper
+uses `SCAN`, checks only token-throttle bucket `:last_checked` and `:capacity`
+keys, and deletes only keys whose Redis `TTL` is `-1`.
 
 ## 7. Reservation Serialization Notes
 

@@ -53,7 +53,11 @@ from ._keys import (
     validate_refund_dedup_ttl_seconds,
 )
 from ._server_time import async_server_time
-from ._ttl import DEFAULT_BUCKET_TTL_SECONDS, validate_redis_ttl_seconds
+from ._ttl import (
+    DEFAULT_BUCKET_TTL_SECONDS,
+    validate_redis_ttl_seconds,
+    validate_reservation_lifetime_ttl_invariant,
+)
 
 _logger = logging.getLogger("token_throttle")
 
@@ -270,6 +274,16 @@ class RedisBackendBuilder(RateLimiterBackendBuilderInterface):
         self._lock_sleep_seconds = _validate_positive_seconds(
             lock_sleep_seconds,
             name="lock_sleep_seconds",
+        )
+
+    def validate_reservation_lifetime_seconds(
+        self,
+        max_reservation_lifetime_seconds: float | None,
+    ) -> None:
+        validate_reservation_lifetime_ttl_invariant(
+            max_reservation_lifetime_seconds=max_reservation_lifetime_seconds,
+            bucket_ttl_seconds=self._bucket_ttl_seconds,
+            refund_dedup_ttl_seconds=self._refund_dedup_ttl_seconds,
         )
 
     async def aclose(self) -> None:

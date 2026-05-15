@@ -51,7 +51,11 @@ from ._sync_bucket import (
     _raise_pipeline_response_error,
     _validate_pipeline_results,
 )
-from ._ttl import DEFAULT_BUCKET_TTL_SECONDS, validate_redis_ttl_seconds
+from ._ttl import (
+    DEFAULT_BUCKET_TTL_SECONDS,
+    validate_redis_ttl_seconds,
+    validate_reservation_lifetime_ttl_invariant,
+)
 
 _logger = logging.getLogger("token_throttle")
 
@@ -258,6 +262,16 @@ class SyncRedisBackendBuilder(SyncRateLimiterBackendBuilderInterface):
         self._lock_blocking_thread_sleep_seconds = _validate_positive_seconds(
             lock_blocking_thread_sleep_seconds,
             name="lock_blocking_thread_sleep_seconds",
+        )
+
+    def validate_reservation_lifetime_seconds(
+        self,
+        max_reservation_lifetime_seconds: float | None,
+    ) -> None:
+        validate_reservation_lifetime_ttl_invariant(
+            max_reservation_lifetime_seconds=max_reservation_lifetime_seconds,
+            bucket_ttl_seconds=self._bucket_ttl_seconds,
+            refund_dedup_ttl_seconds=self._refund_dedup_ttl_seconds,
         )
 
     def close(self) -> None:

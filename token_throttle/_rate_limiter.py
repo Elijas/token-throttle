@@ -35,6 +35,9 @@ from token_throttle._interfaces._models import (
     UsageQuotas,
     frozen_usage,
 )
+from token_throttle._limiter_backends._redis._ttl import (
+    validate_max_reservation_lifetime_seconds,
+)
 from token_throttle._validation import (
     _UNLIMITED_FLAG,
     _revalidate_dto,
@@ -320,6 +323,15 @@ def _raise_legacy_reservation_rejected() -> None:
     )
 
 
+def _validate_backend_reservation_lifetime(
+    backend: RateLimiterBackendBuilderInterface,
+    max_reservation_lifetime_seconds: float | None,
+) -> None:
+    validator = getattr(backend, "validate_reservation_lifetime_seconds", None)
+    if callable(validator):
+        validator(max_reservation_lifetime_seconds)
+
+
 def _is_redis_exception(exc: Exception) -> bool:
     return type(exc).__module__.startswith("redis.")
 
@@ -437,6 +449,7 @@ class RateLimiter(BaseRateLimiter):
         max_model_family_length: int = MAX_MODEL_FAMILY_LENGTH,
         max_metric_length: int = MAX_METRIC_LENGTH,
         max_alias_length: int = MAX_ALIAS_LENGTH,
+        max_reservation_lifetime_seconds: float | None = None,
     ):
         if callable(cfg) and is_async_callable(cfg):
             raise ValueError("cfg must be a synchronous PerModelConfig getter")
@@ -447,6 +460,13 @@ class RateLimiter(BaseRateLimiter):
             )
         if callbacks is not None:
             _revalidate_dto(callbacks)
+        self._max_reservation_lifetime_seconds = (
+            validate_max_reservation_lifetime_seconds(max_reservation_lifetime_seconds)
+        )
+        _validate_backend_reservation_lifetime(
+            backend,
+            self._max_reservation_lifetime_seconds,
+        )
         self._backend = backend
         self._lock = asyncio.Lock()
         self._lifecycle_lock = asyncio.Lock()
@@ -963,6 +983,7 @@ class RateLimiter(BaseRateLimiter):
             bucket_ids=_reservation_bucket_ids(limit_config),
             model=model,
             limiter_instance_id=self._limiter_instance_id,
+            created_at_seconds=time.time(),
         )
 
         await self._begin_pending_acquire(reservation)
@@ -1129,6 +1150,7 @@ class RateLimiter(BaseRateLimiter):
         if is_unlimited:
             self._forget_in_flight_reservation(reservation.reservation_id)
             return
+        self._raise_if_reservation_expired(reservation)
         validate_refund_usage(actual_usage, set(reservation.usage))
         await self._refund_capacity(
             actual_usage,
@@ -1158,6 +1180,7 @@ class RateLimiter(BaseRateLimiter):
         if is_unlimited:
             self._forget_in_flight_reservation(reservation.reservation_id)
             return
+        self._raise_if_reservation_expired(reservation)
         reservation_metrics = set(reservation.usage)
         expected_metrics = {"tokens", "requests"}
         if reservation_metrics != expected_metrics:
@@ -1701,6 +1724,7 @@ class RateLimiter(BaseRateLimiter):
             model=model,
             is_unlimited=True,
             limiter_instance_id=self._limiter_instance_id,
+            created_at_seconds=time.time(),
         )
         async with self._acquire_guard:
             self._raise_if_closed_or_closing()
@@ -1711,6 +1735,29 @@ class RateLimiter(BaseRateLimiter):
             self._forget_in_flight_reservation(reservation.reservation_id)
             raise
         return reservation
+
+    def _raise_if_reservation_expired(
+        self,
+        reservation: CapacityReservation,
+    ) -> None:
+        max_lifetime = self._max_reservation_lifetime_seconds
+        if max_lifetime is None:
+            return
+        if reservation.created_at_seconds is None:
+            self._forget_in_flight_reservation(reservation.reservation_id)
+            raise ValueError(
+                "Reservation missing created_at_seconds; bounded reservation "
+                "lifetimes require reservations issued by token-throttle v2.1.0 "
+                "or newer."
+            )
+        age_seconds = time.time() - reservation.created_at_seconds
+        if age_seconds > max_lifetime:
+            self._forget_in_flight_reservation(reservation.reservation_id)
+            raise ValueError(
+                "Reservation lifetime exceeded "
+                f"max_reservation_lifetime_seconds={max_lifetime:g}; "
+                "expired reservations cannot be refunded."
+            )
 
     async def _refresh_backend_for_reservation(
         self,
