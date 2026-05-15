@@ -187,7 +187,9 @@ class UsageQuotas:
         /,
         *,
         _allow_empty_quotas: bool = False,
+        _freeze: bool = False,
     ) -> None:
+        self._frozen = False
         self._metrics: defaultdict[str, dict[int, Quota]] = defaultdict(dict)
         if not _allow_empty_quotas and not quotas:
             raise ValueError(
@@ -196,17 +198,44 @@ class UsageQuotas:
             )
         for quota in quotas:
             self.add_metric(quota)
+        if _freeze:
+            self._freeze()
 
     @classmethod
-    def unlimited(cls) -> Self:
+    def unlimited(cls, *, _freeze: bool = False) -> Self:
         """Return an explicit no-limit quota set for disabled rate limiting."""
-        return cls([], _allow_empty_quotas=True)
+        return cls([], _allow_empty_quotas=True, _freeze=_freeze)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        if getattr(self, "_frozen", False) and name in {"_frozen", "_metrics"}:
+            raise TypeError("UsageQuotas snapshot is frozen")
+        super().__setattr__(name, value)
+
+    def _freeze(self) -> None:
+        self._metrics = frozendict(
+            {
+                metric: frozendict(quotas_by_window)
+                for metric, quotas_by_window in self._metrics.items()
+            }
+        )
+        self._frozen = True
+
+    def frozen_snapshot(self) -> Self:
+        """Return a frozen exact-type copy for immutable DTO composition."""
+        quotas = list(self)
+        return type(self)(
+            quotas,
+            _allow_empty_quotas=self.is_unlimited,
+            _freeze=True,
+        )
 
     @property
     def is_unlimited(self) -> bool:
         return not bool(self._metrics)
 
     def add_metric(self, quota: Quota) -> None:
+        if self._frozen:
+            raise TypeError("UsageQuotas snapshot is frozen")
         if type(quota) is not Quota:
             raise ValueError(
                 f"Each quota must be a Quota instance (got {type(quota).__name__})"

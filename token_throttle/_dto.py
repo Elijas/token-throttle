@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy as _deepcopy
-from typing import ClassVar, Self
+from typing import ClassVar, Self, override
 
 from pydantic import BaseModel, ConfigDict
 
@@ -19,6 +19,52 @@ class StrictDTO(BaseModel):
     """Base for exact-type public DTOs with composable validation."""
 
     model_config = STRICT_DTO_CONFIG
+
+    @classmethod
+    @override
+    def model_validate(
+        cls,
+        obj: object,
+        *,
+        strict: bool | None = None,
+        extra: object | None = None,
+        from_attributes: bool | None = None,
+        context: object | None = None,
+        by_alias: bool | None = None,
+        by_name: bool | None = None,
+    ) -> Self:
+        _ = strict
+        return super().model_validate(
+            obj,
+            strict=True,
+            extra=extra,
+            from_attributes=from_attributes,
+            context=context,
+            by_alias=by_alias,
+            by_name=by_name,
+        )
+
+    @classmethod
+    @override
+    def model_validate_json(
+        cls,
+        json_data: str | bytes | bytearray,
+        *,
+        strict: bool | None = None,
+        extra: object | None = None,
+        context: object | None = None,
+        by_alias: bool | None = None,
+        by_name: bool | None = None,
+    ) -> Self:
+        _ = strict
+        return super().model_validate_json(
+            json_data,
+            strict=True,
+            extra=extra,
+            context=context,
+            by_alias=by_alias,
+            by_name=by_name,
+        )
 
     @classmethod
     def model_construct(cls, *_args: object, **_kwargs: object) -> Self:

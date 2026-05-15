@@ -90,7 +90,10 @@ class PerModelConfig(StrictDTO):
             raise ValueError(
                 f"quotas must be a UsageQuotas instance (got {type(value).__name__})"
             )
-        return value
+        # KNOWN UNKNOWN: UsageQuotas remains externally mutable in v2.0.0, so
+        # PerModelConfig stores a frozen exact-type snapshot instead of taking
+        # ownership of the caller's object.
+        return value.frozen_snapshot()
 
     @field_validator("usage_counter", mode="after")
     @classmethod

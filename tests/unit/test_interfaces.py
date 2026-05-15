@@ -15,7 +15,8 @@ class TestPerModelConfig:
             quotas=quotas,
             model_family="gpt-4o",
         )
-        assert config.quotas is quotas
+        assert config.quotas is not quotas
+        assert list(config.quotas) == list(quotas)
         assert config.model_family == "gpt-4o"
 
     def test_get_model_family_returns_family_when_set(self):
