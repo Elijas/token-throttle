@@ -9,7 +9,10 @@ import warnings
 
 from frozendict import frozendict
 
-from token_throttle._exceptions import CardinalityLimitExceededError
+from token_throttle._exceptions import (
+    AcquireRefundFailedError,
+    CardinalityLimitExceededError,
+)
 from token_throttle._interfaces._callable_utils import is_async_callable
 from token_throttle._interfaces._callbacks import (
     RateLimiterCallbacks,
@@ -1000,7 +1003,7 @@ class RateLimiter(BaseRateLimiter):
                 else backend.consume_capacity(usage)
             )
             await backend_task
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as exc:
             consumed = (
                 backend_task is not None
                 and await self._backend_task_succeeded_after_cancel(backend_task)
@@ -1010,7 +1013,10 @@ class RateLimiter(BaseRateLimiter):
                     self._finalize_pending_acquire(reservation, model)
                 )
                 if _block:
-                    await self._refund_undelivered_acquire(reservation)
+                    await self._refund_undelivered_acquire_or_deliver(
+                        reservation,
+                        interrupted_by=exc,
+                    )
             else:
                 await self._complete_acquire_state_update(
                     self._rollback_pending_acquire(reservation.reservation_id)
@@ -1028,7 +1034,7 @@ class RateLimiter(BaseRateLimiter):
         )
         if interrupted:
             if _block:
-                await self._refund_undelivered_acquire(reservation)
+                await self._refund_undelivered_acquire_or_deliver(reservation)
             raise asyncio.CancelledError
         return reservation
 
@@ -1091,6 +1097,21 @@ class RateLimiter(BaseRateLimiter):
                 if refund_task.done():
                     break
         refund_task.result()
+
+    async def _refund_undelivered_acquire_or_deliver(
+        self,
+        reservation: CapacityReservation,
+        *,
+        interrupted_by: BaseException | None = None,
+    ) -> None:
+        try:
+            await self._refund_undelivered_acquire(reservation)
+        except BaseException as refund_error:
+            raise AcquireRefundFailedError(
+                reservation=reservation,
+                refund_error=refund_error,
+                interrupted_by=interrupted_by,
+            ) from refund_error
 
     async def _complete_acquire_state_update(self, awaitable) -> bool:
         task = asyncio.create_task(awaitable)

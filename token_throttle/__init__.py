@@ -1,7 +1,10 @@
 import importlib
 import importlib.util
 
-from token_throttle._exceptions import CardinalityLimitExceededError
+from token_throttle._exceptions import (
+    AcquireRefundFailedError,
+    CardinalityLimitExceededError,
+)
 from token_throttle._interfaces._callbacks import (
     OnCapacityConsumedCallback,
     OnCapacityRefundedCallback,
@@ -130,6 +133,7 @@ __all__ = [
     "MAX_MODEL_FAMILY_LENGTH",
     "MAX_RESERVATION_ID_LENGTH",
     "MAX_TOTAL_KEY_LENGTH",
+    "AcquireRefundFailedError",
     "BucketId",
     "CalculatedCapacity",
     "Capacities",

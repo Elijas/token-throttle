@@ -8,7 +8,10 @@ import warnings
 
 from frozendict import frozendict
 
-from token_throttle._exceptions import CardinalityLimitExceededError
+from token_throttle._exceptions import (
+    AcquireRefundFailedError,
+    CardinalityLimitExceededError,
+)
 from token_throttle._interfaces._callable_utils import is_async_callable
 from token_throttle._interfaces._callbacks import (
     SyncRateLimiterCallbacks,
@@ -939,9 +942,13 @@ class SyncRateLimiter:
         try:
             self._finalize_pending_acquire(reservation, model)
             return reservation
-        except BaseException:
+        except BaseException as exc:
             if _block:
-                self._finalize_and_refund_undelivered_acquire(reservation, model)
+                self._finalize_and_refund_undelivered_acquire(
+                    reservation,
+                    model,
+                    interrupted_by=exc,
+                )
             raise
 
     def _begin_pending_acquire(self, reservation: CapacityReservation) -> None:
@@ -992,9 +999,18 @@ class SyncRateLimiter:
         self,
         reservation: CapacityReservation,
         model: str,
+        *,
+        interrupted_by: BaseException | None = None,
     ) -> None:
         self._finalize_pending_acquire(reservation, model)
-        self.refund_capacity(_zero_actual_usage(reservation), reservation)
+        try:
+            self.refund_capacity(_zero_actual_usage(reservation), reservation)
+        except BaseException as refund_error:
+            raise AcquireRefundFailedError(
+                reservation=reservation,
+                refund_error=refund_error,
+                interrupted_by=interrupted_by,
+            ) from refund_error
 
     def refund_capacity(
         self,
