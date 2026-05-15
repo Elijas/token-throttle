@@ -1,4 +1,8 @@
-import unicodedata
+from token_throttle._validation import (
+    _validate_key_prefix,
+    _validate_reservation_id,
+    _validate_total_key_length,
+)
 
 _REDIS_NAMESPACE = "rate_limiting"
 DEFAULT_REFUND_DEDUP_TTL_SECONDS = 7 * 24 * 60 * 60
@@ -6,41 +10,32 @@ DEFAULT_REFUND_DEDUP_TTL_SECONDS = 7 * 24 * 60 * 60
 
 def validate_redis_key_prefix(value: object) -> str:
     """Validate the deployment-scoped Redis key prefix."""
-    if type(value) is not str:
-        raise ValueError(f"key_prefix must be a str (got {type(value).__name__})")
-    if not value:
-        raise ValueError("key_prefix must not be empty")
-
-    normalized = unicodedata.normalize("NFC", value)
-    if not normalized.strip():
-        raise ValueError("key_prefix must not be whitespace-only")
-    if normalized != normalized.strip():
-        raise ValueError("key_prefix must not contain leading/trailing whitespace")
-    if any(char.isspace() for char in normalized):
-        raise ValueError("key_prefix must not contain whitespace")
-    if any(not char.isprintable() for char in normalized):
-        raise ValueError("key_prefix must not contain non-printable characters")
-    if any(unicodedata.category(char).startswith("C") for char in normalized):
-        raise ValueError("key_prefix must not contain Unicode control characters")
-    if ":" in normalized:
-        raise ValueError(
-            "key_prefix must not contain ':' (used as Redis key separator)"
-        )
-    if "{" in normalized or "}" in normalized:
-        raise ValueError(
-            "key_prefix must not contain '{' or '}' (Redis Cluster hash tag delimiters)"
-        )
-    return normalized
+    return _validate_key_prefix(value)
 
 
 def redis_namespace_key(key_prefix: str, *segments: object) -> str:
-    return ":".join(
-        (key_prefix, _REDIS_NAMESPACE, *(str(segment) for segment in segments))
+    key = ":".join(
+        (
+            validate_redis_key_prefix(key_prefix),
+            _REDIS_NAMESPACE,
+            *(str(segment) for segment in segments),
+        )
+    )
+    return _validate_total_key_length(key)
+
+
+def redis_key_with_suffix(key: str, *suffixes: object) -> str:
+    return _validate_total_key_length(
+        ":".join((key, *(str(suffix) for suffix in suffixes)))
     )
 
 
 def redis_refund_dedup_key(key_prefix: str, reservation_id: str) -> str:
-    return redis_namespace_key(key_prefix, "refund_dedup", reservation_id)
+    return redis_namespace_key(
+        key_prefix,
+        "refund_dedup",
+        _validate_reservation_id(reservation_id),
+    )
 
 
 def validate_refund_dedup_ttl_seconds(value: object) -> int:

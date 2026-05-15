@@ -16,8 +16,10 @@ from token_throttle._interfaces._interfaces import PerModelConfig, PerModelConfi
 from token_throttle._interfaces._models import (
     _UNLIMITED_FLAG,
     MAX_ALIAS_LENGTH,
+    MAX_KEY_PREFIX_LENGTH,
     MAX_METRIC_LENGTH,
     MAX_MODEL_FAMILY_LENGTH,
+    MAX_RESERVATION_ID_LENGTH,
     BucketId,
     CapacityReservation,
     FrozenUsage,
@@ -29,9 +31,39 @@ from token_throttle._interfaces._models import (
     frozen_usage,
 )
 
+MAX_TOTAL_KEY_LENGTH = 8192
+
 # Re-exported from ``_models`` so external callers that imported
 # ``_UNLIMITED_FLAG`` from this module keep working.
 __all__ = ["_UNLIMITED_FLAG"]
+
+
+def _validate_key_prefix(value: object) -> str:
+    """Validate the deployment-scoped Redis key prefix."""
+    return _validate_key_segment(
+        value,
+        field_name="key_prefix",
+        max_length=MAX_KEY_PREFIX_LENGTH,
+    )
+
+
+def _validate_reservation_id(value: object) -> str:
+    """Validate a reservation id before it is embedded in a Redis key."""
+    return _validate_key_segment(
+        value,
+        field_name="reservation_id",
+        max_length=MAX_RESERVATION_ID_LENGTH,
+    )
+
+
+def _validate_total_key_length(key: str) -> str:
+    """Reject constructed Redis keys above token-throttle's bounded key cap."""
+    if len(key) > MAX_TOTAL_KEY_LENGTH:
+        raise CardinalityLimitExceededError(
+            f"Redis key must be at most {MAX_TOTAL_KEY_LENGTH} characters "
+            f"(got {len(key)})"
+        )
+    return key
 
 
 def is_unlimited_reservation(reservation: object) -> bool:

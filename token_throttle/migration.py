@@ -15,6 +15,7 @@ from token_throttle._interfaces._models import (
     Quota,
     UsageQuotas,
 )
+from token_throttle._validation import _validate_key_prefix
 
 
 @dataclass(frozen=True, slots=True)
@@ -296,12 +297,30 @@ def _scan_redis_builder_config(
             )
         )
         return
-    _scan_segment(
+    _scan_key_prefix(
         config["key_prefix"],
-        field_name="key_prefix",
         path=key_path,
         issues=issues,
     )
+
+
+def _scan_key_prefix(
+    value: Any,
+    *,
+    path: str,
+    issues: list[ConfigMigrationIssue],
+) -> None:
+    try:
+        _validate_key_prefix(value)
+    except ValueError as exc:
+        issues.append(
+            ConfigMigrationIssue(
+                field_path=path,
+                value=value,
+                reason=str(exc),
+                suggested_fix="Use a non-empty deployment-scoped key_prefix of at most 128 characters without whitespace, ':', '{', or '}'.",
+            )
+        )
 
 
 def _scan_limit(value: Any, *, path: str, issues: list[ConfigMigrationIssue]) -> None:

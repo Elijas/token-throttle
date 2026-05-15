@@ -32,6 +32,7 @@ from token_throttle._interfaces._interfaces import (
 )
 from token_throttle._interfaces._models import Capacities, FrozenUsage
 from token_throttle._validation import (
+    _validate_reservation_id,
     validate_backend_refund_usage_for_bucket_ids,
     validate_backend_usage,
     validate_sleep_interval,
@@ -334,6 +335,7 @@ class RedisBackend(RateLimiterBackend):
     async def _claim_refund_dedup(self, reservation_id: str | None) -> bool:
         if reservation_id is None:
             return True
+        reservation_id = _validate_reservation_id(reservation_id)
         key = redis_refund_dedup_key(self._key_prefix, reservation_id)
         claimed = await self._redis.set(
             key,

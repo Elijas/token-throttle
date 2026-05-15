@@ -27,7 +27,7 @@ from token_throttle._interfaces._interfaces import PerModelConfig
 from token_throttle._interfaces._models import Quota, _is_bool_like
 from token_throttle._validation import validate_per_seconds
 
-from ._keys import redis_namespace_key, validate_redis_key_prefix
+from ._keys import redis_key_with_suffix, redis_namespace_key, validate_redis_key_prefix
 from ._server_time import sync_server_time
 from ._ttl import DEFAULT_BUCKET_TTL_SECONDS, validate_redis_ttl_seconds
 
@@ -172,10 +172,14 @@ class SyncRedisBucket:
             self._max_capacity_default, self.per_seconds
         )
         # Keys for Redis
-        self._last_checked_key = f"{self.full_redis_key}:last_checked"
-        self._capacity_key = f"{self.full_redis_key}:capacity"
-        self._lock_key = f"{self.full_redis_key}:lock"
-        self._max_capacity_key = f"{self.full_redis_key}:max_capacity_override"
+        self._last_checked_key = redis_key_with_suffix(
+            self.full_redis_key, "last_checked"
+        )
+        self._capacity_key = redis_key_with_suffix(self.full_redis_key, "capacity")
+        self._lock_key = redis_key_with_suffix(self.full_redis_key, "lock")
+        self._max_capacity_key = redis_key_with_suffix(
+            self.full_redis_key, "max_capacity_override"
+        )
         self._schema_version_key = redis_namespace_key(
             self.key_prefix,
             "schema_version",

@@ -26,6 +26,8 @@ Lives in this module (not ``_validation``) so ``CapacityReservation``'s
 MAX_MODEL_FAMILY_LENGTH = 256
 MAX_METRIC_LENGTH = 64
 MAX_ALIAS_LENGTH = 256
+MAX_KEY_PREFIX_LENGTH = 128
+MAX_RESERVATION_ID_LENGTH = 128
 
 
 def _is_bool_like(value: object) -> bool:
@@ -40,6 +42,10 @@ def _default_max_length_for_field(field_name: str) -> int | None:
         return MAX_MODEL_FAMILY_LENGTH
     if field_name in {"model_name", "alias"}:
         return MAX_ALIAS_LENGTH
+    if field_name == "key_prefix":
+        return MAX_KEY_PREFIX_LENGTH
+    if field_name == "reservation_id":
+        return MAX_RESERVATION_ID_LENGTH
     return None
 
 
@@ -342,7 +348,10 @@ class CapacityReservation(StrictDTO):
     Mutating ``is_unlimited`` via this vector would bypass metering.
     """
 
-    reservation_id: str = Field(default_factory=lambda: uuid.uuid4().hex)
+    reservation_id: str = Field(
+        default_factory=lambda: uuid.uuid4().hex,
+        max_length=MAX_RESERVATION_ID_LENGTH,
+    )
     usage: FrozenUsage
     model_family: str = Field(
         description=(

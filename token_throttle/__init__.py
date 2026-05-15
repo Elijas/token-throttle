@@ -31,8 +31,10 @@ from token_throttle._interfaces._interfaces import (
 )
 from token_throttle._interfaces._models import (
     MAX_ALIAS_LENGTH,
+    MAX_KEY_PREFIX_LENGTH,
     MAX_METRIC_LENGTH,
     MAX_MODEL_FAMILY_LENGTH,
+    MAX_RESERVATION_ID_LENGTH,
     BucketId,
     Capacities,
     CapacityReservation,
@@ -47,6 +49,7 @@ from token_throttle._interfaces._models import (
 )
 from token_throttle._rate_limiter import RateLimiter
 from token_throttle._sync_rate_limiter import SyncRateLimiter
+from token_throttle._validation import MAX_TOTAL_KEY_LENGTH
 from token_throttle.migration import ConfigMigrationIssue, validate_config_for_v2_0
 
 __version__ = "2.0.0"
@@ -117,8 +120,11 @@ _REDIS_ALL = [
 
 __all__ = [
     "MAX_ALIAS_LENGTH",
+    "MAX_KEY_PREFIX_LENGTH",
     "MAX_METRIC_LENGTH",
     "MAX_MODEL_FAMILY_LENGTH",
+    "MAX_RESERVATION_ID_LENGTH",
+    "MAX_TOTAL_KEY_LENGTH",
     "BucketId",
     "CalculatedCapacity",
     "Capacities",
