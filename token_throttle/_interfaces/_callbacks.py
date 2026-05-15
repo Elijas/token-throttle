@@ -30,8 +30,9 @@ import logging
 import os
 import threading
 import warnings
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import Protocol, runtime_checkable
 
+from frozendict import frozendict
 from pydantic import Field, ValidationInfo, field_validator
 
 from token_throttle._dto import StrictDTO
@@ -40,8 +41,11 @@ from token_throttle._interfaces._callable_utils import (
     is_async_callable,
 )
 
-if TYPE_CHECKING:
-    from token_throttle._interfaces._models import Capacities, FrozenUsage
+type MetricName = str
+type PerSeconds = int
+type BucketId = tuple[MetricName, PerSeconds]
+type FrozenUsage = frozendict[MetricName, float]
+type Capacities = frozendict[BucketId, float]
 
 # ---------------------------------------------------------------------------
 # Auto-detect loguru vs stdlib logging
@@ -173,6 +177,7 @@ _EXPECTED_CALLBACK_PARAMS: dict[str, frozenset[str]] = {
     "on_missing_consumption_data": frozenset(
         {"model_family", "usage_metric", "per_seconds"}
     ),
+    "on_lifecycle_event": frozenset({"event"}),
 }
 
 
@@ -378,6 +383,7 @@ def with_callback_timeout(
         on_capacity_consumed=wrap(callbacks.on_capacity_consumed),
         on_capacity_refunded=wrap(callbacks.on_capacity_refunded),
         on_missing_consumption_data=wrap(callbacks.on_missing_consumption_data),
+        on_lifecycle_event=wrap(callbacks.on_lifecycle_event),
     )
 
 
@@ -404,12 +410,32 @@ def with_sync_callback_timeout(
         on_capacity_consumed=wrap(callbacks.on_capacity_consumed),
         on_capacity_refunded=wrap(callbacks.on_capacity_refunded),
         on_missing_consumption_data=wrap(callbacks.on_missing_consumption_data),
+        on_lifecycle_event=wrap(callbacks.on_lifecycle_event),
     )
 
 
 # ---------------------------------------------------------------------------
 # Async callback protocols
 # ---------------------------------------------------------------------------
+
+
+class LifecycleEvent(StrictDTO):
+    """
+    Structured, additive lifecycle event for correlation and metrics collectors.
+
+    ``model_alias`` and ``request_id`` are caller-controlled values and may
+    contain application identifiers. ``model_family``, ``bucket_ids``, and
+    ``usage`` come from limiter configuration and reservation state.
+    """
+
+    event_type: str = Field(description="Lifecycle event kind")
+    reservation_id: str | None = Field(default=None)
+    request_id: str | None = Field(default=None)
+    model_family: str = Field(description="Resolved limiter model family")
+    model_alias: str | None = Field(default=None, description="Public model alias")
+    bucket_ids: frozenset[BucketId] | None = Field(default=None)
+    usage: FrozenUsage | None = Field(default=None)
+    timestamp: float = Field(description="Unix timestamp in seconds")
 
 
 @runtime_checkable
@@ -487,6 +513,16 @@ class OnMissingConsumptionDataCallback(Protocol):
         """Called when no previous consumption data is detected, assuming full quota"""
 
 
+@runtime_checkable
+class OnLifecycleEventCallback(Protocol):
+    async def __call__(
+        self,
+        *,
+        event: LifecycleEvent,
+    ) -> None:
+        """Called with structured limiter lifecycle events."""
+
+
 class RateLimiterCallbacks(StrictDTO):
     """
     Exact-type immutable async callback bundle.
@@ -517,6 +553,10 @@ class RateLimiterCallbacks(StrictDTO):
         default=None,
         description="Called when no previous consumption data is detected, assuming full quota",
     )
+    on_lifecycle_event: OnLifecycleEventCallback | None = Field(
+        default=None,
+        description="Called with structured limiter lifecycle events",
+    )
 
     @field_validator(
         "on_wait_start",
@@ -524,6 +564,7 @@ class RateLimiterCallbacks(StrictDTO):
         "on_capacity_consumed",
         "on_capacity_refunded",
         "on_missing_consumption_data",
+        "on_lifecycle_event",
         mode="after",
     )
     @classmethod
@@ -636,6 +677,15 @@ class SyncOnMissingConsumptionDataCallback(Protocol):
     ) -> None: ...
 
 
+@runtime_checkable
+class SyncOnLifecycleEventCallback(Protocol):
+    def __call__(
+        self,
+        *,
+        event: LifecycleEvent,
+    ) -> None: ...
+
+
 class SyncRateLimiterCallbacks(StrictDTO):
     """
     Exact-type immutable sync callback bundle.
@@ -666,6 +716,10 @@ class SyncRateLimiterCallbacks(StrictDTO):
         default=None,
         description="Called when no previous consumption data is detected, assuming full quota",
     )
+    on_lifecycle_event: SyncOnLifecycleEventCallback | None = Field(
+        default=None,
+        description="Called with structured limiter lifecycle events",
+    )
 
     @field_validator(
         "on_wait_start",
@@ -673,6 +727,7 @@ class SyncRateLimiterCallbacks(StrictDTO):
         "on_capacity_consumed",
         "on_capacity_refunded",
         "on_missing_consumption_data",
+        "on_lifecycle_event",
         mode="after",
     )
     @classmethod

@@ -4,6 +4,7 @@ import contextlib
 import inspect
 import logging
 import math
+import sys
 import time
 import uuid
 import warnings
@@ -19,6 +20,7 @@ from token_throttle._exceptions import (
 )
 from token_throttle._interfaces._callable_utils import is_async_callable
 from token_throttle._interfaces._callbacks import (
+    LifecycleEvent,
     RateLimiterCallbacks,
     with_callback_timeout,
 )
@@ -76,6 +78,43 @@ _REFUND_STATE_PENDING = "pending"
 _REFUND_STATE_COMMITTED = "committed"
 _REFUND_STATE_FAILED = "failed"
 _REFUND_STATE_MISSING = object()
+_CRITICAL_LIFECYCLE_CALLBACK_EXCEPTION_TYPES = (
+    KeyboardInterrupt,
+    SystemExit,
+    GeneratorExit,
+)
+
+
+def _token_throttle_version() -> str:
+    module = sys.modules.get("token_throttle")
+    version = getattr(module, "__version__", None)
+    return version if isinstance(version, str) else "unknown"
+
+
+def _backend_type_name(backend: object) -> str:
+    backend_module = type(backend).__module__
+    if "._redis." in backend_module:
+        return "redis"
+    if "._memory." in backend_module:
+        return "memory"
+    return "custom"
+
+
+def _request_id_from_value(value: object) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    return str(value)
+
+
+def _lifecycle_callback_exception_group_contains_critical(
+    exc: BaseException,
+) -> bool:
+    if not isinstance(exc, BaseExceptionGroup):
+        return False
+    critical, _non_critical = exc.split(_CRITICAL_LIFECYCLE_CALLBACK_EXCEPTION_TYPES)
+    return critical is not None
 
 
 def _refund_state_is_committed(state: object) -> bool:
@@ -621,6 +660,76 @@ class RateLimiter(BaseRateLimiter):
         self._in_flight_reservation_family: dict[str, str] = {}
         self._model_family_last_touched: dict[str, float] = {}
         self._closed = False
+        _logger.info("token_throttle version %s", _token_throttle_version())
+
+    def snapshot_state(self) -> dict[str, object]:
+        """
+        Return a redacted point-in-time limiter health snapshot.
+
+        The snapshot intentionally omits backend connection strings and Redis
+        key prefixes. Redis marker/refund counts are local best-effort
+        estimates derived from limiter bookkeeping, not a cross-process SCAN.
+        """
+        in_flight_reservations = len(
+            self._in_flight_reservation_ids | self._pending_acquire_reservations
+        )
+        state: dict[str, object] = {
+            "in_flight_reservations": in_flight_reservations,
+            "model_families": len(self._model_family_to_backend),
+            "backend_type": _backend_type_name(self._backend),
+        }
+        if state["backend_type"] == "redis":
+            state["marker_count_estimate"] = in_flight_reservations
+            state["refund_dedup_count_estimate"] = sum(
+                1
+                for refund_state in self._refunded_reservation_ids.values()
+                if _refund_state_is_committed(refund_state)
+            )
+        return state
+
+    async def _emit_lifecycle_event(
+        self,
+        event: LifecycleEvent,
+    ) -> None:
+        callback = (
+            self._backend_callbacks.on_lifecycle_event
+            if self._backend_callbacks is not None
+            else None
+        )
+        if callback is None:
+            return
+        try:
+            await callback(event=event)
+        except _CRITICAL_LIFECYCLE_CALLBACK_EXCEPTION_TYPES:
+            raise
+        except BaseException as exc:
+            if _lifecycle_callback_exception_group_contains_critical(exc):
+                raise
+            msg = f"Rate limiter lifecycle callback raised {type(exc).__name__}: {exc}"
+            with contextlib.suppress(Warning):
+                warnings.warn(msg, RuntimeWarning, stacklevel=3)
+            _logger.warning(msg)
+
+    async def _emit_reservation_lifecycle_event(
+        self,
+        event_type: str,
+        reservation: CapacityReservation,
+        *,
+        request_id: str | None = None,
+        usage: FrozenUsage | None = None,
+    ) -> None:
+        await self._emit_lifecycle_event(
+            LifecycleEvent(
+                event_type=event_type,
+                reservation_id=reservation.reservation_id,
+                request_id=request_id,
+                model_family=reservation.model_family,
+                model_alias=reservation.model,
+                bucket_ids=reservation.bucket_ids,
+                usage=usage if usage is not None else reservation.get_usage(),
+                timestamp=time.time(),
+            )
+        )
 
     def _raise_if_closed(self) -> None:
         if self._closed:
@@ -1088,6 +1197,7 @@ class RateLimiter(BaseRateLimiter):
             usage,
             limit_config,
             timeout=timeout,
+            request_id=_request_id_from_value(kwargs.get("request_id")),
         )
 
     async def _acquire_capacity(
@@ -1098,6 +1208,7 @@ class RateLimiter(BaseRateLimiter):
         *,
         _block: bool = True,
         timeout: float | None = None,
+        request_id: str | None = None,
     ) -> CapacityReservation:
         validate_acquire_usage(usage, limit_config.quotas)
 
@@ -1185,6 +1296,12 @@ class RateLimiter(BaseRateLimiter):
                         interrupted_by=interrupted_by,
                     )
                 raise interrupted_by
+            await self._emit_reservation_lifecycle_event(
+                "capacity_consumed",
+                reservation,
+                request_id=request_id,
+                usage=usage,
+            )
             return reservation
         finally:
             await self._end_acquire_delivery_cleanup(reservation.reservation_id)
@@ -1773,6 +1890,11 @@ class RateLimiter(BaseRateLimiter):
                 )
                 if interrupted:
                     raise asyncio.CancelledError  # noqa: TRY301
+                await self._emit_reservation_lifecycle_event(
+                    "capacity_refunded",
+                    reservation,
+                    usage=reserved_usage,
+                )
             except BaseException:
                 if self._refund_backend_state_changed(
                     refund_backend,
@@ -1959,6 +2081,8 @@ class RateLimiter(BaseRateLimiter):
         self,
         model: str,
         limit_config: PerModelConfig,
+        *,
+        request_id: str | None = None,
     ) -> CapacityReservation:
         # Unlimited reservations bypass metering, so their ``usage`` is
         # never read. The ``CapacityReservation`` field validator
@@ -1982,6 +2106,12 @@ class RateLimiter(BaseRateLimiter):
         except BaseException:
             self._forget_in_flight_reservation(reservation.reservation_id)
             raise
+        await self._emit_reservation_lifecycle_event(
+            "capacity_consumed",
+            reservation,
+            request_id=request_id,
+            usage=frozendict(),
+        )
         return reservation
 
     def _raise_if_reservation_expired(

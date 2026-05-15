@@ -75,6 +75,9 @@ from ._ttl import (
 )
 
 _logger = logging.getLogger("token_throttle")
+_acquire_logger = logging.getLogger("token_throttle.acquire")
+_refund_logger = logging.getLogger("token_throttle.refund")
+_lock_logger = logging.getLogger("token_throttle.lock")
 
 _CRITICAL_CALLBACK_EXCEPTION_TYPES = (
     AcquireRefundFailedError,
@@ -163,6 +166,25 @@ return 'ok'
 """
 _MAX_REDIS_SCRIPT_STATUS_CHARS = 64
 _MIN_PRINTABLE_SCRIPT_STATUS_CODE = 32
+
+
+def _debug_event(
+    logger: logging.Logger,
+    event_type: str,
+    *,
+    reservation_id: str | None = None,
+    bucket_id: tuple[str, int] | None = None,
+    **fields: object,
+) -> None:
+    if not logger.isEnabledFor(logging.DEBUG):
+        return
+    event = {
+        "event_type": event_type,
+        "reservation_id": reservation_id,
+        "bucket_id": bucket_id,
+        **fields,
+    }
+    logger.debug(event_type, extra={"token_throttle_event": event})
 
 
 class RedisScriptResultError(RuntimeError):
@@ -300,9 +322,22 @@ def _ensure_buckets_match_backend(
         )
 
 
-async def _shielded_lock_release(lock: redis.asyncio.lock.Lock) -> None:
+async def _shielded_lock_release(
+    lock: redis.asyncio.lock.Lock,
+    *,
+    bucket_id: tuple[str, int],
+    reservation_id: str | None,
+) -> None:
     """Release a Redis lock, shielded so the round-trip finishes even under cancel."""
-    await asyncio.shield(lock.release())
+    try:
+        await asyncio.shield(lock.release())
+    finally:
+        _debug_event(
+            _lock_logger,
+            "redis_lock_release",
+            reservation_id=reservation_id,
+            bucket_id=bucket_id,
+        )
 
 
 class _RedisLockStack(AsyncExitStack):
@@ -583,6 +618,13 @@ class RedisBackend(RateLimiterBackend):
             ex=self._refund_dedup_ttl_seconds,
             nx=True,
         )
+        _debug_event(
+            _refund_logger,
+            "redis_refund_dedup_write",
+            reservation_id=reservation_id,
+            bucket_id=None,
+            claimed=bool(claimed),
+        )
         if claimed:
             return True
         self._warn_refund_dedup_duplicate(reservation_id)
@@ -604,18 +646,41 @@ class RedisBackend(RateLimiterBackend):
         self,
         acquired_marker_key: str,
         acquired_marker_value: str,
+        *,
+        reservation_id: str | None = None,
     ) -> bool:
         try:
             marker = await self._redis.get(acquired_marker_key)
         except redis.exceptions.RedisError:
             return False
-        return _redis_value_matches(marker, acquired_marker_value)
+        matches = _redis_value_matches(marker, acquired_marker_value)
+        _debug_event(
+            _acquire_logger,
+            "redis_acquire_marker_get",
+            reservation_id=reservation_id,
+            bucket_id=None,
+            matched=matches,
+        )
+        return matches
 
-    async def _refund_tombstone_exists(self, refund_dedup_key: str) -> bool:
+    async def _refund_tombstone_exists(
+        self,
+        refund_dedup_key: str,
+        *,
+        reservation_id: str | None = None,
+    ) -> bool:
         try:
-            return bool(await self._redis.exists(refund_dedup_key))
+            exists = bool(await self._redis.exists(refund_dedup_key))
         except redis.exceptions.RedisError:
             return False
+        _debug_event(
+            _refund_logger,
+            "redis_refund_dedup_get",
+            reservation_id=reservation_id,
+            bucket_id=None,
+            exists=exists,
+        )
+        return exists
 
     async def _probe_legacy_override_keys_once(
         self,
@@ -706,6 +771,7 @@ class RedisBackend(RateLimiterBackend):
         timeout: float,
         blocking_timeout: float | None = None,
         buckets: tuple[RedisBucket, ...] | list[RedisBucket] | None = None,
+        reservation_id: str | None = None,
     ) -> _RedisLockStack:
         """
         Acquire distributed Redis locks for a fixed bucket snapshot.
@@ -730,9 +796,10 @@ class RedisBackend(RateLimiterBackend):
         try:
             for bucket in target_buckets:
                 if stack.locks:
-                    await self._extend_locks(stack)
+                    await self._extend_locks(stack, reservation_id=reservation_id)
                 remaining = max(0.0, stop_trying_at - loop.time())
                 lock = bucket.lock(timeout=timeout, sleep=self._lock_sleep_seconds)
+                bucket_id = (bucket.usage_metric, int(bucket.per_seconds))
                 # Generate the token ourselves and pass it to acquire().
                 # This lets us run LUA_RELEASE directly with a known
                 # token if cancel arrives mid-acquire: redis-py's
@@ -764,8 +831,19 @@ class RedisBackend(RateLimiterBackend):
                     raise
                 if not acquired:
                     _raise_lock_timeout_error()
+                _debug_event(
+                    _lock_logger,
+                    "redis_lock_acquire",
+                    reservation_id=reservation_id,
+                    bucket_id=bucket_id,
+                )
                 stack.locks.append(lock)
-                stack.push_async_callback(_shielded_lock_release, lock)
+                stack.push_async_callback(
+                    _shielded_lock_release,
+                    lock,
+                    bucket_id=bucket_id,
+                    reservation_id=reservation_id,
+                )
         except BaseException:
             await stack.aclose()
             raise
@@ -773,7 +851,11 @@ class RedisBackend(RateLimiterBackend):
         return stack
 
     @staticmethod
-    async def _extend_locks(stack: _RedisLockStack) -> None:
+    async def _extend_locks(
+        stack: _RedisLockStack,
+        *,
+        reservation_id: str | None = None,
+    ) -> None:
         """
         Reset each held lock's TTL to its configured timeout (LOCK_TIMEOUT_SECONDS).
 
@@ -797,6 +879,13 @@ class RedisBackend(RateLimiterBackend):
                 raise redis.exceptions.LockError(
                     "Lock expired or was stolen mid-operation; aborting write."
                 ) from exc
+            _debug_event(
+                _lock_logger,
+                "redis_lock_extension",
+                reservation_id=reservation_id,
+                bucket_id=None,
+                lock_name=lock.name,
+            )
 
     async def _get_capacities_unsafe(
         self,
@@ -910,6 +999,7 @@ class RedisBackend(RateLimiterBackend):
         acquired_marker_value: str | None = None,
         acquired_marker_ttl_ms: int | None = None,
         delete_acquired_marker_key: str | None = None,
+        reservation_id: str | None = None,
     ) -> bool:
         """
         Set capacities for all buckets. Caller must hold the distributed lock.
@@ -927,6 +1017,13 @@ class RedisBackend(RateLimiterBackend):
         if acquired_marker_key is not None:
             if acquired_marker_value is None or acquired_marker_ttl_ms is None:
                 raise ValueError("acquired marker writes require marker value and TTL")
+            for bucket in target_buckets:
+                _debug_event(
+                    _acquire_logger,
+                    "redis_acquire_marker_write",
+                    reservation_id=reservation_id,
+                    bucket_id=(bucket.usage_metric, int(bucket.per_seconds)),
+                )
             keys: list[str] = [acquired_marker_key]
             args: list[object] = [acquired_marker_ttl_ms, acquired_marker_value]
             for (usage_metric, per_seconds), amount in new_capacities.items():
@@ -968,6 +1065,7 @@ class RedisBackend(RateLimiterBackend):
                 if await self._acquire_marker_matches(
                     acquired_marker_key,
                     acquired_marker_value,
+                    reservation_id=reservation_id,
                 ):
                     return True
                 raise
@@ -980,6 +1078,7 @@ class RedisBackend(RateLimiterBackend):
                 if await self._acquire_marker_matches(
                     acquired_marker_key,
                     acquired_marker_value,
+                    reservation_id=reservation_id,
                 ):
                     return True
                 raise DuplicateRefundError(
@@ -1007,6 +1106,12 @@ class RedisBackend(RateLimiterBackend):
                 allow_negative=allow_negative,
             )
         if refund_dedup_key is not None:
+            _debug_event(
+                _refund_logger,
+                "redis_refund_dedup_write",
+                reservation_id=refund_dedup_reservation_id or reservation_id,
+                bucket_id=None,
+            )
             pipeline.set(
                 refund_dedup_key,
                 "1",
@@ -1014,6 +1119,12 @@ class RedisBackend(RateLimiterBackend):
                 nx=True,
             )
         if delete_acquired_marker_key is not None:
+            _debug_event(
+                _acquire_logger,
+                "redis_acquire_marker_delete",
+                reservation_id=reservation_id,
+                bucket_id=None,
+            )
             pipeline.delete(delete_acquired_marker_key)
         try:
             results = await pipeline.execute()
@@ -1062,7 +1173,21 @@ class RedisBackend(RateLimiterBackend):
         acquired_marker_key: str,
         acquired_marker_value: str,
         refund_dedup_key: str,
+        reservation_id: str | None = None,
     ) -> None:
+        for bucket in buckets:
+            _debug_event(
+                _refund_logger,
+                "redis_refund_marker_getdel",
+                reservation_id=reservation_id,
+                bucket_id=(bucket.usage_metric, int(bucket.per_seconds)),
+            )
+        _debug_event(
+            _refund_logger,
+            "redis_refund_dedup_write",
+            reservation_id=reservation_id,
+            bucket_id=None,
+        )
         keys: list[str] = [acquired_marker_key, refund_dedup_key]
         args: list[object] = [
             acquired_marker_value,
@@ -1102,7 +1227,10 @@ class RedisBackend(RateLimiterBackend):
                 *args,
             )
         except redis.exceptions.RedisError:
-            if await self._refund_tombstone_exists(refund_dedup_key):
+            if await self._refund_tombstone_exists(
+                refund_dedup_key,
+                reservation_id=reservation_id,
+            ):
                 return
             raise
         status = _decode_redis_script_status(
@@ -1283,6 +1411,7 @@ class RedisBackend(RateLimiterBackend):
                 timeout=LOCK_TIMEOUT_SECONDS,
                 blocking_timeout=lock_blocking_timeout,
                 buckets=buckets,
+                reservation_id=reservation_id,
             ) as lock_stack:
                 # Pipeline is reused: _get_capacities_unsafe executes it (clearing
                 # the command buffer), then _set_capacities_unsafe adds new commands
@@ -1351,7 +1480,7 @@ class RedisBackend(RateLimiterBackend):
                 # pause during get/check above cannot leave the write
                 # racing with another worker after the original TTL
                 # lapsed.
-                await self._extend_locks(lock_stack)
+                await self._extend_locks(lock_stack, reservation_id=reservation_id)
                 # `allow_negative=False` is correct here only because the
                 # `usage_amount > capacity_amount` gate above guarantees
                 # post = pre - usage >= 0. Keep this branch in sync with that
@@ -1380,6 +1509,7 @@ class RedisBackend(RateLimiterBackend):
                             if reservation_id is not None
                             else None
                         ),
+                        reservation_id=reservation_id,
                     )
                 )
                 try:
@@ -1448,7 +1578,9 @@ class RedisBackend(RateLimiterBackend):
         current_time: float = 0.0
         fresh_start_buckets: list[RedisBucket] = []
         async with await self._lock(
-            timeout=LOCK_TIMEOUT_SECONDS, buckets=buckets
+            timeout=LOCK_TIMEOUT_SECONDS,
+            buckets=buckets,
+            reservation_id=reservation_id,
         ) as lock_stack:
             pipeline = self._redis.pipeline()
             current_time = await async_server_time(self._redis)
@@ -1494,7 +1626,7 @@ class RedisBackend(RateLimiterBackend):
             # Extend lock TTL immediately before the write so a GC pause
             # during get above cannot leave the write racing with another
             # worker after the original TTL lapsed.
-            await self._extend_locks(lock_stack)
+            await self._extend_locks(lock_stack, reservation_id=reservation_id)
             write_task = asyncio.create_task(
                 self._set_capacities_unsafe(
                     postconsumption_capacities,
@@ -1518,6 +1650,7 @@ class RedisBackend(RateLimiterBackend):
                         if reservation_id is not None
                         else None
                     ),
+                    reservation_id=reservation_id,
                 )
             )
             try:
@@ -1865,6 +1998,7 @@ class RedisBackend(RateLimiterBackend):
                     acquired_marker_key=acquired_marker_key,
                     acquired_marker_value=expected_marker_value,
                     refund_dedup_key=refund_dedup_key,
+                    reservation_id=reservation_id,
                 )
             return True
         # Calculate how much to refund for each metric
@@ -1890,7 +2024,9 @@ class RedisBackend(RateLimiterBackend):
 
         fresh_start_buckets: list[RedisBucket] = []
         async with await self._lock(
-            timeout=LOCK_TIMEOUT_SECONDS, buckets=buckets
+            timeout=LOCK_TIMEOUT_SECONDS,
+            buckets=buckets,
+            reservation_id=reservation_id,
         ) as lock_stack:
             pipeline = self._redis.pipeline()
             current_time = await async_server_time(self._redis)
@@ -1945,7 +2081,7 @@ class RedisBackend(RateLimiterBackend):
             updated_capacities = frozendict(updated_capacities_)
 
             # Extend lock TTL before committing the write, see _extend_locks.
-            await self._extend_locks(lock_stack)
+            await self._extend_locks(lock_stack, reservation_id=reservation_id)
             # Option B from FIX-42: defer the Redis tombstone until the same
             # pipeline execution as the capacity write. This prevents the
             # permanent lost-refund failure where SET NX succeeds and the later
@@ -1973,6 +2109,7 @@ class RedisBackend(RateLimiterBackend):
                         acquired_marker_key=acquired_marker_key,
                         acquired_marker_value=expected_marker_value,
                         refund_dedup_key=refund_dedup_key,
+                        reservation_id=reservation_id,
                     )
                 )
             try:
@@ -2295,6 +2432,7 @@ class RedisBackend(RateLimiterBackend):
             async with await self._lock(
                 timeout=LOCK_TIMEOUT_SECONDS,
                 buckets=target_buckets,
+                reservation_id=None,
             ) as lock_stack:
                 pipeline = self._redis.pipeline()
                 current_time = await async_server_time(self._redis)

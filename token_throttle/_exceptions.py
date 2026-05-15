@@ -54,6 +54,7 @@ class AcquireRefundFailedError(Exception):
         "refund failed; inspect .reservation to refund or use the reservation "
         "explicitly"
     )
+    reason = "acquire_refund_failed"
 
     def __init__(
         self,
@@ -75,6 +76,8 @@ class AcquireRefundFailedError(Exception):
 
 class CardinalityLimitExceededError(ValueError):
     """Raised when a mandatory limiter cardinality or length cap is exceeded."""
+
+    reason = "cardinality_limit_exceeded"
 
 
 class DuplicateRefundError(ValueError):
@@ -98,6 +101,8 @@ class DuplicateRefundError(ValueError):
 
 class UnknownReservationError(ValueError):
     """Raised when a backend has no record that a reservation was acquired."""
+
+    reason = "unknown_reservation"
 
 
 _UNKNOWN_RESERVATION_FORGET_IN_FLIGHT_ATTR = (
