@@ -64,8 +64,9 @@ def _redis_modules():
     }
 
 
-def _acquire_marker_value() -> str:
+def _acquire_marker_value(reservation_id: str) -> str:
     return _redis_modules()["redis_acquired_marker_value"](
+        reservation_id=reservation_id,
         model_family=MODEL_FAMILY,
         bucket_ids=frozenset({BUCKET_ID}),
     )
@@ -76,7 +77,9 @@ def _acquire_marker_key(reservation_id: str) -> str:
 
 
 def _seed_acquire_marker(redis_client: object, reservation_id: str) -> None:
-    redis_client.store[_acquire_marker_key(reservation_id)] = _acquire_marker_value()
+    redis_client.store[_acquire_marker_key(reservation_id)] = _acquire_marker_value(
+        reservation_id
+    )
 
 
 async def test_async_cancel_before_backend_write_leaves_local_guard_retryable() -> None:
@@ -266,7 +269,6 @@ class _AsyncRedis:
         argv = list(keys_and_args[numkeys:])
         marker_key, dedup_key = keys[0], keys[1]
         marker = await self.get(marker_key)
-        await self.delete(marker_key)
         if marker is None:
             return (
                 "duplicate_refund"
@@ -289,6 +291,7 @@ class _AsyncRedis:
                 ex=int(argv[arg_index + 2]),
             )
             arg_index += 3
+        await self.delete(marker_key)
         return "ok"
 
     def pipeline(self) -> _AsyncPipeline:
@@ -357,7 +360,6 @@ class _SyncRedis:
         argv = list(keys_and_args[numkeys:])
         marker_key, dedup_key = keys[0], keys[1]
         marker = self.get(marker_key)
-        self.delete(marker_key)
         if marker is None:
             return (
                 "duplicate_refund" if self.exists(dedup_key) else "unknown_reservation"
@@ -376,6 +378,7 @@ class _SyncRedis:
                 ex=int(argv[arg_index + 2]),
             )
             arg_index += 3
+        self.delete(marker_key)
         return "ok"
 
     def pipeline(self) -> _SyncPipeline:

@@ -9,7 +9,7 @@ from token_throttle._validation import (
 
 _REDIS_NAMESPACE = "rate_limiting"
 DEFAULT_REFUND_DEDUP_TTL_SECONDS = 7 * 24 * 60 * 60
-_ACQUIRED_MARKER_VERSION = 1
+_ACQUIRED_MARKER_VERSION = 2
 
 
 def validate_redis_key_prefix(value: object) -> str:
@@ -52,6 +52,7 @@ def redis_acquired_marker_key(key_prefix: str, reservation_id: str) -> str:
 
 def redis_acquired_marker_value(
     *,
+    reservation_id: str,
     model_family: str,
     bucket_ids: set[BucketId] | frozenset[BucketId],
 ) -> str:
@@ -61,6 +62,7 @@ def redis_acquired_marker_value(
     return json.dumps(
         {
             "v": _ACQUIRED_MARKER_VERSION,
+            "reservation_id": _validate_reservation_id(reservation_id),
             "model_family": model_family,
             "buckets": [
                 [metric, int(per_seconds)] for metric, per_seconds in sorted(bucket_ids)

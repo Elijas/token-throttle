@@ -37,3 +37,21 @@ class DuplicateRefundError(ValueError):
 
 class UnknownReservationError(ValueError):
     """Raised when a backend has no record that a reservation was acquired."""
+
+
+_UNKNOWN_RESERVATION_FORGET_IN_FLIGHT_ATTR = (
+    "_token_throttle_forget_in_flight_on_unknown"
+)
+
+
+def _mark_unknown_reservation_forget_in_flight(
+    exc: UnknownReservationError,
+) -> UnknownReservationError:
+    setattr(exc, _UNKNOWN_RESERVATION_FORGET_IN_FLIGHT_ATTR, True)
+    return exc
+
+
+def _unknown_reservation_should_forget_in_flight(
+    exc: UnknownReservationError,
+) -> bool:
+    return bool(getattr(exc, _UNKNOWN_RESERVATION_FORGET_IN_FLIGHT_ATTR, False))

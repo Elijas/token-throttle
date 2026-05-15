@@ -171,7 +171,6 @@ class _AsyncRedis:
         if len(keys) >= 2 and ":refund_dedup:" in keys[1]:
             marker_key, dedup_key = keys[0], keys[1]
             marker = await self.get(marker_key)
-            await self.delete(marker_key)
             if marker is None:
                 return (
                     "duplicate_refund"
@@ -194,11 +193,14 @@ class _AsyncRedis:
                     ex=int(argv[arg_index + 2]),
                 )
                 arg_index += 3
+            await self.delete(marker_key)
             return "ok"
 
         marker_key = keys[0]
-        claimed = await self.set(marker_key, argv[1], px=int(argv[0]), nx=True)
-        if not claimed:
+        existing = await self.get(marker_key)
+        if existing is not None:
+            if existing == argv[1]:
+                return "ok"
             return "duplicate_acquire"
         arg_index = 2
         for key_index in range(1, len(keys), 2):
@@ -211,6 +213,12 @@ class _AsyncRedis:
                 ex=int(argv[arg_index + 2]),
             )
             arg_index += 3
+        claimed = await self.set(marker_key, argv[1], px=int(argv[0]), nx=True)
+        if not claimed:
+            existing = await self.get(marker_key)
+            if existing == argv[1]:
+                return "ok"
+            return "duplicate_acquire"
         return "ok"
 
     def pipeline(self) -> _AsyncPipeline:
@@ -316,7 +324,6 @@ class _SyncRedis:
         if len(keys) >= 2 and ":refund_dedup:" in keys[1]:
             marker_key, dedup_key = keys[0], keys[1]
             marker = self.get(marker_key)
-            self.delete(marker_key)
             if marker is None:
                 return (
                     "duplicate_refund"
@@ -337,11 +344,14 @@ class _SyncRedis:
                     ex=int(argv[arg_index + 2]),
                 )
                 arg_index += 3
+            self.delete(marker_key)
             return "ok"
 
         marker_key = keys[0]
-        claimed = self.set(marker_key, argv[1], px=int(argv[0]), nx=True)
-        if not claimed:
+        existing = self.get(marker_key)
+        if existing is not None:
+            if existing == argv[1]:
+                return "ok"
             return "duplicate_acquire"
         arg_index = 2
         for key_index in range(1, len(keys), 2):
@@ -352,6 +362,12 @@ class _SyncRedis:
                 ex=int(argv[arg_index + 2]),
             )
             arg_index += 3
+        claimed = self.set(marker_key, argv[1], px=int(argv[0]), nx=True)
+        if not claimed:
+            existing = self.get(marker_key)
+            if existing == argv[1]:
+                return "ok"
+            return "duplicate_acquire"
         return "ok"
 
     def pipeline(self) -> _SyncPipeline:

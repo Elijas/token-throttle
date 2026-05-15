@@ -22,7 +22,11 @@ except ImportError as exc:
     ) from exc
 from frozendict import frozendict
 
-from token_throttle._exceptions import DuplicateRefundError, UnknownReservationError
+from token_throttle._exceptions import (
+    DuplicateRefundError,
+    UnknownReservationError,
+    _mark_unknown_reservation_forget_in_flight,
+)
 from token_throttle._interfaces._callbacks import SyncRateLimiterCallbacks
 from token_throttle._interfaces._interfaces import (
     PerModelConfig,
@@ -101,8 +105,11 @@ DEFAULT_LOCK_BLOCKING_THREAD_SLEEP_SECONDS = 0.05
 _MIN_PRODUCTION_REDIS_POOL_CONNECTIONS = 10
 _MISSING = object()
 _ACQUIRE_MARKER_SET_SCRIPT = """
-local claimed = redis.call('SET', KEYS[1], ARGV[2], 'PX', ARGV[1], 'NX')
-if not claimed then
+local existing = redis.call('GET', KEYS[1])
+if existing then
+    if existing == ARGV[2] then
+        return 'ok'
+    end
     return 'duplicate_acquire'
 end
 local arg_index = 3
@@ -111,10 +118,18 @@ for key_index = 2, #KEYS, 2 do
     redis.call('SET', KEYS[key_index + 1], ARGV[arg_index + 1], 'EX', ARGV[arg_index + 2])
     arg_index = arg_index + 3
 end
+local claimed = redis.call('SET', KEYS[1], ARGV[2], 'PX', ARGV[1], 'NX')
+if not claimed then
+    existing = redis.call('GET', KEYS[1])
+    if existing == ARGV[2] then
+        return 'ok'
+    end
+    return 'duplicate_acquire'
+end
 return 'ok'
 """
 _REFUND_WITH_MARKER_SCRIPT = """
-local marker = redis.call('GETDEL', KEYS[1])
+local marker = redis.call('GET', KEYS[1])
 if not marker then
     if redis.call('EXISTS', KEYS[2]) == 1 then
         return 'duplicate_refund'
@@ -134,6 +149,7 @@ for key_index = 3, #KEYS, 2 do
     redis.call('SET', KEYS[key_index + 1], ARGV[arg_index + 1], 'EX', ARGV[arg_index + 2])
     arg_index = arg_index + 3
 end
+redis.call('DEL', KEYS[1])
 return 'ok'
 """
 
@@ -169,6 +185,15 @@ def _decode_redis_script_status(value: object) -> str:
     if isinstance(value, str):
         return value
     raise RuntimeError(f"Redis script returned unexpected status {value!r}")
+
+
+def _redis_value_matches(value: object, expected: str) -> bool:
+    if isinstance(value, bytes):
+        try:
+            return value.decode() == expected
+        except UnicodeDecodeError:
+            return False
+    return value == expected
 
 
 def _warn_if_small_redis_pool(redis_client: object, *, stacklevel: int = 3) -> None:
@@ -524,6 +549,23 @@ class SyncRedisBackend(SyncRateLimiterBackend):
     def _claim_refund_dedup(self, reservation_id: str | None) -> bool:
         return self._commit_refund_dedup(reservation_id)
 
+    def _acquire_marker_matches(
+        self,
+        acquired_marker_key: str,
+        acquired_marker_value: str,
+    ) -> bool:
+        try:
+            marker = self._redis.get(acquired_marker_key)
+        except redis.exceptions.RedisError:
+            return False
+        return _redis_value_matches(marker, acquired_marker_value)
+
+    def _refund_tombstone_exists(self, refund_dedup_key: str) -> bool:
+        try:
+            return bool(self._redis.exists(refund_dedup_key))
+        except redis.exceptions.RedisError:
+            return False
+
     def _snapshot_buckets(self) -> tuple[SyncRedisBucket, ...]:
         return tuple(self.sorted_buckets)
 
@@ -797,16 +839,29 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                         bucket._bucket_ttl_seconds,  # noqa: SLF001
                     ]
                 )
-            result = self._redis.eval(
-                _ACQUIRE_MARKER_SET_SCRIPT,
-                len(keys),
-                *keys,
-                *args,
-            )
+            try:
+                result = self._redis.eval(
+                    _ACQUIRE_MARKER_SET_SCRIPT,
+                    len(keys),
+                    *keys,
+                    *args,
+                )
+            except redis.exceptions.RedisError:
+                if self._acquire_marker_matches(
+                    acquired_marker_key,
+                    acquired_marker_value,
+                ):
+                    return True
+                raise
             status = _decode_redis_script_status(result)
             if status == "ok":
                 return True
             if status == "duplicate_acquire":
+                if self._acquire_marker_matches(
+                    acquired_marker_key,
+                    acquired_marker_value,
+                ):
+                    return True
                 raise DuplicateRefundError("reservation already acquired")
             raise RuntimeError(f"Redis acquire marker script failed: {status}")
 
@@ -896,18 +951,29 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                     bucket._bucket_ttl_seconds,  # noqa: SLF001
                 ]
             )
-        result = self._redis.eval(
-            _REFUND_WITH_MARKER_SCRIPT,
-            len(keys),
-            *keys,
-            *args,
-        )
+        try:
+            result = self._redis.eval(
+                _REFUND_WITH_MARKER_SCRIPT,
+                len(keys),
+                *keys,
+                *args,
+            )
+        except redis.exceptions.RedisError:
+            if self._refund_tombstone_exists(refund_dedup_key):
+                return
+            raise
         status = _decode_redis_script_status(result)
         if status == "ok":
             return
         if status == "duplicate_refund":
             raise DuplicateRefundError("reservation already refunded")
-        if status in {"unknown_reservation", "marker_mismatch"}:
+        if status == "unknown_reservation":
+            raise _mark_unknown_reservation_forget_in_flight(
+                UnknownReservationError(
+                    "reservation was never acquired by this backend"
+                )
+            )
+        if status == "marker_mismatch":
             raise UnknownReservationError(
                 "reservation was never acquired by this backend"
             )
@@ -1079,6 +1145,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                     acquired_marker_key=self._acquired_marker_key(reservation_id),
                     acquired_marker_value=(
                         redis_acquired_marker_value(
+                            reservation_id=reservation_id,
                             model_family=self._limit_config.get_model_family(),
                             bucket_ids=self._bucket_ids(buckets),
                         )
@@ -1200,6 +1267,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                 acquired_marker_key=self._acquired_marker_key(reservation_id),
                 acquired_marker_value=(
                     redis_acquired_marker_value(
+                        reservation_id=reservation_id,
                         model_family=self._limit_config.get_model_family(),
                         bucket_ids=self._bucket_ids(buckets),
                     )
@@ -1420,6 +1488,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                     "reservation was never acquired by this backend"
                 )
             expected_marker_value = redis_acquired_marker_value(
+                reservation_id=reservation_id,
                 model_family=(
                     reservation_model_family or self._limit_config.get_model_family()
                 ),

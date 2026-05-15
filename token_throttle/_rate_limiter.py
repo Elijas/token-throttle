@@ -15,6 +15,7 @@ from token_throttle._exceptions import (
     CardinalityLimitExceededError,
     DuplicateRefundError,
     UnknownReservationError,
+    _unknown_reservation_should_forget_in_flight,
 )
 from token_throttle._interfaces._callable_utils import is_async_callable
 from token_throttle._interfaces._callbacks import (
@@ -1587,8 +1588,13 @@ class RateLimiter(BaseRateLimiter):
                         self._commit_refund_state(rid, reservation.model_family)
                     )
                     raise
-                except UnknownReservationError:
-                    await self._clear_refund_state_if_pending(rid)
+                except UnknownReservationError as exc:
+                    await self._clear_refund_state_if_pending(
+                        rid,
+                        forget_in_flight=(
+                            _unknown_reservation_should_forget_in_flight(exc)
+                        ),
+                    )
                     raise
                 except Exception as exc:  # noqa: BLE001 - boundary wrapper preserves cause
                     if self._refund_backend_state_changed(
@@ -1649,12 +1655,19 @@ class RateLimiter(BaseRateLimiter):
             ):
                 self._remember_refund_state(reservation_id, _REFUND_STATE_FAILED)
 
-    async def _clear_refund_state_if_pending(self, reservation_id: str) -> None:
+    async def _clear_refund_state_if_pending(
+        self,
+        reservation_id: str,
+        *,
+        forget_in_flight: bool = False,
+    ) -> None:
         async with self._refund_state_lock:
             if self._refunded_reservation_ids.get(reservation_id) == (
                 _REFUND_STATE_PENDING
             ):
                 self._refunded_reservation_ids.pop(reservation_id, None)
+            if forget_in_flight:
+                self._forget_in_flight_reservation(reservation_id)
 
     @staticmethod
     def _refund_backend_state_signature(
