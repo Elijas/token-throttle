@@ -101,7 +101,7 @@ class _AsyncRedis:
     def __init__(self) -> None:
         self.store: dict[str, object] = {}
         self.deadlines: dict[str, float | None] = {}
-        self.now = 1000.0
+        self.now = time.time()
 
     def advance(self, seconds: float) -> None:
         self.now += seconds
@@ -254,7 +254,7 @@ class _SyncRedis:
     def __init__(self) -> None:
         self.store: dict[str, object] = {}
         self.deadlines: dict[str, float | None] = {}
-        self.now = 1000.0
+        self.now = time.time()
 
     def advance(self, seconds: float) -> None:
         self.now += seconds

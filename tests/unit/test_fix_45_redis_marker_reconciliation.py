@@ -174,8 +174,10 @@ def test_sync_refund_tombstone_replay_skips_capacity_write() -> None:
 
 async def test_async_marker_mismatch_does_not_delete_refund_authority() -> None:
     redis_client = _AsyncRedis()
-    limiter = RateLimiter(_config(), backend=_AsyncRedisBuilder(redis_client))
-    reservation = await limiter.acquire_capacity({"tokens": 30}, MODEL)
+    builder = _AsyncRedisBuilder(redis_client)
+    limiter_a = RateLimiter(_config(), backend=builder)
+    limiter_b = RateLimiter(_config(), backend=builder)
+    reservation = await limiter_a.acquire_capacity({"tokens": 30}, MODEL)
     marker_key = redis_acquired_marker_key(PREFIX, reservation.reservation_id)
     drifted = reservation.model_copy(
         update={"bucket_ids": frozenset({("tokens", 120)})}
@@ -184,12 +186,12 @@ async def test_async_marker_mismatch_does_not_delete_refund_authority() -> None:
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", RuntimeWarning)
         with pytest.raises(UnknownReservationError):
-            await limiter.refund_capacity({"tokens": 0}, drifted)
+            await limiter_b.refund_capacity({"tokens": 0}, drifted)
 
     assert marker_key in redis_client.store
-    assert reservation.reservation_id in limiter._in_flight_reservation_ids
+    assert reservation.reservation_id in limiter_a._in_flight_reservation_ids
 
-    await limiter.refund_capacity({"tokens": 0}, reservation)
+    await limiter_a.refund_capacity({"tokens": 0}, reservation)
 
     assert marker_key not in redis_client.store
     assert redis_client.store[_CAPACITY_KEY] == 100.0
@@ -197,8 +199,10 @@ async def test_async_marker_mismatch_does_not_delete_refund_authority() -> None:
 
 def test_sync_marker_mismatch_does_not_delete_refund_authority() -> None:
     redis_client = _SyncRedis()
-    limiter = SyncRateLimiter(_config(), backend=_SyncRedisBuilder(redis_client))
-    reservation = limiter.acquire_capacity({"tokens": 30}, MODEL)
+    builder = _SyncRedisBuilder(redis_client)
+    limiter_a = SyncRateLimiter(_config(), backend=builder)
+    limiter_b = SyncRateLimiter(_config(), backend=builder)
+    reservation = limiter_a.acquire_capacity({"tokens": 30}, MODEL)
     marker_key = redis_acquired_marker_key(PREFIX, reservation.reservation_id)
     drifted = reservation.model_copy(
         update={"bucket_ids": frozenset({("tokens", 120)})}
@@ -207,12 +211,12 @@ def test_sync_marker_mismatch_does_not_delete_refund_authority() -> None:
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", RuntimeWarning)
         with pytest.raises(UnknownReservationError):
-            limiter.refund_capacity({"tokens": 0}, drifted)
+            limiter_b.refund_capacity({"tokens": 0}, drifted)
 
     assert marker_key in redis_client.store
-    assert reservation.reservation_id in limiter._in_flight_reservation_ids
+    assert reservation.reservation_id in limiter_a._in_flight_reservation_ids
 
-    limiter.refund_capacity({"tokens": 0}, reservation)
+    limiter_a.refund_capacity({"tokens": 0}, reservation)
 
     assert marker_key not in redis_client.store
     assert redis_client.store[_CAPACITY_KEY] == 100.0
