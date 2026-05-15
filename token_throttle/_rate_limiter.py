@@ -58,6 +58,14 @@ DEFAULT_MAX_MODEL_FAMILIES = 10_000
 DEFAULT_MAX_METRICS_PER_FAMILY = 100
 DEFAULT_MAX_ALIASES = 10_000
 DEFAULT_MAX_IN_FLIGHT_RESERVATIONS = 100_000
+_REFUND_STATE_PENDING = "pending"
+_REFUND_STATE_COMMITTED = "committed"
+_REFUND_STATE_FAILED = "failed"
+_REFUND_STATE_MISSING = object()
+
+
+def _refund_state_is_committed(state: object) -> bool:
+    return state is None or state == _REFUND_STATE_COMMITTED
 
 
 def _validate_positive_int_cap(
@@ -496,7 +504,7 @@ class RateLimiter(BaseRateLimiter):
             str, dict[tuple[bool, tuple[tuple[str, int, float], ...]], int]
         ] = {}
         self._model_family_alias_counts: dict[str, int] = {}
-        self._refunded_reservation_ids: collections.OrderedDict[str, None] = (
+        self._refunded_reservation_ids: collections.OrderedDict[str, str | None] = (
             collections.OrderedDict()
         )
         self._refunded_ids_cap = 131_072
@@ -1343,7 +1351,7 @@ class RateLimiter(BaseRateLimiter):
             value,
         )
 
-    async def _refund_capacity(
+    async def _refund_capacity(  # noqa: PLR0915
         self,
         actual_usage: Usage,
         reservation: CapacityReservation,
@@ -1351,10 +1359,20 @@ class RateLimiter(BaseRateLimiter):
         rid = reservation.reservation_id
         refund_lock = await self._acquire_reservation_refund_lock(rid)
         refund_started = False
+        refund_backend: RateLimiterBackend | None = None
+        refund_bucket_ids_for_probe: frozenset[BucketId] | None = None
+        pre_refund_signature: tuple[tuple[BucketId, object, object], ...] | None = None
+        refund_backend_call_started = False
         try:
             async with self._refund_state_lock:
                 self._raise_if_closed()
-                if rid in self._refunded_reservation_ids:
+                refund_state = self._refunded_reservation_ids.get(
+                    rid,
+                    _REFUND_STATE_MISSING,
+                )
+                if refund_state is not _REFUND_STATE_MISSING and (
+                    _refund_state_is_committed(refund_state)
+                ):
                     warnings.warn(
                         f"Reservation {rid} has already been "
                         "refunded. Ignoring duplicate refund to prevent "
@@ -1371,6 +1389,7 @@ class RateLimiter(BaseRateLimiter):
                         stacklevel=3,
                     )
                     return
+                self._remember_refund_state(rid, _REFUND_STATE_PENDING)
                 self._refund_in_progress.add(rid)
                 refund_started = True
 
@@ -1379,7 +1398,7 @@ class RateLimiter(BaseRateLimiter):
                 await self._refresh_backend_for_reservation(reservation)
                 backend = self._model_family_to_backend.get(reservation.model_family)
                 if backend is None:
-                    raise ValueError(
+                    raise ValueError(  # noqa: TRY301
                         f"Backend not found for model family {reservation.model_family}",
                     )
                 async with self._refund_state_lock:
@@ -1388,7 +1407,7 @@ class RateLimiter(BaseRateLimiter):
                     not reservation_in_flight
                     and not backend.supports_durable_refund_dedup()
                 ):
-                    raise ValueError(
+                    raise ValueError(  # noqa: TRY301
                         "Reservation is not in flight for this limiter; "
                         "cold-restart refunds require a backend with durable "
                         "refund dedup."
@@ -1411,27 +1430,141 @@ class RateLimiter(BaseRateLimiter):
                     reservation.bucket_ids,
                     active_bucket_ids,
                 )
-                async with self._refund_state_lock:
-                    self._refunded_reservation_ids[rid] = None
-                    if len(self._refunded_reservation_ids) > self._refunded_ids_cap:
-                        self._refunded_reservation_ids.popitem(last=False)
-                    self._forget_in_flight_reservation(rid)
                 try:
+                    refund_backend = backend
+                    refund_bucket_ids_for_probe = refund_bucket_ids
+                    pre_refund_signature = self._refund_backend_state_signature(
+                        backend,
+                        refund_bucket_ids,
+                    )
+                    refund_backend_call_started = True
                     await backend.refund_capacity_for_buckets(
                         reserved_usage,
                         actual_usage,
                         bucket_ids=refund_bucket_ids,
                         reservation_id=rid,
                     )
-                    self._touch_model_family(reservation.model_family)
                 except Exception as exc:  # noqa: BLE001 - boundary wrapper preserves cause
+                    if self._refund_backend_state_changed(
+                        refund_backend,
+                        refund_bucket_ids_for_probe,
+                        pre_refund_signature,
+                    ):
+                        await self._complete_refund_state_update(
+                            self._commit_refund_state(rid, reservation.model_family)
+                        )
                     _raise_backend_external_error(exc)
+                interrupted = await self._complete_refund_state_update(
+                    self._commit_refund_state(rid, reservation.model_family)
+                )
+                if interrupted:
+                    raise asyncio.CancelledError  # noqa: TRY301
+            except BaseException:
+                if self._refund_backend_state_changed(
+                    refund_backend,
+                    refund_bucket_ids_for_probe,
+                    pre_refund_signature,
+                ):
+                    await self._complete_refund_state_update(
+                        self._commit_refund_state(rid, reservation.model_family)
+                    )
+                elif refund_backend_call_started:
+                    await self._mark_refund_state_failed(rid)
+                else:
+                    await self._clear_refund_state_if_pending(rid)
+                raise
             finally:
                 if refund_started:
                     async with self._refund_state_lock:
                         self._refund_in_progress.discard(rid)
         finally:
             await self._release_reservation_refund_lock(rid, refund_lock)
+
+    def _remember_refund_state(self, reservation_id: str, state: str) -> None:
+        self._refunded_reservation_ids[reservation_id] = state
+        self._refunded_reservation_ids.move_to_end(reservation_id)
+        while len(self._refunded_reservation_ids) > self._refunded_ids_cap:
+            self._refunded_reservation_ids.popitem(last=False)
+
+    async def _commit_refund_state(
+        self,
+        reservation_id: str,
+        model_family: str,
+    ) -> None:
+        async with self._refund_state_lock:
+            self._remember_refund_state(reservation_id, _REFUND_STATE_COMMITTED)
+            self._forget_in_flight_reservation(reservation_id)
+            self._touch_model_family(model_family)
+
+    async def _mark_refund_state_failed(self, reservation_id: str) -> None:
+        async with self._refund_state_lock:
+            if self._refunded_reservation_ids.get(reservation_id) == (
+                _REFUND_STATE_PENDING
+            ):
+                self._remember_refund_state(reservation_id, _REFUND_STATE_FAILED)
+
+    async def _clear_refund_state_if_pending(self, reservation_id: str) -> None:
+        async with self._refund_state_lock:
+            if self._refunded_reservation_ids.get(reservation_id) == (
+                _REFUND_STATE_PENDING
+            ):
+                self._refunded_reservation_ids.pop(reservation_id, None)
+
+    @staticmethod
+    def _refund_backend_state_signature(
+        backend: RateLimiterBackend,
+        bucket_ids: frozenset[BucketId] | None,
+    ) -> tuple[tuple[BucketId, object, object], ...] | None:
+        # KNOWN UNKNOWN: custom backends do not expose a portable "write landed"
+        # probe. The built-in memory backends do, so this preserves the R4
+        # post-write-failure idempotency contract without pre-committing failed
+        # refunds for opaque backends.
+        registry = getattr(backend, "_bucket_registry", None)
+        if not isinstance(registry, dict):
+            return None
+        target_bucket_ids = frozenset(registry) if bucket_ids is None else bucket_ids
+        signature: list[tuple[BucketId, object, object]] = []
+        for bucket_id in sorted(target_bucket_ids):
+            bucket = registry.get(bucket_id)
+            if bucket is None:
+                return None
+            signature.append(
+                (
+                    bucket_id,
+                    getattr(bucket, "capacity", _REFUND_STATE_MISSING),
+                    getattr(bucket, "last_checked", _REFUND_STATE_MISSING),
+                )
+            )
+        return tuple(signature)
+
+    def _refund_backend_state_changed(
+        self,
+        backend: RateLimiterBackend | None,
+        bucket_ids: frozenset[BucketId] | None,
+        pre_refund_signature: tuple[tuple[BucketId, object, object], ...] | None,
+    ) -> bool:
+        if backend is None or pre_refund_signature is None:
+            return False
+        post_refund_signature = self._refund_backend_state_signature(
+            backend, bucket_ids
+        )
+        return post_refund_signature is not None and (
+            post_refund_signature != pre_refund_signature
+        )
+
+    async def _complete_refund_state_update(self, awaitable) -> bool:
+        task = asyncio.create_task(awaitable)
+        interrupted = False
+        while True:
+            try:
+                await asyncio.shield(task)
+                break
+            except asyncio.CancelledError:
+                interrupted = True
+                if task.done():
+                    break
+        task.result()
+        return interrupted
 
     async def _acquire_reservation_refund_lock(
         self,

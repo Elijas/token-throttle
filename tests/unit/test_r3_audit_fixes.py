@@ -80,7 +80,7 @@ class TestConcurrentDuplicateRefundAsync:
             await asyncio.gather(refund_once(), refund_once())
         assert mock_backend.refund_capacity_for_buckets.await_count == 1
 
-    async def test_failed_refund_deduplicates_retry(self):
+    async def test_failed_refund_retry_is_not_deduplicated_until_success(self):
         builder, mock_backend = _make_mock_backend_builder()
 
         call_count = 0
@@ -98,9 +98,9 @@ class TestConcurrentDuplicateRefundAsync:
         with pytest.raises(RuntimeError, match="backend failure"):
             await limiter.refund_capacity({"tokens": 5}, reservation)
 
-        with pytest.warns(UserWarning, match="has already been refunded"):
+        with pytest.raises(RuntimeError, match="backend failure"):
             await limiter.refund_capacity({"tokens": 5}, reservation)
-        assert call_count == 1
+        assert call_count == 2
 
 
 class TestConcurrentDuplicateRefundSync:

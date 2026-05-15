@@ -384,11 +384,22 @@ class SyncRedisBackend(SyncRateLimiterBackend):
     def supports_durable_refund_dedup(self) -> bool:
         return True
 
-    def _claim_refund_dedup(self, reservation_id: str | None) -> bool:
+    def _refund_dedup_key(self, reservation_id: str | None) -> str | None:
         if reservation_id is None:
-            return True
+            return None
         reservation_id = _validate_reservation_id(reservation_id)
-        key = redis_refund_dedup_key(self._key_prefix, reservation_id)
+        return redis_refund_dedup_key(self._key_prefix, reservation_id)
+
+    def _refund_dedup_exists(self, reservation_id: str | None) -> bool:
+        key = self._refund_dedup_key(reservation_id)
+        if key is None:
+            return False
+        return bool(self._redis.exists(key))
+
+    def _commit_refund_dedup(self, reservation_id: str | None) -> bool:
+        key = self._refund_dedup_key(reservation_id)
+        if key is None:
+            return True
         claimed = self._redis.set(
             key,
             "1",
@@ -397,6 +408,10 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         )
         if claimed:
             return True
+        self._warn_refund_dedup_duplicate(reservation_id)
+        return False
+
+    def _warn_refund_dedup_duplicate(self, reservation_id: str) -> None:
         message = (
             f"Reservation {reservation_id} has already been refunded according "
             "to Redis refund dedup. Ignoring duplicate refund to prevent "
@@ -404,7 +419,9 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         )
         warnings.warn(message, UserWarning, stacklevel=3)
         _logger.warning(message)
-        return False
+
+    def _claim_refund_dedup(self, reservation_id: str | None) -> bool:
+        return self._commit_refund_dedup(reservation_id)
 
     def _snapshot_buckets(self) -> tuple[SyncRedisBucket, ...]:
         return tuple(self.sorted_buckets)
@@ -616,7 +633,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
             fresh_start_buckets=fresh_start_buckets,
         )
 
-    def _set_capacities_unsafe(
+    def _set_capacities_unsafe(  # noqa: PLR0913
         self,
         new_capacities: Capacities,
         pipeline: redis.client.Pipeline | None = None,
@@ -624,7 +641,10 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         *,
         allow_negative: bool = False,
         buckets: tuple[SyncRedisBucket, ...] | list[SyncRedisBucket] | None = None,
-    ) -> None:
+        refund_dedup_key: str | None = None,
+        refund_dedup_reservation_id: str | None = None,
+        refund_dedup_ttl_seconds: int | None = None,
+    ) -> bool:
         """
         Set capacities for all buckets. Caller must hold the distributed lock.
 
@@ -653,12 +673,31 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                 execute=False,
                 allow_negative=allow_negative,
             )
+        if refund_dedup_key is not None:
+            pipeline.set(
+                refund_dedup_key,
+                "1",
+                ex=refund_dedup_ttl_seconds,
+                nx=True,
+            )
         try:
-            pipeline.execute()
+            results = pipeline.execute()
         except redis.exceptions.ResponseError as exc:
             _raise_pipeline_response_error(
                 "SyncRedisBackend._set_capacities_unsafe", exc
             )
+        if refund_dedup_key is None:
+            return True
+        results = _validate_pipeline_results(
+            results,
+            context="SyncRedisBackend._set_capacities_unsafe",
+            expected_count=(len(new_capacities) * 2) + 1,
+        )
+        if results[-1]:
+            return True
+        if refund_dedup_reservation_id is not None:
+            self._warn_refund_dedup_duplicate(refund_dedup_reservation_id)
+        return False
 
     def _bucket_ids(
         self,
@@ -1093,9 +1132,6 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         reservation_id: str | None = None,
     ) -> bool:
         """Refund unused capacity back to the rate limiter based on actual usage."""
-        if not self._claim_refund_dedup(reservation_id):
-            return False
-
         buckets = self._snapshot_buckets()
         backend_bucket_ids = self._bucket_ids(buckets)
         refund_bucket_ids = (
@@ -1108,7 +1144,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
             backend_bucket_ids,
         )
         if not refund_bucket_ids:
-            return True
+            return self._commit_refund_dedup(reservation_id)
         # Calculate how much to refund for each metric
         refund_usage_: dict[str, float] = {}
         for metric, reserved_amount in reserved_usage.items():
@@ -1132,6 +1168,10 @@ class SyncRedisBackend(SyncRateLimiterBackend):
 
         fresh_start_buckets: list[SyncRedisBucket] = []
         with self._lock(timeout=LOCK_TIMEOUT_SECONDS, buckets=buckets) as lock_stack:
+            if self._refund_dedup_exists(reservation_id):
+                if reservation_id is not None:
+                    self._warn_refund_dedup_duplicate(reservation_id)
+                return False
             pipeline = self._redis.pipeline()
             current_time = sync_server_time(self._redis)
 
@@ -1183,14 +1223,23 @@ class SyncRedisBackend(SyncRateLimiterBackend):
 
             # Extend lock TTL before write; see _extend_locks.
             self._extend_locks(lock_stack)
-            # Always update capacities in Redis with the current time
-            self._set_capacities_unsafe(
+            # Option B from FIX-42: defer the Redis tombstone until the same
+            # pipeline execution as the capacity write. This prevents the
+            # permanent lost-refund failure where SET NX succeeds and the later
+            # bucket mutation fails; exact concurrent retries are serialized by
+            # the bucket locks, while lock expiry/manual writers can still race.
+            dedup_committed = self._set_capacities_unsafe(
                 frozendict(updated_capacities),
                 pipeline=pipeline,
                 current_time=current_time,
                 allow_negative=True,
                 buckets=buckets,
+                refund_dedup_key=self._refund_dedup_key(reservation_id),
+                refund_dedup_reservation_id=reservation_id,
+                refund_dedup_ttl_seconds=self._refund_dedup_ttl_seconds,
             )
+            if not dedup_committed:
+                return False
         with self._local_condition:
             self._local_condition.notify_all()
         self._fresh_start_buckets_callback(fresh_start_buckets)

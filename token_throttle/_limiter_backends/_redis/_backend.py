@@ -403,11 +403,22 @@ class RedisBackend(RateLimiterBackend):
     def supports_durable_refund_dedup(self) -> bool:
         return True
 
-    async def _claim_refund_dedup(self, reservation_id: str | None) -> bool:
+    def _refund_dedup_key(self, reservation_id: str | None) -> str | None:
         if reservation_id is None:
-            return True
+            return None
         reservation_id = _validate_reservation_id(reservation_id)
-        key = redis_refund_dedup_key(self._key_prefix, reservation_id)
+        return redis_refund_dedup_key(self._key_prefix, reservation_id)
+
+    async def _refund_dedup_exists(self, reservation_id: str | None) -> bool:
+        key = self._refund_dedup_key(reservation_id)
+        if key is None:
+            return False
+        return bool(await self._redis.exists(key))
+
+    async def _commit_refund_dedup(self, reservation_id: str | None) -> bool:
+        key = self._refund_dedup_key(reservation_id)
+        if key is None:
+            return True
         claimed = await self._redis.set(
             key,
             "1",
@@ -416,6 +427,10 @@ class RedisBackend(RateLimiterBackend):
         )
         if claimed:
             return True
+        self._warn_refund_dedup_duplicate(reservation_id)
+        return False
+
+    def _warn_refund_dedup_duplicate(self, reservation_id: str) -> None:
         message = (
             f"Reservation {reservation_id} has already been refunded according "
             "to Redis refund dedup. Ignoring duplicate refund to prevent "
@@ -423,7 +438,9 @@ class RedisBackend(RateLimiterBackend):
         )
         warnings.warn(message, UserWarning, stacklevel=3)
         _logger.warning(message)
-        return False
+
+    async def _claim_refund_dedup(self, reservation_id: str | None) -> bool:
+        return await self._commit_refund_dedup(reservation_id)
 
     async def _probe_legacy_override_keys_once(
         self,
@@ -683,7 +700,7 @@ class RedisBackend(RateLimiterBackend):
             fresh_start_buckets=fresh_start_buckets,
         )
 
-    async def _set_capacities_unsafe(
+    async def _set_capacities_unsafe(  # noqa: PLR0913
         self,
         new_capacities: Capacities,
         pipeline: redis.asyncio.client.Pipeline | None = None,
@@ -691,7 +708,10 @@ class RedisBackend(RateLimiterBackend):
         *,
         allow_negative: bool = False,
         buckets: tuple[RedisBucket, ...] | list[RedisBucket] | None = None,
-    ) -> None:
+        refund_dedup_key: str | None = None,
+        refund_dedup_reservation_id: str | None = None,
+        refund_dedup_ttl_seconds: int | None = None,
+    ) -> bool:
         """
         Set capacities for all buckets. Caller must hold the distributed lock.
 
@@ -720,10 +740,29 @@ class RedisBackend(RateLimiterBackend):
                 execute=False,
                 allow_negative=allow_negative,
             )
+        if refund_dedup_key is not None:
+            pipeline.set(
+                refund_dedup_key,
+                "1",
+                ex=refund_dedup_ttl_seconds,
+                nx=True,
+            )
         try:
-            await pipeline.execute()
+            results = await pipeline.execute()
         except redis.exceptions.ResponseError as exc:
             _raise_pipeline_response_error("RedisBackend._set_capacities_unsafe", exc)
+        if refund_dedup_key is None:
+            return True
+        results = _validate_pipeline_results(
+            results,
+            context="RedisBackend._set_capacities_unsafe",
+            expected_count=(len(new_capacities) * 2) + 1,
+        )
+        if results[-1]:
+            return True
+        if refund_dedup_reservation_id is not None:
+            self._warn_refund_dedup_duplicate(refund_dedup_reservation_id)
+        return False
 
     def _bucket_ids(
         self,
@@ -1282,8 +1321,9 @@ class RedisBackend(RateLimiterBackend):
             bucket_ids: If provided, only refund to buckets matching these
                         (metric, per_seconds) pairs. Used during reconfiguration
                         to refund only to surviving buckets.
-            reservation_id: If provided, claimed in Redis before bucket mutation
-                            to make refunds idempotent across processes.
+            reservation_id: If provided, checked before bucket mutation and
+                            committed in Redis only after the refund write is
+                            queued successfully.
 
         Example:
             TIME N=0: Reserve 100 tokens (assumes all consumed immediately)
@@ -1302,9 +1342,6 @@ class RedisBackend(RateLimiterBackend):
             2. Update the timestamp to N=10
 
         """
-        if not await self._claim_refund_dedup(reservation_id):
-            return False
-
         buckets = self._snapshot_buckets()
         backend_bucket_ids = self._bucket_ids(buckets)
         refund_bucket_ids = (
@@ -1317,7 +1354,7 @@ class RedisBackend(RateLimiterBackend):
             backend_bucket_ids,
         )
         if not refund_bucket_ids:
-            return True
+            return await self._commit_refund_dedup(reservation_id)
         # Calculate how much to refund for each metric
         refund_usage_: dict[str, float] = {}
         for metric, reserved_amount in reserved_usage.items():
@@ -1343,6 +1380,10 @@ class RedisBackend(RateLimiterBackend):
         async with await self._lock(
             timeout=LOCK_TIMEOUT_SECONDS, buckets=buckets
         ) as lock_stack:
+            if await self._refund_dedup_exists(reservation_id):
+                if reservation_id is not None:
+                    self._warn_refund_dedup_duplicate(reservation_id)
+                return False
             pipeline = self._redis.pipeline()
             current_time = await async_server_time(self._redis)
 
@@ -1397,6 +1438,12 @@ class RedisBackend(RateLimiterBackend):
 
             # Extend lock TTL before committing the write, see _extend_locks.
             await self._extend_locks(lock_stack)
+            # Option B from FIX-42: defer the Redis tombstone until the same
+            # pipeline execution as the capacity write. This prevents the
+            # permanent lost-refund failure where SET NX succeeds and the later
+            # bucket mutation fails; exact concurrent retries are serialized by
+            # the bucket locks, while lock expiry/manual writers can still race.
+            refund_dedup_key = self._refund_dedup_key(reservation_id)
             write_task = asyncio.create_task(
                 self._set_capacities_unsafe(
                     frozendict(updated_capacities),
@@ -1404,10 +1451,13 @@ class RedisBackend(RateLimiterBackend):
                     current_time=current_time,
                     allow_negative=True,
                     buckets=buckets,
+                    refund_dedup_key=refund_dedup_key,
+                    refund_dedup_reservation_id=reservation_id,
+                    refund_dedup_ttl_seconds=self._refund_dedup_ttl_seconds,
                 )
             )
             try:
-                await asyncio.shield(write_task)
+                dedup_committed = await asyncio.shield(write_task)
             except asyncio.CancelledError:
                 refunded = await self._wait_for_task_outcome_while_cancelled(write_task)
                 if not refunded:
@@ -1417,7 +1467,9 @@ class RedisBackend(RateLimiterBackend):
                 suppress_current_task_cancellation()
                 async with self._local_condition:
                     self._local_condition.notify_all()
-                return True
+                return bool(write_task.result())
+            if not dedup_committed:
+                return False
         async with self._local_condition:
             self._local_condition.notify_all()
         await self._fresh_start_buckets_callback(fresh_start_buckets)
