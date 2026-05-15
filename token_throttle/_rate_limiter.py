@@ -589,6 +589,7 @@ class RateLimiter(BaseRateLimiter):
         self._refund_in_progress: set[str] = set()
         self._acquire_guard = asyncio.Lock()
         self._pending_acquire_reservations: set[str] = set()
+        self._acquire_delivery_cleanup_reservations: set[str] = set()
         self._pending_drained = asyncio.Event()
         self._pending_drained.set()
         self._close_drain_timeout_seconds = validate_timeout(
@@ -695,6 +696,7 @@ class RateLimiter(BaseRateLimiter):
     def _forget_in_flight_reservation(self, reservation_id: str) -> None:
         self._in_flight_reservation_ids.discard(reservation_id)
         self._pending_acquire_reservations.discard(reservation_id)
+        self._acquire_delivery_cleanup_reservations.discard(reservation_id)
         self._in_flight_reservation_family.pop(reservation_id, None)
         self._reservation_snapshots.pop(reservation_id, None)
 
@@ -745,38 +747,34 @@ class RateLimiter(BaseRateLimiter):
         backend resources fails, the limiter is still marked closed so future
         operations fail cleanly instead of observing a permanent closing state.
         """
-        async with self._acquire_guard:
-            if self._closed:
-                return
-            self._closing = True
-            if not self._pending_acquire_reservations:
-                self._pending_drained.set()
-
+        interrupted = False
         try:
-            await asyncio.wait_for(
-                self._pending_drained.wait(),
-                timeout=self._close_drain_timeout_seconds,
-            )
-        except TimeoutError as exc:
             async with self._acquire_guard:
-                self._closed = True
-                self._closing = False
-            raise TimeoutError(
-                "Timed out waiting for pending acquire reservations to drain"
-            ) from exc
+                if self._closed:
+                    return
+                self._closing = True
+                self._refresh_pending_drained_locked()
 
-        try:
+            interrupted = await self._wait_for_pending_acquire_drain()
+
             async with self._lifecycle_lock:
-                await self._backend.aclose()
+                async with self._acquire_guard:
+                    if self._closed:
+                        already_closed = True
+                    else:
+                        already_closed = False
+                        self._closed = True
+                        self._closing = False
+                if not already_closed:
+                    interrupted = (
+                        await self._close_backend_cancellation_hardened()
+                    ) or interrupted
         except BaseException:
             async with self._acquire_guard:
                 self._closed = True
                 self._closing = False
             raise
 
-        async with self._acquire_guard:
-            self._closed = True
-            self._closing = False
         async with self._refund_state_lock:
             refund_locks = list(self._refund_locks.values())
         acquired_locks = []
@@ -794,6 +792,50 @@ class RateLimiter(BaseRateLimiter):
             "limiter closed; %d reservations still in flight may not be refundable.",
             in_flight_count,
         )
+        if interrupted:
+            raise asyncio.CancelledError
+
+    async def _wait_for_pending_acquire_drain(self) -> bool:
+        wait_task = asyncio.create_task(self._pending_drained.wait())
+        interrupted = False
+        deadline = None
+        if self._close_drain_timeout_seconds is not None:
+            deadline = asyncio.get_running_loop().time() + (
+                self._close_drain_timeout_seconds
+            )
+        try:
+            while True:
+                timeout = None
+                if deadline is not None:
+                    timeout = max(0.0, deadline - asyncio.get_running_loop().time())
+                try:
+                    await asyncio.wait_for(asyncio.shield(wait_task), timeout=timeout)
+                    return interrupted
+                except asyncio.CancelledError:
+                    interrupted = True
+                    if wait_task.done():
+                        return interrupted
+                except TimeoutError as exc:
+                    raise TimeoutError(
+                        "Timed out waiting for pending acquire reservations to drain"
+                    ) from exc
+        finally:
+            if not wait_task.done():
+                wait_task.cancel()
+
+    async def _close_backend_cancellation_hardened(self) -> bool:
+        close_task = asyncio.create_task(self._backend.aclose())
+        interrupted = False
+        while True:
+            try:
+                await asyncio.shield(close_task)
+                break
+            except asyncio.CancelledError:
+                interrupted = True
+                if close_task.done():
+                    break
+        close_task.result()
+        return interrupted
 
     def close(self) -> None:
         """
@@ -827,6 +869,7 @@ class RateLimiter(BaseRateLimiter):
         self._refund_lock_refcounts.clear()
         self._refund_in_progress.clear()
         self._pending_acquire_reservations.clear()
+        self._acquire_delivery_cleanup_reservations.clear()
         self._in_flight_reservation_ids.clear()
         self._reservation_snapshots.clear()
         self._in_flight_reservation_family.clear()
@@ -1082,14 +1125,18 @@ class RateLimiter(BaseRateLimiter):
                 with contextlib.suppress(BaseException):
                     issued_at_seconds = backend_task.result()
                 reservation = _issued_reservation(reservation, issued_at_seconds)
-                await self._complete_acquire_state_update(
-                    self._finalize_pending_acquire(reservation, model)
-                )
-                if _block:
-                    await self._refund_undelivered_acquire_or_deliver(
-                        reservation,
-                        interrupted_by=exc,
+                await self._begin_acquire_delivery_cleanup(reservation.reservation_id)
+                try:
+                    await self._complete_acquire_state_update(
+                        self._finalize_pending_acquire(reservation, model)
                     )
+                    if _block:
+                        await self._refund_undelivered_acquire_or_deliver(
+                            reservation,
+                            interrupted_by=exc,
+                        )
+                finally:
+                    await self._end_acquire_delivery_cleanup(reservation.reservation_id)
             else:
                 await self._complete_acquire_state_update(
                     self._rollback_pending_acquire(reservation.reservation_id)
@@ -1102,20 +1149,23 @@ class RateLimiter(BaseRateLimiter):
             if interrupted:
                 raise asyncio.CancelledError from exc
             _raise_backend_external_error(exc)
-        interrupted = await self._complete_acquire_state_update(
-            self._finalize_pending_acquire(reservation, model)
-        )
-        if interrupted:
-            if _block:
-                await self._refund_undelivered_acquire_or_deliver(reservation)
-            raise asyncio.CancelledError
-        return reservation
+        await self._begin_acquire_delivery_cleanup(reservation.reservation_id)
+        try:
+            interrupted = await self._complete_acquire_state_update(
+                self._finalize_pending_acquire(reservation, model)
+            )
+            if interrupted:
+                if _block:
+                    await self._refund_undelivered_acquire_or_deliver(reservation)
+                raise asyncio.CancelledError
+            return reservation
+        finally:
+            await self._end_acquire_delivery_cleanup(reservation.reservation_id)
 
     async def _begin_pending_acquire(self, reservation: CapacityReservation) -> None:
         async with self._acquire_guard:
             self._raise_if_closed_or_closing()
-            if not self._pending_acquire_reservations:
-                self._pending_drained.clear()
+            self._pending_drained.clear()
             if (
                 reservation.reservation_id not in self._pending_acquire_reservations
                 and reservation.reservation_id not in self._in_flight_reservation_ids
@@ -1148,24 +1198,50 @@ class RateLimiter(BaseRateLimiter):
                 ReservationAuthoritySnapshot.from_reservation(reservation)
             )
             self._touch_model_family(reservation.model_family)
-            if not self._pending_acquire_reservations:
-                self._pending_drained.set()
+            self._refresh_pending_drained_locked()
 
     async def _rollback_pending_acquire(self, reservation_id: str) -> None:
         async with self._acquire_guard:
             self._pending_acquire_reservations.discard(reservation_id)
             self._in_flight_reservation_family.pop(reservation_id, None)
             self._reservation_snapshots.pop(reservation_id, None)
-            if not self._pending_acquire_reservations:
-                self._pending_drained.set()
+            self._refresh_pending_drained_locked()
+
+    async def _begin_acquire_delivery_cleanup(self, reservation_id: str) -> None:
+        async with self._acquire_guard:
+            self._acquire_delivery_cleanup_reservations.add(reservation_id)
+            self._pending_drained.clear()
+
+    async def _end_acquire_delivery_cleanup(self, reservation_id: str) -> None:
+        async with self._acquire_guard:
+            self._acquire_delivery_cleanup_reservations.discard(reservation_id)
+            self._refresh_pending_drained_locked()
+
+    def _refresh_pending_drained_locked(self) -> None:
+        if (
+            self._pending_acquire_reservations
+            or self._acquire_delivery_cleanup_reservations
+        ):
+            self._pending_drained.clear()
+        else:
+            self._pending_drained.set()
 
     async def _refund_undelivered_acquire(
         self,
         reservation: CapacityReservation,
     ) -> None:
-        refund_task = asyncio.create_task(
-            self.refund_capacity(_zero_actual_usage(reservation), reservation)
-        )
+        if self._closed:
+            refund_task = asyncio.create_task(
+                self._refund_capacity(
+                    _zero_actual_usage(reservation),
+                    reservation,
+                    allow_closed=True,
+                )
+            )
+        else:
+            refund_task = asyncio.create_task(
+                self.refund_capacity(_zero_actual_usage(reservation), reservation)
+            )
         while True:
             try:
                 await asyncio.shield(refund_task)
@@ -1549,6 +1625,8 @@ class RateLimiter(BaseRateLimiter):
         self,
         actual_usage: Usage,
         reservation: CapacityReservation,
+        *,
+        allow_closed: bool = False,
     ) -> None:
         rid = reservation.reservation_id
         refund_lock = await self._acquire_reservation_refund_lock(rid)
@@ -1559,7 +1637,8 @@ class RateLimiter(BaseRateLimiter):
         refund_backend_call_started = False
         try:
             async with self._refund_state_lock:
-                self._raise_if_closed()
+                if not allow_closed:
+                    self._raise_if_closed()
                 refund_state = self._refunded_reservation_ids.get(
                     rid,
                     _REFUND_STATE_MISSING,

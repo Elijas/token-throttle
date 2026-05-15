@@ -438,7 +438,7 @@ class SyncRateLimiter:
     limiter-side state update before the limiter is marked closed.
     """
 
-    def __init__(  # noqa: PLR0913
+    def __init__(  # noqa: PLR0913, PLR0915
         self,
         cfg: PerModelConfig | PerModelConfigGetter,
         /,
@@ -548,6 +548,7 @@ class SyncRateLimiter:
         self._refund_in_progress: set[str] = set()
         self._acquire_guard = threading.Lock()
         self._pending_acquire_reservations: set[str] = set()
+        self._acquire_delivery_cleanup_reservations: set[str] = set()
         self._pending_drained = threading.Event()
         self._pending_drained.set()
         self._close_drain_timeout_seconds = validate_timeout(
@@ -654,6 +655,7 @@ class SyncRateLimiter:
     def _forget_in_flight_reservation(self, reservation_id: str) -> None:
         self._in_flight_reservation_ids.discard(reservation_id)
         self._pending_acquire_reservations.discard(reservation_id)
+        self._acquire_delivery_cleanup_reservations.discard(reservation_id)
         self._in_flight_reservation_family.pop(reservation_id, None)
         self._reservation_snapshots.pop(reservation_id, None)
 
@@ -704,35 +706,34 @@ class SyncRateLimiter:
         backend resources fails, the limiter is still marked closed so future
         operations fail cleanly instead of observing a permanent closing state.
         """
-        with self._acquire_guard:
-            if self._closed:
-                return
-            self._closing = True
-            if not self._pending_acquire_reservations:
-                self._pending_drained.set()
-
-        if not self._pending_drained.wait(
-            timeout=self._close_drain_timeout_seconds,
-        ):
-            with self._acquire_guard:
-                self._closed = True
-                self._closing = False
-            raise TimeoutError(
-                "Timed out waiting for pending acquire reservations to drain"
-            )
-
         try:
+            with self._acquire_guard:
+                if self._closed:
+                    return
+                self._closing = True
+                self._refresh_pending_drained_locked()
+
+            if not self._pending_drained.wait(
+                timeout=self._close_drain_timeout_seconds,
+            ):
+                self._terminalize_close_after_drain_timeout()
+
             with self._lifecycle_lock:
-                self._backend.close()
+                with self._acquire_guard:
+                    if self._closed:
+                        already_closed = True
+                    else:
+                        already_closed = False
+                        self._closed = True
+                        self._closing = False
+                if not already_closed:
+                    self._backend.close()
         except BaseException:
             with self._acquire_guard:
                 self._closed = True
                 self._closing = False
             raise
 
-        with self._acquire_guard:
-            self._closed = True
-            self._closing = False
         with self._refund_state_lock:
             refund_locks = list(self._refund_locks.values())
         acquired_locks = []
@@ -751,6 +752,14 @@ class SyncRateLimiter:
             in_flight_count,
         )
 
+    def _terminalize_close_after_drain_timeout(self) -> None:
+        with self._acquire_guard:
+            self._closed = True
+            self._closing = False
+        raise TimeoutError(
+            "Timed out waiting for pending acquire reservations to drain"
+        )
+
     def _clear_retained_state_after_close(self) -> None:
         self._model_family_to_backend.clear()
         self._model_family_to_model_name.clear()
@@ -766,6 +775,7 @@ class SyncRateLimiter:
         self._refund_lock_refcounts.clear()
         self._refund_in_progress.clear()
         self._pending_acquire_reservations.clear()
+        self._acquire_delivery_cleanup_reservations.clear()
         self._in_flight_reservation_ids.clear()
         self._reservation_snapshots.clear()
         self._in_flight_reservation_family.clear()
@@ -1008,23 +1018,26 @@ class SyncRateLimiter:
         except BaseException:
             self._rollback_pending_acquire(reservation.reservation_id)
             raise
+        self._begin_acquire_delivery_cleanup(reservation.reservation_id)
         try:
-            self._finalize_pending_acquire(reservation, model)
-            return reservation
-        except BaseException as exc:
-            if _block:
-                self._finalize_and_refund_undelivered_acquire(
-                    reservation,
-                    model,
-                    interrupted_by=exc,
-                )
-            raise
+            try:
+                self._finalize_pending_acquire(reservation, model)
+                return reservation
+            except BaseException as exc:
+                if _block:
+                    self._finalize_and_refund_undelivered_acquire(
+                        reservation,
+                        model,
+                        interrupted_by=exc,
+                    )
+                raise
+        finally:
+            self._end_acquire_delivery_cleanup(reservation.reservation_id)
 
     def _begin_pending_acquire(self, reservation: CapacityReservation) -> None:
         with self._acquire_guard:
             self._raise_if_closed_or_closing()
-            if not self._pending_acquire_reservations:
-                self._pending_drained.clear()
+            self._pending_drained.clear()
             if (
                 reservation.reservation_id not in self._pending_acquire_reservations
                 and reservation.reservation_id not in self._in_flight_reservation_ids
@@ -1057,16 +1070,33 @@ class SyncRateLimiter:
                 ReservationAuthoritySnapshot.from_reservation(reservation)
             )
             self._touch_model_family(reservation.model_family)
-            if not self._pending_acquire_reservations:
-                self._pending_drained.set()
+            self._refresh_pending_drained_locked()
 
     def _rollback_pending_acquire(self, reservation_id: str) -> None:
         with self._acquire_guard:
             self._pending_acquire_reservations.discard(reservation_id)
             self._in_flight_reservation_family.pop(reservation_id, None)
             self._reservation_snapshots.pop(reservation_id, None)
-            if not self._pending_acquire_reservations:
-                self._pending_drained.set()
+            self._refresh_pending_drained_locked()
+
+    def _begin_acquire_delivery_cleanup(self, reservation_id: str) -> None:
+        with self._acquire_guard:
+            self._acquire_delivery_cleanup_reservations.add(reservation_id)
+            self._pending_drained.clear()
+
+    def _end_acquire_delivery_cleanup(self, reservation_id: str) -> None:
+        with self._acquire_guard:
+            self._acquire_delivery_cleanup_reservations.discard(reservation_id)
+            self._refresh_pending_drained_locked()
+
+    def _refresh_pending_drained_locked(self) -> None:
+        if (
+            self._pending_acquire_reservations
+            or self._acquire_delivery_cleanup_reservations
+        ):
+            self._pending_drained.clear()
+        else:
+            self._pending_drained.set()
 
     def _finalize_and_refund_undelivered_acquire(
         self,
@@ -1077,7 +1107,14 @@ class SyncRateLimiter:
     ) -> None:
         self._finalize_pending_acquire(reservation, model)
         try:
-            self.refund_capacity(_zero_actual_usage(reservation), reservation)
+            if self._closed:
+                self._refund_capacity(
+                    _zero_actual_usage(reservation),
+                    reservation,
+                    allow_closed=True,
+                )
+            else:
+                self.refund_capacity(_zero_actual_usage(reservation), reservation)
         except BaseException as refund_error:
             raise AcquireRefundFailedError(
                 reservation=reservation,
@@ -1329,6 +1366,8 @@ class SyncRateLimiter:
         self,
         actual_usage: Usage,
         reservation: CapacityReservation,
+        *,
+        allow_closed: bool = False,
     ) -> None:
         rid = reservation.reservation_id
         refund_lock = self._acquire_reservation_refund_lock(rid)
@@ -1339,7 +1378,8 @@ class SyncRateLimiter:
         refund_backend_call_started = False
         try:
             with self._refund_state_lock:
-                self._raise_if_closed()
+                if not allow_closed:
+                    self._raise_if_closed()
                 refund_state = self._refunded_reservation_ids.get(
                     rid,
                     _REFUND_STATE_MISSING,
