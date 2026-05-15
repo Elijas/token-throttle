@@ -24,16 +24,21 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import contextlib
+import contextvars
 import inspect
 import logging
 import os
 import threading
+import warnings
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from pydantic import Field, ValidationInfo, field_validator
 
 from token_throttle._dto import StrictDTO
-from token_throttle._interfaces._callable_utils import is_async_callable
+from token_throttle._interfaces._callable_utils import (
+    close_awaitable_if_possible,
+    is_async_callable,
+)
 
 if TYPE_CHECKING:
     from token_throttle._interfaces._models import Capacities, FrozenUsage
@@ -192,6 +197,24 @@ def _validate_callback_signature(value: object, field_name: str) -> None:
         )
 
 
+def _is_generator_callback(value: object) -> bool:
+    if inspect.isgeneratorfunction(value) or inspect.isasyncgenfunction(value):
+        return True
+    if not callable(value):
+        return False
+    return inspect.isgeneratorfunction(value.__call__) or inspect.isasyncgenfunction(
+        value.__call__
+    )
+
+
+def _validate_not_generator_callback(value: object, field_name: str) -> None:
+    if _is_generator_callback(value):
+        raise ValueError(
+            f"{field_name} must not be a generator or async-generator callback; "
+            "callback bodies must run during dispatch and return None"
+        )
+
+
 _STDLIB_LEVEL_MAP: dict[str, int] = {
     "TRACE": logging.DEBUG,
     "DEBUG": logging.DEBUG,
@@ -256,6 +279,26 @@ def _log_callback_timeout(timeout: float) -> None:
     )
 
 
+def _log_late_callback_exception(exc: BaseException) -> None:
+    msg = (
+        "Rate limiter callback raised after callback_timeout elapsed "
+        f"{type(exc).__name__}: {exc}"
+    )
+    with contextlib.suppress(Warning):
+        warnings.warn(msg, RuntimeWarning, stacklevel=3)
+    _stdlib_logger.warning(msg)
+
+
+def _invoke_sync_callback_checked(callback, **kwargs) -> None:
+    result = callback(**kwargs)
+    if inspect.isawaitable(result):
+        close_awaitable_if_possible(result)
+        raise TypeError(
+            "Synchronous rate limiter callback returned an awaitable; "
+            "use async RateLimiterCallbacks with RateLimiter instead"
+        )
+
+
 async def _invoke_async_callback_with_timeout(
     callback,
     callback_timeout: float | None,
@@ -276,14 +319,15 @@ def _invoke_sync_callback_with_timeout(
     **kwargs,
 ) -> None:
     if callback_timeout is None:
-        callback(**kwargs)
+        _invoke_sync_callback_checked(callback, **kwargs)
         return
 
     future: concurrent.futures.Future[None] = concurrent.futures.Future()
+    context = contextvars.copy_context()
 
     def run_callback() -> None:
         try:
-            callback(**kwargs)
+            _invoke_sync_callback_checked(callback, **kwargs)
         except BaseException as exc:  # noqa: BLE001 - re-raised on caller thread below
             with contextlib.suppress(concurrent.futures.InvalidStateError):
                 future.set_exception(exc)
@@ -291,12 +335,24 @@ def _invoke_sync_callback_with_timeout(
             with contextlib.suppress(concurrent.futures.InvalidStateError):
                 future.set_result(None)
 
-    thread = threading.Thread(target=run_callback, daemon=True)
+    def log_late_exception(done: concurrent.futures.Future[None]) -> None:
+        try:
+            done.result()
+        except BaseException as exc:  # noqa: BLE001 - cannot propagate after timeout
+            _log_late_callback_exception(exc)
+
+    # Timeout-wrapped sync callbacks run in a helper thread.  Copy the caller's
+    # contextvars context so ambient tracing/request state survives dispatch.
+    thread = threading.Thread(target=lambda: context.run(run_callback), daemon=True)
     thread.start()
     try:
         future.result(timeout=callback_timeout)
     except concurrent.futures.TimeoutError:
         _log_callback_timeout(callback_timeout)
+        if future.done():
+            log_late_exception(future)
+        else:
+            future.add_done_callback(log_late_exception)
 
 
 def with_callback_timeout(
@@ -476,6 +532,8 @@ class RateLimiterCallbacks(StrictDTO):
         value: object,
         info: ValidationInfo,
     ) -> object:
+        if value is not None and info.field_name is not None:
+            _validate_not_generator_callback(value, info.field_name)
         if value is not None and not is_async_callable(value):
             raise ValueError(f"{info.field_name} must be an async callable")
         if value is not None and info.field_name is not None:
@@ -623,6 +681,8 @@ class SyncRateLimiterCallbacks(StrictDTO):
         value: object,
         info: ValidationInfo,
     ) -> object:
+        if value is not None and info.field_name is not None:
+            _validate_not_generator_callback(value, info.field_name)
         if value is not None and is_async_callable(value):
             raise ValueError(f"{info.field_name} must be a synchronous callable")
         if value is not None and info.field_name is not None:

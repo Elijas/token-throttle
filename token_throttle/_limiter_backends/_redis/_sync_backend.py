@@ -28,7 +28,10 @@ from token_throttle._exceptions import (
     UnknownReservationError,
     _mark_unknown_reservation_forget_in_flight,
 )
-from token_throttle._interfaces._callbacks import SyncRateLimiterCallbacks
+from token_throttle._interfaces._callbacks import (
+    SyncRateLimiterCallbacks,
+    _invoke_sync_callback_checked,
+)
 from token_throttle._interfaces._interfaces import (
     PerModelConfig,
     SyncRateLimiterBackend,
@@ -2009,13 +2012,10 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         cancellation or process signals must propagate before best-effort logging.
         """
         try:
-            callback(**kwargs)
-        except (
-            AcquireRefundFailedError,
-            KeyboardInterrupt,
-            SystemExit,
-            GeneratorExit,
-        ):
+            _invoke_sync_callback_checked(callback, **kwargs)
+        except (AcquireRefundFailedError, asyncio.CancelledError):
+            raise
+        except (KeyboardInterrupt, SystemExit, GeneratorExit):
             raise
         except BaseException as exc:
             if _callback_exception_group_contains_critical(exc):
