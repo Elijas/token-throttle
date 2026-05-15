@@ -56,7 +56,13 @@ from ._sync_bucket import (
     SyncRedisBucket,
     _normalize_bucket_state_pair,
     _raise_pipeline_response_error,
+    _safe_redis_value_repr,
+    _validate_delete_result,
+    _validate_expire_result,
     _validate_pipeline_results,
+    _validate_redis_get_result,
+    _validate_set_nx_result,
+    _validate_set_result,
 )
 from ._ttl import (
     DEFAULT_BUCKET_TTL_SECONDS,
@@ -152,6 +158,12 @@ end
 redis.call('DEL', KEYS[1])
 return 'ok'
 """
+_MAX_REDIS_SCRIPT_STATUS_CHARS = 64
+_MIN_PRINTABLE_SCRIPT_STATUS_CODE = 32
+
+
+class RedisScriptResultError(RuntimeError):
+    """Redis Lua script returned an unusable status value."""
 
 
 def _raise_lock_timeout_error() -> typing.NoReturn:
@@ -179,12 +191,30 @@ def _reservation_lifetime_ttl_ms(value: float | None) -> int:
     return max(1, math.ceil(value_float * 1000.0))
 
 
-def _decode_redis_script_status(value: object) -> str:
+def _decode_redis_script_status(value: object, *, context: str) -> str:
     if isinstance(value, bytes):
-        return value.decode()
-    if isinstance(value, str):
-        return value
-    raise RuntimeError(f"Redis script returned unexpected status {value!r}")
+        try:
+            status = value.decode()
+        except UnicodeDecodeError as exc:
+            raise RedisScriptResultError(
+                f"{context}: Redis script status was not valid UTF-8 "
+                f"({_safe_redis_value_repr(value)})"
+            ) from exc
+    elif isinstance(value, str):
+        status = value
+    else:
+        raise RedisScriptResultError(
+            f"{context}: Redis script returned unexpected status "
+            f"{_safe_redis_value_repr(value)}"
+        )
+    if len(status) > _MAX_REDIS_SCRIPT_STATUS_CHARS or any(
+        ord(char) < _MIN_PRINTABLE_SCRIPT_STATUS_CODE for char in status
+    ):
+        raise RedisScriptResultError(
+            f"{context}: Redis script returned invalid status "
+            f"{_safe_redis_value_repr(status)}"
+        )
+    return status
 
 
 def _redis_value_matches(value: object, expected: str) -> bool:
@@ -751,11 +781,32 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                     f"SyncRedisBackend._get_capacities_unsafe({bucket.full_redis_key})"
                 ),
             )
+            _validate_expire_result(
+                results[idx + 2],
+                context=(
+                    "SyncRedisBackend._get_capacities_unsafe"
+                    f"({bucket.full_redis_key}) last_checked TTL"
+                ),
+            )
+            _validate_expire_result(
+                results[idx + 3],
+                context=(
+                    "SyncRedisBackend._get_capacities_unsafe"
+                    f"({bucket.full_redis_key}) capacity TTL"
+                ),
+            )
             # max_capacity GETs come after all per-bucket state commands.
             max_capacity_idx = num_buckets * _PIPELINE_CMDS_PER_BUCKET + (
                 i * _PIPELINE_CMDS_PER_OVERRIDE
             )
-            if bucket.update_max_capacity_from_result(results[max_capacity_idx]):
+            max_capacity_raw = _validate_redis_get_result(
+                results[max_capacity_idx],
+                context=(
+                    "SyncRedisBackend._get_capacities_unsafe"
+                    f"({bucket.full_redis_key}) max_capacity_override"
+                ),
+            )
+            if bucket.update_max_capacity_from_result(max_capacity_raw):
                 self._redis.expire(
                     bucket._max_capacity_key,  # noqa: SLF001
                     bucket._override_ttl_seconds,  # noqa: SLF001
@@ -777,7 +828,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
             fresh_start_buckets=fresh_start_buckets,
         )
 
-    def _set_capacities_unsafe(  # noqa: PLR0913
+    def _set_capacities_unsafe(  # noqa: PLR0913, PLR0915
         self,
         new_capacities: Capacities,
         pipeline: redis.client.Pipeline | None = None,
@@ -853,7 +904,9 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                 ):
                     return True
                 raise
-            status = _decode_redis_script_status(result)
+            status = _decode_redis_script_status(
+                result, context="SyncRedisBackend acquire marker script"
+            )
             if status == "ok":
                 return True
             if status == "duplicate_acquire":
@@ -863,7 +916,10 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                 ):
                     return True
                 raise DuplicateRefundError("reservation already acquired")
-            raise RuntimeError(f"Redis acquire marker script failed: {status}")
+            raise RedisScriptResultError(
+                "Redis acquire marker script returned unknown status "
+                f"{_safe_redis_value_repr(status)}"
+            )
 
         for (usage_metric, per_seconds), amount in new_capacities.items():
             bucket = self._find_bucket(
@@ -895,16 +951,37 @@ class SyncRedisBackend(SyncRateLimiterBackend):
             _raise_pipeline_response_error(
                 "SyncRedisBackend._set_capacities_unsafe", exc
             )
-        if refund_dedup_key is None:
-            return True
         results = _validate_pipeline_results(
             results,
             context="SyncRedisBackend._set_capacities_unsafe",
             expected_count=(len(new_capacities) * 2)
-            + 1
+            + int(refund_dedup_key is not None)
             + int(delete_acquired_marker_key is not None),
         )
-        if results[-1]:
+        for slot in range(len(new_capacities) * 2):
+            _validate_set_result(
+                results[slot],
+                context=f"SyncRedisBackend._set_capacities_unsafe capacity slot {slot}",
+            )
+        if refund_dedup_key is None:
+            if delete_acquired_marker_key is not None:
+                _validate_delete_result(
+                    results[len(new_capacities) * 2],
+                    context=(
+                        "SyncRedisBackend._set_capacities_unsafe acquired marker DEL"
+                    ),
+                )
+            return True
+        dedup_idx = len(new_capacities) * 2
+        if delete_acquired_marker_key is not None:
+            _validate_delete_result(
+                results[dedup_idx + 1],
+                context="SyncRedisBackend._set_capacities_unsafe acquired marker DEL",
+            )
+        if _validate_set_nx_result(
+            results[dedup_idx],
+            context="SyncRedisBackend._set_capacities_unsafe refund dedup SET NX",
+        ):
             return True
         if refund_dedup_reservation_id is not None:
             self._warn_refund_dedup_duplicate(refund_dedup_reservation_id)
@@ -962,7 +1039,9 @@ class SyncRedisBackend(SyncRateLimiterBackend):
             if self._refund_tombstone_exists(refund_dedup_key):
                 return
             raise
-        status = _decode_redis_script_status(result)
+        status = _decode_redis_script_status(
+            result, context="SyncRedisBackend refund marker script"
+        )
         if status == "ok":
             return
         if status == "duplicate_refund":
@@ -977,7 +1056,10 @@ class SyncRedisBackend(SyncRateLimiterBackend):
             raise UnknownReservationError(
                 "reservation was never acquired by this backend"
             )
-        raise RuntimeError(f"Redis refund marker script failed: {status}")
+        raise RedisScriptResultError(
+            "Redis refund marker script returned unknown status "
+            f"{_safe_redis_value_repr(status)}"
+        )
 
     def _bucket_ids(
         self,
@@ -1712,6 +1794,20 @@ class SyncRedisBackend(SyncRateLimiterBackend):
             results[SyncRedisBucket.PIPELINE_CAPACITY_OFFSET],
             context=f"SyncRedisBackend._snapshot_bucket_state({bucket.full_redis_key})",
         )
+        _validate_expire_result(
+            results[2],
+            context=(
+                f"SyncRedisBackend._snapshot_bucket_state({bucket.full_redis_key}) "
+                "last_checked TTL"
+            ),
+        )
+        _validate_expire_result(
+            results[3],
+            context=(
+                f"SyncRedisBackend._snapshot_bucket_state({bucket.full_redis_key}) "
+                "capacity TTL"
+            ),
+        )
         if last_checked_raw is None or stored_raw is None:
             # Partial state (one None) is treated the same as full absence:
             # the bucket will start fresh on the next acquire. This is the
@@ -1732,20 +1828,20 @@ class SyncRedisBackend(SyncRateLimiterBackend):
             _logger.warning(
                 "Stale Redis bucket state at %r: %r; "
                 "snapshot skipped due to unparseable Redis state "
-                "(last_checked=%r, capacity=%r).",
+                "(last_checked=%s, capacity=%s).",
                 bucket.full_redis_key,
                 parse_error,
-                last_checked_raw,
-                stored_raw,
+                _safe_redis_value_repr(last_checked_raw),
+                _safe_redis_value_repr(stored_raw),
             )
             return
         if not (math.isfinite(last_checked) and math.isfinite(stored)):
             _logger.warning(
                 "Bucket %s: snapshot skipped due to non-finite Redis state "
-                "(last_checked=%r, capacity=%r).",
+                "(last_checked=%s, capacity=%s).",
                 bucket.full_redis_key,
-                last_checked_raw,
-                stored_raw,
+                _safe_redis_value_repr(last_checked_raw),
+                _safe_redis_value_repr(stored_raw),
             )
             return
         time_passed = current_time - last_checked

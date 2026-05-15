@@ -275,6 +275,12 @@ from token_throttle._limiter_backends._redis._sync_bucket import (  # noqa: E402
 )
 
 
+def _redis_get_value(value: object) -> object:
+    if value is None or isinstance(value, (bytes, str)):
+        return value
+    return str(value)
+
+
 class _AsyncPipeline:
     def __init__(self, redis: "_AsyncRedisState") -> None:
         self._redis = redis
@@ -296,7 +302,7 @@ class _AsyncPipeline:
         results = []
         for op, args, _kwargs in self._ops:
             if op == "get":
-                results.append(self._redis.store.get(args[0]))
+                results.append(_redis_get_value(self._redis.store.get(args[0])))
             elif op == "set":
                 self._redis.store[args[0]] = args[1]
                 results.append(True)
@@ -319,7 +325,7 @@ class _AsyncRedisState:
         return _AsyncPipeline(self)
 
     async def get(self, key: str):
-        return self.store.get(key)
+        return _redis_get_value(self.store.get(key))
 
     async def set(self, key: str, value, **_kwargs) -> bool:
         self.store[key] = value
@@ -357,7 +363,7 @@ class _SyncPipeline:
         results = []
         for op, args, _kwargs in self._ops:
             if op == "get":
-                results.append(self._redis.store.get(args[0]))
+                results.append(_redis_get_value(self._redis.store.get(args[0])))
             elif op == "set":
                 self._redis.store[args[0]] = args[1]
                 results.append(True)
@@ -380,7 +386,7 @@ class _SyncRedisState:
         return _SyncPipeline(self)
 
     def get(self, key: str):
-        return self.store.get(key)
+        return _redis_get_value(self.store.get(key))
 
     def set(self, key: str, value, **_kwargs) -> bool:
         self.store[key] = value

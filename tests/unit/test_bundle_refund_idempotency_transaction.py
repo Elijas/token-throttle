@@ -26,6 +26,12 @@ RESERVED = {"tokens": 30.0}
 ACTUAL = {"tokens": 10.0}
 
 
+def _redis_get_value(value: object) -> object:
+    if value is None or isinstance(value, (bytes, str)):
+        return value
+    return str(value)
+
+
 def _config() -> PerModelConfig:
     return PerModelConfig(
         quotas=UsageQuotas([Quota(metric="tokens", limit=100.0, per_seconds=60)]),
@@ -228,7 +234,7 @@ class _AsyncRedis:
         self._paused_first_dedup_set = False
 
     async def get(self, key: str) -> object:
-        return self.store.get(key)
+        return _redis_get_value(self.store.get(key))
 
     async def exists(self, key: str) -> int:
         return int(key in self.store)
@@ -327,7 +333,7 @@ class _SyncRedis:
         self.now = float(int(time.time()))
 
     def get(self, key: str) -> object:
-        return self.store.get(key)
+        return _redis_get_value(self.store.get(key))
 
     def exists(self, key: str) -> int:
         return int(key in self.store)

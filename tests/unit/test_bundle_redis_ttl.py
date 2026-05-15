@@ -15,6 +15,12 @@ from token_throttle._limiter_backends._redis._sync_backend import (
 )
 
 
+def _redis_get_value(value: object) -> object:
+    if value is None or isinstance(value, (bytes, str)):
+        return value
+    return str(value)
+
+
 class _FakeAsyncPipeline:
     def __init__(self, redis: "_FakeAsyncRedis") -> None:
         self._redis = redis
@@ -55,7 +61,7 @@ class _FakeAsyncRedis:
 
     async def get(self, key: str) -> object:
         self._purge_if_expired(key)
-        return self.store.get(key)
+        return _redis_get_value(self.store.get(key))
 
     async def set(
         self,

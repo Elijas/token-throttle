@@ -134,6 +134,7 @@ class TestAsyncBucketUsesServerTime:
     ):
         """set_capacity() without current_time should write the Redis server timestamp."""
         pipeline = mock_redis.pipeline.return_value
+        pipeline.execute.return_value = [True, True]
 
         await bucket.set_capacity(5.0)
 
@@ -173,7 +174,7 @@ class TestAsyncBucketUsesServerTime:
     ):
         """Explicit pipelines should still execute unless execute=False is passed."""
         pipeline = MagicMock()
-        pipeline.execute = AsyncMock(return_value=[None, None])
+        pipeline.execute = AsyncMock(return_value=[True, True])
 
         await bucket.set_capacity(5.0, pipeline=pipeline, current_time=999.0)
 
@@ -217,6 +218,7 @@ class TestSyncBucketUsesServerTime:
     def test_set_capacity_standalone_writes_server_timestamp(self, bucket, mock_redis):
         """set_capacity() without current_time should write the Redis server timestamp."""
         pipeline = mock_redis.pipeline.return_value
+        pipeline.execute.return_value = [True, True]
 
         bucket.set_capacity(5.0)
 
@@ -250,6 +252,7 @@ class TestSyncBucketUsesServerTime:
     ):
         """Explicit pipelines should still execute unless execute=False is passed."""
         pipeline = MagicMock()
+        pipeline.execute.return_value = [True, True]
 
         bucket.set_capacity(5.0, pipeline=pipeline, current_time=999.0)
 

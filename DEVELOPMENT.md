@@ -272,11 +272,13 @@ The minimum Redis ACL permission set for token-throttle:
 
 | Command category | Commands used | Why |
 |---|---|---|
-| `+@read` | `GET` | Read bucket capacity and last-checked state |
-| `+@write` | `SET`, `DEL`, `EXPIRE`, `GETDEL` | Write bucket state, acquire markers, refund dedup keys, and TTL |
+| `+@read` | `GET`, `EXISTS` | Read bucket capacity, marker, and refund-dedup state |
+| `+@write` | `SET`, `DEL`, `EXPIRE` | Write bucket state, acquire markers, refund dedup keys, and TTL |
 | `+@string` | included in read/write above | Plain string key/value operations |
 | `+@scripting` | `EVAL`, `EVALSHA`, `SCRIPT LOAD` | Atomic acquire/refund Lua plus redis-py lock release and extend Lua scripts |
 | `+TIME` | `TIME` | Server-side clock for elapsed-time calculations |
+
+Redis backends require Redis server 6.2 or newer.
 
 token-throttle does **not** use `KEYS`, `FLUSHDB`, `FLUSHALL`, `CONFIG`, or any
 Pub/Sub command. A restrictive ACL can safely deny those categories.

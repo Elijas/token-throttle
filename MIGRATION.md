@@ -100,9 +100,9 @@ factory functions, or explicit `PerModelConfig` construction before upgrading.
 
 ## 6. Redis ACL Requirements
 
-token-throttle uses `GET`, `SET`, `DEL`, `GETDEL`, `TIME`, `EXPIRE`, and pipeline
-operations. No `KEYS`, `FLUSHDB`, `FLUSHALL`, `CONFIG`, or Pub/Sub commands
-are issued by the library.
+Redis backends require Redis server 6.2 or newer. token-throttle uses `GET`,
+`EXISTS`, `SET`, `DEL`, `TIME`, `EXPIRE`, and pipeline operations. No `KEYS`,
+`FLUSHDB`, `FLUSHALL`, `CONFIG`, or Pub/Sub commands are issued by the library.
 
 Redis acquire-marker and refund transactions use Lua `EVAL`. Redis lock release
 and extension (via redis-py) also require `EVALSHA` and `SCRIPT LOAD`. These are

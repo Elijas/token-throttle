@@ -52,6 +52,12 @@ PREFIX = "tenant"
 BUCKET_ID = ("tokens", 60)
 
 
+def _redis_get_value(value: object) -> object:
+    if value is None or isinstance(value, (bytes, str)):
+        return value
+    return str(value)
+
+
 def _config() -> PerModelConfig:
     return PerModelConfig(
         quotas=UsageQuotas([Quota(metric="tokens", limit=100.0, per_seconds=60)]),
@@ -114,7 +120,7 @@ class _AsyncRedis:
 
     async def get(self, key: str) -> object:
         self._purge_if_expired(key)
-        return self.store.get(key)
+        return _redis_get_value(self.store.get(key))
 
     async def exists(self, key: str) -> int:
         self._purge_if_expired(key)
@@ -267,7 +273,7 @@ class _SyncRedis:
 
     def get(self, key: str) -> object:
         self._purge_if_expired(key)
-        return self.store.get(key)
+        return _redis_get_value(self.store.get(key))
 
     def exists(self, key: str) -> int:
         self._purge_if_expired(key)

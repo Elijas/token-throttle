@@ -232,6 +232,10 @@ quota state. Use different prefixes for unrelated deployments sharing one Redis
 DB or Redis Cluster. The prefix and user-controlled key segments cannot contain
 `:`, `{`, `}`, whitespace, or control characters.
 
+Redis backends require Redis server 6.2 or newer and a Redis user that can run
+`GET`, `EXISTS`, `SET`, `DEL`, `EXPIRE`, `TIME`, and Lua scripting commands
+used by redis-py locks and token-throttle acquire/refund transactions.
+
 For bounded Redis deployments, prefer `redis.asyncio.BlockingConnectionPool`
 or `redis.BlockingConnectionPool` and size `max_connections` to at least
 `max_concurrent_acquires` plus headroom for Redis lock acquire/release, `TIME`,

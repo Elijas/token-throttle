@@ -35,6 +35,12 @@ MODEL_FAMILY = "test-family"
 BUCKET_ID = ("tokens", 60)
 
 
+def _redis_get_value(value: object) -> object:
+    if value is None or isinstance(value, (bytes, str)):
+        return value
+    return str(value)
+
+
 def _config(limit: float = 100.0) -> PerModelConfig:
     return PerModelConfig(
         quotas=UsageQuotas([Quota(metric="tokens", limit=limit, per_seconds=60)]),
@@ -155,7 +161,7 @@ class _AsyncRedisPipeline:
         results = []
         for op, key, value, kwargs in self._ops:
             if op == "get":
-                results.append(self._redis.store.get(key))
+                results.append(_redis_get_value(self._redis.store.get(key)))
             elif op == "set":
                 self._redis.store[key] = value
                 self._redis.set_calls.append((key, value, kwargs))
@@ -175,7 +181,7 @@ class _AsyncRedis:
 
     async def get(self, key):
         self.get_calls.append(key)
-        return self.store.get(key)
+        return _redis_get_value(self.store.get(key))
 
     async def expire(self, key, seconds):
         self.expire_calls.append((key, seconds))
@@ -203,7 +209,7 @@ class _SyncRedisPipeline:
         results = []
         for op, key, value, kwargs in self._ops:
             if op == "get":
-                results.append(self._redis.store.get(key))
+                results.append(_redis_get_value(self._redis.store.get(key)))
             elif op == "set":
                 self._redis.store[key] = value
                 self._redis.set_calls.append((key, value, kwargs))
@@ -223,7 +229,7 @@ class _SyncRedis:
 
     def get(self, key):
         self.get_calls.append(key)
-        return self.store.get(key)
+        return _redis_get_value(self.store.get(key))
 
     def expire(self, key, seconds):
         self.expire_calls.append((key, seconds))

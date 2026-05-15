@@ -33,7 +33,7 @@ the unpack would receive an empty queued-command list.
 Custom-gateway shape contract
 -----------------------------
 Implementations of ``AbstractRedisGateway`` must return TIME as a
-2-element tuple/list of integer-coercible values with ``seconds >= 0`` and
+2-element tuple/list of integer values with ``seconds >= 0`` and
 ``0 <= microseconds < 1_000_000``. Off-shape responses raise ``TypeError``
 or ``ValueError`` instead of producing wrong-but-not-erroring math.
 """
@@ -68,6 +68,7 @@ a permissive sanity rail, not a tightness guarantee.
 
 _TIME_RESPONSE_LEN = 2  # Redis TIME returns (seconds, microseconds)
 _MICROSECONDS_PER_SECOND = 1_000_000
+_MAX_REDIS_TIME_SECONDS = 253_402_300_799  # 9999-12-31T23:59:59Z
 
 
 def _reject_pipeline(client: object) -> None:
@@ -86,24 +87,32 @@ def _parse_time_response(raw: Any) -> tuple[int, int]:
             f"(expected a 2-element tuple/list of integers)"
         )
     raw_seconds, raw_microseconds = raw
-    try:
-        seconds = int(raw_seconds)
-        microseconds = int(raw_microseconds)
-    except (TypeError, ValueError, OverflowError) as exc:
+    if type(raw_seconds) is not int or type(raw_microseconds) is not int:
         raise TypeError(
-            f"Redis TIME components must be integer-coercible, got {raw!r}"
-        ) from exc
-    if seconds < 0 or not (0 <= microseconds < _MICROSECONDS_PER_SECOND):
+            "Redis TIME components must be integer-coercible Redis integer "
+            f"components, got {raw!r}"
+        )
+    seconds = raw_seconds
+    microseconds = raw_microseconds
+    if (
+        seconds < 0
+        or seconds > _MAX_REDIS_TIME_SECONDS
+        or not (0 <= microseconds < _MICROSECONDS_PER_SECOND)
+    ):
         raise ValueError(
             f"Redis TIME out of range: seconds={seconds}, "
-            f"microseconds={microseconds} (need seconds >= 0 and "
+            f"microseconds={microseconds} (need 0 <= seconds <= "
+            f"{_MAX_REDIS_TIME_SECONDS} and "
             f"0 <= microseconds < {_MICROSECONDS_PER_SECOND})"
         )
     return seconds, microseconds
 
 
 def _to_float_with_jump_check(seconds: int, microseconds: int) -> float:
-    server_time = seconds + microseconds / _MICROSECONDS_PER_SECOND
+    try:
+        server_time = seconds + microseconds / _MICROSECONDS_PER_SECOND
+    except OverflowError as exc:
+        raise ValueError(f"Redis TIME out of range: seconds={seconds}") from exc
     local_time = time.time()
     forward_jump = server_time - local_time
     if forward_jump > MAX_FORWARD_JUMP_SECONDS:

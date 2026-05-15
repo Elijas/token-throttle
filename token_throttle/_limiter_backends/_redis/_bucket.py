@@ -1,4 +1,5 @@
 import contextlib
+import hashlib
 import inspect
 import json
 import logging
@@ -36,6 +37,8 @@ from ._ttl import DEFAULT_BUCKET_TTL_SECONDS, validate_redis_ttl_seconds
 __all__ = ["CalculatedCapacity", "RedisBucket"]
 
 _logger = logging.getLogger(__name__)
+_MAX_REDIS_GET_VALUE_BYTES = 16 * 1024
+_MAX_REDIS_DIAGNOSTIC_BYTES = 96
 
 
 class RedisPipelineResultError(RuntimeError):
@@ -46,8 +49,21 @@ def _raise_pipeline_response_error(
     context: str, exc: redis.exceptions.ResponseError
 ) -> typing.NoReturn:
     raise RedisPipelineResultError(
-        f"Redis pipeline failed at {context}: {exc}"
+        f"Redis pipeline failed at {context}: {_safe_redis_value_repr(exc)}"
     ) from exc
+
+
+def _safe_redis_value_repr(value: object) -> str:
+    if isinstance(value, bytes):
+        prefix = value[:_MAX_REDIS_DIAGNOSTIC_BYTES]
+        suffix = "" if len(value) <= _MAX_REDIS_DIAGNOSTIC_BYTES else "..."
+        digest = hashlib.sha256(value).hexdigest()[:12]
+        return f"bytes(len={len(value)}, sha256={digest}, prefix={prefix!r}{suffix})"
+    if isinstance(value, str):
+        prefix = value[:_MAX_REDIS_DIAGNOSTIC_BYTES]
+        suffix = "" if len(value) <= _MAX_REDIS_DIAGNOSTIC_BYTES else "..."
+        return f"str(len={len(value)}, prefix={prefix!r}{suffix})"
+    return f"{type(value).__name__}({value!r})"
 
 
 def _validate_pipeline_results(
@@ -71,21 +87,101 @@ def _validate_pipeline_results(
             f"{context}: pipeline returned {len(results)} results, "
             f"expected {expected_count}"
         )
+    for index, value in enumerate(results):
+        if isinstance(value, BaseException):
+            raise RedisPipelineResultError(
+                f"{context}: pipeline slot {index} returned an error response: "
+                f"{_safe_redis_value_repr(value)}"
+            )
     return results
 
 
-def _validate_bucket_state_result(value: object, *, context: str) -> object:
+def _validate_redis_get_result(value: object, *, context: str) -> bytes | str | None:
     if isinstance(value, BaseException):
         raise RedisPipelineResultError(
-            f"{context}: Redis returned an error response for bucket state: {value}"
+            f"{context}: Redis GET returned an error response: "
+            f"{_safe_redis_value_repr(value)}"
         )
     if value is None:
         return None
-    if type(value) is bool or not isinstance(value, (bytes, str, int, float)):
+    if not isinstance(value, (bytes, str)):
         raise RedisPipelineResultError(
-            f"{context}: unexpected bucket-state result type {type(value).__name__}"
+            f"{context}: unexpected Redis GET result type {type(value).__name__}; "
+            "expected bytes, str, or None"
+        )
+    if len(value) > _MAX_REDIS_GET_VALUE_BYTES:
+        raise RedisPipelineResultError(
+            f"{context}: Redis GET value is too large "
+            f"({len(value)} bytes; max {_MAX_REDIS_GET_VALUE_BYTES}) "
+            f"{_safe_redis_value_repr(value)}"
         )
     return value
+
+
+def _validate_bucket_state_result(value: object, *, context: str) -> object:
+    return _validate_redis_get_result(value, context=context)
+
+
+def _validate_expire_result(value: object, *, context: str) -> bool:
+    if isinstance(value, BaseException):
+        raise RedisPipelineResultError(
+            f"{context}: Redis EXPIRE returned an error response: "
+            f"{_safe_redis_value_repr(value)}"
+        )
+    if type(value) is bool:
+        return value
+    if type(value) is int and value in (0, 1):
+        return bool(value)
+    raise RedisPipelineResultError(
+        f"{context}: unexpected Redis EXPIRE result "
+        f"{_safe_redis_value_repr(value)}; expected bool or 0/1"
+    )
+
+
+def _validate_set_result(value: object, *, context: str) -> bool:
+    if isinstance(value, BaseException):
+        raise RedisPipelineResultError(
+            f"{context}: Redis SET returned an error response: "
+            f"{_safe_redis_value_repr(value)}"
+        )
+    if value is True or value in ("OK", b"OK"):
+        return True
+    raise RedisPipelineResultError(
+        f"{context}: unexpected Redis SET result {_safe_redis_value_repr(value)}; "
+        "expected True or OK"
+    )
+
+
+def _validate_set_nx_result(value: object, *, context: str) -> bool:
+    if isinstance(value, BaseException):
+        raise RedisPipelineResultError(
+            f"{context}: Redis SET NX returned an error response: "
+            f"{_safe_redis_value_repr(value)}"
+        )
+    if value is True or value in ("OK", b"OK"):
+        return True
+    if value is None or value is False:
+        return False
+    raise RedisPipelineResultError(
+        f"{context}: unexpected Redis SET NX result "
+        f"{_safe_redis_value_repr(value)}; expected True/OK, False, or None"
+    )
+
+
+def _validate_delete_result(value: object, *, context: str) -> int:
+    if isinstance(value, BaseException):
+        raise RedisPipelineResultError(
+            f"{context}: Redis DEL returned an error response: "
+            f"{_safe_redis_value_repr(value)}"
+        )
+    if type(value) is bool:
+        return int(value)
+    if type(value) is int and value >= 0:
+        return value
+    raise RedisPipelineResultError(
+        f"{context}: unexpected Redis DEL result {_safe_redis_value_repr(value)}; "
+        "expected non-negative integer"
+    )
 
 
 def _normalize_bucket_state_pair(
@@ -286,16 +382,16 @@ class RedisBucket:
         if type(raw_value) is bool or not isinstance(raw_value, (int, float)):
             if raw_value is not None:
                 _logger.warning(
-                    "Stale Redis bucket state at %r: expected positive finite value",
-                    raw_value,
+                    "Stale Redis bucket state at %s: expected positive finite value",
+                    _safe_redis_value_repr(raw_value),
                 )
             return None
         try:
             parsed = _validate_max_capacity_finite_positive(raw_value)
         except ValueError as parse_error:
             _logger.warning(
-                "Stale Redis bucket state at %r: %r",
-                raw_value,
+                "Stale Redis bucket state at %s: %r",
+                _safe_redis_value_repr(raw_value),
                 parse_error,
             )
             return None
@@ -308,7 +404,7 @@ class RedisBucket:
             self.full_redis_key,
             self._max_capacity_key,
             reason,
-            raw_value,
+            _safe_redis_value_repr(raw_value),
         )
 
     def _handle_legacy_override(
@@ -327,7 +423,7 @@ class RedisBucket:
             key if key is not None else self._max_capacity_key,
             era,
             reason,
-            raw_value,
+            _safe_redis_value_repr(raw_value),
         )
 
     def handle_legacy_max_capacity_key(self, raw_value: object) -> None:
@@ -346,10 +442,16 @@ class RedisBucket:
             raise MaxCapacityOverrideParseError(
                 "Redis max_capacity override command returned an error response"
             )
-        if not isinstance(raw_value, (bytes, str, dict)):
+        if not isinstance(raw_value, (bytes, str)):
             raise MaxCapacityOverrideParseError(
-                "Redis max_capacity override must be bytes, str, dict, or None "
+                "Redis max_capacity override must be bytes, str, or None "
                 f"(got {type(raw_value).__name__})"
+            )
+        if len(raw_value) > _MAX_REDIS_GET_VALUE_BYTES:
+            raise MaxCapacityOverrideParseError(
+                "Redis max_capacity override is too large "
+                f"({len(raw_value)} bytes; max {_MAX_REDIS_GET_VALUE_BYTES}) "
+                f"{_safe_redis_value_repr(raw_value)}"
             )
 
         decoded: object = raw_value
@@ -553,6 +655,15 @@ class RedisBucket:
                 results[self.PIPELINE_CAPACITY_OFFSET],
                 context=f"RedisBucket.get_capacity({self.full_redis_key})",
             )
+            _validate_expire_result(
+                results[2],
+                context=f"RedisBucket.get_capacity({self.full_redis_key}) "
+                "last_checked TTL",
+            )
+            _validate_expire_result(
+                results[3],
+                context=f"RedisBucket.get_capacity({self.full_redis_key}) capacity TTL",
+            )
             return self.calculate_capacity(last_checked, capacity, current_time)
         return None
 
@@ -595,9 +706,22 @@ class RedisBucket:
 
         if execute:
             try:
-                await pipeline.execute()
+                results = await pipeline.execute()
             except redis.exceptions.ResponseError as exc:
                 _raise_pipeline_response_error("RedisBucket.set_capacity", exc)
+            results = _validate_pipeline_results(
+                results,
+                context=f"RedisBucket.set_capacity({self.full_redis_key})",
+                expected_count=2,
+            )
+            _validate_set_result(
+                results[0],
+                context=f"RedisBucket.set_capacity({self.full_redis_key}) last_checked",
+            )
+            _validate_set_result(
+                results[1],
+                context=f"RedisBucket.set_capacity({self.full_redis_key}) capacity",
+            )
 
     def calculate_capacity(
         self,
