@@ -797,9 +797,13 @@ class RateLimiter(BaseRateLimiter):
         usage = frozen_usage(usage)
         limit_config = self._config_getter(model)
         self._validated_model_family(model, limit_config)
-        self._validate_shared_model_family_config(model, limit_config)
         if limit_config.is_unlimited:
-            return await self._unlimited_reservation(model)
+            return await self._unlimited_reservation(model, limit_config)
+        self._validate_shared_model_family_config(
+            model,
+            limit_config,
+            register=False,
+        )
         return await self._acquire_capacity(
             model, usage, limit_config, _block=_block, timeout=timeout
         )
@@ -852,8 +856,12 @@ class RateLimiter(BaseRateLimiter):
 
         limit_config = self._config_getter(model)
         self._validated_model_family(model, limit_config)
-        self._validate_shared_model_family_config(model, limit_config)
         if limit_config.is_unlimited:
+            self._validate_shared_model_family_config(
+                model,
+                limit_config,
+                register=False,
+            )
             # Counter still runs for telemetry consistency (L05 I03);
             # extra_usage shape is still validated; both results are
             # discarded because the unlimited reservation always
@@ -867,9 +875,14 @@ class RateLimiter(BaseRateLimiter):
                     **kwargs,
                 )
             merge_extra_usage_unrestricted(usage, extra_usage)
-            return await self._unlimited_reservation(model)
+            return await self._unlimited_reservation(model, limit_config)
         if limit_config.usage_counter is None:
             raise ValueError("limit_config.usage_counter cannot be None")
+        self._validate_shared_model_family_config(
+            model,
+            limit_config,
+            register=False,
+        )
 
         usage = merge_extra_usage(
             await _resolve_usage_counter_result_for_model_async(
@@ -910,6 +923,10 @@ class RateLimiter(BaseRateLimiter):
         await self._begin_pending_acquire(reservation)
         backend_task: asyncio.Task[None] | None = None
         try:
+            # Reserve an in-flight slot before registering family/alias rows.
+            # If max_in_flight rejects, validation metadata is never inserted;
+            # while the slot is pending, cleanup treats the family as active.
+            self._validate_shared_model_family_config(model, limit_config)
             backend = await self._get_backend(limit_config)
             backend_task = asyncio.create_task(
                 backend.await_for_capacity(usage, timeout=timeout)
@@ -1422,7 +1439,11 @@ class RateLimiter(BaseRateLimiter):
                 return
             self._refund_lock_refcounts[reservation_id] = count
 
-    async def _unlimited_reservation(self, model: str) -> CapacityReservation:
+    async def _unlimited_reservation(
+        self,
+        model: str,
+        limit_config: PerModelConfig,
+    ) -> CapacityReservation:
         # Unlimited reservations bypass metering, so their ``usage`` is
         # never read. The ``CapacityReservation`` field validator
         # requires empty ``usage`` when ``is_unlimited=True``; passing
@@ -1439,6 +1460,11 @@ class RateLimiter(BaseRateLimiter):
         async with self._acquire_guard:
             self._raise_if_closed_or_closing()
             self._remember_in_flight_reservation(reservation)
+        try:
+            self._validate_shared_model_family_config(model, limit_config)
+        except BaseException:
+            self._forget_in_flight_reservation(reservation.reservation_id)
+            raise
         return reservation
 
     async def _refresh_backend_for_reservation(
@@ -1640,6 +1666,8 @@ class RateLimiter(BaseRateLimiter):
         self,
         model: str,
         limit_config: PerModelConfig,
+        *,
+        register: bool = True,
     ) -> None:
         # Detects conflicting quotas across models sharing a model_family.
         # Registration in the reverse-lookup map (_remember_model_family)
@@ -1714,6 +1742,8 @@ class RateLimiter(BaseRateLimiter):
 
         self._enforce_new_model_family_cap(model_family)
         self._enforce_new_alias_cap(model)
+        if not register:
+            return
         is_new_alias = model not in self._model_name_to_model_family
         already_counted = previous_signature is not None and (
             reset_counts_to_current or previous_signature not in current_counts
