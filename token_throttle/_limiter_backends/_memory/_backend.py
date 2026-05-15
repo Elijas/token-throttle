@@ -1,4 +1,5 @@
 import asyncio
+import collections
 import contextlib
 import logging
 import math
@@ -81,6 +82,7 @@ class MemoryBackendBuilder(RateLimiterBackendBuilderInterface):
 class MemoryBackend(RateLimiterBackend):
     DEFAULT_SLEEP_INTERVAL: ClassVar[float] = 0.1
     MAX_CROSS_WORKER_POLL: ClassVar[float] = 1.0
+    REFUNDED_RESERVATION_IDS_CAP: ClassVar[int] = 131_072
 
     def __init__(
         self,
@@ -109,6 +111,10 @@ class MemoryBackend(RateLimiterBackend):
         }
         self._acquired_reservation_ids: set[str] = set()
         self._refunded_reservation_ids: set[str] = set()
+        self._refunded_reservation_id_order: collections.deque[str] = (
+            collections.deque()
+        )
+        self._refunded_reservation_ids_cap = self.REFUNDED_RESERVATION_IDS_CAP
 
     def supports_metric_set_change(self) -> bool:
         return True
@@ -193,9 +199,8 @@ class MemoryBackend(RateLimiterBackend):
         self,
         usage: FrozenUsage,
         preconsumption: Capacities,
-        current_time: float,
     ) -> tuple[bool, Capacities]:
-        """Check and consume atomically. Caller MUST hold self._condition."""
+        """Check and calculate consumption. Caller MUST hold self._condition."""
         active_metric_names = {metric for metric, _ in preconsumption}
         self._ensure_usage_metrics_are_active(usage, active_metric_names)
 
@@ -230,8 +235,17 @@ class MemoryBackend(RateLimiterBackend):
                 continue
             postconsumption_dict[(cap_metric, per_seconds)] = cap_amount - usage_amount
         postconsumption = frozendict(postconsumption_dict)
-        self._set_capacities(postconsumption, current_time)
         return True, postconsumption
+
+    def _remember_refunded_reservation_id(self, reservation_id: str) -> None:
+        """Remember a successful refund with O(1) FIFO eviction."""
+        if reservation_id in self._refunded_reservation_ids:
+            return
+        self._refunded_reservation_ids.add(reservation_id)
+        self._refunded_reservation_id_order.append(reservation_id)
+        while len(self._refunded_reservation_ids) > self._refunded_reservation_ids_cap:
+            expired = self._refunded_reservation_id_order.popleft()
+            self._refunded_reservation_ids.discard(expired)
 
     async def consume_capacity(
         self,
@@ -297,13 +311,13 @@ class MemoryBackend(RateLimiterBackend):
                     -max_cap[(cap_metric, per_seconds)],
                 )
             postconsumption_capacities = frozendict(postconsumption_dict)
+            if reservation_id is not None:
+                self._acquired_reservation_ids.add(reservation_id)
             self._set_capacities(
                 postconsumption_capacities,
                 current_time,
                 allow_negative=True,
             )
-            if reservation_id is not None:
-                self._acquired_reservation_ids.add(reservation_id)
 
         # Callbacks fired outside the lock. Consumption has already been
         # durably recorded in bucket state above, so if a CancelledError
@@ -360,7 +374,6 @@ class MemoryBackend(RateLimiterBackend):
                     ok, postconsumption = self._try_consume_locked(
                         usage,
                         preconsumption,
-                        current_time,
                     )
                     if ok:
                         if reservation_id is not None:
@@ -369,6 +382,7 @@ class MemoryBackend(RateLimiterBackend):
                                     "reservation already acquired"
                                 )
                             self._acquired_reservation_ids.add(reservation_id)
+                        self._set_capacities(postconsumption, current_time)
                         consumed_monotonic = time.monotonic()
                         consumed_buckets = list(self._buckets)
                         break
@@ -618,7 +632,7 @@ class MemoryBackend(RateLimiterBackend):
             self._set_capacities(updated_capacities, current_time, allow_negative=True)
             if reservation_id is not None:
                 self._acquired_reservation_ids.remove(reservation_id)
-                self._refunded_reservation_ids.add(reservation_id)
+                self._remember_refunded_reservation_id(reservation_id)
             self._condition.notify_all()
 
         # Callbacks fired outside the lock
