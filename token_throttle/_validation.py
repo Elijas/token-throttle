@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from collections.abc import Set as AbstractSet
 
 from token_throttle._capacity import _validate_max_capacity_finite_positive
+from token_throttle._dto import StrictDTO
 from token_throttle._exceptions import CardinalityLimitExceededError
 from token_throttle._interfaces._callable_utils import (
     close_awaitable_if_possible,
@@ -36,6 +37,11 @@ MAX_TOTAL_KEY_LENGTH = 8192
 # Re-exported from ``_models`` so external callers that imported
 # ``_UNLIMITED_FLAG`` from this module keep working.
 __all__ = ["_UNLIMITED_FLAG"]
+
+
+def _revalidate_dto[StrictDTO_T: StrictDTO](instance: StrictDTO_T) -> StrictDTO_T:
+    """Force a fresh validation pass for an exact DTO instance."""
+    return instance.revalidate()
 
 
 def _validate_key_prefix(value: object) -> str:
@@ -87,6 +93,7 @@ def is_unlimited_reservation(reservation: object) -> bool:
             "reservation must be a CapacityReservation "
             f"(got {type(reservation).__name__})"
         )
+    reservation = _revalidate_dto(reservation)
     return reservation.is_unlimited is True
 
 
@@ -545,6 +552,7 @@ def resolve_config(
         raise ValueError("cfg must be a synchronous PerModelConfig getter")
     if type(r) is not PerModelConfig:
         raise ValueError(f"cfg must resolve to PerModelConfig (got {type(r).__name__})")
+    r = _revalidate_dto(r)
     resolved = (
         r.model_copy()
         if r.model_family

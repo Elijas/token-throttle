@@ -17,6 +17,7 @@ from token_throttle._interfaces._interfaces import (
 )
 from token_throttle._interfaces._models import Capacities, FrozenUsage
 from token_throttle._validation import (
+    _revalidate_dto,
     validate_backend_refund_usage_for_bucket_ids,
     validate_backend_usage,
     validate_sleep_interval,
@@ -57,6 +58,9 @@ class SyncMemoryBackendBuilder(SyncRateLimiterBackendBuilderInterface):
         *,
         callbacks: SyncRateLimiterCallbacks | None = None,
     ) -> "SyncMemoryBackend":
+        cfg = _revalidate_dto(cfg)
+        if callbacks is not None:
+            _revalidate_dto(callbacks)
         buckets = []
         for quota in cfg.quotas:
             b = MemoryBucket(
@@ -87,6 +91,9 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
         callbacks: SyncRateLimiterCallbacks | None = None,
     ) -> None:
         super().__init__()
+        limit_config = _revalidate_dto(limit_config)
+        if callbacks is not None:
+            _revalidate_dto(callbacks)
         self._buckets = buckets
         self._condition = threading.Condition()
         self._sleep_interval: float = (

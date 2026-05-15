@@ -246,6 +246,7 @@ class UsageQuotas:
             raise ValueError(
                 f"Each quota must be a Quota instance (got {type(quota).__name__})"
             )
+        quota = quota.revalidate()
         if (
             quota.metric in self._metrics
             and quota.per_seconds in self._metrics[quota.metric]

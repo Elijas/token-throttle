@@ -16,6 +16,7 @@ from token_throttle._interfaces._interfaces import (
 )
 from token_throttle._interfaces._models import Capacities, FrozenUsage
 from token_throttle._validation import (
+    _revalidate_dto,
     validate_backend_refund_usage_for_bucket_ids,
     validate_backend_usage,
     validate_sleep_interval,
@@ -56,6 +57,9 @@ class MemoryBackendBuilder(RateLimiterBackendBuilderInterface):
         *,
         callbacks: RateLimiterCallbacks | None = None,
     ) -> "RateLimiterBackend":
+        cfg = _revalidate_dto(cfg)
+        if callbacks is not None:
+            _revalidate_dto(callbacks)
         buckets = []
         for quota in cfg.quotas:
             b = MemoryBucket(
@@ -86,6 +90,9 @@ class MemoryBackend(RateLimiterBackend):
         callbacks: RateLimiterCallbacks | None = None,
     ) -> None:
         super().__init__()
+        limit_config = _revalidate_dto(limit_config)
+        if callbacks is not None:
+            _revalidate_dto(callbacks)
         self._buckets = buckets
         self._condition = asyncio.Condition()  # Lazily binds to event loop on first use (3.10+), safe before loop starts. Audited 2026-04.
         self._sleep_interval: float = (

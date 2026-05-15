@@ -32,6 +32,7 @@ from token_throttle._interfaces._interfaces import (
 )
 from token_throttle._interfaces._models import Capacities, FrozenUsage
 from token_throttle._validation import (
+    _revalidate_dto,
     _validate_reservation_id,
     validate_backend_refund_usage_for_bucket_ids,
     validate_backend_usage,
@@ -299,6 +300,9 @@ class RedisBackendBuilder(RateLimiterBackendBuilderInterface):
         *,
         callbacks: RateLimiterCallbacks | None = None,
     ) -> "RateLimiterBackend":
+        cfg = _revalidate_dto(cfg)
+        if callbacks is not None:
+            _revalidate_dto(callbacks)
         redis_buckets = []
         for quota in cfg.quotas:
             b = RedisBucket(
@@ -342,6 +346,9 @@ class RedisBackend(RateLimiterBackend):
         callbacks: RateLimiterCallbacks | None = None,
     ) -> None:
         super().__init__()
+        limit_config = _revalidate_dto(limit_config)
+        if callbacks is not None:
+            _revalidate_dto(callbacks)
         self._redis = redis
         self._key_prefix = validate_redis_key_prefix(key_prefix)
         _ensure_buckets_match_backend(
@@ -692,6 +699,7 @@ class RedisBackend(RateLimiterBackend):
                 capacity,
                 current_time,
             )
+            result = _revalidate_dto(result)
             if result.is_fresh_start:
                 fresh_start_buckets.append(bucket)
             new_capacities[(bucket.usage_metric, int(bucket.per_seconds))] = (

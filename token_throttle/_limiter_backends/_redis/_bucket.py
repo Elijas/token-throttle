@@ -26,7 +26,7 @@ from token_throttle._capacity import (
 )
 from token_throttle._interfaces._interfaces import PerModelConfig
 from token_throttle._interfaces._models import Quota, _is_bool_like
-from token_throttle._validation import validate_per_seconds
+from token_throttle._validation import _revalidate_dto, validate_per_seconds
 
 from ._keys import redis_key_with_suffix, redis_namespace_key, validate_redis_key_prefix
 from ._server_time import async_server_time
@@ -145,6 +145,8 @@ class RedisBucket:
         bucket_ttl_seconds: int = DEFAULT_BUCKET_TTL_SECONDS,
         override_ttl_seconds: int | None = None,
     ):
+        quota = _revalidate_dto(quota)
+        limit_config = _revalidate_dto(limit_config)
         self.usage_metric = quota.metric
         self.per_seconds = validate_per_seconds(quota.per_seconds)
         self.key_prefix = validate_redis_key_prefix(key_prefix)

@@ -82,11 +82,19 @@ class StrictDTO(BaseModel):
         return fields
 
     def _dump_for_revalidation(self) -> dict[str, object]:
-        dump = self.model_dump()
+        dump = {
+            field_name: self.__dict__[field_name]
+            for field_name in type(self).model_fields
+            if field_name in self.__dict__
+        }
         extra_fields = set(self.__dict__) - set(type(self).model_fields)
         for field_name in extra_fields:
             dump[field_name] = self.__dict__[field_name]
         return dump
+
+    def revalidate(self) -> Self:
+        """Return a freshly validated copy of this exact DTO."""
+        return type(self).model_validate(self._dump_for_revalidation())
 
     def model_copy(
         self,

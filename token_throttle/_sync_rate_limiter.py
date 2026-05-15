@@ -35,6 +35,7 @@ from token_throttle._interfaces._models import (
 )
 from token_throttle._validation import (
     _UNLIMITED_FLAG,
+    _revalidate_dto,
     extract_total_tokens,
     extract_usage_from_response,
     is_unlimited_reservation,
@@ -395,6 +396,8 @@ class SyncRateLimiter:
                 "callbacks must be a SyncRateLimiterCallbacks instance or None "
                 f"(got {type(callbacks).__name__})"
             )
+        if callbacks is not None:
+            _revalidate_dto(callbacks)
         self._backend = backend
         self._lock = threading.Lock()
         self._lifecycle_lock = threading.Lock()
@@ -597,6 +600,20 @@ class SyncRateLimiter:
                 self._limiter_instance_id,
             )
             _raise_limiter_instance_mismatch()
+
+    def _reject_legacy_reservation_before_revalidation(
+        self,
+        reservation: object,
+    ) -> None:
+        if type(reservation) is not CapacityReservation:
+            return
+        fields = reservation.__dict__
+        if (
+            "limiter_instance_id" in fields
+            and fields["limiter_instance_id"] is None
+            and "reservation_id" in fields
+        ):
+            self._verify_reservation_limiter_instance(reservation)
 
     def close(self) -> None:
         """
@@ -978,6 +995,10 @@ class SyncRateLimiter:
                 "refund_capacity expects (actual_usage, reservation); "
                 "did you mean refund_capacity_from_response?"
             )
+        if type(reservation) is not CapacityReservation:
+            is_unlimited_reservation(reservation)
+        self._reject_legacy_reservation_before_revalidation(reservation)
+        reservation = _revalidate_dto(reservation)
         is_unlimited = is_unlimited_reservation(reservation)
         self._verify_reservation_limiter_instance(reservation)
         if is_unlimited:
@@ -1000,6 +1021,10 @@ class SyncRateLimiter:
         :meth:`refund_capacity` directly.
         """
         self._raise_if_closed()
+        if type(reservation) is not CapacityReservation:
+            is_unlimited_reservation(reservation)
+        self._reject_legacy_reservation_before_revalidation(reservation)
+        reservation = _revalidate_dto(reservation)
         is_unlimited = is_unlimited_reservation(reservation)
         self._verify_reservation_limiter_instance(reservation)
         if is_unlimited:

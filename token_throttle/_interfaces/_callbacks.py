@@ -305,6 +305,7 @@ def with_callback_timeout(
 ) -> RateLimiterCallbacks | None:
     if callbacks is None:
         return None
+    callbacks.revalidate()
 
     def wrap(callback):
         if callback is None:
@@ -330,6 +331,7 @@ def with_sync_callback_timeout(
 ) -> SyncRateLimiterCallbacks | None:
     if callbacks is None:
         return None
+    callbacks.revalidate()
 
     def wrap(callback):
         if callback is None:
@@ -485,8 +487,10 @@ def _merge_rate_limiter_callbacks(
     user_callbacks: RateLimiterCallbacks | None,
     default_callbacks: RateLimiterCallbacks,
 ) -> RateLimiterCallbacks:
+    default_callbacks = default_callbacks.revalidate()
     if user_callbacks is None:
         return default_callbacks
+    user_callbacks = user_callbacks.revalidate()
 
     merged = {
         field_name: (
@@ -630,8 +634,10 @@ def _merge_sync_rate_limiter_callbacks(
     user_callbacks: SyncRateLimiterCallbacks | None,
     default_callbacks: SyncRateLimiterCallbacks,
 ) -> SyncRateLimiterCallbacks:
+    default_callbacks = default_callbacks.revalidate()
     if user_callbacks is None:
         return default_callbacks
+    user_callbacks = user_callbacks.revalidate()
 
     merged = {
         field_name: (
