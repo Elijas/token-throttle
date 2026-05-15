@@ -253,7 +253,7 @@ class MemoryBackend(RateLimiterBackend):
         *,
         reservation_id: str | None = None,
         reservation_lifetime_seconds: float | None = None,
-    ) -> None:
+    ) -> float | None:
         """
         Consume capacity unconditionally.
 
@@ -335,6 +335,7 @@ class MemoryBackend(RateLimiterBackend):
                 usage=usage,
                 current_time=current_time,
             )
+        return current_time
 
     async def await_for_capacity(
         self,
@@ -343,7 +344,7 @@ class MemoryBackend(RateLimiterBackend):
         timeout: float | None = None,
         reservation_id: str | None = None,
         reservation_lifetime_seconds: float | None = None,
-    ) -> None:
+    ) -> float | None:
         """Wait until all buckets have the required capacity."""
         _ = reservation_lifetime_seconds
         validate_backend_usage(usage, self._usage_metric_names)
@@ -488,6 +489,7 @@ class MemoryBackend(RateLimiterBackend):
                 # preserving structured-concurrency (TaskGroup) semantics.
                 pass
             raise
+        return current_time
 
     def _compute_sleep(self, usage: FrozenUsage, preconsumption: Capacities) -> float:
         """Compute max wait across all buckets based on deficit / rate."""
@@ -543,6 +545,7 @@ class MemoryBackend(RateLimiterBackend):
         reservation_bucket_ids: set[tuple[str, int]]
         | frozenset[tuple[str, int]]
         | None = None,
+        reservation_reserved_usage: FrozenUsage | None = None,
     ) -> bool:
         """
         Refund unused capacity back to the rate limiter based on actual usage.
@@ -550,7 +553,7 @@ class MemoryBackend(RateLimiterBackend):
         Handles both positive refunds (used less than reserved) and negative
         refunds (used more than reserved, i.e. overuse).
         """
-        _ = reservation_model_family, reservation_bucket_ids
+        _ = reservation_model_family, reservation_bucket_ids, reservation_reserved_usage
         backend_bucket_ids = self._bucket_ids()
         refund_bucket_ids = (
             backend_bucket_ids if bucket_ids is None else frozenset(bucket_ids)

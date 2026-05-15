@@ -1,4 +1,6 @@
 import json
+import math
+from collections.abc import Mapping
 
 from token_throttle._interfaces._models import BucketId
 from token_throttle._validation import (
@@ -9,7 +11,7 @@ from token_throttle._validation import (
 
 _REDIS_NAMESPACE = "rate_limiting"
 DEFAULT_REFUND_DEDUP_TTL_SECONDS = 7 * 24 * 60 * 60
-_ACQUIRED_MARKER_VERSION = 2
+_ACQUIRED_MARKER_VERSION = 3
 
 
 def validate_redis_key_prefix(value: object) -> str:
@@ -55,22 +57,30 @@ def redis_acquired_marker_value(
     reservation_id: str,
     model_family: str,
     bucket_ids: set[BucketId] | frozenset[BucketId],
+    usage: Mapping[str, float] | None = None,
 ) -> str:
     # KNOWN UNKNOWN: this internal JSON marker schema is intentionally stricter
     # than the public CapacityReservation shape; no external compatibility is
     # promised until a future release documents marker payloads as operator API.
-    return json.dumps(
-        {
-            "v": _ACQUIRED_MARKER_VERSION,
-            "reservation_id": _validate_reservation_id(reservation_id),
-            "model_family": model_family,
-            "buckets": [
-                [metric, int(per_seconds)] for metric, per_seconds in sorted(bucket_ids)
-            ],
-        },
-        separators=(",", ":"),
-        sort_keys=True,
-    )
+    payload: dict[str, object] = {
+        "v": _ACQUIRED_MARKER_VERSION,
+        "reservation_id": _validate_reservation_id(reservation_id),
+        "model_family": model_family,
+        "buckets": [
+            [metric, int(per_seconds)] for metric, per_seconds in sorted(bucket_ids)
+        ],
+    }
+    if usage is not None:
+        normalized_usage = []
+        for metric, amount in sorted(usage.items()):
+            amount_float = float(amount)
+            if not math.isfinite(amount_float) or amount_float < 0:
+                raise ValueError(
+                    f"Reserved usage value for {metric} must be finite and non-negative"
+                )
+            normalized_usage.append([metric, amount_float])
+        payload["usage"] = normalized_usage
+    return json.dumps(payload, separators=(",", ":"), sort_keys=True)
 
 
 def validate_refund_dedup_ttl_seconds(value: object) -> int:

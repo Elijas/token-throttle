@@ -1058,8 +1058,23 @@ class RedisBackend(RateLimiterBackend):
     def _normalize_check_result(
         self,
         result: tuple[bool, Capacities, Capacities, float | None]
-        | tuple[bool, Capacities, Capacities, float | None, tuple[RedisBucket, ...]],
-    ) -> tuple[bool, Capacities, Capacities, float | None, tuple[RedisBucket, ...]]:
+        | tuple[bool, Capacities, Capacities, float | None, tuple[RedisBucket, ...]]
+        | tuple[
+            bool,
+            Capacities,
+            Capacities,
+            float | None,
+            float | None,
+            tuple[RedisBucket, ...],
+        ],
+    ) -> tuple[
+        bool,
+        Capacities,
+        Capacities,
+        float | None,
+        float | None,
+        tuple[RedisBucket, ...],
+    ]:
         if len(result) == 4:  # noqa: PLR2004
             available, preconsumption, postconsumption, consumed_monotonic = result
             return (
@@ -1067,6 +1082,7 @@ class RedisBackend(RateLimiterBackend):
                 preconsumption,
                 postconsumption,
                 consumed_monotonic,
+                None,
                 self._snapshot_buckets(),
             )
         if len(result) == 5:  # noqa: PLR2004
@@ -1078,10 +1094,28 @@ class RedisBackend(RateLimiterBackend):
                 preconsumption,
                 postconsumption,
                 consumed_monotonic,
+                None,
+                tuple(buckets),
+            )
+        if len(result) == 6:  # noqa: PLR2004
+            (
+                available,
+                preconsumption,
+                postconsumption,
+                consumed_monotonic,
+                consumed_at_seconds,
+                buckets,
+            ) = result
+            return (
+                available,
+                preconsumption,
+                postconsumption,
+                consumed_monotonic,
+                consumed_at_seconds,
                 tuple(buckets),
             )
         raise RuntimeError(
-            "_check_and_consume_capacity() must return 4 or 5 values",
+            "_check_and_consume_capacity() must return 4, 5, or 6 values",
         )
 
     def _compute_sleep_for_wait(
@@ -1139,7 +1173,14 @@ class RedisBackend(RateLimiterBackend):
         lock_blocking_timeout: float | None = None,
         reservation_id: str | None = None,
         reservation_lifetime_seconds: float | None = None,
-    ) -> tuple[bool, Capacities, Capacities, float | None, tuple[RedisBucket, ...]]:
+    ) -> tuple[
+        bool,
+        Capacities,
+        Capacities,
+        float | None,
+        float | None,
+        tuple[RedisBucket, ...],
+    ]:
         """Check if there's enough capacity and consume it if available."""
         usage: FrozenUsage = frozendict(
             {metric: float(amount) for metric, amount in usage_.items()},
@@ -1149,6 +1190,7 @@ class RedisBackend(RateLimiterBackend):
         # Empty on the failure path; callers only read postconsumption on success.
         postconsumption_capacities: Capacities = frozendict()
         consumed_monotonic: float | None = None
+        consumed_at_seconds: float | None = None
         current_time: float = 0.0
         fresh_start_buckets: list[RedisBucket] = []
         consumed = False
@@ -1205,6 +1247,7 @@ class RedisBackend(RateLimiterBackend):
                                 preconsumption_capacities,
                                 postconsumption_capacities,
                                 consumed_monotonic,
+                                consumed_at_seconds,
                                 buckets,
                             )
 
@@ -1243,6 +1286,7 @@ class RedisBackend(RateLimiterBackend):
                                 reservation_id=reservation_id,
                                 model_family=self._limit_config.get_model_family(),
                                 bucket_ids=self._bucket_ids(buckets),
+                                usage=usage,
                             )
                             if reservation_id is not None
                             else None
@@ -1263,6 +1307,7 @@ class RedisBackend(RateLimiterBackend):
                     raise
                 consumed = True
                 consumed_monotonic = time.monotonic()
+                consumed_at_seconds = current_time
             await self._fresh_start_buckets_callback(fresh_start_buckets)
             if self._callbacks and self._callbacks.on_capacity_consumed:
                 await self._invoke_callback_safe(
@@ -1292,6 +1337,7 @@ class RedisBackend(RateLimiterBackend):
             preconsumption_capacities,
             postconsumption_capacities,
             consumed_monotonic,
+            consumed_at_seconds,
             buckets,
         )
 
@@ -1301,7 +1347,7 @@ class RedisBackend(RateLimiterBackend):
         *,
         reservation_id: str | None = None,
         reservation_lifetime_seconds: float | None = None,
-    ) -> None:
+    ) -> float | None:
         """
         Consume capacity unconditionally.
 
@@ -1378,6 +1424,7 @@ class RedisBackend(RateLimiterBackend):
                             reservation_id=reservation_id,
                             model_family=self._limit_config.get_model_family(),
                             bucket_ids=self._bucket_ids(buckets),
+                            usage=usage,
                         )
                         if reservation_id is not None
                         else None
@@ -1411,7 +1458,7 @@ class RedisBackend(RateLimiterBackend):
                 # OnCapacityConsumedCallback docstring for the delivery
                 # guarantee contract.
                 suppress_current_task_cancellation()
-                return
+                return None
         # Callbacks fire after the lock is released. Consumption is already
         # durably recorded in Redis, so if CancelledError arrives during
         # callbacks we let it propagate: the caller (e.g. asyncio.timeout)
@@ -1428,6 +1475,7 @@ class RedisBackend(RateLimiterBackend):
                 usage=usage,
                 current_time=current_time,
             )
+        return current_time
 
     async def await_for_capacity(
         self,
@@ -1436,7 +1484,7 @@ class RedisBackend(RateLimiterBackend):
         timeout: float | None = None,
         reservation_id: str | None = None,
         reservation_lifetime_seconds: float | None = None,
-    ) -> None:
+    ) -> float | None:
         """Wait until all buckets have the required capacity."""
         validate_backend_usage(usage, self._validation_metric_names())
         timeout = validate_timeout(timeout)
@@ -1455,6 +1503,7 @@ class RedisBackend(RateLimiterBackend):
                     preconsumption,
                     postconsumption,
                     consumed_monotonic,
+                    consumed_at_seconds,
                     buckets,
                 ) = self._normalize_check_result(
                     await self._check_and_consume_capacity(
@@ -1511,7 +1560,7 @@ class RedisBackend(RateLimiterBackend):
                         # structured concurrency (TaskGroups).
                         pass
                     raise
-                return
+                return consumed_at_seconds
 
             if deadline is not None and time.monotonic() >= deadline:
                 raise TimeoutError("Timed out waiting for capacity")
@@ -1618,6 +1667,7 @@ class RedisBackend(RateLimiterBackend):
         reservation_bucket_ids: set[tuple[str, int]]
         | frozenset[tuple[str, int]]
         | None = None,
+        reservation_reserved_usage: FrozenUsage | None = None,
     ) -> bool:
         """
         Refund unused capacity back to the rate limiter based on actual usage.
@@ -1666,6 +1716,8 @@ class RedisBackend(RateLimiterBackend):
                                       reservation for acquire-marker validation.
             reservation_bucket_ids: Bucket identity set captured on the
                                     reservation for acquire-marker validation.
+            reservation_reserved_usage: Reserved usage captured on the
+                                        reservation for acquire-marker validation.
 
         Example:
             TIME N=0: Reserve 100 tokens (assumes all consumed immediately)
@@ -1713,6 +1765,7 @@ class RedisBackend(RateLimiterBackend):
                     if reservation_bucket_ids is not None
                     else backend_bucket_ids
                 ),
+                usage=reservation_reserved_usage or reserved_usage,
             )
         if not refund_bucket_ids:
             if (

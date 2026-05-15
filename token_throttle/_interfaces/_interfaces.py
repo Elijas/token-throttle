@@ -171,7 +171,7 @@ class RateLimiterBackend(ABC):
         timeout: float | None = None,
         reservation_id: str | None = None,
         reservation_lifetime_seconds: float | None = None,
-    ) -> None:
+    ) -> float | None:
         """
         Wait until all buckets can satisfy *usage*, then consume atomically.
 
@@ -200,7 +200,7 @@ class RateLimiterBackend(ABC):
         *,
         reservation_id: str | None = None,
         reservation_lifetime_seconds: float | None = None,
-    ) -> None:
+    ) -> float | None:
         """
         Consume capacity unconditionally.
 
@@ -239,6 +239,7 @@ class RateLimiterBackend(ABC):
         reservation_id: str | None = None,
         reservation_model_family: str | None = None,
         reservation_bucket_ids: set[BucketId] | frozenset[BucketId] | None = None,
+        reservation_reserved_usage: FrozenUsage | None = None,
     ) -> bool:
         """
         Return unused capacity to a specific subset of buckets.
@@ -249,7 +250,7 @@ class RateLimiterBackend(ABC):
         cross-process acquire authority and idempotency. The default falls back
         to ``refund_capacity()`` and returns ``True`` after applying the refund.
         """
-        _ = reservation_model_family, reservation_bucket_ids
+        _ = reservation_model_family, reservation_bucket_ids, reservation_reserved_usage
         await self.refund_capacity(reserved_usage, actual_usage)
         return True
 
@@ -348,6 +349,16 @@ def backend_uses_default_prepare_reconfigured_backend(
     )
 
 
+def backend_uses_default_refund_capacity_for_buckets(
+    backend: RateLimiterBackend,
+) -> bool:
+    """Return whether *backend* inherits the no-proof refund hook."""
+    return (
+        getattr(type(backend), "refund_capacity_for_buckets", None)
+        is RateLimiterBackend.refund_capacity_for_buckets
+    )
+
+
 class BaseRateLimiter(ABC):
     @abstractmethod
     async def acquire_capacity(
@@ -390,7 +401,7 @@ class SyncRateLimiterBackend(ABC):
         timeout: float | None = None,
         reservation_id: str | None = None,
         reservation_lifetime_seconds: float | None = None,
-    ) -> None:
+    ) -> float | None:
         """
         Wait until all buckets can satisfy *usage*, then consume atomically.
 
@@ -411,7 +422,7 @@ class SyncRateLimiterBackend(ABC):
         *,
         reservation_id: str | None = None,
         reservation_lifetime_seconds: float | None = None,
-    ) -> None:
+    ) -> float | None:
         """
         Consume capacity unconditionally.
 
@@ -435,6 +446,7 @@ class SyncRateLimiterBackend(ABC):
         reservation_id: str | None = None,
         reservation_model_family: str | None = None,
         reservation_bucket_ids: set[BucketId] | frozenset[BucketId] | None = None,
+        reservation_reserved_usage: FrozenUsage | None = None,
     ) -> bool:
         """
         Synchronous counterpart of ``refund_capacity_for_buckets``.
@@ -442,7 +454,7 @@ class SyncRateLimiterBackend(ABC):
         The default falls back to ``refund_capacity()`` and returns ``True``
         for backwards compatibility with custom backends.
         """
-        _ = reservation_model_family, reservation_bucket_ids
+        _ = reservation_model_family, reservation_bucket_ids, reservation_reserved_usage
         self.refund_capacity(reserved_usage, actual_usage)
         return True
 
@@ -527,6 +539,16 @@ def sync_backend_uses_default_prepare_reconfigured_backend(
     return (
         type(backend).prepare_reconfigured_backend
         is SyncRateLimiterBackend.prepare_reconfigured_backend
+    )
+
+
+def sync_backend_uses_default_refund_capacity_for_buckets(
+    backend: SyncRateLimiterBackend,
+) -> bool:
+    """Return whether *backend* inherits the no-proof refund hook."""
+    return (
+        getattr(type(backend), "refund_capacity_for_buckets", None)
+        is SyncRateLimiterBackend.refund_capacity_for_buckets
     )
 
 

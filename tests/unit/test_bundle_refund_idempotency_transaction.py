@@ -69,6 +69,7 @@ def _acquire_marker_value(reservation_id: str) -> str:
         reservation_id=reservation_id,
         model_family=MODEL_FAMILY,
         bucket_ids=frozenset({BUCKET_ID}),
+        usage=RESERVED,
     )
 
 

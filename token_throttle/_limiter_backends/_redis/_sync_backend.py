@@ -307,7 +307,7 @@ class SyncRedisBackendBuilder(SyncRateLimiterBackendBuilderInterface):
         lock_blocking_thread_sleep_seconds: float = (
             DEFAULT_LOCK_BLOCKING_THREAD_SLEEP_SECONDS
         ),
-    ) -> None:
+    ) -> float | None:
         super().__init__()
         client_module = type(redis_client).__module__
         if client_module.startswith("redis.asyncio.") or (
@@ -997,11 +997,20 @@ class SyncRedisBackend(SyncRateLimiterBackend):
             Capacities,
             float | None,
             tuple[SyncRedisBucket, ...],
+        ]
+        | tuple[
+            bool,
+            Capacities,
+            Capacities,
+            float | None,
+            float | None,
+            tuple[SyncRedisBucket, ...],
         ],
     ) -> tuple[
         bool,
         Capacities,
         Capacities,
+        float | None,
         float | None,
         tuple[SyncRedisBucket, ...],
     ]:
@@ -1012,6 +1021,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                 preconsumption,
                 postconsumption,
                 consumed_monotonic,
+                None,
                 self._snapshot_buckets(),
             )
         if len(result) == 5:  # noqa: PLR2004
@@ -1023,10 +1033,28 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                 preconsumption,
                 postconsumption,
                 consumed_monotonic,
+                None,
+                tuple(buckets),
+            )
+        if len(result) == 6:  # noqa: PLR2004
+            (
+                available,
+                preconsumption,
+                postconsumption,
+                consumed_monotonic,
+                consumed_at_seconds,
+                buckets,
+            ) = result
+            return (
+                available,
+                preconsumption,
+                postconsumption,
+                consumed_monotonic,
+                consumed_at_seconds,
                 tuple(buckets),
             )
         raise RuntimeError(
-            "_check_and_consume_capacity() must return 4 or 5 values",
+            "_check_and_consume_capacity() must return 4, 5, or 6 values",
         )
 
     def _compute_sleep_for_wait(
@@ -1047,7 +1075,14 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         lock_blocking_timeout: float | None = None,
         reservation_id: str | None = None,
         reservation_lifetime_seconds: float | None = None,
-    ) -> tuple[bool, Capacities, Capacities, float | None, tuple[SyncRedisBucket, ...]]:
+    ) -> tuple[
+        bool,
+        Capacities,
+        Capacities,
+        float | None,
+        float | None,
+        tuple[SyncRedisBucket, ...],
+    ]:
         """Check if there's enough capacity and consume it if available."""
         usage: FrozenUsage = frozendict(
             {metric: float(amount) for metric, amount in usage_.items()},
@@ -1057,6 +1092,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         # Empty on the failure path; callers only read postconsumption on success.
         postconsumption_capacities: Capacities = frozendict()
         consumed_monotonic: float | None = None
+        consumed_at_seconds: float | None = None
         current_time: float = 0.0
         fresh_start_buckets: list[SyncRedisBucket] = []
         consumed = False
@@ -1112,6 +1148,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                                 preconsumption_capacities,
                                 postconsumption_capacities,
                                 consumed_monotonic,
+                                consumed_at_seconds,
                                 buckets,
                             )
 
@@ -1148,6 +1185,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                             reservation_id=reservation_id,
                             model_family=self._limit_config.get_model_family(),
                             bucket_ids=self._bucket_ids(buckets),
+                            usage=usage,
                         )
                         if reservation_id is not None
                         else None
@@ -1159,6 +1197,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                     ),
                 )
                 consumed = True
+                consumed_at_seconds = current_time
             self._fresh_start_buckets_callback(fresh_start_buckets)
             if self._callbacks and self._callbacks.on_capacity_consumed:
                 self._invoke_callback_safe(
@@ -1190,6 +1229,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
             preconsumption_capacities,
             postconsumption_capacities,
             consumed_monotonic,
+            consumed_at_seconds,
             buckets,
         )
 
@@ -1270,6 +1310,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                         reservation_id=reservation_id,
                         model_family=self._limit_config.get_model_family(),
                         bucket_ids=self._bucket_ids(buckets),
+                        usage=usage,
                     )
                     if reservation_id is not None
                     else None
@@ -1290,6 +1331,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                 usage=usage,
                 current_time=current_time,
             )
+        return current_time
 
     def wait_for_capacity(
         self,
@@ -1298,7 +1340,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         timeout: float | None = None,
         reservation_id: str | None = None,
         reservation_lifetime_seconds: float | None = None,
-    ) -> None:
+    ) -> float | None:
         """Wait until all buckets have the required capacity."""
         validate_backend_usage(usage, self._validation_metric_names())
         timeout = validate_timeout(timeout)
@@ -1317,6 +1359,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                     preconsumption,
                     postconsumption,
                     consumed_monotonic,
+                    consumed_at_seconds,
                     buckets,
                 ) = self._normalize_check_result(
                     self._check_and_consume_capacity(
@@ -1375,7 +1418,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                         # cleanup. Swallow so the original interrupt propagates.
                         pass
                     raise
-                return
+                return consumed_at_seconds
 
             if deadline is not None and time.monotonic() >= deadline:
                 raise TimeoutError("Timed out waiting for capacity")
@@ -1466,6 +1509,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         reservation_bucket_ids: set[tuple[str, int]]
         | frozenset[tuple[str, int]]
         | None = None,
+        reservation_reserved_usage: FrozenUsage | None = None,
     ) -> bool:
         """Refund unused capacity back to the rate limiter based on actual usage."""
         buckets = self._snapshot_buckets()
@@ -1497,6 +1541,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                     if reservation_bucket_ids is not None
                     else backend_bucket_ids
                 ),
+                usage=reservation_reserved_usage or reserved_usage,
             )
         if not refund_bucket_ids:
             if (

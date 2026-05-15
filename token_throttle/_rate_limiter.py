@@ -29,6 +29,7 @@ from token_throttle._interfaces._interfaces import (
     RateLimiterBackend,
     RateLimiterBackendBuilderInterface,
     backend_uses_default_prepare_reconfigured_backend,
+    backend_uses_default_refund_capacity_for_buckets,
 )
 from token_throttle._interfaces._models import (
     MAX_ALIAS_LENGTH,
@@ -38,6 +39,7 @@ from token_throttle._interfaces._models import (
     CapacityReservation,
     FrozenUsage,
     Quota,
+    ReservationAuthoritySnapshot,
     Usage,
     UsageQuotas,
     frozen_usage,
@@ -140,6 +142,20 @@ def _reservation_bucket_ids(cfg: PerModelConfig) -> frozenset[BucketId]:
 
 def _zero_actual_usage(reservation: CapacityReservation) -> dict[str, float]:
     return dict.fromkeys(reservation.usage, 0.0)
+
+
+def _issued_reservation(
+    reservation: CapacityReservation,
+    issued_at_seconds: float | None = None,
+) -> CapacityReservation:
+    if (
+        issued_at_seconds is None
+        or type(issued_at_seconds) is bool
+        or not isinstance(issued_at_seconds, (int, float))
+        or not math.isfinite(float(issued_at_seconds))
+    ):
+        issued_at_seconds = time.time()
+    return reservation.model_copy(update={"created_at_seconds": issued_at_seconds})
 
 
 def _resolved_model_family(cfg: PerModelConfig) -> str:
@@ -580,6 +596,7 @@ class RateLimiter(BaseRateLimiter):
         )
         self._limiter_instance_id = uuid.uuid4().hex
         self._in_flight_reservation_ids: set[str] = set()
+        self._reservation_snapshots: dict[str, ReservationAuthoritySnapshot] = {}
         self._closing = False
         self._in_flight_reservation_family: dict[str, str] = {}
         self._model_family_last_touched: dict[str, float] = {}
@@ -671,11 +688,24 @@ class RateLimiter(BaseRateLimiter):
         self._in_flight_reservation_family[reservation.reservation_id] = (
             reservation.model_family
         )
+        self._reservation_snapshots[reservation.reservation_id] = (
+            ReservationAuthoritySnapshot.from_reservation(reservation)
+        )
 
     def _forget_in_flight_reservation(self, reservation_id: str) -> None:
         self._in_flight_reservation_ids.discard(reservation_id)
         self._pending_acquire_reservations.discard(reservation_id)
         self._in_flight_reservation_family.pop(reservation_id, None)
+        self._reservation_snapshots.pop(reservation_id, None)
+
+    def _authoritative_reservation_for_refund(
+        self,
+        reservation: CapacityReservation,
+    ) -> CapacityReservation:
+        snapshot = self._reservation_snapshots.get(reservation.reservation_id)
+        if snapshot is None:
+            return reservation
+        return snapshot.to_reservation()
 
     def _verify_reservation_has_limiter_instance(
         self,
@@ -798,6 +828,7 @@ class RateLimiter(BaseRateLimiter):
         self._refund_in_progress.clear()
         self._pending_acquire_reservations.clear()
         self._in_flight_reservation_ids.clear()
+        self._reservation_snapshots.clear()
         self._in_flight_reservation_family.clear()
         self._model_family_last_touched.clear()
 
@@ -1010,11 +1041,11 @@ class RateLimiter(BaseRateLimiter):
             bucket_ids=_reservation_bucket_ids(limit_config),
             model=model,
             limiter_instance_id=self._limiter_instance_id,
-            created_at_seconds=time.time(),
+            created_at_seconds=None,
         )
 
         await self._begin_pending_acquire(reservation)
-        backend_task: asyncio.Task[None] | None = None
+        backend_task: asyncio.Task[float | None] | None = None
         try:
             # Reserve an in-flight slot before registering family/alias rows.
             # If max_in_flight rejects, validation metadata is never inserted;
@@ -1039,13 +1070,18 @@ class RateLimiter(BaseRateLimiter):
                     ),
                 )
             )
-            await backend_task
+            issued_at_seconds = await backend_task
+            reservation = _issued_reservation(reservation, issued_at_seconds)
         except asyncio.CancelledError as exc:
             consumed = (
                 backend_task is not None
                 and await self._backend_task_succeeded_after_cancel(backend_task)
             )
             if consumed:
+                issued_at_seconds = None
+                with contextlib.suppress(BaseException):
+                    issued_at_seconds = backend_task.result()
+                reservation = _issued_reservation(reservation, issued_at_seconds)
                 await self._complete_acquire_state_update(
                     self._finalize_pending_acquire(reservation, model)
                 )
@@ -1108,6 +1144,9 @@ class RateLimiter(BaseRateLimiter):
             self._in_flight_reservation_family[reservation.reservation_id] = (
                 reservation.model_family
             )
+            self._reservation_snapshots[reservation.reservation_id] = (
+                ReservationAuthoritySnapshot.from_reservation(reservation)
+            )
             self._touch_model_family(reservation.model_family)
             if not self._pending_acquire_reservations:
                 self._pending_drained.set()
@@ -1116,6 +1155,7 @@ class RateLimiter(BaseRateLimiter):
         async with self._acquire_guard:
             self._pending_acquire_reservations.discard(reservation_id)
             self._in_flight_reservation_family.pop(reservation_id, None)
+            self._reservation_snapshots.pop(reservation_id, None)
             if not self._pending_acquire_reservations:
                 self._pending_drained.set()
 
@@ -1166,7 +1206,7 @@ class RateLimiter(BaseRateLimiter):
 
     async def _backend_task_succeeded_after_cancel(
         self,
-        task: asyncio.Task[None],
+        task: asyncio.Task[float | None],
     ) -> bool:
         while True:
             try:
@@ -1203,6 +1243,7 @@ class RateLimiter(BaseRateLimiter):
             is_unlimited_reservation(reservation)
         self._reject_legacy_reservation_before_revalidation(reservation)
         reservation = _revalidate_dto(reservation)
+        reservation = self._authoritative_reservation_for_refund(reservation)
         is_unlimited = is_unlimited_reservation(reservation)
         self._verify_reservation_has_limiter_instance(reservation)
         if is_unlimited:
@@ -1233,6 +1274,7 @@ class RateLimiter(BaseRateLimiter):
             is_unlimited_reservation(reservation)
         self._reject_legacy_reservation_before_revalidation(reservation)
         reservation = _revalidate_dto(reservation)
+        reservation = self._authoritative_reservation_for_refund(reservation)
         is_unlimited = is_unlimited_reservation(reservation)
         self._verify_reservation_has_limiter_instance(reservation)
         if is_unlimited:
@@ -1542,10 +1584,10 @@ class RateLimiter(BaseRateLimiter):
                     )
                 async with self._refund_state_lock:
                     reservation_in_flight = rid in self._in_flight_reservation_ids
-                if (
-                    not reservation_in_flight
-                    and not backend.supports_acquire_marker_authority()
-                ):
+                has_marker_authority = self._backend_has_acquire_marker_authority(
+                    backend
+                )
+                if not reservation_in_flight and not has_marker_authority:
                     raise UnknownReservationError(  # noqa: TRY301
                         "reservation was never acquired by this backend"
                     )
@@ -1575,13 +1617,20 @@ class RateLimiter(BaseRateLimiter):
                         refund_bucket_ids,
                     )
                     refund_backend_call_started = True
+                    refund_kwargs = {
+                        "bucket_ids": refund_bucket_ids,
+                        "reservation_id": rid,
+                        "reservation_model_family": reservation.model_family,
+                        "reservation_bucket_ids": reservation.bucket_ids,
+                    }
+                    if has_marker_authority:
+                        refund_kwargs["reservation_reserved_usage"] = (
+                            reservation.get_usage()
+                        )
                     await backend.refund_capacity_for_buckets(
                         reserved_usage,
                         actual_usage,
-                        bucket_ids=refund_bucket_ids,
-                        reservation_id=rid,
-                        reservation_model_family=reservation.model_family,
-                        reservation_bucket_ids=reservation.bucket_ids,
+                        **refund_kwargs,
                     )
                 except DuplicateRefundError:
                     await self._complete_refund_state_update(
@@ -1710,6 +1759,27 @@ class RateLimiter(BaseRateLimiter):
         return post_refund_signature is not None and (
             post_refund_signature != pre_refund_signature
         )
+
+    def _backend_has_acquire_marker_authority(
+        self,
+        backend: RateLimiterBackend,
+    ) -> bool:
+        supports = backend.supports_acquire_marker_authority()
+        if inspect.isawaitable(supports):
+            close = getattr(supports, "close", None)
+            if callable(close):
+                close()
+            return False
+        if supports is not True:
+            return False
+        if backend_uses_default_refund_capacity_for_buckets(backend):
+            raise RuntimeError(
+                f"Custom backend {type(backend).__name__} claims "
+                "supports_acquire_marker_authority=True but did not override "
+                "refund_capacity_for_buckets; reservation authority would be "
+                "unverified."
+            )
+        return True
 
     async def _complete_refund_state_update(self, awaitable) -> bool:
         task = asyncio.create_task(awaitable)

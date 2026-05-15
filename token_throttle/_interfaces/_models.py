@@ -3,6 +3,7 @@ import unicodedata
 import uuid
 from collections import defaultdict
 from collections.abc import Iterator, Mapping
+from dataclasses import dataclass
 from enum import Enum
 from typing import ClassVar, Self
 
@@ -499,3 +500,46 @@ class CapacityReservation(StrictDTO):
 
     def get_usage(self) -> FrozenUsage:
         return self.usage
+
+
+@dataclass(frozen=True, slots=True)
+class ReservationAuthoritySnapshot:
+    """Internal immutable authority for refunding an issued reservation."""
+
+    reservation_id: str
+    usage: FrozenUsage
+    model_family: str
+    bucket_ids: frozenset[BucketId] | None
+    model: str | None
+    is_unlimited: bool
+    limiter_instance_id: str
+    created_at_seconds: float | None
+
+    @classmethod
+    def from_reservation(
+        cls,
+        reservation: CapacityReservation,
+    ) -> "ReservationAuthoritySnapshot":
+        reservation = reservation.revalidate()
+        return cls(
+            reservation_id=reservation.reservation_id,
+            usage=reservation.usage,
+            model_family=reservation.model_family,
+            bucket_ids=reservation.bucket_ids,
+            model=reservation.model,
+            is_unlimited=reservation.is_unlimited,
+            limiter_instance_id=reservation.limiter_instance_id,
+            created_at_seconds=reservation.created_at_seconds,
+        )
+
+    def to_reservation(self) -> CapacityReservation:
+        return CapacityReservation(
+            reservation_id=self.reservation_id,
+            usage=self.usage,
+            model_family=self.model_family,
+            bucket_ids=self.bucket_ids,
+            model=self.model,
+            is_unlimited=self.is_unlimited,
+            limiter_instance_id=self.limiter_instance_id,
+            created_at_seconds=self.created_at_seconds,
+        )
