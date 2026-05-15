@@ -20,6 +20,7 @@ from token_throttle._interfaces._models import (
     MAX_KEY_PREFIX_LENGTH,
     MAX_METRIC_LENGTH,
     MAX_MODEL_FAMILY_LENGTH,
+    MAX_PER_SECONDS,
     MAX_RESERVATION_ID_LENGTH,
     BucketId,
     CapacityReservation,
@@ -201,6 +202,7 @@ def _validate_usage_mapping(
             f"Usage keys={sorted(usage_keys)}, {expected_keys_label}={sorted(expected_keys)}",
         )
     for metric, amount_ in usage.items():
+        _validate_key_segment(metric, field_name="metric")
         amount = _coerce_usage_value(
             metric,
             amount_,
@@ -410,25 +412,30 @@ def _merge_extra_usage(
 
     merged_usage = dict(usage)
     for metric, raw_amount in extra_usage.items():
-        if not allow_new_keys and metric not in merged_usage:
+        normalized_metric = _validate_key_segment(metric, field_name="metric")
+        if not allow_new_keys and normalized_metric not in merged_usage:
             raise ValueError(
-                f"extra_usage key '{metric}' is not in counter output - "
+                f"extra_usage key '{normalized_metric}' is not in counter output - "
                 "to add custom metrics, ensure the counter emits the key first.",
             )
-        amount = _coerce_extra_usage_value(metric, raw_amount)
+        amount = _coerce_extra_usage_value(normalized_metric, raw_amount)
         if amount < 0:
-            raise ValueError(f"extra_usage value for {metric} must be non-negative")
+            raise ValueError(
+                f"extra_usage value for {normalized_metric} must be non-negative"
+            )
         try:
-            merged_value = merged_usage.get(metric, 0.0) + amount
+            merged_value = merged_usage.get(normalized_metric, 0.0) + amount
         except OverflowError as exc:
             raise ValueError(
-                f"extra_usage value for {metric} too large to fit in IEEE 754 double"
+                f"extra_usage value for {normalized_metric} "
+                "too large to fit in IEEE 754 double"
             ) from exc
         if not math.isfinite(merged_value):
             raise ValueError(
-                f"extra_usage value for {metric} too large to fit in IEEE 754 double"
+                f"extra_usage value for {normalized_metric} "
+                "too large to fit in IEEE 754 double"
             )
-        merged_usage[metric] = merged_value
+        merged_usage[normalized_metric] = merged_value
     return frozen_usage(merged_usage)
 
 
@@ -471,9 +478,12 @@ def validate_extra_usage(
             f"(got {type(exc).__name__}: {exc})"
         ) from exc
     for metric, raw_amount in materialized.items():
-        amount = _coerce_extra_usage_value(metric, raw_amount)
+        normalized_metric = _validate_key_segment(metric, field_name="metric")
+        amount = _coerce_extra_usage_value(normalized_metric, raw_amount)
         if amount < 0:
-            raise ValueError(f"extra_usage value for {metric} must be non-negative")
+            raise ValueError(
+                f"extra_usage value for {normalized_metric} must be non-negative"
+            )
     return materialized
 
 
@@ -504,13 +514,52 @@ def validate_per_seconds(per_seconds: object) -> int:
     """
     if _is_bool_like(per_seconds):
         raise ValueError("per_seconds must not be a boolean")
-    if isinstance(per_seconds, int):
-        if per_seconds <= 0:
-            raise ValueError(
-                f"per_seconds must be a positive integer (got {per_seconds!r})"
-            )
-        return per_seconds
-    raise ValueError(f"per_seconds must be a positive integer (got {per_seconds!r})")
+    if type(per_seconds) is not int:
+        raise ValueError(
+            f"per_seconds must be a positive integer exact int (got {per_seconds!r}); "
+            "use a plain int number of seconds such as 60"
+        )
+    if per_seconds <= 0:
+        raise ValueError(
+            f"per_seconds must be a positive integer exact int (got {per_seconds!r}); "
+            "use a plain int number of seconds such as 60"
+        )
+    if per_seconds > MAX_PER_SECONDS:
+        raise ValueError(
+            f"per_seconds must be <= {MAX_PER_SECONDS} seconds "
+            f"(got {per_seconds!r}); choose a smaller quota window"
+        )
+    return per_seconds
+
+
+def _validate_model_name(model_name: object, *, max_alias_length: int) -> str:
+    if type(model_name) is not str:
+        raise ValueError(
+            f"model_name must be a string (got {type(model_name).__name__}); "
+            "set the 'model' parameter to a non-empty model name string"
+        )
+    if len(model_name) > max_alias_length:
+        raise CardinalityLimitExceededError(
+            f"max_alias_length exceeded: model_name must be at most "
+            f"{max_alias_length} characters "
+            f"(got {len(model_name)}); shorten the model alias or increase "
+            "max_alias_length"
+        )
+    if not model_name:
+        raise ValueError(
+            "model_name cannot be empty; set the 'model' parameter to a "
+            "non-empty model name string"
+        )
+    if not model_name.strip():
+        raise ValueError(
+            f"model_name cannot be whitespace-only (got {model_name!r}); "
+            "set the 'model' parameter to a non-empty model name string"
+        )
+    return _validate_key_segment(
+        model_name,
+        field_name="model_name",
+        max_length=max_alias_length,
+    )
 
 
 def resolve_config(
@@ -527,23 +576,7 @@ def resolve_config(
         ValueError: If model_name is not a non-empty, non-whitespace string.
 
     """
-    if not isinstance(model_name, str):
-        raise ValueError(  # noqa: TRY004
-            f"model_name must be a string (got {type(model_name).__name__})"
-        )
-    if len(model_name) > max_alias_length:
-        raise CardinalityLimitExceededError(
-            f"max_alias_length exceeded: model_name must be at most "
-            f"{max_alias_length} characters "
-            f"(got {len(model_name)})"
-        )
-    if not model_name:
-        raise ValueError("model_name cannot be empty")
-    # Whitespace-only names would silently default model_family to the same
-    # whitespace, causing two callers using e.g. "  " vs "   " to route to
-    # different backends without noticing.
-    if not model_name.strip():
-        raise ValueError(f"model_name cannot be whitespace-only (got {model_name!r})")
+    model_name = _validate_model_name(model_name, max_alias_length=max_alias_length)
     if callable(cfg) and is_async_callable(cfg):
         raise ValueError("cfg must be a synchronous PerModelConfig getter")
     r = cfg(model_name) if callable(cfg) else cfg

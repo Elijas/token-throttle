@@ -126,8 +126,16 @@ def _missing_model_parameter_error(kwargs: collections.abc.Mapping[str, object])
     aliases = ("model_name", "modelName", "model_id", "modelId")
     for alias in aliases:
         if alias in kwargs:
-            return f"'model' parameter is required; did you mean 'model' instead of '{alias}'?"
-    return "'model' parameter is required"
+            return (
+                "'model' parameter is required; "
+                f"did you mean 'model' instead of '{alias}'? "
+                f"got {alias}={kwargs[alias]!r}. Use 'model' with a "
+                "non-empty model name string."
+            )
+    return (
+        "'model' parameter is required; pass model='...' with a non-empty "
+        "model name string."
+    )
 
 
 def _quotas_snapshot(cfg: PerModelConfig) -> dict[tuple[str, int], float]:
@@ -487,7 +495,7 @@ class RateLimiter(BaseRateLimiter):
     limiter-side state update before the limiter is marked closed.
     """
 
-    def __init__(  # noqa: PLR0913
+    def __init__(  # noqa: PLR0913, PLR0915
         self,
         cfg: PerModelConfig | PerModelConfigGetter,
         /,
@@ -507,6 +515,14 @@ class RateLimiter(BaseRateLimiter):
     ):
         if callable(cfg) and is_async_callable(cfg):
             raise ValueError("cfg must be a synchronous PerModelConfig getter")
+        if not callable(cfg):
+            if type(cfg) is not PerModelConfig:
+                raise ValueError(
+                    f"cfg must be a PerModelConfig or synchronous getter "
+                    f"(got {type(cfg).__name__}); pass PerModelConfig(...) "
+                    "or a function returning PerModelConfig"
+                )
+            cfg = _revalidate_dto(cfg)
         if callbacks is not None and type(callbacks) is not RateLimiterCallbacks:
             raise TypeError(
                 "callbacks must be a RateLimiterCallbacks instance or None "
@@ -1043,7 +1059,12 @@ class RateLimiter(BaseRateLimiter):
             merge_extra_usage_unrestricted(usage, extra_usage)
             return await self._unlimited_reservation(model, limit_config)
         if limit_config.usage_counter is None:
-            raise ValueError("limit_config.usage_counter cannot be None")
+            raise ValueError(
+                "limit_config.usage_counter cannot be None for "
+                "acquire_capacity_for_request on a limited config; set "
+                "usage_counter to a synchronous callable or call "
+                "acquire_capacity(usage=..., model=...) with explicit usage"
+            )
         self._validate_shared_model_family_config(
             model,
             limit_config,

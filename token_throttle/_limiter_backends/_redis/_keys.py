@@ -3,6 +3,7 @@ import math
 from collections.abc import Mapping
 
 from token_throttle._interfaces._models import BucketId
+from token_throttle._limiter_backends._redis._ttl import validate_redis_ttl_seconds
 from token_throttle._validation import (
     _validate_key_prefix,
     _validate_reservation_id,
@@ -84,8 +85,4 @@ def redis_acquired_marker_value(
 
 
 def validate_refund_dedup_ttl_seconds(value: object) -> int:
-    if type(value) is not int:
-        raise TypeError("refund_dedup_ttl_seconds must be an int number of seconds")
-    if value <= 0:
-        raise ValueError("refund_dedup_ttl_seconds must be greater than 0")
-    return value
+    return validate_redis_ttl_seconds(value, name="refund_dedup_ttl_seconds")

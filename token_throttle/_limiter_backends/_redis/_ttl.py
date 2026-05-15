@@ -2,13 +2,22 @@ import math
 
 DEFAULT_BUCKET_TTL_SECONDS = 7 * 24 * 60 * 60
 RESERVATION_LIFETIME_TTL_SAFETY_MARGIN = 2.0
+MAX_REDIS_TTL_SECONDS = 2**31 - 1
 
 
 def validate_redis_ttl_seconds(value: object, *, name: str) -> int:
-    if type(value) is bool or not isinstance(value, int):
-        raise TypeError(f"{name} must be an int number of seconds")
+    if type(value) is not int:
+        raise TypeError(
+            f"{name} must be an exact int number of seconds "
+            f"(got {type(value).__name__}); use a plain int such as 604800"
+        )
     if value <= 0:
-        raise ValueError(f"{name} must be greater than 0")
+        raise ValueError(f"{name} must be greater than 0 (got {value!r})")
+    if value > MAX_REDIS_TTL_SECONDS:
+        raise ValueError(
+            f"{name} must be <= {MAX_REDIS_TTL_SECONDS} seconds "
+            f"(got {value!r}); choose a smaller Redis TTL"
+        )
     return value
 
 
@@ -23,6 +32,11 @@ def validate_max_reservation_lifetime_seconds(value: object) -> float | None:
     if not math.isfinite(value_float) or value_float <= 0:
         raise ValueError(
             "max_reservation_lifetime_seconds must be finite and greater than 0"
+        )
+    if value_float > MAX_REDIS_TTL_SECONDS:
+        raise ValueError(
+            "max_reservation_lifetime_seconds must be <= "
+            f"{MAX_REDIS_TTL_SECONDS} seconds (got {value!r})"
         )
     return value_float
 

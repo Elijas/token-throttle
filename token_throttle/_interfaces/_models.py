@@ -2,7 +2,7 @@ import math
 import unicodedata
 import uuid
 from collections import defaultdict
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from enum import Enum
 from typing import ClassVar, Self
@@ -29,6 +29,8 @@ MAX_METRIC_LENGTH = 64
 MAX_ALIAS_LENGTH = 256
 MAX_KEY_PREFIX_LENGTH = 128
 MAX_RESERVATION_ID_LENGTH = 128
+MAX_QUOTAS_PER_USAGE_QUOTAS = 1000
+MAX_PER_SECONDS = 2**31 - 1
 
 
 def _is_bool_like(value: object) -> bool:
@@ -84,10 +86,10 @@ def _validate_key_segment(
         raise ValueError(f"{field_name} must not contain leading/trailing whitespace")
     if any(char.isspace() for char in normalized):
         raise ValueError(f"{field_name} must not contain whitespace")
-    if any(not char.isprintable() for char in normalized):
-        raise ValueError(f"{field_name} must not contain non-printable characters")
     if any(unicodedata.category(char).startswith("C") for char in normalized):
         raise ValueError(f"{field_name} must not contain Unicode control characters")
+    if any(not char.isprintable() for char in normalized):
+        raise ValueError(f"{field_name} must not contain non-printable characters")
     if ":" in normalized:
         raise ValueError(
             f"{field_name} must not contain ':' (used as Redis key separator)"
@@ -122,7 +124,7 @@ class Quota(StrictDTO):
     on immutability.
     """
 
-    DEFAULT_SECONDS: ClassVar[int] = SecondsIn.MINUTE
+    DEFAULT_SECONDS: ClassVar[int] = 60
     metric: str = Field(
         description=(
             "Metric name used in Redis key segments. Must be non-empty, NFC "
@@ -167,11 +169,32 @@ class Quota(StrictDTO):
     @field_validator("per_seconds", mode="before")
     @classmethod
     def _reject_non_numeric_per_seconds(cls, value: object) -> object:
-        if isinstance(value, (int, float)) or _is_bool_like(value):
+        if _is_bool_like(value):
+            return value
+        if isinstance(value, SecondsIn):
+            return int(value)
+        if type(value) is int:
+            return value
+        if isinstance(value, int):
+            raise ValueError(  # noqa: TRY004 - public validators raise ValueError.
+                "per_seconds must be an exact int number of seconds "
+                f"(got {type(value).__name__}); use a plain int such as 60"
+            )
+        if isinstance(value, float):
             return value
         raise ValueError(
             f"per_seconds must be int or float (got {type(value).__name__})"
         )
+
+    @field_validator("per_seconds")
+    @classmethod
+    def _reject_huge_per_seconds(cls, value: int) -> int:
+        if value > MAX_PER_SECONDS:
+            raise ValueError(
+                f"per_seconds must be <= {MAX_PER_SECONDS} seconds "
+                f"(got {value!r}); choose a smaller quota window"
+            )
+        return value
 
     @field_validator("metric", mode="before")
     @classmethod
@@ -185,12 +208,14 @@ class UsageQuotas:
 
     v2.0.0 contract: ``UsageQuotas`` is a data-transfer collection, not a
     subclass extension point. Security-sensitive callers accept the exact
-    class and exact ``Quota`` instances only.
+    class and exact ``Quota`` instances only. Iterable inputs are materialized
+    with a hard cap of 1000 entries to prevent unbounded generator consumption
+    at validation boundaries.
     """
 
     def __init__(
         self,
-        quotas: list[Quota],
+        quotas: Iterable[Quota],
         /,
         *,
         _allow_empty_quotas: bool = False,
@@ -198,6 +223,7 @@ class UsageQuotas:
     ) -> None:
         self._frozen = False
         self._metrics: defaultdict[str, dict[int, Quota]] = defaultdict(dict)
+        quotas = self._materialize_quotas(quotas)
         if not _allow_empty_quotas and not quotas:
             raise ValueError(
                 "Empty quota list provided. No rate limiting will be applied. "
@@ -212,6 +238,28 @@ class UsageQuotas:
     def unlimited(cls, *, _freeze: bool = False) -> Self:
         """Return an explicit no-limit quota set for disabled rate limiting."""
         return cls([], _allow_empty_quotas=True, _freeze=_freeze)
+
+    @staticmethod
+    def _materialize_quotas(quotas: Iterable[Quota]) -> list[Quota]:
+        if isinstance(quotas, Mapping):
+            quota_iterable = quotas.values()
+        elif isinstance(quotas, Iterable):
+            quota_iterable = quotas
+        else:
+            raise ValueError(  # noqa: TRY004 - public validators raise ValueError.
+                "quotas must be an iterable of Quota instances "
+                f"(got {type(quotas).__name__})"
+            )
+        materialized: list[Quota] = []
+        for index, quota in enumerate(quota_iterable, start=1):
+            if index > MAX_QUOTAS_PER_USAGE_QUOTAS:
+                raise CardinalityLimitExceededError(
+                    "UsageQuotas accepts at most "
+                    f"{MAX_QUOTAS_PER_USAGE_QUOTAS} entries; split the limiter "
+                    "configuration or reduce the quota set"
+                )
+            materialized.append(quota)
+        return materialized
 
     def __setattr__(self, name: str, value: object) -> None:
         if getattr(self, "_frozen", False) and name in {"_frozen", "_metrics"}:
@@ -320,7 +368,8 @@ def frozen_usage(usage: Usage) -> FrozenUsage:
             raise ValueError(
                 f"Usage metric key must be a non-empty string (got {metric!r})"
             )
-        converted[metric] = _coerce_usage_value(metric, amount)
+        normalized_metric = _validate_key_segment(metric, field_name="metric")
+        converted[normalized_metric] = _coerce_usage_value(normalized_metric, amount)
     return frozendict(converted)
 
 
@@ -493,8 +542,12 @@ class CapacityReservation(StrictDTO):
             metric = _validate_key_segment(metric, field_name="bucket_id metric")
             if _is_bool_like(per_seconds):
                 raise ValueError("bucket_id per_seconds must not be a boolean")
-            if not isinstance(per_seconds, int) or per_seconds <= 0:
+            if type(per_seconds) is not int or per_seconds <= 0:
                 raise ValueError("bucket_id per_seconds must be a positive integer")
+            if per_seconds > MAX_PER_SECONDS:
+                raise ValueError(
+                    f"bucket_id per_seconds must be <= {MAX_PER_SECONDS} seconds"
+                )
             normalized.add((metric, int(per_seconds)))
         return frozenset(normalized)
 
