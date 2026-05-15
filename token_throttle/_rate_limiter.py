@@ -4,10 +4,12 @@ import contextlib
 import inspect
 import logging
 import math
+import os
 import sys
 import time
 import uuid
 import warnings
+from typing import Self
 
 from frozendict import frozendict
 
@@ -82,6 +84,17 @@ _CRITICAL_LIFECYCLE_CALLBACK_EXCEPTION_TYPES = (
     KeyboardInterrupt,
     SystemExit,
     GeneratorExit,
+)
+_PROCESS_AFFINITY_ERROR = (
+    "RateLimiter is process-affine; construct after fork()/spawn() or accept "
+    "silent divergence"
+)
+_LOOP_AFFINITY_ERROR = (
+    "RateLimiter is event-loop-affine; construct one RateLimiter per event loop"
+)
+_PICKLE_ERROR = (
+    "RateLimiter is not pickleable; construct in each worker process. "
+    "See docs/Concurrency."
 )
 
 
@@ -554,7 +567,12 @@ class RateLimiter(BaseRateLimiter):
         max_metric_length: int = MAX_METRIC_LENGTH,
         max_alias_length: int = MAX_ALIAS_LENGTH,
         max_reservation_lifetime_seconds: float | None = None,
+        pid_check: bool = True,
     ):
+        if type(pid_check) is not bool:
+            raise ValueError(
+                f"pid_check must be a bool (got {type(pid_check).__name__})"
+            )
         if callable(cfg) and is_async_callable(cfg):
             raise ValueError("cfg must be a synchronous PerModelConfig getter")
         if not callable(cfg):
@@ -577,6 +595,12 @@ class RateLimiter(BaseRateLimiter):
             max_reservation_lifetime_seconds,
         )
         self._backend = backend
+        self._pid_check = pid_check
+        self._pid = os.getpid()
+        try:
+            self._loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._loop = None
         self._lock = asyncio.Lock()
         self._lifecycle_lock = asyncio.Lock()
         callback_timeout = validate_timeout(callback_timeout)
@@ -731,6 +755,35 @@ class RateLimiter(BaseRateLimiter):
             )
         )
 
+    def __reduce__(self):
+        raise TypeError(_PICKLE_ERROR)
+
+    async def __aenter__(self) -> Self:
+        self._check_public_entry()
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        await self.aclose()
+
+    def _check_process_affinity(self) -> None:
+        if self._pid_check and os.getpid() != self._pid:
+            raise RuntimeError(_PROCESS_AFFINITY_ERROR)
+
+    def _check_loop_affinity(self) -> None:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        if self._loop is None:
+            self._loop = loop
+            return
+        if loop is not self._loop:
+            raise RuntimeError(_LOOP_AFFINITY_ERROR)
+
+    def _check_public_entry(self) -> None:
+        self._check_process_affinity()
+        self._check_loop_affinity()
+
     def _raise_if_closed(self) -> None:
         if self._closed:
             raise RuntimeError("RateLimiter is closed")
@@ -875,6 +928,7 @@ class RateLimiter(BaseRateLimiter):
         backend resources fails, the limiter is still marked closed so future
         operations fail cleanly instead of observing a permanent closing state.
         """
+        self._check_public_entry()
         interrupted = False
         try:
             async with self._acquire_guard:
@@ -973,6 +1027,7 @@ class RateLimiter(BaseRateLimiter):
         Outside an event loop, this runs ``aclose()`` to drain pending acquires
         and release owned backend resources.
         """
+        self._check_public_entry()
         try:
             asyncio.get_running_loop()
         except RuntimeError:
@@ -1014,6 +1069,7 @@ class RateLimiter(BaseRateLimiter):
         Redis-backed limiter state is not deleted here; Redis bucket keys have
         their own inactivity TTL and expire independently.
         """
+        self._check_public_entry()
         if type(unused_for_seconds) is not int:
             raise ValueError(
                 "unused_for_seconds must be an int "
@@ -1065,6 +1121,7 @@ class RateLimiter(BaseRateLimiter):
         bound backend operation latency or callback dispatch time; callbacks are
         bounded separately by ``callback_timeout`` configured on the limiter.
         """
+        self._check_public_entry()
         self._raise_if_closed()
         timeout = validate_timeout(timeout)
         return await self._acquire_or_record(usage, model, _block=True, timeout=timeout)
@@ -1077,6 +1134,7 @@ class RateLimiter(BaseRateLimiter):
         externally. Capacity may go negative by design (speedometer pattern);
         the bucket recovers naturally as it refills.
         """
+        self._check_public_entry()
         self._raise_if_closed()
         return await self._acquire_or_record(usage, model, _block=False)
 
@@ -1141,6 +1199,7 @@ class RateLimiter(BaseRateLimiter):
         invalid ``extra_usage``, or backend usage that does not match the
         configured quotas.
         """
+        self._check_public_entry()
         self._raise_if_closed()
         timeout = validate_timeout(timeout)
         extra_usage = validate_extra_usage(extra_usage)
@@ -1457,6 +1516,7 @@ class RateLimiter(BaseRateLimiter):
         captured at acquire time, so config rebuilds refund only surviving
         buckets.
         """
+        self._check_public_entry()
         self._raise_if_closed()
         if isinstance(actual_usage, CapacityReservation):
             raise TypeError(
@@ -1493,6 +1553,7 @@ class RateLimiter(BaseRateLimiter):
         ``create_openai_*`` factories).  For custom metric names, use
         :meth:`refund_capacity` directly.
         """
+        self._check_public_entry()
         self._raise_if_closed()
         if type(reservation) is not CapacityReservation:
             is_unlimited_reservation(reservation)
@@ -1555,6 +1616,7 @@ class RateLimiter(BaseRateLimiter):
         Cross-process Redis visibility is bounded by the backend's short
         max-capacity cache window.
         """
+        self._check_public_entry()
         self._raise_if_closed_or_closing()
         metric = validate_metric(metric, max_length=self._max_metric_length)
         per_seconds = validate_per_seconds(per_seconds)

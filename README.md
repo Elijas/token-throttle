@@ -469,6 +469,34 @@ response = call_llm_sync(...)
 limiter.refund_capacity(actual_usage={"requests": 1, "tokens": 320}, reservation=reservation)
 ```
 
+## Concurrency Model
+
+Create one limiter per process and, for the async API, one limiter per event
+loop. `RateLimiter` and `SyncRateLimiter` own in-process locks, lifecycle
+state, and backend builders; they are not pickleable and should be constructed
+inside each worker process after `fork()` or `spawn()`. By default they check
+process affinity on every public method and raise if a limiter is reused in a
+different PID. Pass `pid_check=False` only when you deliberately accept the
+unsupported risk of divergent in-memory state.
+
+Use `RateLimiter` from async code and `SyncRateLimiter` from synchronous code.
+Calling `SyncRateLimiter.acquire_capacity()` while an event loop is running
+blocks that loop; token-throttle emits a `RuntimeWarning` once per process.
+
+Both limiter types can own their close lifecycle through context managers:
+
+```python
+async with RateLimiter(get_config, backend=MemoryBackendBuilder()) as limiter:
+    reservation = await limiter.acquire_capacity({"tokens": 500}, model="gpt-4.1")
+    await limiter.refund_capacity({"tokens": 320}, reservation)
+```
+
+```python
+with SyncRateLimiter(get_config, backend=SyncMemoryBackendBuilder()) as limiter:
+    reservation = limiter.acquire_capacity({"tokens": 500}, model="gpt-4.1")
+    limiter.refund_capacity({"tokens": 320}, reservation)
+```
+
 ## Links
 
 - Originally a rewrite of [openlimit](https://github.com/shobrook/openlimit)

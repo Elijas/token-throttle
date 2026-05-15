@@ -1,13 +1,16 @@
+import asyncio
 import collections
 import contextlib
 import inspect
 import logging
 import math
+import os
 import sys
 import threading
 import time
 import uuid
 import warnings
+from typing import Self
 
 from frozendict import frozendict
 
@@ -83,6 +86,19 @@ _CRITICAL_LIFECYCLE_CALLBACK_EXCEPTION_TYPES = (
     SystemExit,
     GeneratorExit,
 )
+_PROCESS_AFFINITY_ERROR = (
+    "RateLimiter is process-affine; construct after fork()/spawn() or accept "
+    "silent divergence"
+)
+_PICKLE_ERROR = (
+    "RateLimiter is not pickleable; construct in each worker process. "
+    "See docs/Concurrency."
+)
+_SYNC_IN_ASYNC_WARNING = (
+    "You're calling SyncRateLimiter from inside an event loop. This blocks the "
+    "loop. Use RateLimiter instead."
+)
+_sync_in_async_warning_pids: set[int] = set()
 
 
 def _token_throttle_version() -> str:
@@ -507,7 +523,12 @@ class SyncRateLimiter:
         max_metric_length: int = MAX_METRIC_LENGTH,
         max_alias_length: int = MAX_ALIAS_LENGTH,
         max_reservation_lifetime_seconds: float | None = None,
+        pid_check: bool = True,
     ):
+        if type(pid_check) is not bool:
+            raise ValueError(
+                f"pid_check must be a bool (got {type(pid_check).__name__})"
+            )
         if callable(cfg) and is_async_callable(cfg):
             raise ValueError("cfg must be a synchronous PerModelConfig getter")
         if not callable(cfg):
@@ -530,6 +551,8 @@ class SyncRateLimiter:
             max_reservation_lifetime_seconds,
         )
         self._backend = backend
+        self._pid_check = pid_check
+        self._pid = os.getpid()
         self._lock = threading.Lock()
         self._lifecycle_lock = threading.Lock()
         self._validation_lock = threading.Lock()
@@ -692,6 +715,34 @@ class SyncRateLimiter:
             )
         )
 
+    def __reduce__(self):
+        raise TypeError(_PICKLE_ERROR)
+
+    def __enter__(self) -> Self:
+        self._check_public_entry()
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.close()
+
+    def _check_process_affinity(self) -> None:
+        if self._pid_check and os.getpid() != self._pid:
+            raise RuntimeError(_PROCESS_AFFINITY_ERROR)
+
+    def _check_public_entry(self) -> None:
+        self._check_process_affinity()
+
+    def _warn_if_running_in_event_loop(self) -> None:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        pid = os.getpid()
+        if pid in _sync_in_async_warning_pids:
+            return
+        _sync_in_async_warning_pids.add(pid)
+        warnings.warn(_SYNC_IN_ASYNC_WARNING, RuntimeWarning, stacklevel=2)
+
     def _raise_if_closed(self) -> None:
         if self._closed:
             raise RuntimeError("SyncRateLimiter is closed")
@@ -836,6 +887,7 @@ class SyncRateLimiter:
         backend resources fails, the limiter is still marked closed so future
         operations fail cleanly instead of observing a permanent closing state.
         """
+        self._check_public_entry()
         try:
             with self._acquire_guard:
                 if self._closed:
@@ -922,6 +974,7 @@ class SyncRateLimiter:
         Redis-backed limiter state is not deleted here; Redis bucket keys have
         their own inactivity TTL and expire independently.
         """
+        self._check_public_entry()
         if type(unused_for_seconds) is not int:
             raise ValueError(
                 "unused_for_seconds must be an int "
@@ -974,6 +1027,8 @@ class SyncRateLimiter:
         bound backend operation latency or callback dispatch time; callbacks are
         bounded separately by ``callback_timeout`` configured on the limiter.
         """
+        self._check_public_entry()
+        self._warn_if_running_in_event_loop()
         self._raise_if_closed()
         timeout = validate_timeout(timeout)
         return self._acquire_or_record(usage, model, _block=True, timeout=timeout)
@@ -986,6 +1041,7 @@ class SyncRateLimiter:
         externally. Capacity may go negative by design (speedometer pattern);
         the bucket recovers naturally as it refills.
         """
+        self._check_public_entry()
         self._raise_if_closed()
         return self._acquire_or_record(usage, model, _block=False)
 
@@ -1050,6 +1106,7 @@ class SyncRateLimiter:
         invalid ``extra_usage``, or backend usage that does not match the
         configured quotas.
         """
+        self._check_public_entry()
         self._raise_if_closed()
         timeout = validate_timeout(timeout)
         extra_usage = validate_extra_usage(extra_usage)
@@ -1284,6 +1341,7 @@ class SyncRateLimiter:
         captured at acquire time, so config rebuilds refund only surviving
         buckets.
         """
+        self._check_public_entry()
         self._raise_if_closed()
         if isinstance(actual_usage, CapacityReservation):
             raise TypeError(
@@ -1317,6 +1375,7 @@ class SyncRateLimiter:
         ``create_openai_*`` factories).  For custom metric names, use
         :meth:`refund_capacity` directly.
         """
+        self._check_public_entry()
         self._raise_if_closed()
         if type(reservation) is not CapacityReservation:
             is_unlimited_reservation(reservation)
@@ -1379,6 +1438,7 @@ class SyncRateLimiter:
         Cross-process Redis visibility is bounded by the backend's short
         max-capacity cache window.
         """
+        self._check_public_entry()
         self._raise_if_closed_or_closing()
         metric = validate_metric(metric, max_length=self._max_metric_length)
         per_seconds = validate_per_seconds(per_seconds)
