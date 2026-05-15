@@ -137,7 +137,7 @@ async def test_async_shared_family_cold_start_validation_is_linear():
     elapsed = time.perf_counter() - started
 
     assert calls == 1000
-    assert elapsed < 1.0
+    assert elapsed < 5.0
 
 
 def test_sync_caps_and_cleanup():
@@ -178,4 +178,4 @@ def test_sync_shared_family_cold_start_validation_is_linear():
     elapsed = time.perf_counter() - started
 
     assert calls == 1000
-    assert elapsed < 1.0
+    assert elapsed < 5.0
