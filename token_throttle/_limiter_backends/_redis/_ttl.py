@@ -79,6 +79,21 @@ def derive_default_max_reservation_lifetime_seconds_from_ttls(
     refund_dedup_ttl_seconds: int | None,
     safety_margin: float = RESERVATION_LIFETIME_TTL_SAFETY_MARGIN,
 ) -> float | None:
+    """
+    Derive Redis' default reservation lifetime from configured TTLs.
+
+    Redis reservations need their acquire marker, bucket state, and refund
+    dedup tombstone to outlive the period in which a reservation may be
+    refunded. When at least one Redis TTL is finite, the derived lifetime is
+    just below ``min(bucket_ttl_seconds, refund_dedup_ttl_seconds) /
+    safety_margin``. The default safety margin is 2, so the public rule of
+    thumb is ``min(bucket_ttl_seconds, refund_dedup_ttl_seconds) / 2``.
+
+    Returning just below the quotient preserves the strict invariant enforced
+    for explicit lifetimes: every finite Redis TTL must be greater than
+    ``max_reservation_lifetime_seconds * safety_margin``. If both TTL inputs
+    are None, no Redis-derived lifetime can be calculated and None is returned.
+    """
     margin = _validate_reservation_lifetime_ttl_safety_margin(safety_margin)
     ttl_by_name = _finite_ttls_by_name(
         bucket_ttl_seconds=bucket_ttl_seconds,
@@ -99,6 +114,20 @@ def resolve_max_reservation_lifetime_seconds_from_ttls(
     refund_dedup_ttl_seconds: int | None,
     safety_margin: float = RESERVATION_LIFETIME_TTL_SAFETY_MARGIN,
 ) -> float | None:
+    """
+    Resolve caller-provided or Redis-derived reservation lifetime.
+
+    A caller-provided ``max_reservation_lifetime_seconds`` is validated against
+    the Redis TTL invariant: each finite Redis TTL must be strictly greater
+    than ``max_reservation_lifetime_seconds * safety_margin``. This keeps Redis
+    bucket state, acquire markers, and refund dedup tombstones available for
+    the full refund window.
+
+    When the caller leaves the lifetime as None, Redis derives the default from
+    the smaller finite TTL using the same safety margin. With the default
+    margin of 2, that means the effective lifetime is just below
+    ``min(bucket_ttl_seconds, refund_dedup_ttl_seconds) / 2``.
+    """
     max_lifetime = validate_max_reservation_lifetime_seconds(
         max_reservation_lifetime_seconds
     )

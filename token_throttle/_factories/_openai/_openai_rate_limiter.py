@@ -16,6 +16,9 @@ from token_throttle._interfaces._callbacks import (
 from token_throttle._interfaces._interfaces import PerModelConfig
 from token_throttle._interfaces._models import Quota, SecondsIn, UsageQuotas
 from token_throttle._limiter_backends._redis._backend import RedisBackendBuilder
+from token_throttle._limiter_backends._redis._keys import (
+    DEFAULT_REFUND_DEDUP_TTL_SECONDS,
+)
 from token_throttle._limiter_backends._redis._ttl import DEFAULT_BUCKET_TTL_SECONDS
 from token_throttle._rate_limiter import RateLimiter
 
@@ -27,6 +30,8 @@ def create_openai_redis_rate_limiter(  # noqa: PLR0913
     rpm: int,
     tpm: int,
     bucket_ttl_seconds: int = DEFAULT_BUCKET_TTL_SECONDS,
+    max_reservation_lifetime_seconds: float | None = None,
+    refund_dedup_ttl_seconds: int | None = None,
     callbacks: RateLimiterCallbacks | None = None,
 ) -> RateLimiter:
     """
@@ -41,6 +46,11 @@ def create_openai_redis_rate_limiter(  # noqa: PLR0913
     defaults: non-None user callbacks win, while None slots inherit the default
     INFO logger for missing consumption data. ``bucket_ttl_seconds`` controls
     the required expiry refreshed on Redis bucket-state keys.
+    ``max_reservation_lifetime_seconds`` bounds how long an acquired
+    reservation can remain refundable; None lets the Redis backend derive the
+    library default from Redis TTLs. ``refund_dedup_ttl_seconds`` controls how
+    long successful refund ids are retained for cross-process idempotency; None
+    preserves the library default.
 
     The helper is intentionally minute-window-only. For hourly/daily windows,
     custom metrics, or non-OpenAI usage shapes, construct ``RateLimiter`` with
@@ -87,6 +97,12 @@ def create_openai_redis_rate_limiter(  # noqa: PLR0913
             redis_client,
             key_prefix=key_prefix,
             bucket_ttl_seconds=bucket_ttl_seconds,
+            refund_dedup_ttl_seconds=(
+                DEFAULT_REFUND_DEDUP_TTL_SECONDS
+                if refund_dedup_ttl_seconds is None
+                else refund_dedup_ttl_seconds
+            ),
         ),
         callbacks=_merge_rate_limiter_callbacks(callbacks, default_callbacks),
+        max_reservation_lifetime_seconds=max_reservation_lifetime_seconds,
     )

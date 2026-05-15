@@ -15,6 +15,9 @@ from token_throttle._interfaces._callbacks import (
 )
 from token_throttle._interfaces._interfaces import PerModelConfig
 from token_throttle._interfaces._models import Quota, SecondsIn, UsageQuotas
+from token_throttle._limiter_backends._redis._keys import (
+    DEFAULT_REFUND_DEDUP_TTL_SECONDS,
+)
 from token_throttle._limiter_backends._redis._sync_backend import (
     SyncRedisBackendBuilder,
 )
@@ -29,6 +32,8 @@ def create_openai_redis_sync_rate_limiter(  # noqa: PLR0913
     rpm: int,
     tpm: int,
     bucket_ttl_seconds: int = DEFAULT_BUCKET_TTL_SECONDS,
+    max_reservation_lifetime_seconds: float | None = None,
+    refund_dedup_ttl_seconds: int | None = None,
     callbacks: SyncRateLimiterCallbacks | None = None,
 ) -> SyncRateLimiter:
     """
@@ -59,6 +64,12 @@ def create_openai_redis_sync_rate_limiter(  # noqa: PLR0913
     bucket_ttl_seconds:
         Required Redis bucket-state expiry in seconds. The expiry is refreshed
         when bucket state is read or written.
+    max_reservation_lifetime_seconds:
+        Optional bound on how long an acquired reservation remains refundable.
+        None preserves the Redis backend default derived from Redis TTLs.
+    refund_dedup_ttl_seconds:
+        Redis TTL for successful refund idempotency keys. None preserves the
+        library Redis backend default.
 
     Notes
     -----
@@ -114,6 +125,12 @@ def create_openai_redis_sync_rate_limiter(  # noqa: PLR0913
             redis_client,
             key_prefix=key_prefix,
             bucket_ttl_seconds=bucket_ttl_seconds,
+            refund_dedup_ttl_seconds=(
+                DEFAULT_REFUND_DEDUP_TTL_SECONDS
+                if refund_dedup_ttl_seconds is None
+                else refund_dedup_ttl_seconds
+            ),
         ),
         callbacks=_merge_sync_rate_limiter_callbacks(callbacks, default_callbacks),
+        max_reservation_lifetime_seconds=max_reservation_lifetime_seconds,
     )

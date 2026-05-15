@@ -251,8 +251,49 @@ not expire.
 Redis refunds also write a cross-process idempotency key:
 `{key_prefix}:rate_limiting:refund_dedup:{reservation_id}`. The TTL defaults to
 7 days and can be changed with `refund_dedup_ttl_seconds` on Redis backend
-builders. Memory backends keep only process-local refund dedup state and cannot
-safely refund reservations after a cold restart.
+builders or Redis OpenAI factories. Memory backends keep only process-local
+refund dedup state and cannot safely refund reservations after a cold restart.
+
+#### Production sizing for Redis backends
+
+Redis backends create short-lived per-reservation keys in addition to bucket
+state. Size Redis from traffic rate and TTLs, not only from the number of model
+families:
+
+- Acquire marker keys, rough count:
+  `acquires_per_second * max_reservation_lifetime_seconds`.
+- Refund dedup keys, rough count:
+  `refunds_per_second * refund_dedup_ttl_seconds`.
+
+The Redis default TTLs are intentionally conservative for correctness and
+compatibility: `bucket_ttl_seconds=604800` and
+`refund_dedup_ttl_seconds=604800` (7 days). With no explicit
+`max_reservation_lifetime_seconds`, Redis derives the reservation lifetime from
+the shorter Redis TTL: just below
+`min(bucket_ttl_seconds, refund_dedup_ttl_seconds) / 2`. At 10k acquires/sec,
+the default derived marker lifetime is about 302,400 seconds, which can imply
+roughly 3.0 billion marker keys. Tune these values for sustained high-RPS
+deployments.
+
+A practical starting point is to choose the smallest reservation lifetime that
+covers normal request latency, retry delay, and shutdown drain time, then choose
+`bucket_ttl_seconds` and `refund_dedup_ttl_seconds` longer than twice that
+lifetime. Redis enforces this invariant:
+`bucket_ttl_seconds > max_reservation_lifetime_seconds * 2` and
+`refund_dedup_ttl_seconds > max_reservation_lifetime_seconds * 2`. The margin
+keeps bucket state, acquire markers, and refund tombstones alive for the full
+window in which a reservation can still be refunded.
+
+Example budgets for a tuned deployment, assuming about 0.5-1.0 KB per marker or
+dedup key after Redis object overhead and leaving operational headroom:
+
+| Traffic | Example knobs | Approx keys | Suggested Redis memory budget |
+| --- | --- | ---: | ---: |
+| 1k acquire/refund RPS | `max_reservation_lifetime_seconds=300`, `refund_dedup_ttl_seconds=600`, `bucket_ttl_seconds=900` | 300k markers + 600k dedup keys | 1-2 GB |
+| 10k acquire/refund RPS | `max_reservation_lifetime_seconds=300`, `refund_dedup_ttl_seconds=600`, `bucket_ttl_seconds=900` | 3M markers + 6M dedup keys | 10-20 GB |
+
+Validate with `INFO memory`, `DBSIZE` or keyspace scans in staging because Redis
+memory per key depends on key-prefix length, allocator behavior, and value size.
 
 Custom backends implement `RateLimiterBackend` or `SyncRateLimiterBackend`.
 Required operations are capacity wait/consume/refund and `set_max_capacity`.

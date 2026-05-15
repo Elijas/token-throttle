@@ -84,9 +84,11 @@ reject refunds for reservations missing from local in-flight state.
 `max_reservation_lifetime_seconds` is optional on both public limiters. Memory
 backends leave it unbounded when omitted. Redis builders derive a default from
 the shorter of `bucket_ttl_seconds` and `refund_dedup_ttl_seconds` so every
-Redis reservation has a finite lifetime. Every new reservation records
-`created_at_seconds`, and refund rejects reservations older than the configured
-or derived bound. Redis builders validate the bound at limiter construction:
+Redis reservation has a finite lifetime: just below
+`min(bucket_ttl_seconds, refund_dedup_ttl_seconds) / 2` with the default safety
+margin. Every new reservation records `created_at_seconds`, and refund rejects
+reservations older than the configured or derived bound. Redis builders validate
+the bound at limiter construction:
 `bucket_ttl_seconds` and `refund_dedup_ttl_seconds` must both be greater than
 `max_reservation_lifetime_seconds * 2`. This keeps bucket state, acquire
 markers, and refund dedup tombstones alive for the expected reservation
