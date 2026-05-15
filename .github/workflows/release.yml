@@ -5,45 +5,67 @@ on:
     inputs:
       bump:
         description: "Version bump type"
-        required: true
+        required: false
         type: choice
         options:
           - patch
           - minor
           - major
+      publish_ref:
+        description: "Internal: immutable tag ref to publish"
+        required: false
+        type: string
+  push:
+    tags:
+      - "v*.*.*"
 
 concurrency:
-  group: release
+  group: release-${{ github.ref }}
   cancel-in-progress: false
 
+permissions:
+  contents: read
+
 jobs:
-  test:
+  test-dispatch:
+    if: github.event_name == 'workflow_dispatch' && inputs.publish_ref == ''
     uses: ./.github/workflows/ci.yml
 
-  publish:
-    needs: test
+  prepare-release:
+    if: github.event_name == 'workflow_dispatch' && inputs.publish_ref == ''
+    needs: test-dispatch
     runs-on: ubuntu-latest
     permissions:
+      actions: write
       contents: write
-      id-token: write
-    environment:
-      name: pypi
-      url: https://pypi.org/project/token-throttle/
     steps:
-      - uses: actions/checkout@v6
-      - uses: astral-sh/setup-uv@v7
-      - uses: actions/setup-python@v6
+      - name: Check release source ref
+        run: |
+          if [ "${GITHUB_REF}" != "refs/heads/main" ]; then
+            echo "::error::Manual releases must run from refs/heads/main, got ${GITHUB_REF}"
+            exit 1
+          fi
+          if [ -z "${{ inputs.bump }}" ]; then
+            echo "::error::Release dispatch requires a bump input"
+            exit 1
+          fi
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+      - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9 # v7
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
         with:
           python-version: "3.12"
       - name: Configure git identity
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-      - name: Bump version, update README, push
+      - name: Bump version, verify build, tag
         run: |
           uv sync --group dev
           uv run bump-my-version bump ${{ inputs.bump }}
-          NEW_VERSION=$(python -c "import re; print(re.search(r'current_version = \"(.+?)\"', open('pyproject.toml').read()).group(1))")
+          NEW_VERSION=$(python -c "import re; print(re.search(r'current_version = \"(.+?)\"', open('pyproject.toml', encoding='utf-8').read()).group(1))")
           uv run python devtools/bump_readme_version.py "$NEW_VERSION"
           uv lock
           uv run ruff check --fix
@@ -52,16 +74,63 @@ jobs:
             echo "::error::ruff check found issues that --fix could not resolve"
             exit 1
           fi
+          uv build
           git add -A
-          git diff --cached --quiet || git commit -m "chore(release): update lockfile and formatting for v${NEW_VERSION}"
+          if git diff --cached --quiet; then
+            echo "::error::No release changes were staged"
+            exit 1
+          fi
+          git commit -m "chore(release): update lockfile and formatting for v${NEW_VERSION}"
           if [ -n "$(git status --porcelain)" ]; then
             echo "::error::Working tree is dirty after release commit:"
             git status --short
             exit 1
           fi
           git tag -a "v${NEW_VERSION}" -m "Release v${NEW_VERSION}"
-          git push --follow-tags
+          git push --atomic origin "HEAD:${GITHUB_REF}" "refs/tags/v${NEW_VERSION}"
+          curl -fsS -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/workflows/release.yml/dispatches" \
+            -d "{\"ref\":\"v${NEW_VERSION}\",\"inputs\":{\"publish_ref\":\"v${NEW_VERSION}\"}}"
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+  test-tag:
+    if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.publish_ref != '')
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.publish_ref != '')
+    needs: test-tag
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    environment:
+      name: pypi
+      url: https://pypi.org/project/token-throttle/
+    steps:
+      - name: Check publish ref
+        run: |
+          if [[ "${GITHUB_REF}" != refs/tags/v* ]]; then
+            echo "::error::Publishing requires an immutable version tag ref, got ${GITHUB_REF}"
+            exit 1
+          fi
+          if [ -n "${{ inputs.publish_ref }}" ] && [ "${GITHUB_REF}" != "refs/tags/${{ inputs.publish_ref }}" ]; then
+            echo "::error::Dispatch publish_ref does not match workflow ref"
+            exit 1
+          fi
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ github.ref }}
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9 # v7
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+        with:
+          python-version: "3.12"
       - name: Build package
         run: uv build
       - name: Publish to PyPI (OIDC)
-        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b  # release/v1
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1

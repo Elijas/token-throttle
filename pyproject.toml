@@ -3,18 +3,41 @@ name = "token-throttle"
 version = "3.0.0"
 description = "Simple Multi-Resource Rate Limiting That Saves Unused Tokens. Rate limit API requests across different resources and workers without wasting your quota. Reserve tokens upfront, get refunds for what you don't use, and avoid over-limiting."
 readme = "README.md"
+authors = [{ name = "Elijas Dapšauskas" }]
+license = { text = "Apache-2.0" }
+license-files = ["LICENSE"]
+keywords = ["rate-limit", "rate-limiter", "redis", "openai", "llm", "tokens"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
+]
 
 ##############################
 ### DEPENDENCIES
 ##############################
 
 requires-python = ">=3.12"
-dependencies = ["frozendict>=2.4.6", "pydantic>=2.11.3"]
+dependencies = ["frozendict>=2.4.6,<3", "pydantic>=2.11.3,<3"]
 
 [project.optional-dependencies]
-redis = ["redis>=5.2.1"]
-tiktoken = ["tiktoken>=0.4.0"]
-loguru = ["loguru>=0.7.3"]
+redis = ["redis>=5.2.1,<8"]
+tiktoken = ["tiktoken>=0.4.0,<1"]
+loguru = ["loguru>=0.7.3,<1"]
+
+[project.urls]
+Repository = "https://github.com/Elijas/token-throttle"
+Documentation = "https://github.com/Elijas/token-throttle#readme"
+Changelog = "https://github.com/Elijas/token-throttle/blob/main/MIGRATION.md"
+Issues = "https://github.com/Elijas/token-throttle/issues"
 
 [dependency-groups]
 dev = [
