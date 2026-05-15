@@ -62,7 +62,7 @@ from token_throttle.migration import (
     validate_config_for_v2_0,
 )
 
-__version__ = "2.1.0"
+__version__ = "3.0.0"
 
 # Lazy imports: these pull in redis or tiktoken at import time.
 # Deferred via __getattr__ so `import token_throttle` works without optional deps.
