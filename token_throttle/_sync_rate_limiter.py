@@ -117,6 +117,10 @@ def _reservation_bucket_ids(cfg: PerModelConfig) -> frozenset[BucketId]:
     return frozenset((q.metric, int(q.per_seconds)) for q in cfg.quotas)
 
 
+def _zero_actual_usage(reservation: CapacityReservation) -> dict[str, float]:
+    return dict.fromkeys(reservation.usage, 0.0)
+
+
 def _resolved_model_family(cfg: PerModelConfig) -> str:
     """
     Stable routing key used to detect unsupported model remaps.
@@ -871,8 +875,13 @@ class SyncRateLimiter:
         except BaseException:
             self._rollback_pending_acquire(reservation.reservation_id)
             raise
-        self._finalize_pending_acquire(reservation, model)
-        return reservation
+        try:
+            self._finalize_pending_acquire(reservation, model)
+            return reservation
+        except BaseException:
+            if _block:
+                self._finalize_and_refund_undelivered_acquire(reservation, model)
+            raise
 
     def _begin_pending_acquire(self, reservation: CapacityReservation) -> None:
         with self._acquire_guard:
@@ -917,6 +926,14 @@ class SyncRateLimiter:
             self._in_flight_reservation_family.pop(reservation_id, None)
             if not self._pending_acquire_reservations:
                 self._pending_drained.set()
+
+    def _finalize_and_refund_undelivered_acquire(
+        self,
+        reservation: CapacityReservation,
+        model: str,
+    ) -> None:
+        self._finalize_pending_acquire(reservation, model)
+        self.refund_capacity(_zero_actual_usage(reservation), reservation)
 
     def refund_capacity(
         self,

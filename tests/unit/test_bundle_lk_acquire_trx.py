@@ -56,6 +56,17 @@ async def _assert_async_cancel_after_backend_success_is_refundable(
         await asyncio.wait_for(task, timeout=1.0)
 
     reservation = captured[0]
+    if method_name == "acquire_capacity":
+        assert reservation.reservation_id not in limiter._in_flight_reservation_ids
+        assert reservation.reservation_id not in limiter._pending_acquire_reservations
+        next_reservation = await limiter.acquire_capacity(
+            {"tokens": 100},
+            MODEL,
+            timeout=0,
+        )
+        await limiter.refund_capacity({"tokens": 0}, next_reservation)
+        return
+
     assert reservation.reservation_id in limiter._in_flight_reservation_ids
     assert reservation.reservation_id not in limiter._pending_acquire_reservations
 

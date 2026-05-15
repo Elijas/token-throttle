@@ -118,6 +118,10 @@ def _reservation_bucket_ids(cfg: PerModelConfig) -> frozenset[BucketId]:
     return frozenset((q.metric, int(q.per_seconds)) for q in cfg.quotas)
 
 
+def _zero_actual_usage(reservation: CapacityReservation) -> dict[str, float]:
+    return dict.fromkeys(reservation.usage, 0.0)
+
+
 def _resolved_model_family(cfg: PerModelConfig) -> str:
     """
     Stable routing key used to detect unsupported model remaps.
@@ -943,6 +947,8 @@ class RateLimiter(BaseRateLimiter):
                 await self._complete_acquire_state_update(
                     self._finalize_pending_acquire(reservation, model)
                 )
+                if _block:
+                    await self._refund_undelivered_acquire(reservation)
             else:
                 await self._complete_acquire_state_update(
                     self._rollback_pending_acquire(reservation.reservation_id)
@@ -959,6 +965,8 @@ class RateLimiter(BaseRateLimiter):
             self._finalize_pending_acquire(reservation, model)
         )
         if interrupted:
+            if _block:
+                await self._refund_undelivered_acquire(reservation)
             raise asyncio.CancelledError
         return reservation
 
@@ -1005,6 +1013,22 @@ class RateLimiter(BaseRateLimiter):
             self._in_flight_reservation_family.pop(reservation_id, None)
             if not self._pending_acquire_reservations:
                 self._pending_drained.set()
+
+    async def _refund_undelivered_acquire(
+        self,
+        reservation: CapacityReservation,
+    ) -> None:
+        refund_task = asyncio.create_task(
+            self.refund_capacity(_zero_actual_usage(reservation), reservation)
+        )
+        while True:
+            try:
+                await asyncio.shield(refund_task)
+                break
+            except asyncio.CancelledError:
+                if refund_task.done():
+                    break
+        refund_task.result()
 
     async def _complete_acquire_state_update(self, awaitable) -> bool:
         task = asyncio.create_task(awaitable)
