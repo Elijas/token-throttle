@@ -87,7 +87,8 @@ async def test_async_cancel_after_backend_consume_refund_failure_delivers_reserv
         await asyncio.wait_for(task, timeout=1.0)
 
     error = exc_info.value
-    assert isinstance(error, asyncio.CancelledError)
+    assert not isinstance(error, asyncio.CancelledError)
+    assert isinstance(error.interrupted_by, asyncio.CancelledError)
     assert isinstance(error.refund_error, RuntimeError)
     assert error.reservation.reservation_id in limiter._in_flight_reservation_ids
     assert limiter._pending_acquire_reservations == set()
@@ -98,7 +99,7 @@ async def test_async_cancel_after_backend_consume_refund_failure_delivers_reserv
     await limiter.refund_capacity({"tokens": 0}, reservation)
 
 
-def test_acquire_refund_failed_error_is_caught_as_cancelled_error():
+def test_acquire_refund_failed_error_is_not_a_cancelled_error():
     reservation = CapacityReservation(
         usage=frozendict({"tokens": 1.0}),
         model_family=MODEL_FAMILY,
@@ -107,14 +108,16 @@ def test_acquire_refund_failed_error_is_caught_as_cancelled_error():
         limiter_instance_id="test-limiter",
     )
 
-    with pytest.raises(asyncio.CancelledError) as exc_info:
+    with pytest.raises(AcquireRefundFailedError) as exc_info:
         raise AcquireRefundFailedError(
             reservation=reservation,
+            interrupted_by=asyncio.CancelledError("simulated cancellation"),
             refund_error=RuntimeError("simulated refund failure"),
         )
 
-    assert isinstance(exc_info.value, AcquireRefundFailedError)
+    assert not isinstance(exc_info.value, asyncio.CancelledError)
     assert exc_info.value.reservation is reservation
+    assert isinstance(exc_info.value.interrupted_by, asyncio.CancelledError)
 
 
 async def test_async_cancel_before_backend_consume_does_not_consume_capacity():

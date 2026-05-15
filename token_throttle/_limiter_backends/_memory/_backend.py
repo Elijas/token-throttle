@@ -9,7 +9,11 @@ from typing import ClassVar
 
 from frozendict import frozendict
 
-from token_throttle._exceptions import DuplicateRefundError, UnknownReservationError
+from token_throttle._exceptions import (
+    AcquireRefundFailedError,
+    DuplicateRefundError,
+    UnknownReservationError,
+)
 from token_throttle._interfaces._callbacks import RateLimiterCallbacks
 from token_throttle._interfaces._interfaces import (
     PerModelConfig,
@@ -30,6 +34,7 @@ from ._bucket import MemoryBucket
 _logger = logging.getLogger("token_throttle")
 
 _CRITICAL_CALLBACK_EXCEPTION_TYPES = (
+    AcquireRefundFailedError,
     asyncio.CancelledError,
     KeyboardInterrupt,
     SystemExit,
@@ -269,7 +274,10 @@ class MemoryBackend(RateLimiterBackend):
             if reservation_id is not None and (
                 reservation_id in self._acquired_reservation_ids
             ):
-                raise DuplicateRefundError("reservation already acquired")
+                raise DuplicateRefundError(
+                    "reservation already acquired",
+                    reason="duplicate_acquire",
+                )
             current_time = time.time()
             preconsumption_capacities, fresh_start_buckets = self._get_capacities(
                 current_time,
@@ -370,7 +378,10 @@ class MemoryBackend(RateLimiterBackend):
                     if reservation_id is not None and (
                         reservation_id in self._acquired_reservation_ids
                     ):
-                        raise DuplicateRefundError("reservation already acquired")
+                        raise DuplicateRefundError(
+                            "reservation already acquired",
+                            reason="duplicate_acquire",
+                        )
                     preconsumption, fresh = self._get_capacities(current_time)
                     ok, postconsumption = self._try_consume_locked(
                         usage,
@@ -380,7 +391,8 @@ class MemoryBackend(RateLimiterBackend):
                         if reservation_id is not None:
                             if reservation_id in self._acquired_reservation_ids:
                                 raise DuplicateRefundError(
-                                    "reservation already acquired"
+                                    "reservation already acquired",
+                                    reason="duplicate_acquire",
                                 )
                             self._acquired_reservation_ids.add(reservation_id)
                         self._set_capacities(postconsumption, current_time)
@@ -591,7 +603,10 @@ class MemoryBackend(RateLimiterBackend):
                 and reservation_id not in self._acquired_reservation_ids
             ):
                 if reservation_id in self._refunded_reservation_ids:
-                    raise DuplicateRefundError("reservation already refunded")
+                    raise DuplicateRefundError(
+                        "reservation already refunded",
+                        reason="already_refunded",
+                    )
                 raise UnknownReservationError(
                     "reservation was never acquired by this backend"
                 )
@@ -754,7 +769,7 @@ class MemoryBackend(RateLimiterBackend):
         """
         try:
             await callback(**kwargs)
-        except asyncio.CancelledError:
+        except (AcquireRefundFailedError, asyncio.CancelledError):
             raise
         except (KeyboardInterrupt, SystemExit, GeneratorExit):
             raise

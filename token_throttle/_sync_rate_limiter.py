@@ -346,7 +346,10 @@ def _raise_legacy_reservation_rejected() -> None:
 
 
 def _raise_duplicate_refund(_reservation_id: str) -> None:
-    raise DuplicateRefundError("reservation already refunded")
+    raise DuplicateRefundError(
+        "reservation already refunded",
+        reason="already_refunded",
+    )
 
 
 def _get_backend_lifetime_hook(
@@ -1410,7 +1413,10 @@ class SyncRateLimiter:
                 ):
                     _raise_duplicate_refund(rid)
                 if rid in self._refund_in_progress:
-                    raise DuplicateRefundError("reservation refund already in progress")
+                    raise DuplicateRefundError(
+                        "reservation refund already in progress",
+                        reason="in_progress",
+                    )
                 self._remember_refund_state(rid, _REFUND_STATE_PENDING)
                 self._refund_in_progress.add(rid)
                 refund_started = True

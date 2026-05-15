@@ -348,7 +348,10 @@ def _raise_legacy_reservation_rejected() -> None:
 
 
 def _raise_duplicate_refund(_reservation_id: str) -> None:
-    raise DuplicateRefundError("reservation already refunded")
+    raise DuplicateRefundError(
+        "reservation already refunded",
+        reason="already_refunded",
+    )
 
 
 def _get_backend_lifetime_hook(
@@ -1164,21 +1167,24 @@ class RateLimiter(BaseRateLimiter):
                 )
             raise
         except Exception as exc:
-            interrupted = await self._complete_acquire_state_update(
+            interrupted_by = await self._complete_acquire_state_update(
                 self._rollback_pending_acquire(reservation.reservation_id)
             )
-            if interrupted:
-                raise asyncio.CancelledError from exc
+            if interrupted_by is not None:
+                raise interrupted_by from exc
             _raise_backend_external_error(exc)
         await self._begin_acquire_delivery_cleanup(reservation.reservation_id)
         try:
-            interrupted = await self._complete_acquire_state_update(
+            interrupted_by = await self._complete_acquire_state_update(
                 self._finalize_pending_acquire(reservation, model)
             )
-            if interrupted:
+            if interrupted_by is not None:
                 if _block:
-                    await self._refund_undelivered_acquire_or_deliver(reservation)
-                raise asyncio.CancelledError
+                    await self._refund_undelivered_acquire_or_deliver(
+                        reservation,
+                        interrupted_by=interrupted_by,
+                    )
+                raise interrupted_by
             return reservation
         finally:
             await self._end_acquire_delivery_cleanup(reservation.reservation_id)
@@ -1287,19 +1293,23 @@ class RateLimiter(BaseRateLimiter):
                 interrupted_by=interrupted_by,
             ) from refund_error
 
-    async def _complete_acquire_state_update(self, awaitable) -> bool:
+    async def _complete_acquire_state_update(
+        self,
+        awaitable,
+    ) -> asyncio.CancelledError | None:
         task = asyncio.create_task(awaitable)
-        interrupted = False
+        interrupted_by: asyncio.CancelledError | None = None
         while True:
             try:
                 await asyncio.shield(task)
                 break
-            except asyncio.CancelledError:
-                interrupted = True
+            except asyncio.CancelledError as exc:
+                if interrupted_by is None:
+                    interrupted_by = exc
                 if task.done():
                     break
         task.result()
-        return interrupted
+        return interrupted_by
 
     async def _backend_task_succeeded_after_cancel(
         self,
@@ -1669,7 +1679,10 @@ class RateLimiter(BaseRateLimiter):
                 ):
                     _raise_duplicate_refund(rid)
                 if rid in self._refund_in_progress:
-                    raise DuplicateRefundError("reservation refund already in progress")
+                    raise DuplicateRefundError(
+                        "reservation refund already in progress",
+                        reason="in_progress",
+                    )
                 self._remember_refund_state(rid, _REFUND_STATE_PENDING)
                 self._refund_in_progress.add(rid)
                 refund_started = True

@@ -22,6 +22,7 @@ except ImportError as exc:
 from frozendict import frozendict
 
 from token_throttle._exceptions import (
+    AcquireRefundFailedError,
     DuplicateRefundError,
     UnknownReservationError,
     _mark_unknown_reservation_forget_in_flight,
@@ -76,6 +77,7 @@ from ._ttl import (
 _logger = logging.getLogger("token_throttle")
 
 _CRITICAL_CALLBACK_EXCEPTION_TYPES = (
+    AcquireRefundFailedError,
     asyncio.CancelledError,
     KeyboardInterrupt,
     SystemExit,
@@ -980,7 +982,10 @@ class RedisBackend(RateLimiterBackend):
                     acquired_marker_value,
                 ):
                     return True
-                raise DuplicateRefundError("reservation already acquired")
+                raise DuplicateRefundError(
+                    "reservation already acquired",
+                    reason="duplicate_acquire",
+                )
             raise RedisScriptResultError(
                 "Redis acquire marker script returned unknown status "
                 f"{_safe_redis_value_repr(status)}"
@@ -1106,7 +1111,10 @@ class RedisBackend(RateLimiterBackend):
         if status == "ok":
             return
         if status == "duplicate_refund":
-            raise DuplicateRefundError("reservation already refunded")
+            raise DuplicateRefundError(
+                "reservation already refunded",
+                reason="already_refunded",
+            )
         if status == "unknown_reservation":
             raise _mark_unknown_reservation_forget_in_flight(
                 UnknownReservationError(
@@ -2248,7 +2256,7 @@ class RedisBackend(RateLimiterBackend):
         """
         try:
             await callback(**kwargs)
-        except asyncio.CancelledError:
+        except (AcquireRefundFailedError, asyncio.CancelledError):
             raise
         except (KeyboardInterrupt, SystemExit, GeneratorExit):
             raise

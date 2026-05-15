@@ -1,30 +1,76 @@
 from __future__ import annotations
 
-import asyncio
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
     from token_throttle._interfaces._models import CapacityReservation
 
+DuplicateRefundReason = Literal[
+    "already_refunded",
+    "in_progress",
+    "duplicate_acquire",
+]
 
-class AcquireRefundFailedError(asyncio.CancelledError):
+_DUPLICATE_REFUND_REASONS = frozenset(
+    {
+        "already_refunded",
+        "in_progress",
+        "duplicate_acquire",
+    }
+)
+
+_DUPLICATE_REFUND_MESSAGES: dict[str, str] = {
+    "already_refunded": "reservation already refunded",
+    "in_progress": "reservation refund already in progress",
+    "duplicate_acquire": "reservation already acquired",
+}
+
+
+def _infer_duplicate_refund_reason(message: str | None) -> DuplicateRefundReason:
+    if message == _DUPLICATE_REFUND_MESSAGES["in_progress"]:
+        return "in_progress"
+    if message == _DUPLICATE_REFUND_MESSAGES["duplicate_acquire"]:
+        return "duplicate_acquire"
+    return "already_refunded"
+
+
+def _rebuild_acquire_refund_failed_error(
+    reservation: CapacityReservation,
+    interrupted_by: BaseException | None,
+    refund_error: BaseException | None,
+) -> AcquireRefundFailedError:
+    return AcquireRefundFailedError(
+        reservation,
+        interrupted_by=interrupted_by,
+        refund_error=refund_error,
+    )
+
+
+class AcquireRefundFailedError(Exception):
     """Raised when cancellation fallback cannot refund an acquired reservation."""
+
+    _MESSAGE = (
+        "acquire was interrupted after capacity was reserved, and the fallback "
+        "refund failed; inspect .reservation to refund or use the reservation "
+        "explicitly"
+    )
 
     def __init__(
         self,
-        *,
         reservation: CapacityReservation,
-        refund_error: BaseException,
         interrupted_by: BaseException | None = None,
+        refund_error: BaseException | None = None,
     ) -> None:
-        super().__init__(
-            "acquire was interrupted after capacity was reserved, and the "
-            "fallback refund failed; inspect .reservation to refund or use "
-            "the reservation explicitly"
-        )
+        super().__init__(self._MESSAGE)
         self.reservation = reservation
         self.refund_error = refund_error
         self.interrupted_by = interrupted_by
+
+    def __reduce__(self):
+        return (
+            _rebuild_acquire_refund_failed_error,
+            (self.reservation, self.interrupted_by, self.refund_error),
+        )
 
 
 class CardinalityLimitExceededError(ValueError):
@@ -33,6 +79,21 @@ class CardinalityLimitExceededError(ValueError):
 
 class DuplicateRefundError(ValueError):
     """Raised when a reservation has already been refunded."""
+
+    def __init__(
+        self,
+        message: str | None = None,
+        *,
+        reason: DuplicateRefundReason | None = None,
+    ) -> None:
+        if reason is None:
+            reason = _infer_duplicate_refund_reason(message)
+        if reason not in _DUPLICATE_REFUND_REASONS:
+            raise ValueError(f"unknown duplicate refund reason: {reason!r}")
+        if message is None:
+            message = _DUPLICATE_REFUND_MESSAGES[reason]
+        super().__init__(message)
+        self.reason = reason
 
 
 class UnknownReservationError(ValueError):

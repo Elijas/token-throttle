@@ -10,7 +10,11 @@ from typing import ClassVar
 
 from frozendict import frozendict
 
-from token_throttle._exceptions import DuplicateRefundError, UnknownReservationError
+from token_throttle._exceptions import (
+    AcquireRefundFailedError,
+    DuplicateRefundError,
+    UnknownReservationError,
+)
 from token_throttle._interfaces._callbacks import SyncRateLimiterCallbacks
 from token_throttle._interfaces._interfaces import (
     PerModelConfig,
@@ -31,6 +35,7 @@ from ._bucket import MemoryBucket
 _logger = logging.getLogger("token_throttle")
 
 _CRITICAL_CALLBACK_EXCEPTION_TYPES = (
+    AcquireRefundFailedError,
     asyncio.CancelledError,
     KeyboardInterrupt,
     SystemExit,
@@ -268,7 +273,10 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
             if reservation_id is not None and (
                 reservation_id in self._acquired_reservation_ids
             ):
-                raise DuplicateRefundError("reservation already acquired")
+                raise DuplicateRefundError(
+                    "reservation already acquired",
+                    reason="duplicate_acquire",
+                )
             # time.time() (wall-clock) is intentional: the memory backend
             # runs in a single process, so there is no cross-worker clock
             # skew concern. monotonic() would avoid NTP jumps but would
@@ -365,7 +373,10 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
                     if reservation_id is not None and (
                         reservation_id in self._acquired_reservation_ids
                     ):
-                        raise DuplicateRefundError("reservation already acquired")
+                        raise DuplicateRefundError(
+                            "reservation already acquired",
+                            reason="duplicate_acquire",
+                        )
                     preconsumption, fresh = self._get_capacities(current_time)
                     ok, postconsumption = self._try_consume_locked(
                         usage,
@@ -565,7 +576,10 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
                 and reservation_id not in self._acquired_reservation_ids
             ):
                 if reservation_id in self._refunded_reservation_ids:
-                    raise DuplicateRefundError("reservation already refunded")
+                    raise DuplicateRefundError(
+                        "reservation already refunded",
+                        reason="already_refunded",
+                    )
                 raise UnknownReservationError(
                     "reservation was never acquired by this backend"
                 )
@@ -728,7 +742,12 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
         """
         try:
             callback(**kwargs)
-        except (KeyboardInterrupt, SystemExit, GeneratorExit):
+        except (
+            AcquireRefundFailedError,
+            KeyboardInterrupt,
+            SystemExit,
+            GeneratorExit,
+        ):
             raise
         except BaseException as exc:
             if _callback_exception_group_contains_critical(exc):

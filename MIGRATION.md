@@ -1,5 +1,32 @@
 # Migration Guide
 
+## Migrating from v3.x to v4.0.0
+
+`AcquireRefundFailedError` is no longer an `asyncio.CancelledError` subclass.
+Code that recovered failed acquire-cleanup reservations with
+`except asyncio.CancelledError` must catch `AcquireRefundFailedError` directly:
+
+```python
+from token_throttle import AcquireRefundFailedError
+
+try:
+    reservation = await limiter.acquire_capacity({"tokens": 1000}, model)
+except AcquireRefundFailedError as exc:
+    reservation = exc.reservation
+    original_interrupt = exc.interrupted_by
+    # Refund manually or continue with the delivered reservation.
+```
+
+The exception still exposes `.reservation`; v4 adds `.interrupted_by` for the
+original cancellation or control-flow exception that interrupted acquire
+delivery. This keeps the critical cleanup payload visible through
+`asyncio.wait_for`, `asyncio.shield`, `asyncio.gather(return_exceptions=True)`,
+`TaskGroup`, pickle, and cross-process exception propagation.
+
+`DuplicateRefundError` now includes a `.reason` string for monitoring and
+branching: `"already_refunded"`, `"in_progress"`, or `"duplicate_acquire"`.
+The existing messages are unchanged.
+
 ## Migrating from v2.x to v3.0.0
 
 v3.0.0 requires Redis-backed refunds to prove that the backend previously issued
