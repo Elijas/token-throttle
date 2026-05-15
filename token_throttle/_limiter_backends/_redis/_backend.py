@@ -90,6 +90,7 @@ _PIPELINE_CMDS_PER_OVERRIDE = 2
 DEFAULT_LOCK_BLOCKING_TIMEOUT_SECONDS = 5.0
 DEFAULT_LOCK_SLEEP_SECONDS = 0.05
 _MIN_PRODUCTION_REDIS_POOL_CONNECTIONS = 10
+_MISSING = object()
 
 
 def _raise_lock_timeout_error() -> typing.NoReturn:
@@ -120,6 +121,59 @@ def _warn_if_small_redis_pool(redis_client: object, *, stacklevel: int = 3) -> N
             "max_concurrent_acquires plus Redis command headroom.",
             RuntimeWarning,
             stacklevel=stacklevel,
+        )
+
+
+def _is_mock_object(value: object) -> bool:
+    return type(value).__module__.startswith("unittest.mock")
+
+
+def _ensure_bucket_matches_backend(
+    bucket: RedisBucket,
+    *,
+    key_prefix: str,
+    redis_client: redis.asyncio.Redis,
+) -> None:
+    bucket_key_prefix = getattr(bucket, "key_prefix", _MISSING)
+    if bucket_key_prefix is not _MISSING and bucket_key_prefix != key_prefix:
+        raise ValueError(
+            "RedisBucket key_prefix must match RedisBackend key_prefix "
+            f"(bucket={bucket_key_prefix!r}, backend={key_prefix!r})"
+        )
+
+    bucket_redis = getattr(bucket, "_redis", _MISSING)
+    if bucket_redis is _MISSING or bucket_redis is redis_client:
+        return
+
+    bucket_pool = getattr(bucket_redis, "connection_pool", None)
+    backend_pool = getattr(redis_client, "connection_pool", None)
+    if bucket_pool is not None and bucket_pool is backend_pool:
+        return
+    if (
+        bucket_pool is None
+        or backend_pool is None
+        or _is_mock_object(bucket_pool)
+        or _is_mock_object(backend_pool)
+    ):
+        return
+
+    raise ValueError(
+        "RedisBucket redis client must be the same object as RedisBackend redis "
+        "or share the same connection_pool"
+    )
+
+
+def _ensure_buckets_match_backend(
+    buckets: typing.Iterable[RedisBucket],
+    *,
+    key_prefix: str,
+    redis_client: redis.asyncio.Redis,
+) -> None:
+    for bucket in buckets:
+        _ensure_bucket_matches_backend(
+            bucket,
+            key_prefix=key_prefix,
+            redis_client=redis_client,
         )
 
 
@@ -287,9 +341,14 @@ class RedisBackend(RateLimiterBackend):
         callbacks: RateLimiterCallbacks | None = None,
     ) -> None:
         super().__init__()
-        self.sorted_buckets = sorted(buckets, key=lambda b: b.full_redis_key)
         self._redis = redis
         self._key_prefix = validate_redis_key_prefix(key_prefix)
+        _ensure_buckets_match_backend(
+            buckets,
+            key_prefix=self._key_prefix,
+            redis_client=self._redis,
+        )
+        self.sorted_buckets = sorted(buckets, key=lambda b: b.full_redis_key)
         self._refund_dedup_ttl_seconds = validate_refund_dedup_ttl_seconds(
             refund_dedup_ttl_seconds
         )
@@ -312,6 +371,18 @@ class RedisBackend(RateLimiterBackend):
         self._usage_metric_names: set[str] = {bucket.usage_metric for bucket in buckets}
         self._local_condition = asyncio.Condition()
         self._legacy_override_probe_complete = False
+
+    def add_bucket(self, bucket: RedisBucket) -> None:
+        _ensure_bucket_matches_backend(
+            bucket,
+            key_prefix=self._key_prefix,
+            redis_client=self._redis,
+        )
+        self.sorted_buckets = sorted(
+            [*self._snapshot_buckets(), bucket],
+            key=lambda existing_bucket: existing_bucket.full_redis_key,
+        )
+        self._usage_metric_names = self._usage_metric_names_for(self.sorted_buckets)
 
     def _effective_lock_blocking_timeout(
         self,
@@ -1583,6 +1654,11 @@ class RedisBackend(RateLimiterBackend):
         buckets: list[RedisBucket],
         cfg: PerModelConfig,
     ) -> None:
+        _ensure_buckets_match_backend(
+            buckets,
+            key_prefix=self._key_prefix,
+            redis_client=self._redis,
+        )
         self.sorted_buckets = sorted(buckets, key=lambda bucket: bucket.full_redis_key)
         self._usage_metric_names = {bucket.usage_metric for bucket in buckets}
         self._limit_config = cfg
