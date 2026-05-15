@@ -1,6 +1,7 @@
 import asyncio
 import collections
 import contextlib
+import inspect
 import logging
 import math
 import time
@@ -326,13 +327,47 @@ def _raise_legacy_reservation_rejected() -> None:
     )
 
 
+def _get_backend_lifetime_hook(
+    backend: RateLimiterBackendBuilderInterface,
+    name: str,
+):
+    try:
+        inspect.getattr_static(backend, name)
+    except AttributeError:
+        return None
+    hook = getattr(backend, name)
+    if callable(hook):
+        return hook
+    return None
+
+
 def _validate_backend_reservation_lifetime(
     backend: RateLimiterBackendBuilderInterface,
     max_reservation_lifetime_seconds: float | None,
 ) -> None:
-    validator = getattr(backend, "validate_reservation_lifetime_seconds", None)
-    if callable(validator):
+    validator = _get_backend_lifetime_hook(
+        backend,
+        "validate_reservation_lifetime_seconds",
+    )
+    if validator is not None:
         validator(max_reservation_lifetime_seconds)
+
+
+def _resolve_backend_reservation_lifetime(
+    backend: RateLimiterBackendBuilderInterface,
+    max_reservation_lifetime_seconds: float | None,
+) -> float | None:
+    max_lifetime = validate_max_reservation_lifetime_seconds(
+        max_reservation_lifetime_seconds
+    )
+    resolver = _get_backend_lifetime_hook(
+        backend,
+        "resolve_max_reservation_lifetime_seconds",
+    )
+    if resolver is not None:
+        max_lifetime = validate_max_reservation_lifetime_seconds(resolver(max_lifetime))
+    _validate_backend_reservation_lifetime(backend, max_lifetime)
+    return max_lifetime
 
 
 def _is_redis_exception(exc: Exception) -> bool:
@@ -463,12 +498,9 @@ class RateLimiter(BaseRateLimiter):
             )
         if callbacks is not None:
             _revalidate_dto(callbacks)
-        self._max_reservation_lifetime_seconds = (
-            validate_max_reservation_lifetime_seconds(max_reservation_lifetime_seconds)
-        )
-        _validate_backend_reservation_lifetime(
+        self._max_reservation_lifetime_seconds = _resolve_backend_reservation_lifetime(
             backend,
-            self._max_reservation_lifetime_seconds,
+            max_reservation_lifetime_seconds,
         )
         self._backend = backend
         self._lock = asyncio.Lock()

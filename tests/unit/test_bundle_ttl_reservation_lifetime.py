@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import fnmatch
+import math
 import warnings
 
 import pytest
@@ -18,9 +19,11 @@ from token_throttle._interfaces._models import (
 from token_throttle._limiter_backends._memory._backend import MemoryBackendBuilder
 from token_throttle._limiter_backends._redis._keys import redis_refund_dedup_key
 from token_throttle._limiter_backends._redis._ttl import (
+    resolve_max_reservation_lifetime_seconds_from_ttls,
     validate_reservation_lifetime_ttl_invariant,
 )
 from token_throttle._rate_limiter import RateLimiter
+from token_throttle._sync_rate_limiter import SyncRateLimiter
 from token_throttle.migration import cleanup_legacy_buckets
 
 
@@ -157,6 +160,16 @@ class _AsyncDedupBuilder:
             refund_dedup_ttl_seconds=self.refund_dedup_ttl,
         )
 
+    def resolve_max_reservation_lifetime_seconds(
+        self,
+        max_reservation_lifetime_seconds: float | None,
+    ) -> float | None:
+        return resolve_max_reservation_lifetime_seconds_from_ttls(
+            max_reservation_lifetime_seconds=max_reservation_lifetime_seconds,
+            bucket_ttl_seconds=self.bucket_ttl,
+            refund_dedup_ttl_seconds=self.refund_dedup_ttl,
+        )
+
     def build(
         self,
         cfg: PerModelConfig,
@@ -173,6 +186,47 @@ class _AsyncDedupBuilder:
 
     async def aclose(self) -> None:
         return None
+
+
+def test_default_lifetime_is_derived_from_redis_ttls() -> None:
+    builder = _AsyncDedupBuilder(
+        _ExpiringRedis(),
+        bucket_ttl=600,
+        refund_dedup_ttl=300,
+    )
+
+    limiter = RateLimiter(_config(), backend=builder)
+
+    max_lifetime = limiter._max_reservation_lifetime_seconds
+    assert max_lifetime is not None
+    assert max_lifetime <= 150.0
+    assert math.isclose(max_lifetime, 150.0)
+
+
+def test_sync_default_lifetime_is_derived_from_redis_ttls() -> None:
+    builder = _AsyncDedupBuilder(
+        _ExpiringRedis(),
+        bucket_ttl=600,
+        refund_dedup_ttl=300,
+    )
+
+    limiter = SyncRateLimiter(_config(), backend=builder)
+
+    max_lifetime = limiter._max_reservation_lifetime_seconds
+    assert max_lifetime is not None
+    assert max_lifetime <= 150.0
+    assert math.isclose(max_lifetime, 150.0)
+
+
+def test_default_lifetime_stays_unbounded_when_backend_has_no_ttls() -> None:
+    assert (
+        resolve_max_reservation_lifetime_seconds_from_ttls(
+            max_reservation_lifetime_seconds=None,
+            bucket_ttl_seconds=None,
+            refund_dedup_ttl_seconds=None,
+        )
+        is None
+    )
 
 
 class _SyncMigrationRedis:
@@ -194,6 +248,43 @@ class _SyncMigrationRedis:
         self.store.pop(key, None)
         self.ttls.pop(key, None)
         return int(existed)
+
+
+async def test_cm03_default_lifetime_rejects_after_bucket_ttl_expiry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    redis_client = _ExpiringRedis()
+    builder = _AsyncDedupBuilder(redis_client, bucket_ttl=3, refund_dedup_ttl=3)
+    now = 0.0
+    monkeypatch.setattr(async_limiter_module.time, "time", lambda: now)
+    limiter = RateLimiter(_config(), backend=builder)
+
+    max_lifetime = limiter._max_reservation_lifetime_seconds
+    assert max_lifetime is not None
+    assert max_lifetime < builder.bucket_ttl
+
+    reservation = await limiter.acquire_capacity({"tokens": 30}, "model")
+    await redis_client.set(
+        "tenant:rate_limiting:bucket:fam:tokens:60:last_checked",
+        0.0,
+        ex=3,
+    )
+    await redis_client.set(
+        "tenant:rate_limiting:bucket:fam:tokens:60:capacity",
+        70.0,
+        ex=3,
+    )
+
+    now = 4.0
+    redis_client.advance(4.0)
+
+    assert (
+        await redis_client.ttl("tenant:rate_limiting:bucket:fam:tokens:60:capacity")
+        == -2
+    )
+    with pytest.raises(ValueError, match="Reservation lifetime exceeded"):
+        await limiter.refund_capacity({"tokens": 0}, reservation)
+    assert builder.backends[0].refund_calls == 0
 
 
 async def test_cm03_expired_reservation_rejected_after_bucket_ttl_expiry(
@@ -268,6 +359,38 @@ def test_cm04_cleanup_removes_pre_fix38_idle_bucket_state_keys() -> None:
     assert foreign in redis_client.store
 
 
+async def test_lr04_default_lifetime_rejects_after_dedup_ttl_expires(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    redis_client = _ExpiringRedis()
+    now = 0.0
+    monkeypatch.setattr(async_limiter_module.time, "time", lambda: now)
+    first_builder = _AsyncDedupBuilder(redis_client, bucket_ttl=3, refund_dedup_ttl=3)
+    first = RateLimiter(_config(), backend=first_builder)
+    max_lifetime = first._max_reservation_lifetime_seconds
+    assert max_lifetime is not None
+    assert max_lifetime < first_builder.refund_dedup_ttl
+
+    reservation = await first.acquire_capacity({"tokens": 30}, "model")
+
+    now = 0.5
+    redis_client.advance(0.5)
+    await first.refund_capacity({"tokens": 0}, reservation)
+    assert first_builder.backends[0].refund_calls == 1
+
+    now = 3.6
+    redis_client.advance(3.1)
+    dedup_key = redis_refund_dedup_key("tenant", reservation.reservation_id)
+    assert await redis_client.exists(dedup_key) == 0
+    second_builder = _AsyncDedupBuilder(redis_client, bucket_ttl=3, refund_dedup_ttl=3)
+    second = RateLimiter(_config(), backend=second_builder)
+    second._limiter_instance_id = reservation.limiter_instance_id
+
+    with pytest.raises(ValueError, match="Reservation lifetime exceeded"):
+        await second.refund_capacity({"tokens": 0}, reservation)
+    assert second_builder.backends == []
+
+
 async def test_lr04_second_cross_process_refund_rejected_after_dedup_ttl_expires(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -316,8 +439,22 @@ def test_max_reservation_lifetime_longer_than_redis_ttls_raises() -> None:
         )
 
 
+def test_explicit_lifetime_is_respected_with_finite_redis_ttls() -> None:
+    redis_client = _ExpiringRedis()
+    builder = _AsyncDedupBuilder(redis_client, bucket_ttl=10, refund_dedup_ttl=30)
+
+    limiter = RateLimiter(
+        _config(),
+        backend=builder,
+        max_reservation_lifetime_seconds=1,
+    )
+
+    assert limiter._max_reservation_lifetime_seconds == 1.0
+
+
 async def test_default_unbounded_lifetime_preserves_missing_timestamp_refund() -> None:
     limiter = RateLimiter(_config(), backend=MemoryBackendBuilder())
+    assert limiter._max_reservation_lifetime_seconds is None
     reservation = await limiter.acquire_capacity({"tokens": 30}, "model")
     object.__setattr__(reservation, "created_at_seconds", None)
 

@@ -55,6 +55,7 @@ from ._keys import (
 from ._server_time import async_server_time
 from ._ttl import (
     DEFAULT_BUCKET_TTL_SECONDS,
+    resolve_max_reservation_lifetime_seconds_from_ttls,
     validate_redis_ttl_seconds,
     validate_reservation_lifetime_ttl_invariant,
 )
@@ -274,6 +275,16 @@ class RedisBackendBuilder(RateLimiterBackendBuilderInterface):
         self._lock_sleep_seconds = _validate_positive_seconds(
             lock_sleep_seconds,
             name="lock_sleep_seconds",
+        )
+
+    def resolve_max_reservation_lifetime_seconds(
+        self,
+        max_reservation_lifetime_seconds: float | None,
+    ) -> float | None:
+        return resolve_max_reservation_lifetime_seconds_from_ttls(
+            max_reservation_lifetime_seconds=max_reservation_lifetime_seconds,
+            bucket_ttl_seconds=self._bucket_ttl_seconds,
+            refund_dedup_ttl_seconds=self._refund_dedup_ttl_seconds,
         )
 
     def validate_reservation_lifetime_seconds(
