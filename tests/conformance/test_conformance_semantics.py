@@ -65,7 +65,10 @@ class _TruthfulMarkerAndDedupBuilder(_PatchingMemoryBuilder):
             if reservation_id is not None:
                 if reservation_model_family != cfg.get_model_family():
                     raise ValueError("reservation model family mismatch")
-                if reservation_bucket_ids != frozenset({("requests", 1)}):
+                expected_bucket_ids = frozenset(
+                    (q.metric, q.per_seconds) for q in cfg.quotas
+                )
+                if reservation_bucket_ids != expected_bucket_ids:
                     raise ValueError("reservation bucket ids mismatch")
                 if reservation_reserved_usage != reserved_usage:
                     raise ValueError("reservation usage mismatch")

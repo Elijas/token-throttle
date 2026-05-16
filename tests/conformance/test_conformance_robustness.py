@@ -1,16 +1,32 @@
 from __future__ import annotations
 
 import asyncio
+from typing import cast
 
 import pytest
 
-from token_throttle import BackendConformanceError, conformance, conformance_test_for
+from token_throttle import (
+    BackendConformanceError,
+    conformance,
+    conformance_test_for,
+    sync_conformance_test_for,
+)
+from token_throttle._interfaces._callbacks import (
+    RateLimiterCallbacks,
+    SyncRateLimiterCallbacks,
+)
 from token_throttle._interfaces._interfaces import (
     PerModelConfig,
     RateLimiterBackend,
+    SyncRateLimiterBackend,
     backend_uses_default_prepare_reconfigured_backend,
     sync_backend_uses_default_prepare_reconfigured_backend,
 )
+from token_throttle._limiter_backends._memory._backend import MemoryBackendBuilder
+from token_throttle._limiter_backends._memory._sync_backend import (
+    SyncMemoryBackendBuilder,
+)
+from token_throttle.conformance import ConformanceTiming
 
 
 class _MinimalAsyncBackend(RateLimiterBackend):
@@ -65,6 +81,10 @@ class _MinimalAsyncBuilder:
 
 
 class _RaisingBuildAsyncBuilder:
+    def __init__(self) -> None:
+        self.aclose_called = False
+        self.close_called = False
+
     def build(
         self,
         cfg: PerModelConfig,
@@ -75,10 +95,27 @@ class _RaisingBuildAsyncBuilder:
         raise RuntimeError("boom")
 
     async def aclose(self) -> None:
-        pass
+        self.aclose_called = True
 
     def close(self) -> None:
-        pass
+        self.close_called = True
+
+
+class _RaisingBuildSyncBuilder:
+    def __init__(self) -> None:
+        self.close_called = False
+
+    def build(
+        self,
+        cfg: PerModelConfig,
+        *,
+        callbacks=None,
+    ) -> SyncRateLimiterBackend:
+        _ = cfg, callbacks
+        raise RuntimeError("boom")
+
+    def close(self) -> None:
+        self.close_called = True
 
 
 class _SecondBuildJunkAsyncBuilder(_MinimalAsyncBuilder):
@@ -132,12 +169,96 @@ class _AwaitableClaimAsyncBackend(_MinimalAsyncBackend):
         return _CloseRaisesAwaitable()
 
 
+class _BadAsyncCallbackPayloadBuilder:
+    def __init__(self) -> None:
+        self._delegate = MemoryBackendBuilder(sleep_interval=0.01)
+
+    def build(
+        self,
+        cfg: PerModelConfig,
+        *,
+        callbacks=None,
+    ) -> RateLimiterBackend:
+        if callbacks is None:
+            return self._delegate.build(cfg, callbacks=callbacks)
+        original_callbacks = callbacks
+
+        async def on_capacity_consumed(**kwargs) -> None:
+            original = original_callbacks.on_capacity_consumed
+            if original is not None:
+                kwargs["model_family"] = 123
+                await original(**kwargs)
+
+        callbacks = RateLimiterCallbacks(
+            on_wait_start=original_callbacks.on_wait_start,
+            after_wait_end_consumption=original_callbacks.after_wait_end_consumption,
+            on_capacity_consumed=on_capacity_consumed,
+            on_capacity_refunded=original_callbacks.on_capacity_refunded,
+            on_missing_consumption_data=original_callbacks.on_missing_consumption_data,
+            on_lifecycle_event=original_callbacks.on_lifecycle_event,
+        )
+        return self._delegate.build(cfg, callbacks=callbacks)
+
+    async def aclose(self) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
+
+class _BadSyncCallbackPayloadBuilder:
+    def __init__(self) -> None:
+        self._delegate = SyncMemoryBackendBuilder(sleep_interval=0.01)
+
+    def build(
+        self,
+        cfg: PerModelConfig,
+        *,
+        callbacks=None,
+    ) -> SyncRateLimiterBackend:
+        if callbacks is None:
+            return self._delegate.build(cfg, callbacks=callbacks)
+        original_callbacks = callbacks
+
+        def on_capacity_consumed(**kwargs) -> None:
+            original = original_callbacks.on_capacity_consumed
+            if original is not None:
+                kwargs["model_family"] = 123
+                original(**kwargs)
+
+        callbacks = SyncRateLimiterCallbacks(
+            on_wait_start=original_callbacks.on_wait_start,
+            after_wait_end_consumption=original_callbacks.after_wait_end_consumption,
+            on_capacity_consumed=on_capacity_consumed,
+            on_capacity_refunded=original_callbacks.on_capacity_refunded,
+            on_missing_consumption_data=original_callbacks.on_missing_consumption_data,
+            on_lifecycle_event=original_callbacks.on_lifecycle_event,
+        )
+        return self._delegate.build(cfg, callbacks=callbacks)
+
+    def close(self) -> None:
+        return None
+
+
 async def test_builder_build_exception_is_normalized() -> None:
+    builder = _RaisingBuildAsyncBuilder()
     with pytest.raises(
         BackendConformanceError,
         match=r"build\(async-protocol-probe\) raised RuntimeError: boom",
     ):
-        await conformance_test_for(_RaisingBuildAsyncBuilder())
+        await conformance_test_for(builder)
+    assert builder.aclose_called
+    assert builder.close_called
+
+
+def test_sync_builder_build_exception_is_normalized_and_cleanup_runs() -> None:
+    builder = _RaisingBuildSyncBuilder()
+    with pytest.raises(
+        BackendConformanceError,
+        match=r"build\(sync-protocol-probe\) raised RuntimeError: boom",
+    ):
+        sync_conformance_test_for(builder)
+    assert builder.close_called
 
 
 async def test_every_build_result_is_runtime_checked() -> None:
@@ -156,6 +277,39 @@ async def test_async_backend_hang_is_bounded_by_operation_deadline(monkeypatch) 
         match=r"await_for_capacity\(requests=1\) did not return within 0.05s",
     ):
         await conformance_test_for(_MinimalAsyncBuilder(_HangingAsyncBackend()))
+
+
+async def test_async_callback_payload_shape_is_validated() -> None:
+    with (
+        pytest.warns(RuntimeWarning, match="Rate limiter callback raised"),
+        pytest.raises(
+            BackendConformanceError,
+            match="on_capacity_consumed callback passed invalid model_family",
+        ),
+    ):
+        await conformance_test_for(_BadAsyncCallbackPayloadBuilder())
+
+
+def test_sync_callback_payload_shape_is_validated() -> None:
+    with (
+        pytest.warns(RuntimeWarning, match="Rate limiter callback raised"),
+        pytest.raises(
+            BackendConformanceError,
+            match="on_capacity_consumed callback passed invalid model_family",
+        ),
+    ):
+        sync_conformance_test_for(_BadSyncCallbackPayloadBuilder())
+
+
+def test_conformance_timing_scale_env(monkeypatch) -> None:
+    monkeypatch.setenv("TOKEN_THROTTLE_CONFORMANCE_TIMING_SCALE", "0.5")
+
+    assert conformance._resolve_timing(None) == ConformanceTiming(
+        builder_deadline_seconds=2.5,
+        operation_deadline_seconds=5.0,
+        prompt_deadline_seconds=0.5,
+        wait_budget_seconds=2.5,
+    )
 
 
 async def test_claim_method_exception_is_normalized() -> None:
@@ -192,8 +346,8 @@ def test_instance_level_prepare_hook_is_not_treated_as_default() -> None:
             self.prepare_reconfigured_backend = prepare_reconfigured_backend
 
     assert not backend_uses_default_prepare_reconfigured_backend(
-        _StructuralAsyncBackend()
+        cast("RateLimiterBackend", _StructuralAsyncBackend())
     )
     assert not sync_backend_uses_default_prepare_reconfigured_backend(
-        _StructuralSyncBackend()
+        cast("SyncRateLimiterBackend", _StructuralSyncBackend())
     )

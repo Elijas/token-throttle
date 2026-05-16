@@ -9,7 +9,11 @@ implementations for optional hooks.
 Run the conformance helper against custom backends before shipping:
 
 ```python
-from token_throttle import conformance_test_for, sync_conformance_test_for
+from token_throttle import (
+    conformance_test_for,
+    sync_conformance_test_for,
+)
+from token_throttle.conformance import ConformanceTiming
 
 
 async def test_async_backend_contract(async_builder):
@@ -17,12 +21,47 @@ async def test_async_backend_contract(async_builder):
 
 
 def test_sync_backend_contract(sync_builder):
-    sync_conformance_test_for(sync_builder)
+    sync_conformance_test_for(
+        sync_builder,
+        timing=ConformanceTiming(operation_deadline_seconds=20.0),
+    )
 ```
 
 Use isolated backend state for these tests, such as a disposable Redis key
 prefix, test database, or in-memory backend instance. A conformance failure
 raises `BackendConformanceError`.
+
+The helper invokes builder cleanup hooks in a `try`/`finally` boundary:
+`conformance_test_for()` calls `aclose()` and then `close()` when those methods
+exist, and `sync_conformance_test_for()` calls `close()`. If you need to manage
+cleanup outside the helper, pass a small wrapper builder that does not expose
+those methods.
+
+## Conformance Timing
+
+The default helper deadlines are:
+
+- builder operations: 5 seconds
+- backend operations: 10 seconds
+- prompt no-wait checks: 1 second
+- bounded wait probes: 5 seconds
+
+Override them per test with `ConformanceTiming`:
+
+```python
+await conformance_test_for(
+    async_builder,
+    timing=ConformanceTiming(
+        builder_deadline_seconds=10.0,
+        operation_deadline_seconds=20.0,
+        prompt_deadline_seconds=2.0,
+        wait_budget_seconds=10.0,
+    ),
+)
+```
+
+For slow CI runners, set `TOKEN_THROTTLE_CONFORMANCE_TIMING_SCALE` to multiply
+all defaults, for example `TOKEN_THROTTLE_CONFORMANCE_TIMING_SCALE=2`.
 
 ## Async Protocol
 
@@ -85,8 +124,27 @@ Backends should raise:
   refunded or already acquired.
 - `UnknownReservationError` when a marker-authoritative backend cannot prove
   the presented reservation was acquired.
+- `AcquireRefundFailedError` from public limiter acquire delivery when capacity
+  was reserved, delivery was interrupted, and the fallback refund failed.
 - `BackendConformanceError` only from conformance tests, not from normal backend
   operations.
+
+## FIX-50 Acquire/Refund Failure Contract
+
+`AcquireRefundFailedError` is a regular `Exception`, not an
+`asyncio.CancelledError`. Catch it directly when callers need to recover a
+reservation after interrupted acquire delivery.
+
+The error exposes:
+
+- `.reservation`: the delivered reservation that still needs operator attention
+  or explicit use.
+- `.interrupted_by`: the original interruption, such as cancellation, when
+  available.
+- `.refund_error`: the refund failure, when available.
+
+Public limiter code chains the raised `AcquireRefundFailedError` with
+`__cause__` so normal exception tooling can inspect the triggering failure.
 
 ## Metric-Set Reconfiguration
 
@@ -155,6 +213,9 @@ Callback payloads must use redacted model-family, usage, capacity, and timing
 data. Do not include Redis URLs, credentials, plaintext lock names, prompt text,
 responses, or API keys.
 
+The conformance helper validates callback emission and callback payload shape.
+It does not require structured `DEBUG` log emission.
+
 Durable shared-state backends should also emit structured `DEBUG` logs under
 the same logger families used by Redis:
 
@@ -162,9 +223,23 @@ the same logger families used by Redis:
 - `token_throttle.refund` for refund marker GET/DEL and refund-dedup writes.
 - `token_throttle.lock` for distributed lock acquire, release, and extension.
 
-Each structured record should provide a `token_throttle_event` logging attribute
-with `event_type`, `reservation_id`, `bucket_id`, and operation-specific fields.
-Hash or otherwise redact raw lock names and deployment prefixes.
+Each structured record should provide a `token_throttle_event` logging attribute.
+Hash or otherwise redact raw lock names and deployment prefixes. A typical
+stdlib logging template is:
+
+```python
+logger.debug(
+    "refund_marker_deleted",
+    extra={
+        "token_throttle_event": {
+            "event_type": "refund_marker_deleted",
+            "reservation_id": reservation_id,
+            "bucket_id": bucket_id,
+            "model_family": redacted_model_family,
+        }
+    },
+)
+```
 
 ## Snapshot State (FIX-54)
 
@@ -188,10 +263,29 @@ a redacted health surface, not a backend inventory API.
 
 ## Conformance Scope
 
-The bundled helpers check protocol shape, basic capacity semantics,
-all-or-nothing consumption, invalid usage rejection, refund warnings,
-`set_max_capacity()` / `apply_configured_max_capacity()`, callback emission, and
-marker-authority claim consistency.
+As of v5.1.0, the bundled helpers check:
+
+- structural protocol shape for async and sync builders/backends
+- per-build isolation and runtime checking of every build result
+- sync/async return contracts, including awaitable misuse on sync paths
+- basic capacity acquisition, prompt try-acquire behavior, and invalid usage
+  rejection
+- all-or-nothing multi-metric consumption
+- refund semantics, overuse warnings, and max-capacity update behavior
+- callback emission and documented callback payload keys/types
+- marker authority positive behavior for backends that claim support
+- marker authority claim consistency, including rejection of default refund
+  hooks for authoritative backends
+- durable refund dedup claim consistency and duplicate-refund behavior
+- metric-set-change claim consistency and reconfiguration behavior
+- public limiter round-trip behavior across backend builders
+- the FIX-50 `AcquireRefundFailedError` shape exposed by public limiters
+
+The helpers do not check:
+
+- performance regressions beyond bounded helper deadlines
+- structured `token_throttle_event` `DEBUG` log emission
+- third-party storage durability or write-ahead guarantees
 
 KNOWN UNKNOWN: post-write probes for third-party durable backends are still not
 portable. The conformance helper verifies observable behavior through the public

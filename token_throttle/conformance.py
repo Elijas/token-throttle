@@ -3,12 +3,17 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import contextlib
+import contextvars
 import inspect
 import math
+import os
 import time
 import uuid
 import warnings
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
+
+from frozendict import frozendict
 
 from token_throttle._exceptions import (
     AcquireRefundFailedError,
@@ -17,6 +22,7 @@ from token_throttle._exceptions import (
     UnknownReservationError,
 )
 from token_throttle._interfaces._callbacks import (
+    LifecycleEvent,
     RateLimiterCallbacks,
     SyncRateLimiterCallbacks,
 )
@@ -33,6 +39,7 @@ from token_throttle._interfaces._interfaces import (
 )
 from token_throttle._interfaces._models import (
     BucketId,
+    Capacities,
     CapacityReservation,
     FrozenUsage,
     Quota,
@@ -59,6 +66,78 @@ _REQUESTS_BUCKET_ID = ("requests", _SHORT_WINDOW_SECONDS)
 _TOKENS_BUCKET_ID = ("tokens", _SHORT_WINDOW_SECONDS)
 _PUBLIC_MODEL_NAME = "conformance-model"
 _RETURN_TIMESTAMP_SKEW_SECONDS = 24 * 60 * 60
+_BUCKET_ID_SIZE = 2
+_TIMING_SCALE_ENV = "TOKEN_THROTTLE_CONFORMANCE_TIMING_SCALE"
+
+
+@dataclass(frozen=True)
+class ConformanceTiming:
+    """Wall-clock deadlines used by the public conformance helpers."""
+
+    builder_deadline_seconds: float = _BUILDER_DEADLINE_SECONDS
+    operation_deadline_seconds: float = _OPERATION_DEADLINE_SECONDS
+    prompt_deadline_seconds: float = _PROMPT_DEADLINE_SECONDS
+    wait_budget_seconds: float = _WAIT_BUDGET_SECONDS
+
+
+_TIMING_CONTEXT: contextvars.ContextVar[ConformanceTiming | None] = (
+    contextvars.ContextVar("token_throttle_conformance_timing", default=None)
+)
+_CALLBACK_FAILURES: contextvars.ContextVar[list[str] | None] = contextvars.ContextVar(
+    "token_throttle_conformance_callback_failures", default=None
+)
+
+
+def _validate_timing_value(field_name: str, value: float) -> float:
+    value = float(value)
+    if value <= 0 or not math.isfinite(value):
+        raise ValueError(f"{field_name} must be a positive finite number")
+    return value
+
+
+def _resolve_timing(timing: ConformanceTiming | None) -> ConformanceTiming:
+    if timing is None:
+        scale_text = os.environ.get(_TIMING_SCALE_ENV)
+        if scale_text is None:
+            timing = ConformanceTiming(
+                builder_deadline_seconds=_BUILDER_DEADLINE_SECONDS,
+                operation_deadline_seconds=_OPERATION_DEADLINE_SECONDS,
+                prompt_deadline_seconds=_PROMPT_DEADLINE_SECONDS,
+                wait_budget_seconds=_WAIT_BUDGET_SECONDS,
+            )
+        else:
+            try:
+                scale = float(scale_text)
+            except ValueError as exc:
+                raise ValueError(
+                    f"{_TIMING_SCALE_ENV} must be a positive finite number"
+                ) from exc
+            _validate_timing_value(_TIMING_SCALE_ENV, scale)
+            timing = ConformanceTiming(
+                builder_deadline_seconds=_BUILDER_DEADLINE_SECONDS * scale,
+                operation_deadline_seconds=_OPERATION_DEADLINE_SECONDS * scale,
+                prompt_deadline_seconds=_PROMPT_DEADLINE_SECONDS * scale,
+                wait_budget_seconds=_WAIT_BUDGET_SECONDS * scale,
+            )
+
+    return ConformanceTiming(
+        builder_deadline_seconds=_validate_timing_value(
+            "builder_deadline_seconds", timing.builder_deadline_seconds
+        ),
+        operation_deadline_seconds=_validate_timing_value(
+            "operation_deadline_seconds", timing.operation_deadline_seconds
+        ),
+        prompt_deadline_seconds=_validate_timing_value(
+            "prompt_deadline_seconds", timing.prompt_deadline_seconds
+        ),
+        wait_budget_seconds=_validate_timing_value(
+            "wait_budget_seconds", timing.wait_budget_seconds
+        ),
+    )
+
+
+def _timing() -> ConformanceTiming:
+    return _TIMING_CONTEXT.get() or _resolve_timing(None)
 
 
 def _family(label: str) -> str:
@@ -108,6 +187,53 @@ def _check(condition: object, message: str) -> None:
         _fail(message)
 
 
+def _check_callback_model_family(slot: str, model_family: object) -> None:
+    _check_callback_payload(
+        isinstance(model_family, str) and model_family.startswith("conformance/"),
+        f"{slot} callback passed invalid model_family {model_family!r}",
+    )
+
+
+def _check_callback_usage(slot: str, field_name: str, value: object) -> None:
+    _check_callback_payload(
+        isinstance(value, frozendict)
+        and all(isinstance(key, str) for key in value)
+        and all(isinstance(amount, int | float) for amount in value.values()),
+        f"{slot} callback passed invalid {field_name}",
+    )
+
+
+def _check_callback_capacities(slot: str, field_name: str, value: object) -> None:
+    _check_callback_payload(
+        isinstance(value, frozendict)
+        and all(
+            isinstance(bucket_id, tuple)
+            and len(bucket_id) == _BUCKET_ID_SIZE
+            and isinstance(bucket_id[0], str)
+            and isinstance(bucket_id[1], int)
+            and isinstance(amount, int | float)
+            for bucket_id, amount in value.items()
+        ),
+        f"{slot} callback passed invalid {field_name}",
+    )
+
+
+def _check_callback_float(slot: str, field_name: str, value: object) -> None:
+    _check_callback_payload(
+        isinstance(value, int | float) and math.isfinite(float(value)),
+        f"{slot} callback passed invalid {field_name}",
+    )
+
+
+def _check_callback_payload(condition: object, message: str) -> None:
+    if condition:
+        return
+    failures = _CALLBACK_FAILURES.get()
+    if failures is not None:
+        failures.append(message)
+    _fail(message)
+
+
 def _matches_allowed_exception(
     exc: BaseException,
     allowed_exceptions: tuple[type[BaseException], ...],
@@ -133,7 +259,8 @@ def _run_sync_step(
         max_workers=1,
         thread_name_prefix="token-throttle-conformance",
     )
-    future = executor.submit(callable_)
+    context = contextvars.copy_context()
+    future = executor.submit(lambda: context.run(callable_))
     timed_out = False
     try:
         return future.result(timeout=deadline)
@@ -344,7 +471,7 @@ def _build_async_backend(
     backend = _run_sync_step(
         label,
         lambda: builder.build(cfg, callbacks=callbacks),
-        deadline=_BUILDER_DEADLINE_SECONDS,
+        deadline=_timing().builder_deadline_seconds,
     )
     _check_runtime_protocols(builder, backend, sync=False)
     return cast("RateLimiterBackend", backend)
@@ -360,7 +487,7 @@ def _build_sync_backend(
     backend = _run_sync_step(
         label,
         lambda: builder.build(cfg, callbacks=callbacks),
-        deadline=_BUILDER_DEADLINE_SECONDS,
+        deadline=_timing().builder_deadline_seconds,
     )
     _check_runtime_protocols(builder, backend, sync=True)
     return cast("SyncRateLimiterBackend", backend)
@@ -376,7 +503,7 @@ async def _async_backend_step(
     result = await _run_async_step(
         label,
         awaitable_fn,
-        deadline=_OPERATION_DEADLINE_SECONDS if deadline is None else deadline,
+        deadline=_timing().operation_deadline_seconds if deadline is None else deadline,
         expect_awaitable=True,
         allowed_exceptions=allowed_exceptions,
     )
@@ -394,12 +521,57 @@ def _sync_backend_step(
     result = _run_sync_step(
         label,
         callable_,
-        deadline=_OPERATION_DEADLINE_SECONDS if deadline is None else deadline,
+        deadline=_timing().operation_deadline_seconds if deadline is None else deadline,
         allowed_exceptions=allowed_exceptions,
     )
     _check_sync_backend_result_not_awaitable(label, result)
     _validate_backend_step_return(label, result)
     return result
+
+
+async def _cleanup_async_builder(
+    builder: RateLimiterBackendBuilderInterface,
+) -> None:
+    aclose = getattr(builder, "aclose", None)
+    if callable(aclose):
+
+        def call_aclose() -> object:
+            return aclose()
+
+        await _run_async_step(
+            "builder.aclose()",
+            call_aclose,
+            deadline=_timing().builder_deadline_seconds,
+            expect_awaitable=True,
+        )
+
+    close = getattr(builder, "close", None)
+    if callable(close):
+        _run_sync_step(
+            "builder.close()",
+            close,
+            deadline=_timing().builder_deadline_seconds,
+        )
+
+
+def _cleanup_sync_builder(
+    builder: SyncRateLimiterBackendBuilderInterface,
+) -> None:
+    close = getattr(builder, "close", None)
+    if callable(close):
+        _run_sync_step(
+            "builder.close()",
+            close,
+            deadline=_timing().builder_deadline_seconds,
+        )
+
+
+def _warn_cleanup_failure(exc: BaseException) -> None:
+    warnings.warn(
+        f"builder cleanup raised {type(exc).__name__}: {exc}",
+        RuntimeWarning,
+        stacklevel=3,
+    )
 
 
 class _AsyncRefundFailureBackend(RateLimiterBackend):
@@ -668,7 +840,7 @@ def _check_async_claims(backend: RateLimiterBackend) -> None:
         _run_sync_step(
             "supports_acquire_marker_authority()",
             backend.supports_acquire_marker_authority,
-            deadline=_BUILDER_DEADLINE_SECONDS,
+            deadline=_timing().builder_deadline_seconds,
         ),
         "supports_acquire_marker_authority",
     )
@@ -676,7 +848,7 @@ def _check_async_claims(backend: RateLimiterBackend) -> None:
         _run_sync_step(
             "supports_durable_refund_dedup()",
             backend.supports_durable_refund_dedup,
-            deadline=_BUILDER_DEADLINE_SECONDS,
+            deadline=_timing().builder_deadline_seconds,
         ),
         "supports_durable_refund_dedup",
     )
@@ -684,7 +856,7 @@ def _check_async_claims(backend: RateLimiterBackend) -> None:
         _run_sync_step(
             "supports_metric_set_change()",
             backend.supports_metric_set_change,
-            deadline=_BUILDER_DEADLINE_SECONDS,
+            deadline=_timing().builder_deadline_seconds,
         ),
         "supports_metric_set_change",
     )
@@ -711,7 +883,7 @@ def _check_sync_claims(backend: SyncRateLimiterBackend) -> None:
         _run_sync_step(
             "supports_acquire_marker_authority()",
             backend.supports_acquire_marker_authority,
-            deadline=_BUILDER_DEADLINE_SECONDS,
+            deadline=_timing().builder_deadline_seconds,
         ),
         "supports_acquire_marker_authority",
     )
@@ -719,7 +891,7 @@ def _check_sync_claims(backend: SyncRateLimiterBackend) -> None:
         _run_sync_step(
             "supports_durable_refund_dedup()",
             backend.supports_durable_refund_dedup,
-            deadline=_BUILDER_DEADLINE_SECONDS,
+            deadline=_timing().builder_deadline_seconds,
         ),
         "supports_durable_refund_dedup",
     )
@@ -727,7 +899,7 @@ def _check_sync_claims(backend: SyncRateLimiterBackend) -> None:
         _run_sync_step(
             "supports_metric_set_change()",
             backend.supports_metric_set_change,
-            deadline=_BUILDER_DEADLINE_SECONDS,
+            deadline=_timing().builder_deadline_seconds,
         ),
         "supports_metric_set_change",
     )
@@ -762,7 +934,7 @@ async def _expect_async_value_error(
         await _run_async_step(
             label,
             awaitable_fn,
-            deadline=_OPERATION_DEADLINE_SECONDS,
+            deadline=_timing().operation_deadline_seconds,
             expect_awaitable=True,
             allowed_exceptions=(ValueError,),
         )
@@ -776,14 +948,16 @@ async def _expect_async_timeout(
     awaitable_fn: Callable[[], object],
     message: str,
     *,
-    promptness_deadline: float = _PROMPT_DEADLINE_SECONDS,
+    promptness_deadline: float | None = None,
 ) -> None:
+    if promptness_deadline is None:
+        promptness_deadline = _timing().prompt_deadline_seconds
     start = time.monotonic()
     try:
         await _run_async_step(
             label,
             awaitable_fn,
-            deadline=_WAIT_BUDGET_SECONDS,
+            deadline=_timing().wait_budget_seconds,
             expect_awaitable=True,
             allowed_exceptions=(TimeoutError,),
         )
@@ -807,6 +981,7 @@ def _expect_value_error(
         _sync_backend_step(
             label,
             fn,
+            deadline=_timing().operation_deadline_seconds,
             allowed_exceptions=(ValueError,),
         )
     except ValueError:
@@ -819,14 +994,16 @@ def _expect_timeout(
     fn: Callable[[], object],
     message: str,
     *,
-    promptness_deadline: float = _PROMPT_DEADLINE_SECONDS,
+    promptness_deadline: float | None = None,
 ) -> None:
+    if promptness_deadline is None:
+        promptness_deadline = _timing().prompt_deadline_seconds
     start = time.monotonic()
     try:
         _sync_backend_step(
             label,
             fn,
-            deadline=_WAIT_BUDGET_SECONDS,
+            deadline=_timing().wait_budget_seconds,
             allowed_exceptions=(TimeoutError,),
         )
     except TimeoutError:
@@ -938,7 +1115,7 @@ async def _check_async_basic_capacity(
         lambda: backend.await_for_capacity(frozen_usage({"requests": 1})),
     )
     _check(
-        time.monotonic() - start < _PROMPT_DEADLINE_SECONDS,
+        time.monotonic() - start < _timing().prompt_deadline_seconds,
         "await_for_capacity() did not return promptly when capacity was available",
     )
 
@@ -979,7 +1156,7 @@ async def _check_async_basic_capacity(
         ),
     )
     _check(
-        time.monotonic() - start < _PROMPT_DEADLINE_SECONDS,
+        time.monotonic() - start < _timing().prompt_deadline_seconds,
         "refund_capacity() did not restore unused capacity",
     )
 
@@ -1129,56 +1306,163 @@ async def _check_async_callbacks(
     builder: RateLimiterBackendBuilderInterface,
 ) -> None:
     events: list[str] = []
+    callback_failures: list[str] = []
+    callback_token = _CALLBACK_FAILURES.set(callback_failures)
 
-    async def on_wait_start(**_kwargs) -> None:
+    async def on_wait_start(
+        *,
+        model_family: str,
+        usage: FrozenUsage,
+        preconsumption_capacities: Capacities,
+    ) -> None:
+        _check_callback_model_family("on_wait_start", model_family)
+        _check_callback_usage("on_wait_start", "usage", usage)
+        _check_callback_capacities(
+            "on_wait_start", "preconsumption_capacities", preconsumption_capacities
+        )
         events.append("wait_start")
 
-    async def after_wait_end_consumption(**_kwargs) -> None:
+    async def after_wait_end_consumption(
+        *,
+        model_family: str,
+        usage: FrozenUsage,
+        preconsumption_capacities: Capacities,
+        postconsumption_capacities: Capacities,
+        wait_time_s: float,
+    ) -> None:
+        _check_callback_model_family("after_wait_end_consumption", model_family)
+        _check_callback_usage("after_wait_end_consumption", "usage", usage)
+        _check_callback_capacities(
+            "after_wait_end_consumption",
+            "preconsumption_capacities",
+            preconsumption_capacities,
+        )
+        _check_callback_capacities(
+            "after_wait_end_consumption",
+            "postconsumption_capacities",
+            postconsumption_capacities,
+        )
+        _check_callback_float("after_wait_end_consumption", "wait_time_s", wait_time_s)
         events.append("wait_end")
 
-    async def on_capacity_consumed(**_kwargs) -> None:
+    async def on_capacity_consumed(
+        *,
+        model_family: str,
+        preconsumption_capacities: Capacities,
+        postconsumption_capacities: Capacities,
+        usage: FrozenUsage,
+        current_time: float,
+    ) -> None:
+        _check_callback_model_family("on_capacity_consumed", model_family)
+        _check_callback_capacities(
+            "on_capacity_consumed",
+            "preconsumption_capacities",
+            preconsumption_capacities,
+        )
+        _check_callback_capacities(
+            "on_capacity_consumed",
+            "postconsumption_capacities",
+            postconsumption_capacities,
+        )
+        _check_callback_usage("on_capacity_consumed", "usage", usage)
+        _check_callback_float("on_capacity_consumed", "current_time", current_time)
         events.append("consumed")
 
-    async def on_capacity_refunded(**_kwargs) -> None:
+    async def on_capacity_refunded(  # noqa: PLR0913 - mirrors public callback protocol
+        *,
+        model_family: str,
+        reserved_usage: FrozenUsage,
+        actual_usage: FrozenUsage,
+        refunded_usage: FrozenUsage,
+        prerefund_capacities: Capacities,
+        postrefund_capacities: Capacities,
+    ) -> None:
+        _check_callback_model_family("on_capacity_refunded", model_family)
+        _check_callback_usage("on_capacity_refunded", "reserved_usage", reserved_usage)
+        _check_callback_usage("on_capacity_refunded", "actual_usage", actual_usage)
+        _check_callback_usage("on_capacity_refunded", "refunded_usage", refunded_usage)
+        _check_callback_capacities(
+            "on_capacity_refunded", "prerefund_capacities", prerefund_capacities
+        )
+        _check_callback_capacities(
+            "on_capacity_refunded", "postrefund_capacities", postrefund_capacities
+        )
         events.append("refunded")
 
-    async def on_missing_consumption_data(**_kwargs) -> None:
+    async def on_missing_consumption_data(
+        *,
+        model_family: str,
+        usage_metric: str,
+        per_seconds: int,
+    ) -> None:
+        _check_callback_model_family("on_missing_consumption_data", model_family)
+        _check_callback_payload(
+            isinstance(usage_metric, str) and usage_metric == "requests",
+            "on_missing_consumption_data callback passed invalid usage_metric",
+        )
+        _check_callback_payload(
+            type(per_seconds) is int and per_seconds > 0,
+            "on_missing_consumption_data callback passed invalid per_seconds",
+        )
         events.append("missing")
 
-    backend = _build_async_backend(
-        builder,
-        _config("async-callbacks", limit=_CALLBACK_LIMIT),
-        label="build(async-callbacks)",
-        callbacks=RateLimiterCallbacks(
-            on_wait_start=on_wait_start,
-            after_wait_end_consumption=after_wait_end_consumption,
-            on_capacity_consumed=on_capacity_consumed,
-            on_capacity_refunded=on_capacity_refunded,
-            on_missing_consumption_data=on_missing_consumption_data,
-        ),
-    )
-    await _async_backend_step(
-        "await_for_capacity(requests=4)",
-        lambda: backend.await_for_capacity(frozen_usage({"requests": _CALLBACK_LIMIT})),
-    )
-    await _async_backend_step(
-        "await_for_capacity(requests=1, timeout=2)",
-        lambda: backend.await_for_capacity(
-            frozen_usage({"requests": 1}),
-            timeout=_WAIT_TIMEOUT_SECONDS,
-        ),
-        deadline=_WAIT_BUDGET_SECONDS,
-    )
-    await _async_backend_step(
-        "refund_capacity(requests=1, actual=0)",
-        lambda: backend.refund_capacity(
-            frozen_usage({"requests": 1}),
-            frozen_usage({"requests": 0}),
-        ),
-    )
+    async def on_lifecycle_event(
+        *,
+        event: LifecycleEvent,
+    ) -> None:
+        _check_callback_payload(
+            isinstance(event, LifecycleEvent)
+            and event.model_family.startswith("conformance/"),
+            "on_lifecycle_event callback passed invalid event",
+        )
+        events.append("lifecycle")
+
+    try:
+        backend = _build_async_backend(
+            builder,
+            _config("async-callbacks", limit=_CALLBACK_LIMIT),
+            label="build(async-callbacks)",
+            callbacks=RateLimiterCallbacks(
+                on_wait_start=on_wait_start,
+                after_wait_end_consumption=after_wait_end_consumption,
+                on_capacity_consumed=on_capacity_consumed,
+                on_capacity_refunded=on_capacity_refunded,
+                on_missing_consumption_data=on_missing_consumption_data,
+                on_lifecycle_event=on_lifecycle_event,
+            ),
+        )
+        await _async_backend_step(
+            "await_for_capacity(requests=4)",
+            lambda: backend.await_for_capacity(
+                frozen_usage({"requests": _CALLBACK_LIMIT})
+            ),
+        )
+        await _async_backend_step(
+            "await_for_capacity(requests=1, timeout=2)",
+            lambda: backend.await_for_capacity(
+                frozen_usage({"requests": 1}),
+                timeout=_WAIT_TIMEOUT_SECONDS,
+            ),
+            deadline=_timing().wait_budget_seconds,
+        )
+        await _async_backend_step(
+            "refund_capacity(requests=1, actual=0)",
+            lambda: backend.refund_capacity(
+                frozen_usage({"requests": 1}),
+                frozen_usage({"requests": 0}),
+            ),
+        )
+    finally:
+        _CALLBACK_FAILURES.reset(callback_token)
+
+    if callback_failures:
+        _fail(callback_failures[0])
 
     for event in ("missing", "consumed", "wait_start", "wait_end", "refunded"):
-        _check(event in events, f"callback event {event!r} was not emitted")
+        _check(
+            event in events,
+            f"callback slot {event!r} was not emitted with a valid payload",
+        )
 
 
 def _metric_set_configs(label: str) -> tuple[PerModelConfig, PerModelConfig]:
@@ -1422,7 +1706,7 @@ async def _check_async_marker_authority(
         _run_sync_step(
             "supports_acquire_marker_authority()",
             backend.supports_acquire_marker_authority,
-            deadline=_BUILDER_DEADLINE_SECONDS,
+            deadline=_timing().builder_deadline_seconds,
         ),
         "supports_acquire_marker_authority",
     ):
@@ -1732,6 +2016,8 @@ async def _check_async_acquire_refund_failed_error(
 
 async def conformance_test_for(
     backend_builder: RateLimiterBackendBuilderInterface,
+    *,
+    timing: ConformanceTiming | None = None,
 ) -> None:
     """
     Run the public async backend conformance checks for one backend builder.
@@ -1740,27 +2026,55 @@ async def conformance_test_for(
     key prefix, database, or in-memory instance so these tests can consume and
     refund capacity freely.
 
-    Backend operations are bounded by helper-owned deadlines. KNOWN LIMITATION:
-    if a synchronous backend call hangs in its worker thread, Python cannot
-    safely kill that thread; the helper reports the hang and continues without
-    waiting for that thread to finish.
+    Backend operations are bounded by helper-owned deadlines. Pass
+    ``ConformanceTiming`` to tune those deadlines, or set
+    ``TOKEN_THROTTLE_CONFORMANCE_TIMING_SCALE`` to multiply the defaults for
+    slow runners.
+
+    The helper calls builder ``aclose()`` and ``close()`` hooks in cleanup when
+    those methods exist. Builders that need to manage cleanup elsewhere can
+    expose a wrapper without those methods.
+
+    KNOWN LIMITATION: if a synchronous backend call hangs in its worker thread,
+    Python cannot safely kill that thread; the helper reports the hang and
+    continues without waiting for that thread to finish.
     """
-    _build_async_backend(
-        backend_builder,
-        _config("async-protocol-probe"),
-        label="build(async-protocol-probe)",
-    )
-    await _check_async_basic_capacity(backend_builder)
-    await _check_async_all_or_nothing(backend_builder)
-    await _check_async_refund_and_overuse(backend_builder)
-    await _check_async_consume_and_capacity_updates(backend_builder)
-    await _check_async_callbacks(backend_builder)
-    await _check_async_metric_set_change(backend_builder)
-    await _check_async_per_build_isolation(backend_builder)
-    await _check_async_durable_refund_dedup(backend_builder)
-    await _check_async_marker_authority(backend_builder)
-    await _check_async_public_reservation_round_trip(backend_builder)
-    await _check_async_acquire_refund_failed_error(backend_builder)
+    resolved_timing = _resolve_timing(timing)
+    token = _TIMING_CONTEXT.set(resolved_timing)
+    body_exc: BaseException | None = None
+    try:
+        _build_async_backend(
+            backend_builder,
+            _config("async-protocol-probe"),
+            label="build(async-protocol-probe)",
+        )
+        await _check_async_basic_capacity(backend_builder)
+        await _check_async_all_or_nothing(backend_builder)
+        await _check_async_refund_and_overuse(backend_builder)
+        await _check_async_consume_and_capacity_updates(backend_builder)
+        await _check_async_callbacks(backend_builder)
+        await _check_async_metric_set_change(backend_builder)
+        await _check_async_per_build_isolation(backend_builder)
+        await _check_async_durable_refund_dedup(backend_builder)
+        await _check_async_marker_authority(backend_builder)
+        await _check_async_public_reservation_round_trip(backend_builder)
+        await _check_async_acquire_refund_failed_error(backend_builder)
+    except BaseException as exc:
+        body_exc = exc
+        raise
+    finally:
+        try:
+            await _cleanup_async_builder(backend_builder)
+        except asyncio.CancelledError:
+            raise
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException as exc:
+            if body_exc is None:
+                raise
+            _warn_cleanup_failure(exc)
+        finally:
+            _TIMING_CONTEXT.reset(token)
 
 
 def _check_sync_basic_capacity(
@@ -1779,7 +2093,7 @@ def _check_sync_basic_capacity(
         lambda: backend.wait_for_capacity(frozen_usage({"requests": 1})),
     )
     _check(
-        time.monotonic() - start < _PROMPT_DEADLINE_SECONDS,
+        time.monotonic() - start < _timing().prompt_deadline_seconds,
         "wait_for_capacity() did not return promptly when capacity was available",
     )
 
@@ -1821,7 +2135,7 @@ def _check_sync_basic_capacity(
         ),
     )
     _check(
-        time.monotonic() - start < _PROMPT_DEADLINE_SECONDS,
+        time.monotonic() - start < _timing().prompt_deadline_seconds,
         "refund_capacity() did not restore unused capacity",
     )
 
@@ -1971,56 +2285,163 @@ def _check_sync_callbacks(
     builder: SyncRateLimiterBackendBuilderInterface,
 ) -> None:
     events: list[str] = []
+    callback_failures: list[str] = []
+    callback_token = _CALLBACK_FAILURES.set(callback_failures)
 
-    def on_wait_start(**_kwargs) -> None:
+    def on_wait_start(
+        *,
+        model_family: str,
+        usage: FrozenUsage,
+        preconsumption_capacities: Capacities,
+    ) -> None:
+        _check_callback_model_family("on_wait_start", model_family)
+        _check_callback_usage("on_wait_start", "usage", usage)
+        _check_callback_capacities(
+            "on_wait_start", "preconsumption_capacities", preconsumption_capacities
+        )
         events.append("wait_start")
 
-    def after_wait_end_consumption(**_kwargs) -> None:
+    def after_wait_end_consumption(
+        *,
+        model_family: str,
+        usage: FrozenUsage,
+        preconsumption_capacities: Capacities,
+        postconsumption_capacities: Capacities,
+        wait_time_s: float,
+    ) -> None:
+        _check_callback_model_family("after_wait_end_consumption", model_family)
+        _check_callback_usage("after_wait_end_consumption", "usage", usage)
+        _check_callback_capacities(
+            "after_wait_end_consumption",
+            "preconsumption_capacities",
+            preconsumption_capacities,
+        )
+        _check_callback_capacities(
+            "after_wait_end_consumption",
+            "postconsumption_capacities",
+            postconsumption_capacities,
+        )
+        _check_callback_float("after_wait_end_consumption", "wait_time_s", wait_time_s)
         events.append("wait_end")
 
-    def on_capacity_consumed(**_kwargs) -> None:
+    def on_capacity_consumed(
+        *,
+        model_family: str,
+        preconsumption_capacities: Capacities,
+        postconsumption_capacities: Capacities,
+        usage: FrozenUsage,
+        current_time: float,
+    ) -> None:
+        _check_callback_model_family("on_capacity_consumed", model_family)
+        _check_callback_capacities(
+            "on_capacity_consumed",
+            "preconsumption_capacities",
+            preconsumption_capacities,
+        )
+        _check_callback_capacities(
+            "on_capacity_consumed",
+            "postconsumption_capacities",
+            postconsumption_capacities,
+        )
+        _check_callback_usage("on_capacity_consumed", "usage", usage)
+        _check_callback_float("on_capacity_consumed", "current_time", current_time)
         events.append("consumed")
 
-    def on_capacity_refunded(**_kwargs) -> None:
+    def on_capacity_refunded(  # noqa: PLR0913 - mirrors public callback protocol
+        *,
+        model_family: str,
+        reserved_usage: FrozenUsage,
+        actual_usage: FrozenUsage,
+        refunded_usage: FrozenUsage,
+        prerefund_capacities: Capacities,
+        postrefund_capacities: Capacities,
+    ) -> None:
+        _check_callback_model_family("on_capacity_refunded", model_family)
+        _check_callback_usage("on_capacity_refunded", "reserved_usage", reserved_usage)
+        _check_callback_usage("on_capacity_refunded", "actual_usage", actual_usage)
+        _check_callback_usage("on_capacity_refunded", "refunded_usage", refunded_usage)
+        _check_callback_capacities(
+            "on_capacity_refunded", "prerefund_capacities", prerefund_capacities
+        )
+        _check_callback_capacities(
+            "on_capacity_refunded", "postrefund_capacities", postrefund_capacities
+        )
         events.append("refunded")
 
-    def on_missing_consumption_data(**_kwargs) -> None:
+    def on_missing_consumption_data(
+        *,
+        model_family: str,
+        usage_metric: str,
+        per_seconds: int,
+    ) -> None:
+        _check_callback_model_family("on_missing_consumption_data", model_family)
+        _check_callback_payload(
+            isinstance(usage_metric, str) and usage_metric == "requests",
+            "on_missing_consumption_data callback passed invalid usage_metric",
+        )
+        _check_callback_payload(
+            type(per_seconds) is int and per_seconds > 0,
+            "on_missing_consumption_data callback passed invalid per_seconds",
+        )
         events.append("missing")
 
-    backend = _build_sync_backend(
-        builder,
-        _config("sync-callbacks", limit=_CALLBACK_LIMIT),
-        label="build(sync-callbacks)",
-        callbacks=SyncRateLimiterCallbacks(
-            on_wait_start=on_wait_start,
-            after_wait_end_consumption=after_wait_end_consumption,
-            on_capacity_consumed=on_capacity_consumed,
-            on_capacity_refunded=on_capacity_refunded,
-            on_missing_consumption_data=on_missing_consumption_data,
-        ),
-    )
-    _sync_backend_step(
-        "wait_for_capacity(requests=4)",
-        lambda: backend.wait_for_capacity(frozen_usage({"requests": _CALLBACK_LIMIT})),
-    )
-    _sync_backend_step(
-        "wait_for_capacity(requests=1, timeout=2)",
-        lambda: backend.wait_for_capacity(
-            frozen_usage({"requests": 1}),
-            timeout=_WAIT_TIMEOUT_SECONDS,
-        ),
-        deadline=_WAIT_BUDGET_SECONDS,
-    )
-    _sync_backend_step(
-        "refund_capacity(requests=1, actual=0)",
-        lambda: backend.refund_capacity(
-            frozen_usage({"requests": 1}),
-            frozen_usage({"requests": 0}),
-        ),
-    )
+    def on_lifecycle_event(
+        *,
+        event: LifecycleEvent,
+    ) -> None:
+        _check_callback_payload(
+            isinstance(event, LifecycleEvent)
+            and event.model_family.startswith("conformance/"),
+            "on_lifecycle_event callback passed invalid event",
+        )
+        events.append("lifecycle")
+
+    try:
+        backend = _build_sync_backend(
+            builder,
+            _config("sync-callbacks", limit=_CALLBACK_LIMIT),
+            label="build(sync-callbacks)",
+            callbacks=SyncRateLimiterCallbacks(
+                on_wait_start=on_wait_start,
+                after_wait_end_consumption=after_wait_end_consumption,
+                on_capacity_consumed=on_capacity_consumed,
+                on_capacity_refunded=on_capacity_refunded,
+                on_missing_consumption_data=on_missing_consumption_data,
+                on_lifecycle_event=on_lifecycle_event,
+            ),
+        )
+        _sync_backend_step(
+            "wait_for_capacity(requests=4)",
+            lambda: backend.wait_for_capacity(
+                frozen_usage({"requests": _CALLBACK_LIMIT})
+            ),
+        )
+        _sync_backend_step(
+            "wait_for_capacity(requests=1, timeout=2)",
+            lambda: backend.wait_for_capacity(
+                frozen_usage({"requests": 1}),
+                timeout=_WAIT_TIMEOUT_SECONDS,
+            ),
+            deadline=_timing().wait_budget_seconds,
+        )
+        _sync_backend_step(
+            "refund_capacity(requests=1, actual=0)",
+            lambda: backend.refund_capacity(
+                frozen_usage({"requests": 1}),
+                frozen_usage({"requests": 0}),
+            ),
+        )
+    finally:
+        _CALLBACK_FAILURES.reset(callback_token)
+
+    if callback_failures:
+        _fail(callback_failures[0])
 
     for event in ("missing", "consumed", "wait_start", "wait_end", "refunded"):
-        _check(event in events, f"callback event {event!r} was not emitted")
+        _check(
+            event in events,
+            f"callback slot {event!r} was not emitted with a valid payload",
+        )
 
 
 def _check_sync_metric_set_change(
@@ -2225,7 +2646,7 @@ def _check_sync_marker_authority(
         _run_sync_step(
             "supports_acquire_marker_authority()",
             backend.supports_acquire_marker_authority,
-            deadline=_BUILDER_DEADLINE_SECONDS,
+            deadline=_timing().builder_deadline_seconds,
         ),
         "supports_acquire_marker_authority",
     ):
@@ -2531,6 +2952,8 @@ def _check_sync_acquire_refund_failed_error(
 
 def sync_conformance_test_for(
     backend_builder: SyncRateLimiterBackendBuilderInterface,
+    *,
+    timing: ConformanceTiming | None = None,
 ) -> None:
     """
     Run the public sync backend conformance checks for one backend builder.
@@ -2539,31 +2962,59 @@ def sync_conformance_test_for(
     key prefix, database, or in-memory instance so these tests can consume and
     refund capacity freely.
 
-    Backend operations are bounded by helper-owned deadlines. KNOWN LIMITATION:
-    if a synchronous backend call hangs in its worker thread, Python cannot
-    safely kill that thread; the helper reports the hang and continues without
-    waiting for that thread to finish.
+    Backend operations are bounded by helper-owned deadlines. Pass
+    ``ConformanceTiming`` to tune those deadlines, or set
+    ``TOKEN_THROTTLE_CONFORMANCE_TIMING_SCALE`` to multiply the defaults for
+    slow runners.
+
+    The helper calls builder ``close()`` in cleanup when that method exists.
+    Builders that need to manage cleanup elsewhere can expose a wrapper without
+    ``close``.
+
+    KNOWN LIMITATION: if a synchronous backend call hangs in its worker thread,
+    Python cannot safely kill that thread; the helper reports the hang and
+    continues without waiting for that thread to finish.
     """
-    _build_sync_backend(
-        backend_builder,
-        _config("sync-protocol-probe"),
-        label="build(sync-protocol-probe)",
-    )
-    _check_sync_basic_capacity(backend_builder)
-    _check_sync_all_or_nothing(backend_builder)
-    _check_sync_refund_and_overuse(backend_builder)
-    _check_sync_consume_and_capacity_updates(backend_builder)
-    _check_sync_callbacks(backend_builder)
-    _check_sync_metric_set_change(backend_builder)
-    _check_sync_per_build_isolation(backend_builder)
-    _check_sync_durable_refund_dedup(backend_builder)
-    _check_sync_marker_authority(backend_builder)
-    _check_sync_public_reservation_round_trip(backend_builder)
-    _check_sync_acquire_refund_failed_error(backend_builder)
+    resolved_timing = _resolve_timing(timing)
+    token = _TIMING_CONTEXT.set(resolved_timing)
+    body_exc: BaseException | None = None
+    try:
+        _build_sync_backend(
+            backend_builder,
+            _config("sync-protocol-probe"),
+            label="build(sync-protocol-probe)",
+        )
+        _check_sync_basic_capacity(backend_builder)
+        _check_sync_all_or_nothing(backend_builder)
+        _check_sync_refund_and_overuse(backend_builder)
+        _check_sync_consume_and_capacity_updates(backend_builder)
+        _check_sync_callbacks(backend_builder)
+        _check_sync_metric_set_change(backend_builder)
+        _check_sync_per_build_isolation(backend_builder)
+        _check_sync_durable_refund_dedup(backend_builder)
+        _check_sync_marker_authority(backend_builder)
+        _check_sync_public_reservation_round_trip(backend_builder)
+        _check_sync_acquire_refund_failed_error(backend_builder)
+    except BaseException as exc:
+        body_exc = exc
+        raise
+    finally:
+        try:
+            _cleanup_sync_builder(backend_builder)
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException as exc:
+            if body_exc is None:
+                raise
+            _warn_cleanup_failure(exc)
+        finally:
+            _TIMING_CONTEXT.reset(token)
 
 
 def run_conformance_test_for(
     backend_builder: RateLimiterBackendBuilderInterface,
+    *,
+    timing: ConformanceTiming | None = None,
 ) -> None:
     """Run async backend conformance checks from synchronous test suites."""
-    asyncio.run(conformance_test_for(backend_builder))
+    asyncio.run(conformance_test_for(backend_builder, timing=timing))
