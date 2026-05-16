@@ -1070,7 +1070,7 @@ wheels = [
 
 [[package]]
 name = "token-throttle"
-version = "3.0.0"
+version = "4.0.0"
 source = { editable = "." }
 dependencies = [
     { name = "frozendict" },
