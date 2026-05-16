@@ -97,14 +97,10 @@ def _validate_timing_value(field_name: str, value: float) -> float:
 
 def _resolve_timing(timing: ConformanceTiming | None) -> ConformanceTiming:
     if timing is None:
+        default_timing = ConformanceTiming()
         scale_text = os.environ.get(_TIMING_SCALE_ENV)
         if scale_text is None:
-            timing = ConformanceTiming(
-                builder_deadline_seconds=_BUILDER_DEADLINE_SECONDS,
-                operation_deadline_seconds=_OPERATION_DEADLINE_SECONDS,
-                prompt_deadline_seconds=_PROMPT_DEADLINE_SECONDS,
-                wait_budget_seconds=_WAIT_BUDGET_SECONDS,
-            )
+            timing = default_timing
         else:
             try:
                 scale = float(scale_text)
@@ -114,10 +110,12 @@ def _resolve_timing(timing: ConformanceTiming | None) -> ConformanceTiming:
                 ) from exc
             _validate_timing_value(_TIMING_SCALE_ENV, scale)
             timing = ConformanceTiming(
-                builder_deadline_seconds=_BUILDER_DEADLINE_SECONDS * scale,
-                operation_deadline_seconds=_OPERATION_DEADLINE_SECONDS * scale,
-                prompt_deadline_seconds=_PROMPT_DEADLINE_SECONDS * scale,
-                wait_budget_seconds=_WAIT_BUDGET_SECONDS * scale,
+                builder_deadline_seconds=default_timing.builder_deadline_seconds
+                * scale,
+                operation_deadline_seconds=default_timing.operation_deadline_seconds
+                * scale,
+                prompt_deadline_seconds=default_timing.prompt_deadline_seconds * scale,
+                wait_budget_seconds=default_timing.wait_budget_seconds * scale,
             )
 
     return ConformanceTiming(
@@ -566,12 +564,42 @@ def _cleanup_sync_builder(
         )
 
 
-def _warn_cleanup_failure(exc: BaseException) -> None:
+def _warn_cleanup_failure(exc: BaseException, *, target: str = "builder") -> None:
     warnings.warn(
-        f"builder cleanup raised {type(exc).__name__}: {exc}",
+        f"{target} cleanup raised {type(exc).__name__}: {exc}",
         RuntimeWarning,
         stacklevel=3,
     )
+
+
+async def _cleanup_async_limiter(limiter: RateLimiter) -> None:
+    try:
+        await asyncio.wait_for(
+            limiter.aclose(),
+            timeout=_timing().operation_deadline_seconds,
+        )
+    except asyncio.CancelledError:
+        raise
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException as exc:  # noqa: BLE001 - suppress non-control cleanup failures.
+        _warn_cleanup_failure(exc, target="limiter")
+
+
+def _cleanup_sync_limiter(limiter: SyncRateLimiter) -> None:
+    try:
+        _run_sync_step(
+            "SyncRateLimiter.close()",
+            limiter.close,
+            deadline=_timing().operation_deadline_seconds,
+            allowed_exceptions=(asyncio.CancelledError,),
+        )
+    except asyncio.CancelledError:
+        raise
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException as exc:  # noqa: BLE001 - suppress non-control cleanup failures.
+        _warn_cleanup_failure(exc, target="limiter")
 
 
 class _AsyncRefundFailureBackend(RateLimiterBackend):
@@ -1517,7 +1545,7 @@ async def _check_async_metric_set_change(
         _run_sync_step(
             "supports_metric_set_change()",
             old_backend.supports_metric_set_change,
-            deadline=_BUILDER_DEADLINE_SECONDS,
+            deadline=_timing().builder_deadline_seconds,
         ),
         "supports_metric_set_change",
     ):
@@ -1639,6 +1667,64 @@ async def _check_async_no_double_refund_credit(
     )
 
 
+async def _check_async_marker_metadata_mismatch(
+    builder: RateLimiterBackendBuilderInterface,
+    mismatch_field: str,
+    *,
+    reservation_model_family: str | None = None,
+    reservation_bucket_ids: frozenset[BucketId] | None = None,
+    reservation_reserved_usage: FrozenUsage | None = None,
+) -> None:
+    mismatch_cfg = _config(f"async-marker-mismatch-{mismatch_field}", limit=2.0)
+    mismatch_backend = _build_async_backend(
+        builder,
+        mismatch_cfg,
+        label=f"build(async-marker-mismatch-{mismatch_field})",
+    )
+    mismatch_reservation_id = f"conformance-{uuid.uuid4().hex}"
+    mismatch_reserved_usage = frozen_usage({"requests": 2})
+    await _async_backend_step(
+        "await_for_capacity(requests=2, reservation_id=...)",
+        lambda: mismatch_backend.await_for_capacity(
+            mismatch_reserved_usage,
+            reservation_id=mismatch_reservation_id,
+            reservation_lifetime_seconds=_RESERVATION_LIFETIME_SECONDS,
+        ),
+    )
+    try:
+        mismatch_result = await _async_refund_for_buckets(
+            f"refund_capacity_for_buckets(metadata-mismatch-{mismatch_field})",
+            mismatch_backend,
+            mismatch_reserved_usage,
+            frozen_usage({"requests": 1}),
+            reservation_id=mismatch_reservation_id,
+            reservation_model_family=(
+                mismatch_cfg.get_model_family()
+                if reservation_model_family is None
+                else reservation_model_family
+            ),
+            reservation_bucket_ids=(
+                frozenset({_REQUESTS_BUCKET_ID})
+                if reservation_bucket_ids is None
+                else reservation_bucket_ids
+            ),
+            reservation_reserved_usage=reservation_reserved_usage,
+        )
+    except (UnknownReservationError, DuplicateRefundError, ValueError):
+        return
+    if mismatch_result is False:
+        return
+    await _expect_async_timeout(
+        "await_for_capacity(requests=1, timeout=0)",
+        lambda: mismatch_backend.await_for_capacity(
+            frozen_usage({"requests": 1}),
+            timeout=_TRY_ACQUIRE_TIMEOUT_SECONDS,
+        ),
+        "marker-authority backends must fail closed for "
+        f"reservation metadata mismatch ({mismatch_field})",
+    )
+
+
 async def _check_async_durable_refund_dedup(
     builder: RateLimiterBackendBuilderInterface,
 ) -> None:
@@ -1652,7 +1738,7 @@ async def _check_async_durable_refund_dedup(
         _run_sync_step(
             "supports_durable_refund_dedup()",
             backend.supports_durable_refund_dedup,
-            deadline=_BUILDER_DEADLINE_SECONDS,
+            deadline=_timing().builder_deadline_seconds,
         ),
         "supports_durable_refund_dedup",
     ):
@@ -1811,42 +1897,22 @@ async def _check_async_marker_authority(
             "marker-authority backends must not credit duplicate refunds twice",
         )
 
-    mismatch_cfg = _config("async-marker-mismatch", limit=2.0)
-    mismatch_backend = _build_async_backend(
+    await _check_async_marker_metadata_mismatch(
         builder,
-        mismatch_cfg,
-        label="build(async-marker-mismatch)",
+        "model_family",
+        reservation_model_family=_family("forged-marker-family"),
     )
-    mismatch_reservation_id = f"conformance-{uuid.uuid4().hex}"
-    mismatch_reserved_usage = frozen_usage({"requests": 2})
-    await _async_backend_step(
-        "await_for_capacity(requests=2, reservation_id=...)",
-        lambda: mismatch_backend.await_for_capacity(
-            mismatch_reserved_usage,
-            reservation_id=mismatch_reservation_id,
-            reservation_lifetime_seconds=_RESERVATION_LIFETIME_SECONDS,
+    await _check_async_marker_metadata_mismatch(
+        builder,
+        "bucket_ids",
+        reservation_bucket_ids=frozenset(
+            {_REQUESTS_BUCKET_ID, ("forged-bucket", _SHORT_WINDOW_SECONDS)}
         ),
     )
-    try:
-        mismatch_result = await _async_refund_for_buckets(
-            "refund_capacity_for_buckets(metadata-mismatch)",
-            mismatch_backend,
-            mismatch_reserved_usage,
-            frozen_usage({"requests": 1}),
-            reservation_id=mismatch_reservation_id,
-            reservation_model_family=_family("forged-marker-family"),
-        )
-    except (UnknownReservationError, DuplicateRefundError, ValueError):
-        return
-    if mismatch_result is False:
-        return
-    await _expect_async_timeout(
-        "await_for_capacity(requests=1, timeout=0)",
-        lambda: mismatch_backend.await_for_capacity(
-            frozen_usage({"requests": 1}),
-            timeout=_TRY_ACQUIRE_TIMEOUT_SECONDS,
-        ),
-        "marker-authority backends must fail closed for reservation metadata mismatch",
+    await _check_async_marker_metadata_mismatch(
+        builder,
+        "reserved_usage",
+        reservation_reserved_usage=frozen_usage({"requests": 1}),
     )
 
 
@@ -1858,13 +1924,20 @@ async def _check_async_public_reservation_round_trip(
     full_usage = frozen_usage({"requests": 2.0, "tokens": 2.0})
     zero_usage = frozen_usage({"requests": 0.0, "tokens": 0.0})
     bucket_ids = frozenset({_REQUESTS_BUCKET_ID, _TOKENS_BUCKET_ID})
-    limiter = RateLimiter(cfg, backend=backend_builder)
+    limiter = cast(
+        "RateLimiter",
+        _run_sync_step(
+            "RateLimiter construction",
+            lambda: RateLimiter(cfg, backend=backend_builder),
+            deadline=_timing().builder_deadline_seconds,
+        ),
+    )
     try:
         reservation = _check_public_reservation_fields(
             await _run_async_step(
                 "RateLimiter.acquire_capacity(public reservation)",
                 lambda: limiter.acquire_capacity(usage, _PUBLIC_MODEL_NAME),
-                deadline=_OPERATION_DEADLINE_SECONDS,
+                deadline=_timing().operation_deadline_seconds,
                 expect_awaitable=True,
             ),
             expected_usage=usage,
@@ -1875,7 +1948,7 @@ async def _check_async_public_reservation_round_trip(
         await _run_async_step(
             "RateLimiter.refund_capacity(public reservation)",
             lambda: limiter.refund_capacity(zero_usage, reservation),
-            deadline=_OPERATION_DEADLINE_SECONDS,
+            deadline=_timing().operation_deadline_seconds,
             expect_awaitable=True,
         )
 
@@ -1887,7 +1960,7 @@ async def _check_async_public_reservation_round_trip(
                     _PUBLIC_MODEL_NAME,
                     timeout=_TRY_ACQUIRE_TIMEOUT_SECONDS,
                 ),
-                deadline=_OPERATION_DEADLINE_SECONDS,
+                deadline=_timing().operation_deadline_seconds,
                 expect_awaitable=True,
             ),
             expected_usage=full_usage,
@@ -1898,7 +1971,7 @@ async def _check_async_public_reservation_round_trip(
         await _run_async_step(
             "RateLimiter.refund_capacity(restored reservation)",
             lambda: limiter.refund_capacity(zero_usage, restored),
-            deadline=_OPERATION_DEADLINE_SECONDS,
+            deadline=_timing().operation_deadline_seconds,
             expect_awaitable=True,
         )
 
@@ -1915,7 +1988,7 @@ async def _check_async_public_reservation_round_trip(
                     _PUBLIC_MODEL_NAME,
                     timeout=_TRY_ACQUIRE_TIMEOUT_SECONDS,
                 ),
-                deadline=_OPERATION_DEADLINE_SECONDS,
+                deadline=_timing().operation_deadline_seconds,
                 expect_awaitable=True,
             ),
             expected_usage=full_usage,
@@ -1927,7 +2000,7 @@ async def _check_async_public_reservation_round_trip(
         await _run_async_step(
             "RateLimiter.refund_capacity(mutated reservation snapshot authority)",
             lambda: limiter.refund_capacity(zero_usage, mutated_snapshot_probe),
-            deadline=_OPERATION_DEADLINE_SECONDS,
+            deadline=_timing().operation_deadline_seconds,
             expect_awaitable=True,
         )
         final_reservation = _check_public_reservation_fields(
@@ -1938,7 +2011,7 @@ async def _check_async_public_reservation_round_trip(
                     _PUBLIC_MODEL_NAME,
                     timeout=_TRY_ACQUIRE_TIMEOUT_SECONDS,
                 ),
-                deadline=_OPERATION_DEADLINE_SECONDS,
+                deadline=_timing().operation_deadline_seconds,
                 expect_awaitable=True,
             ),
             expected_usage=full_usage,
@@ -1949,15 +2022,11 @@ async def _check_async_public_reservation_round_trip(
         await _run_async_step(
             "RateLimiter.refund_capacity(final public reservation)",
             lambda: limiter.refund_capacity(zero_usage, final_reservation),
-            deadline=_OPERATION_DEADLINE_SECONDS,
+            deadline=_timing().operation_deadline_seconds,
             expect_awaitable=True,
         )
     finally:
-        with contextlib.suppress(BaseException):
-            await asyncio.wait_for(
-                limiter.aclose(),
-                timeout=_OPERATION_DEADLINE_SECONDS,
-            )
+        await _cleanup_async_limiter(limiter)
 
 
 async def _check_async_acquire_refund_failed_error(
@@ -1966,9 +2035,16 @@ async def _check_async_acquire_refund_failed_error(
     refund_error = RuntimeError("fault-injection")
     interrupted_by = asyncio.CancelledError("fault-injection")
     cfg = _config("async-acquire-refund-failed", limit=2.0)
-    limiter = RateLimiter(
-        cfg,
-        backend=_AsyncRefundFailureBuilder(backend_builder, refund_error),
+    limiter = cast(
+        "RateLimiter",
+        _run_sync_step(
+            "RateLimiter construction",
+            lambda: RateLimiter(
+                cfg,
+                backend=_AsyncRefundFailureBuilder(backend_builder, refund_error),
+            ),
+            deadline=_timing().builder_deadline_seconds,
+        ),
     )
     original_complete_acquire_state_update = cast(
         "Callable[[Awaitable[object]], Awaitable[asyncio.CancelledError | None]]",
@@ -1994,7 +2070,7 @@ async def _check_async_acquire_refund_failed_error(
                     frozen_usage({"requests": 1.0}),
                     _PUBLIC_MODEL_NAME,
                 ),
-                deadline=_OPERATION_DEADLINE_SECONDS,
+                deadline=_timing().operation_deadline_seconds,
                 expect_awaitable=True,
                 allowed_exceptions=(AcquireRefundFailedError,),
             )
@@ -2007,11 +2083,7 @@ async def _check_async_acquire_refund_failed_error(
             return
         _fail("interrupted acquire cleanup must raise AcquireRefundFailedError")
     finally:
-        with contextlib.suppress(BaseException):
-            await asyncio.wait_for(
-                limiter.aclose(),
-                timeout=_OPERATION_DEADLINE_SECONDS,
-            )
+        await _cleanup_async_limiter(limiter)
 
 
 async def conformance_test_for(
@@ -2457,7 +2529,7 @@ def _check_sync_metric_set_change(
         _run_sync_step(
             "supports_metric_set_change()",
             old_backend.supports_metric_set_change,
-            deadline=_BUILDER_DEADLINE_SECONDS,
+            deadline=_timing().builder_deadline_seconds,
         ),
         "supports_metric_set_change",
     ):
@@ -2579,6 +2651,64 @@ def _check_sync_no_double_refund_credit(
     )
 
 
+def _check_sync_marker_metadata_mismatch(
+    builder: SyncRateLimiterBackendBuilderInterface,
+    mismatch_field: str,
+    *,
+    reservation_model_family: str | None = None,
+    reservation_bucket_ids: frozenset[BucketId] | None = None,
+    reservation_reserved_usage: FrozenUsage | None = None,
+) -> None:
+    mismatch_cfg = _config(f"sync-marker-mismatch-{mismatch_field}", limit=2.0)
+    mismatch_backend = _build_sync_backend(
+        builder,
+        mismatch_cfg,
+        label=f"build(sync-marker-mismatch-{mismatch_field})",
+    )
+    mismatch_reservation_id = f"conformance-{uuid.uuid4().hex}"
+    mismatch_reserved_usage = frozen_usage({"requests": 2})
+    _sync_backend_step(
+        "wait_for_capacity(requests=2, reservation_id=...)",
+        lambda: mismatch_backend.wait_for_capacity(
+            mismatch_reserved_usage,
+            reservation_id=mismatch_reservation_id,
+            reservation_lifetime_seconds=_RESERVATION_LIFETIME_SECONDS,
+        ),
+    )
+    try:
+        mismatch_result = _sync_refund_for_buckets(
+            f"refund_capacity_for_buckets(metadata-mismatch-{mismatch_field})",
+            mismatch_backend,
+            mismatch_reserved_usage,
+            frozen_usage({"requests": 1}),
+            reservation_id=mismatch_reservation_id,
+            reservation_model_family=(
+                mismatch_cfg.get_model_family()
+                if reservation_model_family is None
+                else reservation_model_family
+            ),
+            reservation_bucket_ids=(
+                frozenset({_REQUESTS_BUCKET_ID})
+                if reservation_bucket_ids is None
+                else reservation_bucket_ids
+            ),
+            reservation_reserved_usage=reservation_reserved_usage,
+        )
+    except (UnknownReservationError, DuplicateRefundError, ValueError):
+        return
+    if mismatch_result is False:
+        return
+    _expect_timeout(
+        "wait_for_capacity(requests=1, timeout=0)",
+        lambda: mismatch_backend.wait_for_capacity(
+            frozen_usage({"requests": 1}),
+            timeout=_TRY_ACQUIRE_TIMEOUT_SECONDS,
+        ),
+        "marker-authority backends must fail closed for "
+        f"reservation metadata mismatch ({mismatch_field})",
+    )
+
+
 def _check_sync_durable_refund_dedup(
     builder: SyncRateLimiterBackendBuilderInterface,
 ) -> None:
@@ -2592,7 +2722,7 @@ def _check_sync_durable_refund_dedup(
         _run_sync_step(
             "supports_durable_refund_dedup()",
             backend.supports_durable_refund_dedup,
-            deadline=_BUILDER_DEADLINE_SECONDS,
+            deadline=_timing().builder_deadline_seconds,
         ),
         "supports_durable_refund_dedup",
     ):
@@ -2751,42 +2881,22 @@ def _check_sync_marker_authority(
             "marker-authority backends must not credit duplicate refunds twice",
         )
 
-    mismatch_cfg = _config("sync-marker-mismatch", limit=2.0)
-    mismatch_backend = _build_sync_backend(
+    _check_sync_marker_metadata_mismatch(
         builder,
-        mismatch_cfg,
-        label="build(sync-marker-mismatch)",
+        "model_family",
+        reservation_model_family=_family("forged-marker-family"),
     )
-    mismatch_reservation_id = f"conformance-{uuid.uuid4().hex}"
-    mismatch_reserved_usage = frozen_usage({"requests": 2})
-    _sync_backend_step(
-        "wait_for_capacity(requests=2, reservation_id=...)",
-        lambda: mismatch_backend.wait_for_capacity(
-            mismatch_reserved_usage,
-            reservation_id=mismatch_reservation_id,
-            reservation_lifetime_seconds=_RESERVATION_LIFETIME_SECONDS,
+    _check_sync_marker_metadata_mismatch(
+        builder,
+        "bucket_ids",
+        reservation_bucket_ids=frozenset(
+            {_REQUESTS_BUCKET_ID, ("forged-bucket", _SHORT_WINDOW_SECONDS)}
         ),
     )
-    try:
-        mismatch_result = _sync_refund_for_buckets(
-            "refund_capacity_for_buckets(metadata-mismatch)",
-            mismatch_backend,
-            mismatch_reserved_usage,
-            frozen_usage({"requests": 1}),
-            reservation_id=mismatch_reservation_id,
-            reservation_model_family=_family("forged-marker-family"),
-        )
-    except (UnknownReservationError, DuplicateRefundError, ValueError):
-        return
-    if mismatch_result is False:
-        return
-    _expect_timeout(
-        "wait_for_capacity(requests=1, timeout=0)",
-        lambda: mismatch_backend.wait_for_capacity(
-            frozen_usage({"requests": 1}),
-            timeout=_TRY_ACQUIRE_TIMEOUT_SECONDS,
-        ),
-        "marker-authority backends must fail closed for reservation metadata mismatch",
+    _check_sync_marker_metadata_mismatch(
+        builder,
+        "reserved_usage",
+        reservation_reserved_usage=frozen_usage({"requests": 1}),
     )
 
 
@@ -2798,13 +2908,20 @@ def _check_sync_public_reservation_round_trip(
     full_usage = frozen_usage({"requests": 2.0, "tokens": 2.0})
     zero_usage = frozen_usage({"requests": 0.0, "tokens": 0.0})
     bucket_ids = frozenset({_REQUESTS_BUCKET_ID, _TOKENS_BUCKET_ID})
-    limiter = SyncRateLimiter(cfg, backend=builder)
+    limiter = cast(
+        "SyncRateLimiter",
+        _run_sync_step(
+            "SyncRateLimiter construction",
+            lambda: SyncRateLimiter(cfg, backend=builder),
+            deadline=_timing().builder_deadline_seconds,
+        ),
+    )
     try:
         reservation = _check_public_reservation_fields(
             _run_sync_step(
                 "SyncRateLimiter.acquire_capacity(public reservation)",
                 lambda: limiter.acquire_capacity(usage, _PUBLIC_MODEL_NAME),
-                deadline=_OPERATION_DEADLINE_SECONDS,
+                deadline=_timing().operation_deadline_seconds,
             ),
             expected_usage=usage,
             expected_model_family=cfg.get_model_family(),
@@ -2814,7 +2931,7 @@ def _check_sync_public_reservation_round_trip(
         _run_sync_step(
             "SyncRateLimiter.refund_capacity(public reservation)",
             lambda: limiter.refund_capacity(zero_usage, reservation),
-            deadline=_OPERATION_DEADLINE_SECONDS,
+            deadline=_timing().operation_deadline_seconds,
         )
 
         restored = _check_public_reservation_fields(
@@ -2825,7 +2942,7 @@ def _check_sync_public_reservation_round_trip(
                     _PUBLIC_MODEL_NAME,
                     timeout=_TRY_ACQUIRE_TIMEOUT_SECONDS,
                 ),
-                deadline=_OPERATION_DEADLINE_SECONDS,
+                deadline=_timing().operation_deadline_seconds,
             ),
             expected_usage=full_usage,
             expected_model_family=cfg.get_model_family(),
@@ -2835,7 +2952,7 @@ def _check_sync_public_reservation_round_trip(
         _run_sync_step(
             "SyncRateLimiter.refund_capacity(restored reservation)",
             lambda: limiter.refund_capacity(zero_usage, restored),
-            deadline=_OPERATION_DEADLINE_SECONDS,
+            deadline=_timing().operation_deadline_seconds,
         )
 
         mutated = restored.model_copy(update={"usage": zero_usage})
@@ -2851,7 +2968,7 @@ def _check_sync_public_reservation_round_trip(
                     _PUBLIC_MODEL_NAME,
                     timeout=_TRY_ACQUIRE_TIMEOUT_SECONDS,
                 ),
-                deadline=_OPERATION_DEADLINE_SECONDS,
+                deadline=_timing().operation_deadline_seconds,
             ),
             expected_usage=full_usage,
             expected_model_family=cfg.get_model_family(),
@@ -2862,7 +2979,7 @@ def _check_sync_public_reservation_round_trip(
         _run_sync_step(
             "SyncRateLimiter.refund_capacity(mutated reservation snapshot authority)",
             lambda: limiter.refund_capacity(zero_usage, mutated_snapshot_probe),
-            deadline=_OPERATION_DEADLINE_SECONDS,
+            deadline=_timing().operation_deadline_seconds,
         )
         final_reservation = _check_public_reservation_fields(
             _run_sync_step(
@@ -2872,7 +2989,7 @@ def _check_sync_public_reservation_round_trip(
                     _PUBLIC_MODEL_NAME,
                     timeout=_TRY_ACQUIRE_TIMEOUT_SECONDS,
                 ),
-                deadline=_OPERATION_DEADLINE_SECONDS,
+                deadline=_timing().operation_deadline_seconds,
             ),
             expected_usage=full_usage,
             expected_model_family=cfg.get_model_family(),
@@ -2882,15 +2999,10 @@ def _check_sync_public_reservation_round_trip(
         _run_sync_step(
             "SyncRateLimiter.refund_capacity(final public reservation)",
             lambda: limiter.refund_capacity(zero_usage, final_reservation),
-            deadline=_OPERATION_DEADLINE_SECONDS,
+            deadline=_timing().operation_deadline_seconds,
         )
     finally:
-        with contextlib.suppress(BaseException):
-            _run_sync_step(
-                "SyncRateLimiter.close()",
-                limiter.close,
-                deadline=_OPERATION_DEADLINE_SECONDS,
-            )
+        _cleanup_sync_limiter(limiter)
 
 
 def _check_sync_acquire_refund_failed_error(
@@ -2899,9 +3011,16 @@ def _check_sync_acquire_refund_failed_error(
     refund_error = RuntimeError("fault-injection")
     interrupted_by = _SyncAcquireInterrupted("fault-injection")
     cfg = _config("sync-acquire-refund-failed", limit=2.0)
-    limiter = SyncRateLimiter(
-        cfg,
-        backend=_SyncRefundFailureBuilder(builder, refund_error),
+    limiter = cast(
+        "SyncRateLimiter",
+        _run_sync_step(
+            "SyncRateLimiter construction",
+            lambda: SyncRateLimiter(
+                cfg,
+                backend=_SyncRefundFailureBuilder(builder, refund_error),
+            ),
+            deadline=_timing().builder_deadline_seconds,
+        ),
     )
     original_finalize_pending_acquire = cast(
         "Callable[[CapacityReservation, str], None]",
@@ -2930,7 +3049,7 @@ def _check_sync_acquire_refund_failed_error(
                     frozen_usage({"requests": 1.0}),
                     _PUBLIC_MODEL_NAME,
                 ),
-                deadline=_OPERATION_DEADLINE_SECONDS,
+                deadline=_timing().operation_deadline_seconds,
                 allowed_exceptions=(AcquireRefundFailedError,),
             )
         except AcquireRefundFailedError as exc:
@@ -2942,12 +3061,7 @@ def _check_sync_acquire_refund_failed_error(
             return
         _fail("interrupted acquire cleanup must raise AcquireRefundFailedError")
     finally:
-        with contextlib.suppress(BaseException):
-            _run_sync_step(
-                "SyncRateLimiter.close()",
-                limiter.close,
-                deadline=_OPERATION_DEADLINE_SECONDS,
-            )
+        _cleanup_sync_limiter(limiter)
 
 
 def sync_conformance_test_for(

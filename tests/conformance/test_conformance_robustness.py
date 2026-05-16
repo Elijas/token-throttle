@@ -240,6 +240,49 @@ class _BadSyncCallbackPayloadBuilder:
         return None
 
 
+class _SlowPromptAsyncBuilder(MemoryBackendBuilder):
+    def __init__(self) -> None:
+        super().__init__(sleep_interval=0.01)
+        self._delayed = False
+
+    def build(
+        self,
+        cfg: PerModelConfig,
+        *,
+        callbacks=None,
+    ) -> RateLimiterBackend:
+        backend = super().build(cfg, callbacks=callbacks)
+        if "async-basic" not in cfg.get_model_family():
+            return backend
+
+        original_await_for_capacity = backend.await_for_capacity
+
+        async def await_for_capacity(
+            usage,
+            *,
+            timeout=None,
+            reservation_id=None,
+            reservation_lifetime_seconds=None,
+        ):
+            if (
+                not self._delayed
+                and dict(usage) == {"requests": 1}
+                and timeout is None
+                and reservation_id is None
+            ):
+                self._delayed = True
+                await asyncio.sleep(1.2)
+            return await original_await_for_capacity(
+                usage,
+                timeout=timeout,
+                reservation_id=reservation_id,
+                reservation_lifetime_seconds=reservation_lifetime_seconds,
+            )
+
+        backend.await_for_capacity = await_for_capacity
+        return backend
+
+
 async def test_builder_build_exception_is_normalized() -> None:
     builder = _RaisingBuildAsyncBuilder()
     with pytest.raises(
@@ -269,14 +312,15 @@ async def test_every_build_result_is_runtime_checked() -> None:
         await conformance_test_for(_SecondBuildJunkAsyncBuilder())
 
 
-async def test_async_backend_hang_is_bounded_by_operation_deadline(monkeypatch) -> None:
-    monkeypatch.setattr(conformance, "_OPERATION_DEADLINE_SECONDS", 0.05)
-
+async def test_async_backend_hang_is_bounded_by_operation_deadline() -> None:
     with pytest.raises(
         BackendConformanceError,
         match=r"await_for_capacity\(requests=1\) did not return within 0.05s",
     ):
-        await conformance_test_for(_MinimalAsyncBuilder(_HangingAsyncBackend()))
+        await conformance_test_for(
+            _MinimalAsyncBuilder(_HangingAsyncBackend()),
+            timing=ConformanceTiming(operation_deadline_seconds=0.05),
+        )
 
 
 async def test_async_callback_payload_shape_is_validated() -> None:
@@ -310,6 +354,22 @@ def test_conformance_timing_scale_env(monkeypatch) -> None:
         prompt_deadline_seconds=0.5,
         wait_budget_seconds=2.5,
     )
+
+
+async def test_conformance_timing_scale_env_extends_prompt_deadline(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("TOKEN_THROTTLE_CONFORMANCE_TIMING_SCALE", "1.0")
+
+    with pytest.raises(
+        BackendConformanceError,
+        match="await_for_capacity\\(\\) did not return promptly",
+    ):
+        await conformance_test_for(_SlowPromptAsyncBuilder())
+
+    monkeypatch.setenv("TOKEN_THROTTLE_CONFORMANCE_TIMING_SCALE", "2.0")
+
+    await conformance_test_for(_SlowPromptAsyncBuilder())
 
 
 async def test_claim_method_exception_is_normalized() -> None:
