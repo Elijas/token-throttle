@@ -66,6 +66,7 @@ _REQUESTS_BUCKET_ID = ("requests", _SHORT_WINDOW_SECONDS)
 _TOKENS_BUCKET_ID = ("tokens", _SHORT_WINDOW_SECONDS)
 _PUBLIC_MODEL_NAME = "conformance-model"
 _RETURN_TIMESTAMP_SKEW_SECONDS = 24 * 60 * 60
+_RESERVATION_TIMESTAMP_TOLERANCE_SECONDS = 1.0
 _BUCKET_ID_SIZE = 2
 _TIMING_SCALE_ENV = "TOKEN_THROTTLE_CONFORMANCE_TIMING_SCALE"
 _OMIT_MARKER_METADATA = object()
@@ -747,7 +748,17 @@ def _warn_cleanup_failure(exc: BaseException, *, target: str = "builder") -> Non
     )
 
 
-async def _cleanup_async_limiter(limiter: RateLimiter) -> None:
+def _raise_limiter_cleanup_failure(exc: BaseException) -> NoReturn:
+    raise BackendConformanceError(
+        f"limiter cleanup raised {type(exc).__name__}: {exc}"
+    ) from exc
+
+
+async def _cleanup_async_limiter(
+    limiter: RateLimiter,
+    *,
+    body_exc: BaseException | None = None,
+) -> None:
     try:
         await asyncio.wait_for(
             limiter.aclose(),
@@ -758,10 +769,16 @@ async def _cleanup_async_limiter(limiter: RateLimiter) -> None:
     except (KeyboardInterrupt, SystemExit):
         raise
     except BaseException as exc:  # noqa: BLE001 - suppress non-control cleanup failures.
+        if body_exc is None:
+            _raise_limiter_cleanup_failure(exc)
         _warn_cleanup_failure(exc, target="limiter")
 
 
-def _cleanup_sync_limiter(limiter: SyncRateLimiter) -> None:
+def _cleanup_sync_limiter(
+    limiter: SyncRateLimiter,
+    *,
+    body_exc: BaseException | None = None,
+) -> None:
     try:
         _run_sync_step(
             "SyncRateLimiter.close()",
@@ -774,6 +791,8 @@ def _cleanup_sync_limiter(limiter: SyncRateLimiter) -> None:
     except (KeyboardInterrupt, SystemExit):
         raise
     except BaseException as exc:  # noqa: BLE001 - suppress non-control cleanup failures.
+        if body_exc is None:
+            _raise_limiter_cleanup_failure(exc)
         _warn_cleanup_failure(exc, target="limiter")
 
 
@@ -785,6 +804,13 @@ class _AsyncRefundFailureBackend(RateLimiterBackend):
     ) -> None:
         self._backend = backend
         self._refund_error = refund_error
+        self.last_refund_reserved_usage: FrozenUsage | None = None
+        self.last_refund_actual_usage: FrozenUsage | None = None
+        self.last_refund_bucket_ids: frozenset[BucketId] | None = None
+        self.last_refund_reservation_id: str | None = None
+        self.last_refund_reservation_model_family: str | None = None
+        self.last_refund_reservation_bucket_ids: frozenset[BucketId] | None = None
+        self.last_refund_reservation_reserved_usage: FrozenUsage | None = None
 
     async def await_for_capacity(
         self,
@@ -832,15 +858,19 @@ class _AsyncRefundFailureBackend(RateLimiterBackend):
         reservation_bucket_ids: set[BucketId] | frozenset[BucketId] | None = None,
         reservation_reserved_usage: FrozenUsage | None = None,
     ) -> bool:
-        _ = (
-            reserved_usage,
-            actual_usage,
-            bucket_ids,
-            reservation_id,
-            reservation_model_family,
-            reservation_bucket_ids,
-            reservation_reserved_usage,
+        self.last_refund_reserved_usage = reserved_usage
+        self.last_refund_actual_usage = actual_usage
+        self.last_refund_bucket_ids = (
+            None if bucket_ids is None else frozenset(bucket_ids)
         )
+        self.last_refund_reservation_id = reservation_id
+        self.last_refund_reservation_model_family = reservation_model_family
+        self.last_refund_reservation_bucket_ids = (
+            None
+            if reservation_bucket_ids is None
+            else frozenset(reservation_bucket_ids)
+        )
+        self.last_refund_reservation_reserved_usage = reservation_reserved_usage
         raise self._refund_error
 
     def supports_durable_refund_dedup(self) -> bool:
@@ -888,6 +918,7 @@ class _AsyncRefundFailureBuilder(RateLimiterBackendBuilderInterface):
     ) -> None:
         self._builder = builder
         self._refund_error = refund_error
+        self.last_backend: _AsyncRefundFailureBackend | None = None
 
     def build(
         self,
@@ -895,10 +926,15 @@ class _AsyncRefundFailureBuilder(RateLimiterBackendBuilderInterface):
         *,
         callbacks: RateLimiterCallbacks | None = None,
     ) -> RateLimiterBackend:
-        return _AsyncRefundFailureBackend(
+        backend = _AsyncRefundFailureBackend(
             self._builder.build(cfg, callbacks=callbacks),
             self._refund_error,
         )
+        self.last_backend = backend
+        return backend
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._builder, name)
 
     async def aclose(self) -> None:
         await self._builder.aclose()
@@ -915,6 +951,13 @@ class _SyncRefundFailureBackend(SyncRateLimiterBackend):
     ) -> None:
         self._backend = backend
         self._refund_error = refund_error
+        self.last_refund_reserved_usage: FrozenUsage | None = None
+        self.last_refund_actual_usage: FrozenUsage | None = None
+        self.last_refund_bucket_ids: frozenset[BucketId] | None = None
+        self.last_refund_reservation_id: str | None = None
+        self.last_refund_reservation_model_family: str | None = None
+        self.last_refund_reservation_bucket_ids: frozenset[BucketId] | None = None
+        self.last_refund_reservation_reserved_usage: FrozenUsage | None = None
 
     def wait_for_capacity(
         self,
@@ -962,15 +1005,19 @@ class _SyncRefundFailureBackend(SyncRateLimiterBackend):
         reservation_bucket_ids: set[BucketId] | frozenset[BucketId] | None = None,
         reservation_reserved_usage: FrozenUsage | None = None,
     ) -> bool:
-        _ = (
-            reserved_usage,
-            actual_usage,
-            bucket_ids,
-            reservation_id,
-            reservation_model_family,
-            reservation_bucket_ids,
-            reservation_reserved_usage,
+        self.last_refund_reserved_usage = reserved_usage
+        self.last_refund_actual_usage = actual_usage
+        self.last_refund_bucket_ids = (
+            None if bucket_ids is None else frozenset(bucket_ids)
         )
+        self.last_refund_reservation_id = reservation_id
+        self.last_refund_reservation_model_family = reservation_model_family
+        self.last_refund_reservation_bucket_ids = (
+            None
+            if reservation_bucket_ids is None
+            else frozenset(reservation_bucket_ids)
+        )
+        self.last_refund_reservation_reserved_usage = reservation_reserved_usage
         raise self._refund_error
 
     def supports_durable_refund_dedup(self) -> bool:
@@ -1018,6 +1065,7 @@ class _SyncRefundFailureBuilder(SyncRateLimiterBackendBuilderInterface):
     ) -> None:
         self._builder = builder
         self._refund_error = refund_error
+        self.last_backend: _SyncRefundFailureBackend | None = None
 
     def build(
         self,
@@ -1025,10 +1073,15 @@ class _SyncRefundFailureBuilder(SyncRateLimiterBackendBuilderInterface):
         *,
         callbacks: SyncRateLimiterCallbacks | None = None,
     ) -> SyncRateLimiterBackend:
-        return _SyncRefundFailureBackend(
+        backend = _SyncRefundFailureBackend(
             self._builder.build(cfg, callbacks=callbacks),
             self._refund_error,
         )
+        self.last_backend = backend
+        return backend
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._builder, name)
 
     def close(self) -> None:
         self._builder.close()
@@ -1220,13 +1273,17 @@ def _expect_timeout(
     _fail(message)
 
 
-def _check_public_reservation_fields(
+def _check_public_reservation_fields(  # noqa: PLR0913
     reservation: object,
     *,
     expected_usage: FrozenUsage,
     expected_model_family: str,
     expected_model: str,
     expected_bucket_ids: frozenset[BucketId],
+    expected_limiter_instance_id: str,
+    expected_reservation_id: str | None = None,
+    acquired_after_seconds: float | None = None,
+    acquired_before_seconds: float | None = None,
 ) -> CapacityReservation:
     _check(
         type(reservation) is CapacityReservation,
@@ -1257,19 +1314,56 @@ def _check_public_reservation_fields(
         type(reservation.reservation_id) is str and bool(reservation.reservation_id),
         "CapacityReservation.reservation_id must be a non-empty str",
     )
+    if expected_reservation_id is not None:
+        _check(
+            reservation.reservation_id == expected_reservation_id,
+            "CapacityReservation.reservation_id did not match acquired reservation",
+        )
     _check(
         type(reservation.limiter_instance_id) is str
         and bool(reservation.limiter_instance_id),
         "CapacityReservation.limiter_instance_id must be a non-empty str",
     )
+    _check(
+        reservation.limiter_instance_id == expected_limiter_instance_id,
+        "CapacityReservation.limiter_instance_id did not match issuing limiter",
+    )
+    created_at_seconds = reservation.created_at_seconds
+    if type(created_at_seconds) not in {int, float}:
+        _fail("CapacityReservation.created_at_seconds must be a finite timestamp")
+    created_at = float(cast("float | int", created_at_seconds))
+    _check(
+        math.isfinite(created_at),
+        "CapacityReservation.created_at_seconds must be a finite timestamp",
+    )
+    if acquired_after_seconds is not None:
+        _check(
+            created_at
+            >= acquired_after_seconds - _RESERVATION_TIMESTAMP_TOLERANCE_SECONDS,
+            "CapacityReservation.created_at_seconds predates the acquire attempt",
+        )
+    if acquired_before_seconds is not None:
+        _check(
+            created_at
+            <= acquired_before_seconds + _RESERVATION_TIMESTAMP_TOLERANCE_SECONDS,
+            "CapacityReservation.created_at_seconds postdates the acquire attempt",
+        )
     return reservation
 
 
-def _check_acquire_refund_failed_payload(
+def _check_acquire_refund_failed_payload(  # noqa: PLR0913
     exc: BaseException,
     *,
     refund_error: RuntimeError,
     interrupted_by: BaseException,
+    expected_usage: FrozenUsage,
+    expected_model_family: str,
+    expected_model: str,
+    expected_bucket_ids: frozenset[BucketId],
+    expected_limiter_instance_id: str,
+    expected_reservation_id: str,
+    acquired_after_seconds: float,
+    acquired_before_seconds: float,
 ) -> None:
     _check(
         isinstance(exc, AcquireRefundFailedError),
@@ -1285,6 +1379,10 @@ def _check_acquire_refund_failed_payload(
         "AcquireRefundFailedError must not be an asyncio.CancelledError",
     )
     _check(
+        exc.args == (AcquireRefundFailedError._MESSAGE,),  # noqa: SLF001
+        "AcquireRefundFailedError.args must contain the stable public message",
+    )
+    _check(
         exc.refund_error is refund_error,
         "AcquireRefundFailedError.refund_error must be the backend refund failure",
     )
@@ -1297,9 +1395,215 @@ def _check_acquire_refund_failed_payload(
         "AcquireRefundFailedError.__cause__ must chain to refund_error",
     )
     _check(
-        type(exc.reservation) is CapacityReservation,
-        "AcquireRefundFailedError.reservation must be an exact CapacityReservation",
+        exc.__suppress_context__ is True,
+        "AcquireRefundFailedError must suppress implicit context when chained",
     )
+    _check_public_reservation_fields(
+        exc.reservation,
+        expected_usage=expected_usage,
+        expected_model_family=expected_model_family,
+        expected_model=expected_model,
+        expected_bucket_ids=expected_bucket_ids,
+        expected_limiter_instance_id=expected_limiter_instance_id,
+        expected_reservation_id=expected_reservation_id,
+        acquired_after_seconds=acquired_after_seconds,
+        acquired_before_seconds=acquired_before_seconds,
+    )
+
+
+def _check_refund_failure_backend_payload(
+    backend: object,
+    *,
+    expected_usage: FrozenUsage,
+    expected_actual_usage: FrozenUsage,
+    expected_model_family: str,
+    expected_bucket_ids: frozenset[BucketId],
+) -> str:
+    _check(
+        backend is not None,
+        "refund failure probe must build the fault-injection backend",
+    )
+    reservation_id = getattr(backend, "last_refund_reservation_id", None)
+    _check(
+        type(reservation_id) is str and bool(reservation_id),
+        "refund failure probe did not capture the acquired reservation id",
+    )
+    _check(
+        getattr(backend, "last_refund_reserved_usage", None) == expected_usage,
+        "refund failure probe reserved_usage did not match acquired usage",
+    )
+    _check(
+        getattr(backend, "last_refund_actual_usage", None) == expected_actual_usage,
+        "refund failure probe actual_usage did not match zero cleanup usage",
+    )
+    _check(
+        getattr(backend, "last_refund_bucket_ids", None) == expected_bucket_ids,
+        "refund failure probe bucket_ids did not match acquired buckets",
+    )
+    _check(
+        getattr(backend, "last_refund_reservation_model_family", None)
+        == expected_model_family,
+        "refund failure probe model_family did not match acquired reservation",
+    )
+    refund_reservation_bucket_ids = getattr(
+        backend,
+        "last_refund_reservation_bucket_ids",
+        None,
+    )
+    if refund_reservation_bucket_ids is not None:
+        _check(
+            refund_reservation_bucket_ids == expected_bucket_ids,
+            "refund failure probe reservation bucket_ids did not match acquired buckets",
+        )
+    refund_reservation_reserved_usage = getattr(
+        backend,
+        "last_refund_reservation_reserved_usage",
+        None,
+    )
+    if refund_reservation_reserved_usage is not None:
+        _check(
+            refund_reservation_reserved_usage == expected_usage,
+            "refund failure probe reservation usage did not match acquired usage",
+        )
+    return cast("str", reservation_id)
+
+
+async def _construct_async_public_limiter(
+    label: str,
+    cfg: PerModelConfig,
+    builder: RateLimiterBackendBuilderInterface,
+) -> RateLimiter:
+    try:
+        return cast(
+            "RateLimiter",
+            _run_sync_step(
+                label,
+                lambda: RateLimiter(cfg, backend=builder),
+                deadline=_timing().builder_deadline_seconds,
+            ),
+        )
+    except BaseException:
+        try:
+            await _cleanup_async_builder(builder)
+        except asyncio.CancelledError:
+            raise
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException as cleanup_exc:  # noqa: BLE001
+            _warn_cleanup_failure(
+                cleanup_exc,
+                target="builder after failed limiter construction",
+            )
+        raise
+
+
+def _construct_sync_public_limiter(
+    label: str,
+    cfg: PerModelConfig,
+    builder: SyncRateLimiterBackendBuilderInterface,
+) -> SyncRateLimiter:
+    try:
+        return cast(
+            "SyncRateLimiter",
+            _run_sync_step(
+                label,
+                lambda: SyncRateLimiter(cfg, backend=builder),
+                deadline=_timing().builder_deadline_seconds,
+            ),
+        )
+    except BaseException:
+        try:
+            _cleanup_sync_builder(builder)
+        except asyncio.CancelledError:
+            raise
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException as cleanup_exc:  # noqa: BLE001
+            _warn_cleanup_failure(
+                cleanup_exc,
+                target="builder after failed limiter construction",
+            )
+        raise
+
+
+async def _cleanup_pending_async_public_refunds(
+    limiter: RateLimiter,
+    reservations: list[CapacityReservation],
+    *,
+    zero_usage: FrozenUsage,
+    body_exc: BaseException | None,
+) -> None:
+    for reservation in reversed(reservations[:]):
+        try:
+
+            def call_refund(
+                reservation: CapacityReservation = reservation,
+            ) -> object:
+                return limiter.refund_capacity(
+                    zero_usage,
+                    reservation,
+                )
+
+            await _run_async_step(
+                "RateLimiter.refund_capacity(public reservation cleanup)",
+                call_refund,
+                deadline=_timing().operation_deadline_seconds,
+                expect_awaitable=True,
+            )
+            _discard_pending_public_refund(reservations, reservation)
+        except asyncio.CancelledError:
+            raise
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException as exc:
+            if body_exc is None:
+                raise
+            _warn_cleanup_failure(exc, target="public reservation refund")
+
+
+def _cleanup_pending_sync_public_refunds(
+    limiter: SyncRateLimiter,
+    reservations: list[CapacityReservation],
+    *,
+    zero_usage: FrozenUsage,
+    body_exc: BaseException | None,
+) -> None:
+    for reservation in reversed(reservations[:]):
+        try:
+
+            def call_refund(
+                reservation: CapacityReservation = reservation,
+            ) -> object:
+                limiter.refund_capacity(
+                    zero_usage,
+                    reservation,
+                )
+                return None
+
+            _run_sync_step(
+                "SyncRateLimiter.refund_capacity(public reservation cleanup)",
+                call_refund,
+                deadline=_timing().operation_deadline_seconds,
+            )
+            _discard_pending_public_refund(reservations, reservation)
+        except asyncio.CancelledError:
+            raise
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException as exc:
+            if body_exc is None:
+                raise
+            _warn_cleanup_failure(exc, target="public reservation refund")
+
+
+def _discard_pending_public_refund(
+    reservations: list[CapacityReservation],
+    reservation: CapacityReservation,
+) -> None:
+    for index, pending in enumerate(reservations):
+        if pending is reservation:
+            del reservations[index]
+            return
 
 
 async def _check_async_basic_capacity(
@@ -2216,55 +2520,76 @@ async def _check_async_public_reservation_round_trip(
     full_usage = frozen_usage({"requests": 2.0, "tokens": 2.0})
     zero_usage = frozen_usage({"requests": 0.0, "tokens": 0.0})
     bucket_ids = frozenset({_REQUESTS_BUCKET_ID, _TOKENS_BUCKET_ID})
-    limiter = cast(
-        "RateLimiter",
-        _run_sync_step(
-            "RateLimiter construction",
-            lambda: RateLimiter(cfg, backend=backend_builder),
-            deadline=_timing().builder_deadline_seconds,
-        ),
+    limiter = await _construct_async_public_limiter(
+        "RateLimiter construction",
+        cfg,
+        backend_builder,
     )
-    try:
-        reservation = _check_public_reservation_fields(
-            await _run_async_step(
-                "RateLimiter.acquire_capacity(public reservation)",
-                lambda: limiter.acquire_capacity(usage, _PUBLIC_MODEL_NAME),
-                deadline=_timing().operation_deadline_seconds,
-                expect_awaitable=True,
+    expected_limiter_instance_id = cast("str", limiter._limiter_instance_id)  # noqa: SLF001
+    pending_refunds: list[CapacityReservation] = []
+    body_exc: BaseException | None = None
+
+    async def acquire_public_reservation(
+        label: str,
+        expected_usage: FrozenUsage,
+        *,
+        acquire_timeout: float | None = None,
+    ) -> CapacityReservation:
+        started_at = time.time()
+        raw_reservation = await _run_async_step(
+            label,
+            lambda: limiter.acquire_capacity(
+                expected_usage,
+                _PUBLIC_MODEL_NAME,
+                timeout=acquire_timeout,
             ),
-            expected_usage=usage,
+            deadline=_timing().operation_deadline_seconds,
+            expect_awaitable=True,
+        )
+        finished_at = time.time()
+        if type(raw_reservation) is CapacityReservation:
+            pending_refunds.append(cast("CapacityReservation", raw_reservation))
+        return _check_public_reservation_fields(
+            raw_reservation,
+            expected_usage=expected_usage,
             expected_model_family=cfg.get_model_family(),
             expected_model=_PUBLIC_MODEL_NAME,
             expected_bucket_ids=bucket_ids,
+            expected_limiter_instance_id=expected_limiter_instance_id,
+            acquired_after_seconds=started_at,
+            acquired_before_seconds=finished_at,
         )
+
+    async def refund_public_reservation(
+        label: str,
+        reservation: CapacityReservation,
+    ) -> None:
         await _run_async_step(
-            "RateLimiter.refund_capacity(public reservation)",
+            label,
             lambda: limiter.refund_capacity(zero_usage, reservation),
             deadline=_timing().operation_deadline_seconds,
             expect_awaitable=True,
         )
+        _discard_pending_public_refund(pending_refunds, reservation)
 
-        restored = _check_public_reservation_fields(
-            await _run_async_step(
-                "RateLimiter.acquire_capacity(restored capacity)",
-                lambda: limiter.acquire_capacity(
-                    full_usage,
-                    _PUBLIC_MODEL_NAME,
-                    timeout=_TRY_ACQUIRE_TIMEOUT_SECONDS,
-                ),
-                deadline=_timing().operation_deadline_seconds,
-                expect_awaitable=True,
-            ),
-            expected_usage=full_usage,
-            expected_model_family=cfg.get_model_family(),
-            expected_model=_PUBLIC_MODEL_NAME,
-            expected_bucket_ids=bucket_ids,
+    try:
+        reservation = await acquire_public_reservation(
+            "RateLimiter.acquire_capacity(public reservation)",
+            usage,
         )
-        await _run_async_step(
+        await refund_public_reservation(
+            "RateLimiter.refund_capacity(public reservation)",
+            reservation,
+        )
+
+        restored = await acquire_public_reservation(
+            "RateLimiter.acquire_capacity(restored capacity)",
+            full_usage,
+            acquire_timeout=_TRY_ACQUIRE_TIMEOUT_SECONDS,
+        )
+        await refund_public_reservation(
             "RateLimiter.refund_capacity(restored reservation)",
-            lambda: limiter.refund_capacity(zero_usage, restored),
-            deadline=_timing().operation_deadline_seconds,
-            expect_awaitable=True,
+            restored,
         )
 
         mutated = restored.model_copy(update={"usage": zero_usage})
@@ -2272,21 +2597,10 @@ async def _check_async_public_reservation_round_trip(
             type(mutated) is CapacityReservation,
             "CapacityReservation.model_copy() must preserve exact public type",
         )
-        snapshot_probe = _check_public_reservation_fields(
-            await _run_async_step(
-                "RateLimiter.acquire_capacity(snapshot authority)",
-                lambda: limiter.acquire_capacity(
-                    full_usage,
-                    _PUBLIC_MODEL_NAME,
-                    timeout=_TRY_ACQUIRE_TIMEOUT_SECONDS,
-                ),
-                deadline=_timing().operation_deadline_seconds,
-                expect_awaitable=True,
-            ),
-            expected_usage=full_usage,
-            expected_model_family=cfg.get_model_family(),
-            expected_model=_PUBLIC_MODEL_NAME,
-            expected_bucket_ids=bucket_ids,
+        snapshot_probe = await acquire_public_reservation(
+            "RateLimiter.acquire_capacity(snapshot authority)",
+            full_usage,
+            acquire_timeout=_TRY_ACQUIRE_TIMEOUT_SECONDS,
         )
         mutated_snapshot_probe = snapshot_probe.model_copy(update={"usage": zero_usage})
         await _run_async_step(
@@ -2295,30 +2609,33 @@ async def _check_async_public_reservation_round_trip(
             deadline=_timing().operation_deadline_seconds,
             expect_awaitable=True,
         )
-        final_reservation = _check_public_reservation_fields(
-            await _run_async_step(
-                "RateLimiter.acquire_capacity(after mutated reservation refund)",
-                lambda: limiter.acquire_capacity(
-                    full_usage,
-                    _PUBLIC_MODEL_NAME,
-                    timeout=_TRY_ACQUIRE_TIMEOUT_SECONDS,
-                ),
-                deadline=_timing().operation_deadline_seconds,
-                expect_awaitable=True,
-            ),
-            expected_usage=full_usage,
-            expected_model_family=cfg.get_model_family(),
-            expected_model=_PUBLIC_MODEL_NAME,
-            expected_bucket_ids=bucket_ids,
+        _discard_pending_public_refund(pending_refunds, snapshot_probe)
+        final_reservation = await acquire_public_reservation(
+            "RateLimiter.acquire_capacity(after mutated reservation refund)",
+            full_usage,
+            acquire_timeout=_TRY_ACQUIRE_TIMEOUT_SECONDS,
         )
-        await _run_async_step(
+        await refund_public_reservation(
             "RateLimiter.refund_capacity(final public reservation)",
-            lambda: limiter.refund_capacity(zero_usage, final_reservation),
-            deadline=_timing().operation_deadline_seconds,
-            expect_awaitable=True,
+            final_reservation,
         )
+    except BaseException as exc:
+        body_exc = exc
+        raise
     finally:
-        await _cleanup_async_limiter(limiter)
+        cleanup_body_exc = body_exc
+        try:
+            await _cleanup_pending_async_public_refunds(
+                limiter,
+                pending_refunds,
+                zero_usage=zero_usage,
+                body_exc=body_exc,
+            )
+        except BaseException as exc:
+            cleanup_body_exc = exc
+            raise
+        finally:
+            await _cleanup_async_limiter(limiter, body_exc=cleanup_body_exc)
 
 
 async def _check_async_acquire_refund_failed_error(
@@ -2327,17 +2644,16 @@ async def _check_async_acquire_refund_failed_error(
     refund_error = RuntimeError("fault-injection")
     interrupted_by = asyncio.CancelledError("fault-injection")
     cfg = _config("async-acquire-refund-failed", limit=2.0)
-    limiter = cast(
-        "RateLimiter",
-        _run_sync_step(
-            "RateLimiter construction",
-            lambda: RateLimiter(
-                cfg,
-                backend=_AsyncRefundFailureBuilder(backend_builder, refund_error),
-            ),
-            deadline=_timing().builder_deadline_seconds,
-        ),
+    usage = frozen_usage({"requests": 1.0})
+    zero_usage = frozen_usage({"requests": 0.0})
+    bucket_ids = frozenset({_REQUESTS_BUCKET_ID})
+    wrapped_builder = _AsyncRefundFailureBuilder(backend_builder, refund_error)
+    limiter = await _construct_async_public_limiter(
+        "RateLimiter construction",
+        cfg,
+        wrapped_builder,
     )
+    expected_limiter_instance_id = cast("str", limiter._limiter_instance_id)  # noqa: SLF001
     original_complete_acquire_state_update = cast(
         "Callable[[Awaitable[object]], Awaitable[asyncio.CancelledError | None]]",
         limiter._complete_acquire_state_update,  # noqa: SLF001
@@ -2354,12 +2670,14 @@ async def _check_async_acquire_refund_failed_error(
     limiter._complete_acquire_state_update = (  # type: ignore[method-assign]  # noqa: SLF001
         complete_acquire_state_update_with_cancel
     )
+    body_exc: BaseException | None = None
     try:
         try:
+            started_at = time.time()
             await _run_async_step(
                 "RateLimiter.acquire_capacity(FIX-50 refund failure)",
                 lambda: limiter.acquire_capacity(
-                    frozen_usage({"requests": 1.0}),
+                    usage,
                     _PUBLIC_MODEL_NAME,
                 ),
                 deadline=_timing().operation_deadline_seconds,
@@ -2367,15 +2685,34 @@ async def _check_async_acquire_refund_failed_error(
                 allowed_exceptions=(AcquireRefundFailedError,),
             )
         except AcquireRefundFailedError as exc:
+            finished_at = time.time()
+            expected_reservation_id = _check_refund_failure_backend_payload(
+                wrapped_builder.last_backend,
+                expected_usage=usage,
+                expected_actual_usage=zero_usage,
+                expected_model_family=cfg.get_model_family(),
+                expected_bucket_ids=bucket_ids,
+            )
             _check_acquire_refund_failed_payload(
                 exc,
                 refund_error=refund_error,
                 interrupted_by=interrupted_by,
+                expected_usage=usage,
+                expected_model_family=cfg.get_model_family(),
+                expected_model=_PUBLIC_MODEL_NAME,
+                expected_bucket_ids=bucket_ids,
+                expected_limiter_instance_id=expected_limiter_instance_id,
+                expected_reservation_id=expected_reservation_id,
+                acquired_after_seconds=started_at,
+                acquired_before_seconds=finished_at,
             )
             return
         _fail("interrupted acquire cleanup must raise AcquireRefundFailedError")
+    except BaseException as exc:
+        body_exc = exc
+        raise
     finally:
-        await _cleanup_async_limiter(limiter)
+        await _cleanup_async_limiter(limiter, body_exc=body_exc)
 
 
 async def conformance_test_for(
@@ -3317,51 +3654,74 @@ def _check_sync_public_reservation_round_trip(
     full_usage = frozen_usage({"requests": 2.0, "tokens": 2.0})
     zero_usage = frozen_usage({"requests": 0.0, "tokens": 0.0})
     bucket_ids = frozenset({_REQUESTS_BUCKET_ID, _TOKENS_BUCKET_ID})
-    limiter = cast(
-        "SyncRateLimiter",
-        _run_sync_step(
-            "SyncRateLimiter construction",
-            lambda: SyncRateLimiter(cfg, backend=builder),
-            deadline=_timing().builder_deadline_seconds,
-        ),
+    limiter = _construct_sync_public_limiter(
+        "SyncRateLimiter construction",
+        cfg,
+        builder,
     )
-    try:
-        reservation = _check_public_reservation_fields(
-            _run_sync_step(
-                "SyncRateLimiter.acquire_capacity(public reservation)",
-                lambda: limiter.acquire_capacity(usage, _PUBLIC_MODEL_NAME),
-                deadline=_timing().operation_deadline_seconds,
+    expected_limiter_instance_id = cast("str", limiter._limiter_instance_id)  # noqa: SLF001
+    pending_refunds: list[CapacityReservation] = []
+    body_exc: BaseException | None = None
+
+    def acquire_public_reservation(
+        label: str,
+        expected_usage: FrozenUsage,
+        *,
+        timeout: float | None = None,
+    ) -> CapacityReservation:
+        started_at = time.time()
+        raw_reservation = _run_sync_step(
+            label,
+            lambda: limiter.acquire_capacity(
+                expected_usage,
+                _PUBLIC_MODEL_NAME,
+                timeout=timeout,
             ),
-            expected_usage=usage,
+            deadline=_timing().operation_deadline_seconds,
+        )
+        finished_at = time.time()
+        if type(raw_reservation) is CapacityReservation:
+            pending_refunds.append(cast("CapacityReservation", raw_reservation))
+        return _check_public_reservation_fields(
+            raw_reservation,
+            expected_usage=expected_usage,
             expected_model_family=cfg.get_model_family(),
             expected_model=_PUBLIC_MODEL_NAME,
             expected_bucket_ids=bucket_ids,
+            expected_limiter_instance_id=expected_limiter_instance_id,
+            acquired_after_seconds=started_at,
+            acquired_before_seconds=finished_at,
         )
+
+    def refund_public_reservation(
+        label: str,
+        reservation: CapacityReservation,
+    ) -> None:
         _run_sync_step(
-            "SyncRateLimiter.refund_capacity(public reservation)",
+            label,
             lambda: limiter.refund_capacity(zero_usage, reservation),
             deadline=_timing().operation_deadline_seconds,
         )
+        _discard_pending_public_refund(pending_refunds, reservation)
 
-        restored = _check_public_reservation_fields(
-            _run_sync_step(
-                "SyncRateLimiter.acquire_capacity(restored capacity)",
-                lambda: limiter.acquire_capacity(
-                    full_usage,
-                    _PUBLIC_MODEL_NAME,
-                    timeout=_TRY_ACQUIRE_TIMEOUT_SECONDS,
-                ),
-                deadline=_timing().operation_deadline_seconds,
-            ),
-            expected_usage=full_usage,
-            expected_model_family=cfg.get_model_family(),
-            expected_model=_PUBLIC_MODEL_NAME,
-            expected_bucket_ids=bucket_ids,
+    try:
+        reservation = acquire_public_reservation(
+            "SyncRateLimiter.acquire_capacity(public reservation)",
+            usage,
         )
-        _run_sync_step(
+        refund_public_reservation(
+            "SyncRateLimiter.refund_capacity(public reservation)",
+            reservation,
+        )
+
+        restored = acquire_public_reservation(
+            "SyncRateLimiter.acquire_capacity(restored capacity)",
+            full_usage,
+            timeout=_TRY_ACQUIRE_TIMEOUT_SECONDS,
+        )
+        refund_public_reservation(
             "SyncRateLimiter.refund_capacity(restored reservation)",
-            lambda: limiter.refund_capacity(zero_usage, restored),
-            deadline=_timing().operation_deadline_seconds,
+            restored,
         )
 
         mutated = restored.model_copy(update={"usage": zero_usage})
@@ -3369,20 +3729,10 @@ def _check_sync_public_reservation_round_trip(
             type(mutated) is CapacityReservation,
             "CapacityReservation.model_copy() must preserve exact public type",
         )
-        snapshot_probe = _check_public_reservation_fields(
-            _run_sync_step(
-                "SyncRateLimiter.acquire_capacity(snapshot authority)",
-                lambda: limiter.acquire_capacity(
-                    full_usage,
-                    _PUBLIC_MODEL_NAME,
-                    timeout=_TRY_ACQUIRE_TIMEOUT_SECONDS,
-                ),
-                deadline=_timing().operation_deadline_seconds,
-            ),
-            expected_usage=full_usage,
-            expected_model_family=cfg.get_model_family(),
-            expected_model=_PUBLIC_MODEL_NAME,
-            expected_bucket_ids=bucket_ids,
+        snapshot_probe = acquire_public_reservation(
+            "SyncRateLimiter.acquire_capacity(snapshot authority)",
+            full_usage,
+            timeout=_TRY_ACQUIRE_TIMEOUT_SECONDS,
         )
         mutated_snapshot_probe = snapshot_probe.model_copy(update={"usage": zero_usage})
         _run_sync_step(
@@ -3390,28 +3740,33 @@ def _check_sync_public_reservation_round_trip(
             lambda: limiter.refund_capacity(zero_usage, mutated_snapshot_probe),
             deadline=_timing().operation_deadline_seconds,
         )
-        final_reservation = _check_public_reservation_fields(
-            _run_sync_step(
-                "SyncRateLimiter.acquire_capacity(after mutated reservation refund)",
-                lambda: limiter.acquire_capacity(
-                    full_usage,
-                    _PUBLIC_MODEL_NAME,
-                    timeout=_TRY_ACQUIRE_TIMEOUT_SECONDS,
-                ),
-                deadline=_timing().operation_deadline_seconds,
-            ),
-            expected_usage=full_usage,
-            expected_model_family=cfg.get_model_family(),
-            expected_model=_PUBLIC_MODEL_NAME,
-            expected_bucket_ids=bucket_ids,
+        _discard_pending_public_refund(pending_refunds, snapshot_probe)
+        final_reservation = acquire_public_reservation(
+            "SyncRateLimiter.acquire_capacity(after mutated reservation refund)",
+            full_usage,
+            timeout=_TRY_ACQUIRE_TIMEOUT_SECONDS,
         )
-        _run_sync_step(
+        refund_public_reservation(
             "SyncRateLimiter.refund_capacity(final public reservation)",
-            lambda: limiter.refund_capacity(zero_usage, final_reservation),
-            deadline=_timing().operation_deadline_seconds,
+            final_reservation,
         )
+    except BaseException as exc:
+        body_exc = exc
+        raise
     finally:
-        _cleanup_sync_limiter(limiter)
+        cleanup_body_exc = body_exc
+        try:
+            _cleanup_pending_sync_public_refunds(
+                limiter,
+                pending_refunds,
+                zero_usage=zero_usage,
+                body_exc=body_exc,
+            )
+        except BaseException as exc:
+            cleanup_body_exc = exc
+            raise
+        finally:
+            _cleanup_sync_limiter(limiter, body_exc=cleanup_body_exc)
 
 
 def _check_sync_acquire_refund_failed_error(
@@ -3420,17 +3775,16 @@ def _check_sync_acquire_refund_failed_error(
     refund_error = RuntimeError("fault-injection")
     interrupted_by = _SyncAcquireInterruptedError("fault-injection")
     cfg = _config("sync-acquire-refund-failed", limit=2.0)
-    limiter = cast(
-        "SyncRateLimiter",
-        _run_sync_step(
-            "SyncRateLimiter construction",
-            lambda: SyncRateLimiter(
-                cfg,
-                backend=_SyncRefundFailureBuilder(builder, refund_error),
-            ),
-            deadline=_timing().builder_deadline_seconds,
-        ),
+    usage = frozen_usage({"requests": 1.0})
+    zero_usage = frozen_usage({"requests": 0.0})
+    bucket_ids = frozenset({_REQUESTS_BUCKET_ID})
+    wrapped_builder = _SyncRefundFailureBuilder(builder, refund_error)
+    limiter = _construct_sync_public_limiter(
+        "SyncRateLimiter construction",
+        cfg,
+        wrapped_builder,
     )
+    expected_limiter_instance_id = cast("str", limiter._limiter_instance_id)  # noqa: SLF001
     original_finalize_pending_acquire = cast(
         "Callable[[CapacityReservation, str], None]",
         limiter._finalize_pending_acquire,  # noqa: SLF001
@@ -3450,27 +3804,48 @@ def _check_sync_acquire_refund_failed_error(
     limiter._finalize_pending_acquire = (  # type: ignore[method-assign]  # noqa: SLF001
         finalize_pending_acquire_with_interruption
     )
+    body_exc: BaseException | None = None
     try:
         try:
+            started_at = time.time()
             _run_sync_step(
                 "SyncRateLimiter.acquire_capacity(FIX-50 refund failure)",
                 lambda: limiter.acquire_capacity(
-                    frozen_usage({"requests": 1.0}),
+                    usage,
                     _PUBLIC_MODEL_NAME,
                 ),
                 deadline=_timing().operation_deadline_seconds,
                 allowed_exceptions=(AcquireRefundFailedError,),
             )
         except AcquireRefundFailedError as exc:
+            finished_at = time.time()
+            expected_reservation_id = _check_refund_failure_backend_payload(
+                wrapped_builder.last_backend,
+                expected_usage=usage,
+                expected_actual_usage=zero_usage,
+                expected_model_family=cfg.get_model_family(),
+                expected_bucket_ids=bucket_ids,
+            )
             _check_acquire_refund_failed_payload(
                 exc,
                 refund_error=refund_error,
                 interrupted_by=interrupted_by,
+                expected_usage=usage,
+                expected_model_family=cfg.get_model_family(),
+                expected_model=_PUBLIC_MODEL_NAME,
+                expected_bucket_ids=bucket_ids,
+                expected_limiter_instance_id=expected_limiter_instance_id,
+                expected_reservation_id=expected_reservation_id,
+                acquired_after_seconds=started_at,
+                acquired_before_seconds=finished_at,
             )
             return
         _fail("interrupted acquire cleanup must raise AcquireRefundFailedError")
+    except BaseException as exc:
+        body_exc = exc
+        raise
     finally:
-        _cleanup_sync_limiter(limiter)
+        _cleanup_sync_limiter(limiter, body_exc=body_exc)
 
 
 def sync_conformance_test_for(
