@@ -182,6 +182,8 @@ _EXPECTED_CALLBACK_PARAMS: dict[str, frozenset[str]] = {
 
 
 def _validate_callback_signature(value: object, field_name: str) -> None:
+    if not callable(value):
+        return
     expected = _EXPECTED_CALLBACK_PARAMS[field_name]
     try:
         sig = inspect.signature(value)
@@ -800,6 +802,11 @@ def create_logging_callbacks(
         ("missing_consumption_data", missing_consumption_data),
     ):
         _validate_log_level(_val, _name)
+    wait_start_level = wait_start
+    wait_end_consumption_level = wait_end_consumption
+    capacity_consumed_level = capacity_consumed
+    capacity_refunded_level = capacity_refunded
+    missing_consumption_data_level = missing_consumption_data
 
     async def on_wait_start(
         *,
@@ -807,8 +814,9 @@ def create_logging_callbacks(
         usage: FrozenUsage,
         preconsumption_capacities: Capacities,
     ) -> None:
+        assert wait_start_level is not None  # noqa: S101
         _log(
-            wait_start,
+            wait_start_level,
             "Rate limiter wait starting",
             model_family=model_family,
             usage=usage,
@@ -823,8 +831,9 @@ def create_logging_callbacks(
         postconsumption_capacities: Capacities,
         wait_time_s: float,
     ) -> None:
+        assert wait_end_consumption_level is not None  # noqa: S101
         _log(
-            wait_end_consumption,
+            wait_end_consumption_level,
             "Rate limiter wait complete",
             model_family=model_family,
             usage=usage,
@@ -841,8 +850,9 @@ def create_logging_callbacks(
         postconsumption_capacities: Capacities,
         current_time: float,
     ) -> None:
+        assert capacity_consumed_level is not None  # noqa: S101
         _log(
-            capacity_consumed,
+            capacity_consumed_level,
             "Rate limiter capacity consumed",
             model_family=model_family,
             usage=usage,
@@ -860,8 +870,9 @@ def create_logging_callbacks(
         prerefund_capacities: Capacities,
         postrefund_capacities: Capacities,
     ) -> None:
+        assert capacity_refunded_level is not None  # noqa: S101
         _log(
-            capacity_refunded,
+            capacity_refunded_level,
             "Rate limiter capacity refunded",
             model_family=model_family,
             reserved_usage=reserved_usage,
@@ -877,8 +888,9 @@ def create_logging_callbacks(
         usage_metric: str,
         per_seconds: int,
     ) -> None:
+        assert missing_consumption_data_level is not None  # noqa: S101
         _log(
-            missing_consumption_data,
+            missing_consumption_data_level,
             "Rate limiter missing consumption data",
             model_family=model_family,
             usage_metric=usage_metric,
@@ -923,6 +935,11 @@ def create_sync_logging_callbacks(
         ("missing_consumption_data", missing_consumption_data),
     ):
         _validate_log_level(_val, _name)
+    wait_start_level = wait_start
+    wait_end_consumption_level = wait_end_consumption
+    capacity_consumed_level = capacity_consumed
+    capacity_refunded_level = capacity_refunded
+    missing_consumption_data_level = missing_consumption_data
 
     def on_wait_start(
         *,
@@ -930,8 +947,9 @@ def create_sync_logging_callbacks(
         usage: FrozenUsage,
         preconsumption_capacities: Capacities,
     ) -> None:
+        assert wait_start_level is not None  # noqa: S101
         _log(
-            wait_start,
+            wait_start_level,
             "Rate limiter wait starting",
             model_family=model_family,
             usage=usage,
@@ -946,8 +964,9 @@ def create_sync_logging_callbacks(
         postconsumption_capacities: Capacities,
         wait_time_s: float,
     ) -> None:
+        assert wait_end_consumption_level is not None  # noqa: S101
         _log(
-            wait_end_consumption,
+            wait_end_consumption_level,
             "Rate limiter wait complete",
             model_family=model_family,
             usage=usage,
@@ -964,8 +983,9 @@ def create_sync_logging_callbacks(
         postconsumption_capacities: Capacities,
         current_time: float,
     ) -> None:
+        assert capacity_consumed_level is not None  # noqa: S101
         _log(
-            capacity_consumed,
+            capacity_consumed_level,
             "Rate limiter capacity consumed",
             model_family=model_family,
             usage=usage,
@@ -983,8 +1003,9 @@ def create_sync_logging_callbacks(
         prerefund_capacities: Capacities,
         postrefund_capacities: Capacities,
     ) -> None:
+        assert capacity_refunded_level is not None  # noqa: S101
         _log(
-            capacity_refunded,
+            capacity_refunded_level,
             "Rate limiter capacity refunded",
             model_family=model_family,
             reserved_usage=reserved_usage,
@@ -1000,8 +1021,9 @@ def create_sync_logging_callbacks(
         usage_metric: str,
         per_seconds: int,
     ) -> None:
+        assert missing_consumption_data_level is not None  # noqa: S101
         _log(
-            missing_consumption_data,
+            missing_consumption_data_level,
             "Rate limiter missing consumption data",
             model_family=model_family,
             usage_metric=usage_metric,

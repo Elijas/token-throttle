@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 from copy import deepcopy as _deepcopy
-from typing import ClassVar, Self, override
+from typing import TYPE_CHECKING, Any, Self, override
 
 from pydantic import BaseModel, ConfigDict
 
-STRICT_DTO_CONFIG: ClassVar[ConfigDict] = ConfigDict(
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+    from pydantic.config import ExtraValues
+
+STRICT_DTO_CONFIG: ConfigDict = ConfigDict(
     arbitrary_types_allowed=True,
     extra="forbid",
     frozen=True,
@@ -27,7 +32,7 @@ class StrictDTO(BaseModel):
         obj: object,
         *,
         strict: bool | None = None,
-        extra: object | None = None,
+        extra: ExtraValues | None = None,
         from_attributes: bool | None = None,
         context: object | None = None,
         by_alias: bool | None = None,
@@ -51,7 +56,7 @@ class StrictDTO(BaseModel):
         json_data: str | bytes | bytearray,
         *,
         strict: bool | None = None,
-        extra: object | None = None,
+        extra: ExtraValues | None = None,
         context: object | None = None,
         by_alias: bool | None = None,
         by_name: bool | None = None,
@@ -92,6 +97,15 @@ class StrictDTO(BaseModel):
             dump[field_name] = self.__dict__[field_name]
         return dump
 
+    def _state_for_copy(self) -> dict[str, object]:
+        state = self.__getstate__()
+        if not isinstance(state, dict):  # pragma: no cover - pydantic invariant
+            raise TypeError(
+                f"{type(self).__name__}.__getstate__ returned "
+                f"{type(state).__name__}, expected dict"
+            )
+        return state
+
     def revalidate(self) -> Self:
         """Return a freshly validated copy of this exact DTO."""
         return type(self).model_validate(self._dump_for_revalidation())
@@ -99,7 +113,7 @@ class StrictDTO(BaseModel):
     def model_copy(
         self,
         *,
-        update: dict[str, object] | None = None,
+        update: Mapping[str, Any] | None = None,
         deep: bool = False,
     ) -> Self:
         dump = self._dump_for_revalidation()
@@ -115,10 +129,10 @@ class StrictDTO(BaseModel):
 
     def __copy__(self) -> Self:
         copied = type(self).__new__(type(self))
-        copied.__setstate__(self.__getstate__())
+        copied.__setstate__(self._state_for_copy())
         return copied
 
     def __deepcopy__(self, memo: dict[int, object] | None = None) -> Self:
         copied = type(self).__new__(type(self))
-        copied.__setstate__(_deepcopy(self.__getstate__(), memo=memo))
+        copied.__setstate__(_deepcopy(self._state_for_copy(), memo=memo))
         return copied

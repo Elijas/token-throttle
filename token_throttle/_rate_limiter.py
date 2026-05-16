@@ -626,6 +626,7 @@ class RateLimiter(BaseRateLimiter):
         self._backend = backend
         self._pid_check = pid_check
         self._pid = os.getpid()
+        self._loop: asyncio.AbstractEventLoop | None
         try:
             self._loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -1234,7 +1235,7 @@ class RateLimiter(BaseRateLimiter):
         self._check_public_entry()
         self._raise_if_closed()
         timeout = validate_timeout(timeout)
-        extra_usage = validate_extra_usage(extra_usage)
+        validated_extra_usage = validate_extra_usage(extra_usage)
         if "model" not in kwargs:
             raise ValueError(_missing_model_parameter_error(kwargs))
         model = kwargs["model"]
@@ -1251,7 +1252,7 @@ class RateLimiter(BaseRateLimiter):
             # extra_usage shape is still validated; both results are
             # discarded because the unlimited reservation always
             # carries empty usage by construction.
-            usage = frozendict()
+            usage: FrozenUsage = frozendict()
             if limit_config.usage_counter is not None:
                 usage = await _resolve_usage_counter_result_for_model_async(
                     limit_config.usage_counter,
@@ -1259,7 +1260,7 @@ class RateLimiter(BaseRateLimiter):
                     warn_if_sync_counter_blocks_event_loop=True,
                     **kwargs,
                 )
-            merge_extra_usage_unrestricted(usage, extra_usage)
+            merge_extra_usage_unrestricted(usage, validated_extra_usage)
             return await self._unlimited_reservation(model, limit_config)
         if limit_config.usage_counter is None:
             raise ValueError(
@@ -1281,7 +1282,7 @@ class RateLimiter(BaseRateLimiter):
                 warn_if_sync_counter_blocks_event_loop=True,
                 **kwargs,
             ),
-            extra_usage,
+            validated_extra_usage,
         )
         return await self._acquire_capacity(
             model,
@@ -1349,6 +1350,7 @@ class RateLimiter(BaseRateLimiter):
             if consumed:
                 issued_at_seconds = None
                 with contextlib.suppress(BaseException):
+                    assert backend_task is not None  # noqa: S101
                     issued_at_seconds = backend_task.result()
                 reservation = _issued_reservation(reservation, issued_at_seconds)
                 await self._begin_acquire_delivery_cleanup(reservation.reservation_id)
@@ -1941,21 +1943,25 @@ class RateLimiter(BaseRateLimiter):
                         refund_bucket_ids,
                     )
                     refund_backend_call_started = True
-                    refund_kwargs = {
-                        "bucket_ids": refund_bucket_ids,
-                        "reservation_id": rid,
-                        "reservation_model_family": reservation.model_family,
-                        "reservation_bucket_ids": reservation.bucket_ids,
-                    }
                     if has_marker_authority:
-                        refund_kwargs["reservation_reserved_usage"] = (
-                            reservation.get_usage()
+                        await backend.refund_capacity_for_buckets(
+                            reserved_usage,
+                            actual_usage,
+                            bucket_ids=refund_bucket_ids,
+                            reservation_id=rid,
+                            reservation_model_family=reservation.model_family,
+                            reservation_bucket_ids=reservation.bucket_ids,
+                            reservation_reserved_usage=reservation.get_usage(),
                         )
-                    await backend.refund_capacity_for_buckets(
-                        reserved_usage,
-                        actual_usage,
-                        **refund_kwargs,
-                    )
+                    else:
+                        await backend.refund_capacity_for_buckets(
+                            reserved_usage,
+                            actual_usage,
+                            bucket_ids=refund_bucket_ids,
+                            reservation_id=rid,
+                            reservation_model_family=reservation.model_family,
+                            reservation_bucket_ids=reservation.bucket_ids,
+                        )
                 except DuplicateRefundError:
                     await self._complete_refund_state_update(
                         self._commit_refund_state(rid, reservation.model_family)

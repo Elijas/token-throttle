@@ -43,6 +43,11 @@ tasks:
       - uv run ruff check --fix --watch
     desc: Run Ruff linter in watch mode with auto-fix
     aliases: [lw]
+  lint-types:
+    cmds:
+      - uv run mypy {{.CLI_ARGS}}
+    desc: Run mypy type checks
+    aliases: [lt]
   upgrade-dependencies:
     desc: Upgrade all project dependencies to their latest compatible versions
     cmds:

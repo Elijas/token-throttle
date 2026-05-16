@@ -1141,7 +1141,7 @@ class SyncRateLimiter:
         self._check_public_entry()
         self._raise_if_closed()
         timeout = validate_timeout(timeout)
-        extra_usage = validate_extra_usage(extra_usage)
+        validated_extra_usage = validate_extra_usage(extra_usage)
         if "model" not in kwargs:
             raise ValueError(_missing_model_parameter_error(kwargs))
         model = kwargs["model"]
@@ -1158,14 +1158,14 @@ class SyncRateLimiter:
             # extra_usage shape is still validated; both results are
             # discarded because the unlimited reservation always
             # carries empty usage by construction.
-            usage = frozendict()
+            usage: FrozenUsage = frozendict()
             if limit_config.usage_counter is not None:
                 usage = _resolve_usage_counter_result_for_model(
                     limit_config.usage_counter,
                     model_name=model,
                     **kwargs,
                 )
-            merge_extra_usage_unrestricted(usage, extra_usage)
+            merge_extra_usage_unrestricted(usage, validated_extra_usage)
             return self._unlimited_reservation(model, limit_config)
         if limit_config.usage_counter is None:
             raise ValueError(
@@ -1186,7 +1186,7 @@ class SyncRateLimiter:
                 model_name=model,
                 **kwargs,
             ),
-            extra_usage,
+            validated_extra_usage,
         )
         return self._acquire_capacity(
             model,
@@ -1679,21 +1679,25 @@ class SyncRateLimiter:
                         refund_bucket_ids,
                     )
                     refund_backend_call_started = True
-                    refund_kwargs = {
-                        "bucket_ids": refund_bucket_ids,
-                        "reservation_id": rid,
-                        "reservation_model_family": reservation.model_family,
-                        "reservation_bucket_ids": reservation.bucket_ids,
-                    }
                     if has_marker_authority:
-                        refund_kwargs["reservation_reserved_usage"] = (
-                            reservation.get_usage()
+                        backend.refund_capacity_for_buckets(
+                            reserved_usage,
+                            actual_usage,
+                            bucket_ids=refund_bucket_ids,
+                            reservation_id=rid,
+                            reservation_model_family=reservation.model_family,
+                            reservation_bucket_ids=reservation.bucket_ids,
+                            reservation_reserved_usage=reservation.get_usage(),
                         )
-                    backend.refund_capacity_for_buckets(
-                        reserved_usage,
-                        actual_usage,
-                        **refund_kwargs,
-                    )
+                    else:
+                        backend.refund_capacity_for_buckets(
+                            reserved_usage,
+                            actual_usage,
+                            bucket_ids=refund_bucket_ids,
+                            reservation_id=rid,
+                            reservation_model_family=reservation.model_family,
+                            reservation_bucket_ids=reservation.bucket_ids,
+                        )
                 except DuplicateRefundError:
                     self._commit_refund_state(rid, reservation.model_family)
                     raise

@@ -16,6 +16,17 @@ uv run pytest tests/unit -v
 uv run pytest tests/ -v --redis-url redis://localhost:6379
 ```
 
+## Type checking
+
+```bash
+uv sync --all-extras --group dev
+uv run mypy
+```
+
+The mypy gate checks the complete `token_throttle/` package with normal import
+following. Install all extras before running it because the checked package
+includes Redis, OpenAI, and tokenizer integration modules.
+
 ## CI structure
 
 CI runs six jobs (see `.github/workflows/ci.yml`):
@@ -23,6 +34,7 @@ CI runs six jobs (see `.github/workflows/ci.yml`):
 | Job | What it does | Extras installed |
 |-----|-------------|-----------------|
 | `lint` | ruff check + format on Linux / Python 3.12 | dev only |
+| `type-check` | package-wide mypy on Linux / Python 3.12 | all extras + dev |
 | `test-unit-core` | Unit tests without optional deps on Linux / Python 3.12, 3.13, 3.14 | dev only |
 | `test-unit-full` | Unit tests with all optional deps on Linux / Python 3.12, 3.13, 3.14 | all extras + dev |
 | `test-unit-platform` | Unit tests with all optional deps on macOS and Windows / Python 3.13 | all extras + dev |
@@ -31,14 +43,16 @@ CI runs six jobs (see `.github/workflows/ci.yml`):
 
 Supported Python matrix: Python 3.12, 3.13, and 3.14, matching
 `requires-python = ">=3.12"` and the package classifiers. Python 3.10 and 3.11
-are not supported or tested.
+are not supported or tested. `type-check` runs on Python 3.12 only, matching
+`[tool.mypy].python_version`.
 
 Platform matrix: Linux remains the full test and Redis integration target.
 macOS and Windows run the all-extras unit suite on Python 3.13 to catch
 platform-specific unit bugs without multiplying every Python version across
 every operating system. Redis integration tests stay Linux-only because GitHub
 Actions service containers are Linux-oriented and this project targets Redis
-behavior rather than OS-specific Redis packaging.
+behavior rather than OS-specific Redis packaging. Redis 7 (alpine) is used as
+the GitHub service container for integration and coverage jobs.
 
 ## Known constraints and assumptions
 

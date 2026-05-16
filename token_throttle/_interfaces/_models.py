@@ -5,7 +5,7 @@ from collections import defaultdict
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from enum import Enum
-from typing import ClassVar, Self
+from typing import ClassVar, Literal, Self, cast, overload
 
 from frozendict import frozendict
 from pydantic import Field, ValidationInfo, field_validator
@@ -50,6 +50,28 @@ def _default_max_length_for_field(field_name: str) -> int | None:
     if field_name == "reservation_id":
         return MAX_RESERVATION_ID_LENGTH
     return None
+
+
+@overload
+def _validate_key_segment(
+    value: object,
+    /,
+    *,
+    field_name: str,
+    allow_none: Literal[False] = False,
+    max_length: int | None = None,
+) -> str: ...
+
+
+@overload
+def _validate_key_segment(
+    value: object,
+    /,
+    *,
+    field_name: str,
+    allow_none: Literal[True],
+    max_length: int | None = None,
+) -> str | None: ...
 
 
 def _validate_key_segment(
@@ -224,7 +246,7 @@ class UsageQuotas:
         _freeze: bool = False,
     ) -> None:
         self._frozen = False
-        self._metrics: defaultdict[str, dict[int, Quota]] = defaultdict(dict)
+        self._metrics: Mapping[str, Mapping[int, Quota]] = defaultdict(dict)
         quotas = self._materialize_quotas(quotas)
         if not _allow_empty_quotas and not quotas:
             raise ValueError(
@@ -244,7 +266,7 @@ class UsageQuotas:
     @staticmethod
     def _materialize_quotas(quotas: Iterable[Quota]) -> list[Quota]:
         if isinstance(quotas, Mapping):
-            quota_iterable = quotas.values()
+            quota_iterable: Iterable[Quota] = quotas.values()
         elif isinstance(quotas, Iterable):
             quota_iterable = quotas
         else:
@@ -295,21 +317,19 @@ class UsageQuotas:
         """Add one exact ``Quota`` to this mutable quota set."""
         if self._frozen:
             raise TypeError("UsageQuotas snapshot is frozen")
+        metrics = cast("defaultdict[str, dict[int, Quota]]", self._metrics)
         if type(quota) is not Quota:
             raise ValueError(
                 f"Each quota must be a Quota instance (got {type(quota).__name__})"
             )
         quota = quota.revalidate()
-        if (
-            quota.metric in self._metrics
-            and quota.per_seconds in self._metrics[quota.metric]
-        ):
-            existing = self._metrics[quota.metric][quota.per_seconds]
+        if quota.metric in metrics and quota.per_seconds in metrics[quota.metric]:
+            existing = metrics[quota.metric][quota.per_seconds]
             raise ValueError(
                 f"Metric {quota.metric} with {quota.per_seconds} seconds already "
                 f"exists (existing limit={existing.limit}, new limit={quota.limit}).",
             )
-        self._metrics[quota.metric][quota.per_seconds] = quota
+        metrics[quota.metric][quota.per_seconds] = quota
 
     def __iter__(self) -> Iterator[Quota]:
         """Iterate over configured quotas."""
@@ -363,7 +383,7 @@ def _coerce_usage_value(
     return value
 
 
-def frozen_usage(usage: Usage) -> FrozenUsage:
+def frozen_usage(usage: object) -> FrozenUsage:
     """Convert usage to a frozendict."""
     if not isinstance(usage, Mapping):
         raise ValueError(  # noqa: TRY004
@@ -536,10 +556,9 @@ class CapacityReservation(StrictDTO):
         if value is None:
             return None
         if not isinstance(value, (set, frozenset, list, tuple)):
-            try:
-                value = tuple(value)
-            except TypeError:
+            if not isinstance(value, Iterable):
                 return value
+            value = tuple(value)
 
         normalized: set[BucketId] = set()
         for item in value:

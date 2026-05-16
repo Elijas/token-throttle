@@ -130,9 +130,10 @@ fail_under = 85
 
 [tool.mypy]
 python_version = "3.12"
-files = ["token_throttle/__init__.py"]
+# W3: the CI type gate covers the complete typed package. It requires all
+# optional extras because Redis/OpenAI/tiktoken integrations are checked too.
+files = ["token_throttle/"]
 explicit_package_bases = true
-follow_imports = "skip"
 
 
 ##############################

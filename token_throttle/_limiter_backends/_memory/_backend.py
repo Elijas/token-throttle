@@ -103,10 +103,11 @@ class MemoryBackend(RateLimiterBackend):
             _revalidate_dto(callbacks)
         self._buckets = buckets
         self._condition = asyncio.Condition()  # Lazily binds to event loop on first use (3.10+), safe before loop starts. Audited 2026-04.
-        self._sleep_interval: float = (
+        validated_sleep_interval = validate_sleep_interval(sleep_interval)
+        self._sleep_interval = (
             self.DEFAULT_SLEEP_INTERVAL
-            if sleep_interval is None
-            else validate_sleep_interval(sleep_interval)
+            if validated_sleep_interval is None
+            else validated_sleep_interval
         )
         self._callbacks = callbacks
         self._limit_config = limit_config
@@ -235,10 +236,12 @@ class MemoryBackend(RateLimiterBackend):
             cap_metric,
             per_seconds,
         ), cap_amount in preconsumption.items():
-            usage_amount = usage.get(cap_metric)
-            if usage_amount is None:
+            matching_usage_amount = usage.get(cap_metric)
+            if matching_usage_amount is None:
                 continue
-            postconsumption_dict[(cap_metric, per_seconds)] = cap_amount - usage_amount
+            postconsumption_dict[(cap_metric, per_seconds)] = (
+                cap_amount - matching_usage_amount
+            )
         postconsumption = frozendict(postconsumption_dict)
         return True, postconsumption
 
@@ -311,11 +314,11 @@ class MemoryBackend(RateLimiterBackend):
                 cap_metric,
                 per_seconds,
             ), cap_amount in preconsumption_capacities.items():
-                usage_amount = usage.get(cap_metric)
-                if usage_amount is None:
+                matching_usage_amount = usage.get(cap_metric)
+                if matching_usage_amount is None:
                     continue
                 postconsumption_dict[(cap_metric, per_seconds)] = max(
-                    cap_amount - usage_amount,
+                    cap_amount - matching_usage_amount,
                     -max_cap[(cap_metric, per_seconds)],
                 )
             postconsumption_capacities = frozendict(postconsumption_dict)
@@ -623,8 +626,8 @@ class MemoryBackend(RateLimiterBackend):
                 bucket_id = (cap_metric, int(per_seconds))
                 if bucket_id not in refund_bucket_ids:
                     continue
-                refund_amount = refund_usage.get(cap_metric)
-                if refund_amount is None:
+                matching_refund_amount = refund_usage.get(cap_metric)
+                if matching_refund_amount is None:
                     continue
                 bucket = next(
                     (
@@ -636,7 +639,7 @@ class MemoryBackend(RateLimiterBackend):
                 )
                 if bucket is None:  # pragma: no cover
                     raise ValueError(f"Bucket '{cap_metric}/{per_seconds}s' not found")
-                refund_amount = max(refund_amount, -bucket.max_capacity)
+                refund_amount = max(matching_refund_amount, -bucket.max_capacity)
                 updated_capacities_[(cap_metric, int(per_seconds))] = max(
                     -bucket.max_capacity,
                     min(

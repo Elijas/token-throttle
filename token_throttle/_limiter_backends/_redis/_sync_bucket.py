@@ -58,9 +58,9 @@ def _safe_redis_value_repr(value: object) -> str:
         digest = hashlib.sha256(value).hexdigest()[:12]
         return f"bytes(len={len(value)}, sha256={digest}, prefix={prefix!r}{suffix})"
     if isinstance(value, str):
-        prefix = value[:_MAX_REDIS_DIAGNOSTIC_BYTES]
+        str_prefix = value[:_MAX_REDIS_DIAGNOSTIC_BYTES]
         suffix = "" if len(value) <= _MAX_REDIS_DIAGNOSTIC_BYTES else "..."
-        return f"str(len={len(value)}, prefix={prefix!r}{suffix})"
+        return f"str(len={len(value)}, prefix={str_prefix!r}{suffix})"
     return f"{type(value).__name__}({value!r})"
 
 
@@ -69,7 +69,7 @@ def _validate_pipeline_results(
     *,
     context: str,
     expected_count: int,
-) -> Sequence[object]:
+) -> list[object]:
     if results is None:
         raise RedisPipelineResultError(
             f"{context}: pipeline.execute() returned None, expected "
@@ -91,7 +91,7 @@ def _validate_pipeline_results(
                 f"{context}: pipeline slot {index} returned an error response: "
                 f"{_safe_redis_value_repr(value)}"
             )
-    return results
+    return list(results)
 
 
 def _validate_redis_get_result(value: object, *, context: str) -> bytes | str | None:
@@ -116,7 +116,7 @@ def _validate_redis_get_result(value: object, *, context: str) -> bytes | str | 
     return value
 
 
-def _validate_bucket_state_result(value: object, *, context: str) -> object:
+def _validate_bucket_state_result(value: object, *, context: str) -> bytes | str | None:
     return _validate_redis_get_result(value, context=context)
 
 
@@ -187,7 +187,7 @@ def _normalize_bucket_state_pair(
     capacity: object,
     *,
     context: str,
-) -> tuple[object, object]:
+) -> tuple[bytes | str | None, bytes | str | None]:
     last_checked = _validate_bucket_state_result(
         last_checked, context=f"{context} last_checked"
     )
@@ -549,7 +549,8 @@ class SyncRedisBucket:
             and self._max_capacity_key == other._max_capacity_key
         )
 
-    __hash__ = None  # Mutable — unhashable by design (capacity/rate change at runtime). Audited 2026-04.
+    # Mutable: unhashable by design because capacity/rate can change at runtime.
+    __hash__ = None  # type: ignore[assignment]
 
     def lock(self, **kwargs) -> redis.lock.Lock:
         return redis.lock.Lock(self._redis, self._lock_key, **kwargs)
@@ -566,6 +567,7 @@ class SyncRedisBucket:
         own_pipeline = pipeline is None
         if own_pipeline:
             pipeline = self._redis.pipeline()
+        assert pipeline is not None  # noqa: S101
 
         # Order must match PIPELINE_LAST_CHECKED_OFFSET / PIPELINE_CAPACITY_OFFSET
         pipeline.get(self._last_checked_key)
@@ -627,6 +629,7 @@ class SyncRedisBucket:
             raise ValueError("execute=False requires an explicit pipeline")
         if own_pipeline:
             pipeline = self._redis.pipeline()
+        assert pipeline is not None  # noqa: S101
 
         if current_time is None:
             current_time = sync_server_time(self._redis)

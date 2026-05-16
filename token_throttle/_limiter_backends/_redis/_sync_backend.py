@@ -198,8 +198,11 @@ def _raise_lock_timeout_error() -> typing.NoReturn:
     raise redis.exceptions.LockError("Unable to acquire lock within the time specified")
 
 
-def _lock_name_hash(lock_name: str) -> str:
-    return hashlib.blake2s(lock_name.encode(), digest_size=8).hexdigest()
+def _lock_name_hash(lock_name: str | bytes | memoryview) -> str:
+    lock_name_bytes = (
+        lock_name.encode() if isinstance(lock_name, str) else bytes(lock_name)
+    )
+    return hashlib.blake2s(lock_name_bytes, digest_size=8).hexdigest()
 
 
 def _validate_positive_seconds(value: object, *, name: str) -> float:
@@ -369,7 +372,7 @@ class SyncRedisBackendBuilder(SyncRateLimiterBackendBuilderInterface):
         lock_blocking_thread_sleep_seconds: float = (
             DEFAULT_LOCK_BLOCKING_THREAD_SLEEP_SECONDS
         ),
-    ) -> float | None:
+    ) -> None:
         super().__init__()
         client_module = type(redis_client).__module__
         if client_module.startswith("redis.asyncio.") or (
@@ -437,7 +440,7 @@ class SyncRedisBackendBuilder(SyncRateLimiterBackendBuilderInterface):
         close = getattr(self._redis, "close", None)
         if callable(close):
             result = close()
-            if inspect.isawaitable(result):
+            if inspect.iscoroutine(result):
                 result.close()
 
     def build(
@@ -509,10 +512,11 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         self._refund_dedup_ttl_seconds = validate_refund_dedup_ttl_seconds(
             refund_dedup_ttl_seconds
         )
-        self._sleep_interval: float = (
+        validated_sleep_interval = validate_sleep_interval(sleep_interval)
+        self._sleep_interval = (
             self.DEFAULT_SLEEP_INTERVAL
-            if sleep_interval is None
-            else validate_sleep_interval(sleep_interval)
+            if validated_sleep_interval is None
+            else validated_sleep_interval
         )
         _warn_if_small_redis_pool(redis)
         self._lock_blocking_timeout_seconds = _validate_positive_seconds(
@@ -603,6 +607,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         )
         if claimed:
             return True
+        assert reservation_id is not None  # noqa: S101
         self._warn_refund_dedup_duplicate(reservation_id)
         return False
 
@@ -755,7 +760,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                 # without relying on lock.local.token (which is only
                 # populated AFTER the SET NX succeeds; a cancel in that
                 # window would otherwise orphan the lock for its TTL).
-                token = uuid.uuid4().hex.encode()
+                token = uuid.uuid4().hex
                 try:
                     acquired = lock.acquire(
                         sleep=self._lock_blocking_thread_sleep_seconds,
@@ -766,9 +771,11 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                     # Best-effort CAS release; only deletes the key if
                     # its value still matches our token.
                     with contextlib.suppress(Exception):
-                        lock.lua_release(
-                            keys=[lock.name], args=[token], client=self._redis
-                        )
+                        lua_release = lock.lua_release
+                        if lua_release is not None:
+                            lua_release(
+                                keys=[lock.name], args=[token], client=self._redis
+                            )
                     raise
                 if not acquired:
                     _raise_lock_timeout_error()
@@ -972,14 +979,17 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                     bucket_id=(bucket.usage_metric, int(bucket.per_seconds)),
                 )
             keys: list[str] = [acquired_marker_key]
-            args: list[object] = [acquired_marker_ttl_ms, acquired_marker_value]
+            args: list[str | bytes | int | float] = [
+                acquired_marker_ttl_ms,
+                acquired_marker_value,
+            ]
             for (usage_metric, per_seconds), amount in new_capacities.items():
-                bucket = self._find_bucket(
+                matching_bucket = self._find_bucket(
                     target_buckets,
                     usage_metric,
                     per_seconds,
                 )
-                if bucket is None:
+                if matching_bucket is None:
                     raise ValueError(
                         f"Bucket '{usage_metric}/{per_seconds}s' not found"
                     )
@@ -990,15 +1000,15 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                     normalized_amount = 0.0
                 keys.extend(
                     [
-                        bucket._last_checked_key,  # noqa: SLF001
-                        bucket._capacity_key,  # noqa: SLF001
+                        matching_bucket._last_checked_key,  # noqa: SLF001
+                        matching_bucket._capacity_key,  # noqa: SLF001
                     ]
                 )
                 args.extend(
                     [
                         current_time,
                         normalized_amount,
-                        bucket._bucket_ttl_seconds,  # noqa: SLF001
+                        matching_bucket._bucket_ttl_seconds,  # noqa: SLF001
                     ]
                 )
             try:
@@ -1038,14 +1048,14 @@ class SyncRedisBackend(SyncRateLimiterBackend):
             )
 
         for (usage_metric, per_seconds), amount in new_capacities.items():
-            bucket = self._find_bucket(
+            matching_bucket = self._find_bucket(
                 target_buckets,
                 usage_metric,
                 per_seconds,
             )
-            if bucket is None:
+            if matching_bucket is None:
                 raise ValueError(f"Bucket '{usage_metric}/{per_seconds}s' not found")
-            bucket.set_capacity(
+            matching_bucket.set_capacity(
                 amount,
                 pipeline=pipeline,
                 current_time=current_time,
@@ -1140,17 +1150,17 @@ class SyncRedisBackend(SyncRateLimiterBackend):
             bucket_id=None,
         )
         keys: list[str] = [acquired_marker_key, refund_dedup_key]
-        args: list[object] = [
+        args: list[str | bytes | int | float] = [
             acquired_marker_value,
             self._refund_dedup_ttl_seconds,
         ]
         for (usage_metric, per_seconds), amount in new_capacities.items():
-            bucket = self._find_bucket(
+            matching_bucket = self._find_bucket(
                 buckets,
                 usage_metric,
                 per_seconds,
             )
-            if bucket is None:
+            if matching_bucket is None:
                 raise ValueError(f"Bucket '{usage_metric}/{per_seconds}s' not found")
             if not math.isfinite(float(amount)):
                 raise ValueError(f"capacity must be finite (got {amount!r})")
@@ -1159,15 +1169,15 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                 normalized_amount = 0.0
             keys.extend(
                 [
-                    bucket._last_checked_key,  # noqa: SLF001
-                    bucket._capacity_key,  # noqa: SLF001
+                    matching_bucket._last_checked_key,  # noqa: SLF001
+                    matching_bucket._capacity_key,  # noqa: SLF001
                 ]
             )
             args.extend(
                 [
                     current_time,
                     normalized_amount,
-                    bucket._bucket_ttl_seconds,  # noqa: SLF001
+                    matching_bucket._bucket_ttl_seconds,  # noqa: SLF001
                 ]
             )
         try:
@@ -1388,11 +1398,11 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                     capacity_metric_name,
                     per_seconds,
                 ), capacity_amount in preconsumption_capacities.items():
-                    usage_amount = usage.get(capacity_metric_name)
-                    if usage_amount is None:
+                    matching_usage_amount = usage.get(capacity_metric_name)
+                    if matching_usage_amount is None:
                         continue
                     postconsumption_dict[(capacity_metric_name, per_seconds)] = (
-                        capacity_amount - usage_amount
+                        capacity_amount - matching_usage_amount
                     )
                 postconsumption_capacities = frozendict(postconsumption_dict)
                 consumed_monotonic = time.monotonic()
@@ -1471,7 +1481,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         *,
         reservation_id: str | None = None,
         reservation_lifetime_seconds: float | None = None,
-    ) -> None:
+    ) -> float | None:
         """
         Consume capacity unconditionally.
 
@@ -1524,11 +1534,11 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                 capacity_metric_name,
                 per_seconds,
             ), capacity_amount in preconsumption_capacities.items():
-                usage_amount = usage.get(capacity_metric_name)
-                if usage_amount is None:
+                matching_usage_amount = usage.get(capacity_metric_name)
+                if matching_usage_amount is None:
                     continue
                 postconsumption_dict[(capacity_metric_name, per_seconds)] = max(
-                    capacity_amount - usage_amount,
+                    capacity_amount - matching_usage_amount,
                     -max_cap[(capacity_metric_name, per_seconds)],
                 )
             postconsumption_capacities = frozendict(postconsumption_dict)
@@ -1845,8 +1855,8 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                 bucket_id = (capability_usage_metric, int(per_seconds))
                 if bucket_id not in refund_bucket_ids:
                     continue
-                refund_amount = refund_usage.get(capability_usage_metric)
-                if refund_amount is None:
+                matching_refund_amount = refund_usage.get(capability_usage_metric)
+                if matching_refund_amount is None:
                     continue
                 bucket = self._find_bucket(
                     buckets,
@@ -1862,7 +1872,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                 # Negative capacity is preserved so the token-bucket refill
                 # handles recovery — clamping to 0 here would erase debt
                 # from the record_usage (speedometer) path.
-                refund_amount = max(refund_amount, -bucket.max_capacity)
+                refund_amount = max(matching_refund_amount, -bucket.max_capacity)
                 updated_capacities_[(capability_usage_metric, int(per_seconds))] = max(
                     -bucket.max_capacity,
                     min(
@@ -2099,12 +2109,12 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                 self._snapshot_bucket_state(bucket)
                 bucket.clear_max_capacity_override()
             for quota in cfg.quotas:
-                bucket = self._find_bucket(
+                matching_bucket = self._find_bucket(
                     new_buckets,
                     quota.metric,
                     int(quota.per_seconds),
                 )
-                if bucket is None:  # pragma: no cover
+                if matching_bucket is None:  # pragma: no cover
                     raise ValueError(
                         f"Bucket '{quota.metric}/{quota.per_seconds}s' not found",
                     )
@@ -2119,13 +2129,13 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                 # yields the true active rate).
                 self._extend_locks(lock_stack)
                 self._snapshot_bucket_state(
-                    current_bucket if current_bucket is not None else bucket
+                    current_bucket if current_bucket is not None else matching_bucket
                 )
                 if current_bucket is not None and float(
                     current_bucket.configured_max_capacity
                 ) != float(quota.limit):
-                    bucket.clear_max_capacity_override()
-                bucket.set_configured_max_capacity(float(quota.limit))
+                    matching_bucket.clear_max_capacity_override()
+                matching_bucket.set_configured_max_capacity(float(quota.limit))
 
             self._extend_locks(lock_stack)
             self.install_reconfigured_state(
