@@ -138,6 +138,13 @@ fields `input` or `messages`. The plural `inputs` field is not an OpenAI request
 field and is rejected. Image, audio, and file inputs are unsupported; pass usage
 manually for those.
 
+Token estimates are bounded by `tiktoken`'s model encodings plus local
+best-effort heuristics for chat/message overhead, tools, functions, schemas,
+and output budgets. They have not been reconciled against live OpenAI billing
+dashboards across a request corpus; periodically compare reserved tokens with
+your actual billing and pass usage manually where local counting is not
+representative.
+
 ### Any provider (manual usage)
 
 ```python
@@ -337,6 +344,13 @@ Redis backends require Redis server 6.2 or newer and a Redis user that can run
 `GET`, `EXISTS`, `SET`, `DEL`, `EXPIRE`, `TIME`, and Lua scripting commands
 used by redis-py locks and token-throttle acquire/refund transactions.
 
+R7 validation used `fakeredis` plus local vanilla Redis 7.x. Redis 6.0/6.1 are
+outside the supported version range, and the R7 matrix did not validate
+Sentinel failover behavior, KeyDB, Dragonfly, client-side sharding, or low
+`maxmemory` / low `maxclients` configurations. KeyDB and Dragonfly may work as
+Redis-compatible servers, but they are untested and not officially supported;
+validate topology and resource limits in your environment.
+
 #### Multi-tenant deployments
 
 `key_prefix` provides namespace isolation only. It keeps one tenant's Redis
@@ -350,6 +364,7 @@ tenant on shared Redis can starve benign tenants by exhausting connections,
 memory, CPU, or Lua scheduling. For hostile-tenant scenarios, use separate
 Redis instances per tenant, or place Redis behind infrastructure that enforces
 hardware-level CPU, memory, connection, and network quotas per tenant.
+See `MIGRATION.md` for the v4 multi-tenant isolation decision.
 
 For bounded Redis deployments, prefer `redis.asyncio.BlockingConnectionPool`
 or `redis.BlockingConnectionPool` and size `max_connections` to at least
@@ -383,7 +398,9 @@ deployments:
 Exact throughput and p99 latency depend on Redis CPU, network RTT, Python
 runtime, concurrency, quota shape, and how concentrated traffic is on one
 model family. Treat 10k RPS as a workload that requires staging benchmarks with
-your real quota mix. As a starting planning table:
+your real quota mix. These numbers are based on short local runs and sizing
+estimates, not sustained-load production validation; a maintained production
+benchmark suite is deferred. As a starting planning table:
 
 | Sustained acquire/refund rate | Expected p99 driver | Operational guidance |
 | ---: | --- | --- |

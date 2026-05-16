@@ -1,3 +1,11 @@
+"""
+Local OpenAI token estimation built on tiktoken and best-effort heuristics.
+
+This module does not reconcile estimates against live OpenAI billing records.
+Operators should periodically sanity-check reserved tokens against billing,
+especially for new API shapes, tools, schemas, and model families.
+"""
+
 from __future__ import annotations
 
 import asyncio
@@ -73,6 +81,9 @@ class EncodingGetter(Protocol):
 class OpenAIUsageCounter:
     """
     Estimate OpenAI request usage for text, chat, tool, and function payloads.
+
+    Accuracy is bounded by ``tiktoken`` plus token-throttle's local heuristics;
+    live-billing reconciliation is intentionally left to operator validation.
 
     Supported chat message shapes include string/None message fields, string
     content parts such as ``{"type": "input_text", "text": "..."}``, and

@@ -32,6 +32,19 @@ Matrix: Python 3.12 and 3.13. Redis 7 (alpine) as a GitHub service container.
 
 ## Known constraints and assumptions
 
+### Redis fault-injection testing scope
+
+FIX-45 (commit `cc651dd`) verifies Redis acquire-marker reconciliation with
+deterministic fake-client tests that simulate an `EVAL` reply being lost after
+Redis has committed the Lua transaction. Those tests cover token-throttle's
+retry/reconciliation behavior without relying on network timing.
+
+R7 deliberately deferred a real TCP proxy fault-injection harness. The current
+test suite does not drop TCP ACKs after a real server commit, simulate a real
+Redis server crash mid-`EVAL`, or validate every managed-Redis failure mode.
+Correctness here relies on Redis Lua atomicity plus fake-client coverage;
+operators should validate end-to-end behavior in their own deployment.
+
 ### API validation raises `ValueError`
 
 At public API boundaries, token-throttle raises `ValueError` for bad-value
@@ -259,6 +272,12 @@ This is intentional self-healing: an override created under a previous quota con
 The Redis backend accepts a user-provided `redis.asyncio.Redis` (or `redis.Redis`) client and uses its connection pool as-is. By default, `redis-py` creates a pool with `max_connections=2**31` (effectively unlimited). In high-fanout applications (many concurrent `await_for_capacity` calls), the actual connection count may spike because each pipeline/lock acquisition can consume a connection.
 
 If you need to bound connection usage, use `BlockingConnectionPool` before passing the client to the rate limiter. Size `max_connections` to at least your expected `max_concurrent_acquires` plus headroom for Redis lock acquire/release, the `TIME` command, and pipeline reads/writes. As a starting point, use `max_connections >= max_concurrent_acquires + 10` and tune from Redis pool wait time and server connection metrics. The Redis backend emits a `RuntimeWarning` when it sees `max_connections < 10`, because that is usually too small for production traffic.
+
+The README sizing numbers come from R7 short local runs and Redis object-size
+estimates, not a maintained sustained-load production benchmark suite. Treat
+them as planning guidance only and validate throughput, p99 latency, key
+cardinality, memory, and `maxclients` pressure under the workload and Redis
+configuration you will run in production.
 
 ```python
 import redis.asyncio as aioredis

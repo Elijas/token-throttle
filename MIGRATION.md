@@ -55,6 +55,18 @@ or partial slot pinning as a workaround; use standalone Redis, Sentinel, or a
 managed single-primary Redis-compatible deployment until Cluster support is
 explicitly documented.
 
+Full Redis Cluster support is deferred because it would require coordinated
+changes to the public key shape, hash-tagged keys, per-shard Lua execution,
+Cluster-aware client handling, and cross-shard transaction semantics. If you
+need Cluster, fork and rework key hashing and multi-key Lua routing as one
+design; PRs are welcome, but partial hash-tag changes are not enough.
+
+R7 validation covered `fakeredis` plus local vanilla Redis 7.x. token-throttle
+targets vanilla Redis 6.2 or newer; Redis 6.0/6.1, Sentinel failover behavior,
+Redis Cluster, KeyDB, Dragonfly, and low `maxmemory` / low `maxclients`
+configurations were not part of that validation matrix. Treat those as
+operator-side validation before production use.
+
 ### Stricter public input validation
 
 v4.0.0 narrows several public inputs to exact, predictable shapes:
@@ -207,6 +219,13 @@ Redis backend builders and OpenAI Redis factories require a deployment-scoped
 `key_prefix`. Pick a stable prefix per deployment or tenant, for example
 `"prod-api"` or `"tenant-a"`. The same prefix must be used by every process
 that should share rate-limit state.
+
+`key_prefix` is namespace isolation only, not fairness or hostile-tenant
+resource isolation. Tenants sharing one Redis server still share CPU, memory,
+`maxclients`, Lua scheduling, eviction policy, and network capacity. Hostile
+tenants require deployment-layer isolation: use separate Redis instances per
+tenant, or put Redis behind a quota-aware proxy or infrastructure layer that
+enforces per-tenant resource limits.
 
 ## 4. Review Callback Construction
 

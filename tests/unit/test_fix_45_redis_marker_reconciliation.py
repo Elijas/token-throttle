@@ -1,3 +1,12 @@
+"""FIX-45 fake-client coverage for lost Redis EVAL replies.
+
+The tests below simulate a committed Lua transaction whose reply is lost by
+raising after the fake Redis client's ``eval`` has mutated in-memory state. R7
+deferred a real TCP proxy that drops replies/ACKs against Redis itself; the
+library relies on deterministic fake-client checks plus Redis Lua atomicity,
+with end-to-end proxy/server failure validation left to operators.
+"""
+
 from __future__ import annotations
 
 import warnings

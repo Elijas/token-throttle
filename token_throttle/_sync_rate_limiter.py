@@ -94,6 +94,10 @@ _PICKLE_ERROR = (
     "RateLimiter is not pickleable; construct in each worker process. "
     "See docs/Concurrency."
 )
+# Redis Cluster support is intentionally fail-fast. The Redis backend uses
+# non-hash-tagged multi-key Lua transactions for bucket state, acquire markers,
+# and refund tombstones; making those Cluster-safe would make key hashing part
+# of the public contract and require per-shard Lua plus cross-shard semantics.
 _REDIS_CLUSTER_UNSUPPORTED_ERROR = (
     "token-throttle does not support Redis Cluster (multi-key Lua scripts span "
     "hash slots). Use a standalone or Sentinel-managed Redis instance. See "
