@@ -94,6 +94,11 @@ _PICKLE_ERROR = (
     "RateLimiter is not pickleable; construct in each worker process. "
     "See docs/Concurrency."
 )
+_REDIS_CLUSTER_UNSUPPORTED_ERROR = (
+    "token-throttle does not support Redis Cluster (multi-key Lua scripts span "
+    "hash slots). Use a standalone or Sentinel-managed Redis instance. See "
+    "README 'Redis topology support' for details."
+)
 _SYNC_IN_ASYNC_WARNING = (
     "You're calling SyncRateLimiter from inside an event loop. This blocks the "
     "loop. Use RateLimiter instead."
@@ -114,6 +119,21 @@ def _backend_type_name(backend: object) -> str:
     if "._memory." in backend_module:
         return "memory"
     return "custom"
+
+
+def _is_redis_cluster_client(value: object) -> bool:
+    for cls in type(value).__mro__:
+        if cls.__name__ != "RedisCluster":
+            continue
+        if cls.__module__ in {"redis.cluster", "redis.asyncio.cluster"}:
+            return True
+    return False
+
+
+def _raise_if_redis_cluster_backend(backend: object) -> None:
+    redis_client = getattr(backend, "_redis", None)
+    if _is_redis_cluster_client(redis_client):
+        raise ValueError(_REDIS_CLUSTER_UNSUPPORTED_ERROR)
 
 
 def _request_id_from_value(value: object) -> str | None:
@@ -546,6 +566,7 @@ class SyncRateLimiter:
             )
         if callbacks is not None:
             _revalidate_dto(callbacks)
+        _raise_if_redis_cluster_backend(backend)
         self._max_reservation_lifetime_seconds = _resolve_backend_reservation_lifetime(
             backend,
             max_reservation_lifetime_seconds,

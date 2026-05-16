@@ -229,12 +229,40 @@ Redis builders and Redis OpenAI factories require a non-empty `key_prefix`.
 All Redis keys are scoped as `{key_prefix}:rate_limiting:...`; choose a stable
 deployment-scoped value and share it across workers that intentionally share
 quota state. Use different prefixes for unrelated deployments sharing one Redis
-DB or Redis Cluster. The prefix and user-controlled key segments cannot contain
+deployment. The prefix and user-controlled key segments cannot contain
 `:`, `{`, `}`, whitespace, or control characters.
+
+#### Redis topology support
+
+token-throttle supports standalone Redis and Sentinel-managed Redis primary
+deployments. It does not support Redis Cluster or client-side sharded Redis.
+The Redis backend uses multi-key Lua scripts for atomic acquire-marker and
+refund updates; in Redis Cluster those keys can span hash slots and fail at
+runtime. `RateLimiter` and `SyncRateLimiter` reject redis-py `RedisCluster`
+clients during construction with a `ValueError` instead of failing later during
+`EVAL`.
+
+Do not add caller-controlled Redis hash tags to key prefixes, model families,
+metrics, reservation ids, or other key segments. Public validators reject `{`
+and `}` in Redis key segments, and Cluster support is intentionally unsupported.
 
 Redis backends require Redis server 6.2 or newer and a Redis user that can run
 `GET`, `EXISTS`, `SET`, `DEL`, `EXPIRE`, `TIME`, and Lua scripting commands
 used by redis-py locks and token-throttle acquire/refund transactions.
+
+#### Multi-tenant deployments
+
+`key_prefix` provides namespace isolation only. It keeps one tenant's Redis
+keys from colliding with another tenant's keys, but it is not resource
+isolation. Tenants that share a Redis server still share Redis CPU, memory,
+`maxclients`, command scheduling, Lua script execution time, network bandwidth,
+and eviction policy.
+
+Do not rely on `key_prefix` for hostile-tenant fairness. A hostile or runaway
+tenant on shared Redis can starve benign tenants by exhausting connections,
+memory, CPU, or Lua scheduling. For hostile-tenant scenarios, use separate
+Redis instances per tenant, or place Redis behind infrastructure that enforces
+hardware-level CPU, memory, connection, and network quotas per tenant.
 
 For bounded Redis deployments, prefer `redis.asyncio.BlockingConnectionPool`
 or `redis.BlockingConnectionPool` and size `max_connections` to at least
@@ -254,7 +282,27 @@ Redis refunds also write a cross-process idempotency key:
 builders or Redis OpenAI factories. Memory backends keep only process-local
 refund dedup state and cannot safely refund reservations after a cold restart.
 
-#### Production sizing for Redis backends
+#### Performance and capacity planning
+
+R7 performance testing identified two important ceilings for 10k RPS-class
+deployments:
+
+- A single hot Redis bucket can become the throughput ceiling before 10k RPS
+  because all callers contend on the same Redis lock and Lua-scripted state.
+- The async memory backend is process-local and can also hit an in-process
+  scheduling/lock ceiling before 10k RPS; it is not a horizontal scaling
+  substitute for Redis.
+
+Exact throughput and p99 latency depend on Redis CPU, network RTT, Python
+runtime, concurrency, quota shape, and how concentrated traffic is on one
+model family. Treat 10k RPS as a workload that requires staging benchmarks with
+your real quota mix. As a starting planning table:
+
+| Sustained acquire/refund rate | Expected p99 driver | Operational guidance |
+| ---: | --- | --- |
+| 100 RPS | Redis RTT plus Python scheduling | Default Redis client pools usually work; still set timeouts and monitor waits. |
+| 1k RPS | Lock contention, Redis CPU, pool wait | Use `BlockingConnectionPool`, provision Redis CPU headroom, and benchmark p99 under peak concurrency. |
+| 10k RPS | Hot buckets, Lua scheduling, key churn | Avoid concentrating all traffic in one model family/window; use dedicated Redis capacity and load-test before production. |
 
 Redis backends create short-lived per-reservation keys in addition to bucket
 state. Size Redis from traffic rate and TTLs, not only from the number of model
@@ -294,6 +342,21 @@ dedup key after Redis object overhead and leaving operational headroom:
 
 Validate with `INFO memory`, `DBSIZE` or keyspace scans in staging because Redis
 memory per key depends on key-prefix length, allocator behavior, and value size.
+
+Sample Redis monitoring points:
+
+```text
+INFO commandstats   # eval/evalsha, set, get, del latency and call volume
+INFO clients        # connected_clients, blocked_clients, maxclients pressure
+INFO memory         # used_memory, mem_fragmentation_ratio, evicted_keys
+INFO stats          # instantaneous_ops_per_sec, rejected_connections
+LATENCY LATEST      # server-side latency spikes
+SLOWLOG GET 128     # slow Lua scripts or lock commands
+```
+
+Application-side monitoring should track acquire wait duration, timeout count,
+callback errors, `snapshot_state()["in_flight_reservations"]`, Redis pool wait
+time, and p50/p95/p99 latency for acquire and refund calls.
 
 Custom backends implement `RateLimiterBackend` or `SyncRateLimiterBackend`.
 Required operations are capacity wait/consume/refund and `set_max_capacity`.
