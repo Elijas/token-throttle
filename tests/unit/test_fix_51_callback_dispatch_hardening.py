@@ -5,9 +5,8 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import importlib
-import sys
+import logging
 import threading
-import time
 import warnings
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock
@@ -238,45 +237,49 @@ def test_timeout_wrapped_sync_callback_copies_contextvars() -> None:
     assert seen[0][1] != caller_thread_id
 
 
-@pytest.mark.skipif(
-    sys.platform != "linux",
-    reason=(
-        "FIX-51 late-exception reporter relies on Linux threading semantics; "
-        "on macOS/Windows the late ValueError escapes the wrapper rather than "
-        "being captured by the reporter thread. KNOWN UNKNOWN — see R8 "
-        "platform-matrix expansion (W4) for the discovery; library production "
-        "behavior on non-Linux is unchanged from pre-W4, the test fixture "
-        "needs a platform-portable rewrite (deterministic mock instead of real "
-        "timing-based threading)."
-    ),
-)
 def test_late_exception_after_sync_callback_timeout_is_reported(caplog) -> None:
     caplog.set_level("WARNING", logger="token_throttle")
 
+    release = threading.Event()
+    late_logged = threading.Event()
+
+    class _LateLogSignal(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            if record.name == "token_throttle" and (
+                "raised after callback_timeout elapsed ValueError: late boom"
+                in record.getMessage()
+            ):
+                late_logged.set()
+
+    handler = _LateLogSignal()
+    root_logger = logging.getLogger()
+    root_logger.addHandler(handler)
+
     def on_wait_start(**_kwargs) -> None:
-        time.sleep(0.05)
+        assert release.wait(timeout=5.0), "release event never set"
         raise ValueError("late boom")
 
-    callbacks = SyncRateLimiterCallbacks(on_wait_start=on_wait_start)
-    wrapped = with_sync_callback_timeout(callbacks, 0.01)
+    try:
+        callbacks = SyncRateLimiterCallbacks(on_wait_start=on_wait_start)
+        wrapped = with_sync_callback_timeout(callbacks, 0.01)
 
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        wrapped.on_wait_start(**WAIT_START_KWARGS)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            wrapped.on_wait_start(**WAIT_START_KWARGS)
+            release.set()
 
-        deadline = time.monotonic() + 1.0
-        while (
+            assert late_logged.wait(timeout=5.0), (
+                "late-exception log never emitted; caplog=\n" + caplog.text
+            )
+
+        assert "Rate limiter callback exceeded 0.010s timeout; skipping" in caplog.text
+        assert (
+            "raised after callback_timeout elapsed ValueError: late boom" in caplog.text
+        )
+        assert any(
             "raised after callback_timeout elapsed ValueError: late boom"
-            not in caplog.text
-        ):
-            if time.monotonic() >= deadline:
-                break
-            time.sleep(0.01)
-
-    assert "Rate limiter callback exceeded 0.010s timeout; skipping" in caplog.text
-    assert "raised after callback_timeout elapsed ValueError: late boom" in caplog.text
-    assert any(
-        "raised after callback_timeout elapsed ValueError: late boom"
-        in str(warning.message)
-        for warning in caught
-    )
+            in str(warning.message)
+            for warning in caught
+        )
+    finally:
+        root_logger.removeHandler(handler)
