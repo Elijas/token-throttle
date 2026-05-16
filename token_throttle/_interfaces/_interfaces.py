@@ -359,7 +359,7 @@ def backend_uses_default_prepare_reconfigured_backend(
 ) -> bool:
     """Return whether *backend* inherits the ABC's no-op reconfiguration hook."""
     return (
-        type(backend).prepare_reconfigured_backend
+        getattr(type(backend), "prepare_reconfigured_backend", None)
         is RateLimiterBackend.prepare_reconfigured_backend
     )
 
@@ -555,7 +555,7 @@ def sync_backend_uses_default_prepare_reconfigured_backend(
 ) -> bool:
     """Return whether *backend* inherits the ABC's no-op reconfiguration hook."""
     return (
-        type(backend).prepare_reconfigured_backend
+        getattr(type(backend), "prepare_reconfigured_backend", None)
         is SyncRateLimiterBackend.prepare_reconfigured_backend
     )
 
