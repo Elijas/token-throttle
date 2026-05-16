@@ -809,6 +809,9 @@ class RateLimiter(BaseRateLimiter):
         self._check_process_affinity()
         self._check_loop_affinity()
 
+    def _check_close_entry(self) -> None:
+        self._check_process_affinity()
+
     def _raise_if_closed(self) -> None:
         if self._closed:
             raise RuntimeError("RateLimiter is closed")
@@ -953,7 +956,7 @@ class RateLimiter(BaseRateLimiter):
         backend resources fails, the limiter is still marked closed so future
         operations fail cleanly instead of observing a permanent closing state.
         """
-        self._check_public_entry()
+        self._check_close_entry()
         interrupted = False
         try:
             async with self._acquire_guard:

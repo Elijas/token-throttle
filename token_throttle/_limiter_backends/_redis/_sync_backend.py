@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import hashlib
 import inspect
 import logging
 import math
@@ -195,6 +196,10 @@ class RedisScriptResultError(RuntimeError):
 
 def _raise_lock_timeout_error() -> typing.NoReturn:
     raise redis.exceptions.LockError("Unable to acquire lock within the time specified")
+
+
+def _lock_name_hash(lock_name: str) -> str:
+    return hashlib.blake2s(lock_name.encode(), digest_size=8).hexdigest()
 
 
 def _validate_positive_seconds(value: object, *, name: str) -> float:
@@ -825,7 +830,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                 "redis_lock_extension",
                 reservation_id=reservation_id,
                 bucket_id=None,
-                lock_name=lock.name,
+                lock_name_hash=_lock_name_hash(lock.name),
             )
 
     def _get_capacities_unsafe(

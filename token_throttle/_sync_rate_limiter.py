@@ -757,6 +757,9 @@ class SyncRateLimiter:
     def _check_public_entry(self) -> None:
         self._check_process_affinity()
 
+    def _check_close_entry(self) -> None:
+        self._check_process_affinity()
+
     def _warn_if_running_in_event_loop(self) -> None:
         try:
             asyncio.get_running_loop()
@@ -912,7 +915,7 @@ class SyncRateLimiter:
         backend resources fails, the limiter is still marked closed so future
         operations fail cleanly instead of observing a permanent closing state.
         """
-        self._check_public_entry()
+        self._check_close_entry()
         try:
             with self._acquire_guard:
                 if self._closed:

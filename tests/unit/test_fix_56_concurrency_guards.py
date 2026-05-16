@@ -66,6 +66,16 @@ def test_sync_context_manager_closes_with_close() -> None:
     assert builder.close_calls == 1
 
 
+async def test_sync_limiter_close_inside_event_loop_succeeds() -> None:
+    builder = CountingSyncMemoryBackendBuilder()
+    limiter = SyncRateLimiter(_config(), backend=builder)
+
+    limiter.close()
+
+    assert limiter._closed is True
+    assert builder.close_calls == 1
+
+
 def test_async_limiter_rejects_use_from_different_running_loop() -> None:
     async def make_limiter() -> RateLimiter:
         return RateLimiter(_config(), backend=MemoryBackendBuilder())
@@ -79,6 +89,23 @@ def test_async_limiter_rejects_use_from_different_running_loop() -> None:
         asyncio.run(use_limiter(limiter))
 
 
+def test_async_limiter_allows_aclose_from_different_running_loop() -> None:
+    builder = CountingAsyncMemoryBackendBuilder()
+
+    async def make_limiter() -> RateLimiter:
+        return RateLimiter(_config(), backend=builder)
+
+    async def close_limiter(limiter: RateLimiter) -> None:
+        await limiter.aclose()
+
+    limiter = asyncio.run(make_limiter())
+
+    asyncio.run(close_limiter(limiter))
+
+    assert limiter._closed is True
+    assert builder.close_calls == 1
+
+
 def test_async_limiter_pid_guard_rejects_changed_process() -> None:
     limiter = RateLimiter(_config(), backend=MemoryBackendBuilder())
     limiter._pid = -1
@@ -87,12 +114,36 @@ def test_async_limiter_pid_guard_rejects_changed_process() -> None:
         limiter.clear_unused_model_families(0)
 
 
+async def test_async_limiter_aclose_keeps_pid_guard() -> None:
+    builder = CountingAsyncMemoryBackendBuilder()
+    limiter = RateLimiter(_config(), backend=builder)
+    limiter._pid = -1
+
+    with pytest.raises(RuntimeError, match="process-affine"):
+        await limiter.aclose()
+
+    assert limiter._closed is False
+    assert builder.close_calls == 0
+
+
 def test_sync_limiter_pid_guard_rejects_changed_process() -> None:
     limiter = SyncRateLimiter(_config(), backend=SyncMemoryBackendBuilder())
     limiter._pid = -1
 
     with pytest.raises(RuntimeError, match="process-affine"):
         limiter.clear_unused_model_families(0)
+
+
+def test_sync_limiter_close_keeps_pid_guard() -> None:
+    builder = CountingSyncMemoryBackendBuilder()
+    limiter = SyncRateLimiter(_config(), backend=builder)
+    limiter._pid = -1
+
+    with pytest.raises(RuntimeError, match="process-affine"):
+        limiter.close()
+
+    assert limiter._closed is False
+    assert builder.close_calls == 0
 
 
 def test_pid_guard_can_be_disabled() -> None:

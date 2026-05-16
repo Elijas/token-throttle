@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 from unittest.mock import MagicMock
 
@@ -24,6 +25,29 @@ from token_throttle._limiter_backends._memory._sync_backend import (
 )
 from token_throttle._rate_limiter import RateLimiter
 from token_throttle._sync_rate_limiter import SyncRateLimiter
+
+
+class _RedisLockStack:
+    def __init__(self, locks) -> None:
+        self.locks = locks
+
+
+class _AsyncFakeRedisLock:
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.reacquire_calls = 0
+
+    async def reacquire(self) -> None:
+        self.reacquire_calls += 1
+
+
+class _SyncFakeRedisLock:
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.reacquire_calls = 0
+
+    def reacquire(self) -> None:
+        self.reacquire_calls += 1
 
 
 def _config() -> PerModelConfig:
@@ -171,3 +195,71 @@ def test_sync_redis_refund_dedup_debug_event(caplog) -> None:
     assert records
     assert records[-1].token_throttle_event["reservation_id"] == "resv-1"
     assert records[-1].token_throttle_event["bucket_id"] is None
+
+
+async def test_async_redis_lock_extension_debug_event_redacts_lock_name(
+    caplog,
+) -> None:
+    pytest.importorskip("redis")
+    from token_throttle._limiter_backends._redis._backend import (  # noqa: PLC0415
+        RedisBackend,
+    )
+
+    raw_lock_name = "tenant-secret-prefix:bucket:requests:lock"
+    expected_hash = hashlib.blake2s(raw_lock_name.encode(), digest_size=8).hexdigest()
+    lock_a = _AsyncFakeRedisLock(raw_lock_name)
+    lock_b = _AsyncFakeRedisLock(raw_lock_name)
+    stack = _RedisLockStack([lock_a, lock_b])
+
+    with caplog.at_level(logging.DEBUG, logger="token_throttle.lock"):
+        await RedisBackend._extend_locks(stack, reservation_id="resv-extend")
+
+    events = [
+        record.token_throttle_event
+        for record in caplog.records
+        if getattr(record, "token_throttle_event", {}).get("event_type")
+        == "redis_lock_extension"
+    ]
+    assert len(events) == 2
+    assert lock_a.reacquire_calls == 1
+    assert lock_b.reacquire_calls == 1
+    assert all("lock_name" not in event for event in events)
+    assert [event["lock_name_hash"] for event in events] == [
+        expected_hash,
+        expected_hash,
+    ]
+    assert len(events[-1]["lock_name_hash"]) == 16
+    assert raw_lock_name not in caplog.text
+
+
+def test_sync_redis_lock_extension_debug_event_redacts_lock_name(caplog) -> None:
+    pytest.importorskip("redis")
+    from token_throttle._limiter_backends._redis._sync_backend import (  # noqa: PLC0415
+        SyncRedisBackend,
+    )
+
+    raw_lock_name = "tenant-secret-prefix:bucket:requests:lock"
+    expected_hash = hashlib.blake2s(raw_lock_name.encode(), digest_size=8).hexdigest()
+    lock_a = _SyncFakeRedisLock(raw_lock_name)
+    lock_b = _SyncFakeRedisLock(raw_lock_name)
+    stack = _RedisLockStack([lock_a, lock_b])
+
+    with caplog.at_level(logging.DEBUG, logger="token_throttle.lock"):
+        SyncRedisBackend._extend_locks(stack, reservation_id="resv-extend")
+
+    events = [
+        record.token_throttle_event
+        for record in caplog.records
+        if getattr(record, "token_throttle_event", {}).get("event_type")
+        == "redis_lock_extension"
+    ]
+    assert len(events) == 2
+    assert lock_a.reacquire_calls == 1
+    assert lock_b.reacquire_calls == 1
+    assert all("lock_name" not in event for event in events)
+    assert [event["lock_name_hash"] for event in events] == [
+        expected_hash,
+        expected_hash,
+    ]
+    assert len(events[-1]["lock_name_hash"]) == 16
+    assert raw_lock_name not in caplog.text
