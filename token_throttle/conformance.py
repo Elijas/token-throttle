@@ -4,12 +4,17 @@ import asyncio
 import concurrent.futures
 import contextlib
 import inspect
+import math
 import time
 import uuid
 import warnings
 from typing import TYPE_CHECKING, cast
 
-from token_throttle._exceptions import BackendConformanceError
+from token_throttle._exceptions import (
+    BackendConformanceError,
+    DuplicateRefundError,
+    UnknownReservationError,
+)
 from token_throttle._interfaces._callbacks import (
     RateLimiterCallbacks,
     SyncRateLimiterCallbacks,
@@ -41,6 +46,7 @@ _FAST_LIMIT = 10.0
 _CALLBACK_LIMIT = 4.0
 _RESERVATION_LIFETIME_SECONDS = 30.0
 _REQUESTS_BUCKET_ID = ("requests", _SHORT_WINDOW_SECONDS)
+_RETURN_TIMESTAMP_SKEW_SECONDS = 24 * 60 * 60
 
 
 def _family(label: str) -> str:
@@ -222,6 +228,59 @@ def _check_bool_claim(value: object, method_name: str) -> bool:
     return cast("bool", value)
 
 
+def _validate_capacity_op_return(
+    label: str,
+    value: object,
+    *,
+    allow_timestamp: bool,
+) -> None:
+    if value is None:
+        return
+    if not allow_timestamp:
+        _fail(f"{label} must return None, got {type(value).__name__}")
+    if type(value) not in {int, float}:
+        _fail(
+            f"{label} must return None or a finite timestamp, "
+            f"got {type(value).__name__}"
+        )
+    timestamp = float(cast("float | int", value))
+    if not math.isfinite(timestamp):
+        _fail(f"{label} returned a non-finite timestamp")
+    now = time.time()
+    if timestamp > now + _RETURN_TIMESTAMP_SKEW_SECONDS:
+        _fail(f"{label} returned a timestamp more than 24h in the future")
+    if timestamp < now - _RETURN_TIMESTAMP_SKEW_SECONDS:
+        _fail(f"{label} returned a timestamp more than 24h in the past")
+
+
+def _validate_backend_step_return(label: str, value: object) -> None:
+    if label.startswith(
+        (
+            "await_for_capacity(",
+            "wait_for_capacity(",
+            "consume_capacity(",
+        )
+    ):
+        _validate_capacity_op_return(label, value, allow_timestamp=True)
+    elif label.startswith(
+        (
+            "refund_capacity(",
+            "set_max_capacity(",
+            "apply_configured_max_capacity(",
+        )
+    ):
+        _validate_capacity_op_return(label, value, allow_timestamp=False)
+
+
+def _check_sync_backend_result_not_awaitable(label: str, value: object) -> None:
+    if inspect.isawaitable(value):
+        _close_awaitable(value)
+        method_name = label.split("(", 1)[0]
+        _fail(
+            f"{method_name}() returned an awaitable; sync methods must be synchronous"
+        )
+
+
 def _check_runtime_protocols(
     backend_builder: object,
     backend: object,
@@ -286,13 +345,17 @@ async def _async_backend_step(
     awaitable_fn: Callable[[], object],
     *,
     deadline: float | None = None,
+    allowed_exceptions: tuple[type[BaseException], ...] = (),
 ) -> object:
-    return await _run_async_step(
+    result = await _run_async_step(
         label,
         awaitable_fn,
         deadline=_OPERATION_DEADLINE_SECONDS if deadline is None else deadline,
         expect_awaitable=True,
+        allowed_exceptions=allowed_exceptions,
     )
+    _validate_backend_step_return(label, result)
+    return result
 
 
 def _sync_backend_step(
@@ -300,12 +363,17 @@ def _sync_backend_step(
     callable_: Callable[[], object],
     *,
     deadline: float | None = None,
+    allowed_exceptions: tuple[type[BaseException], ...] = (),
 ) -> object:
-    return _run_sync_step(
+    result = _run_sync_step(
         label,
         callable_,
         deadline=_OPERATION_DEADLINE_SECONDS if deadline is None else deadline,
+        allowed_exceptions=allowed_exceptions,
     )
+    _check_sync_backend_result_not_awaitable(label, result)
+    _validate_backend_step_return(label, result)
+    return result
 
 
 def _check_async_claims(backend: RateLimiterBackend) -> None:
@@ -449,10 +517,9 @@ def _expect_value_error(
     message: str,
 ) -> None:
     try:
-        _run_sync_step(
+        _sync_backend_step(
             label,
             fn,
-            deadline=_OPERATION_DEADLINE_SECONDS,
             allowed_exceptions=(ValueError,),
         )
     except ValueError:
@@ -469,7 +536,7 @@ def _expect_timeout(
 ) -> None:
     start = time.monotonic()
     try:
-        _run_sync_step(
+        _sync_backend_step(
             label,
             fn,
             deadline=_WAIT_BUDGET_SECONDS,
@@ -745,6 +812,234 @@ async def _check_async_callbacks(
         _check(event in events, f"callback event {event!r} was not emitted")
 
 
+def _metric_set_configs(label: str) -> tuple[PerModelConfig, PerModelConfig]:
+    family = _family(label)
+    old_cfg = PerModelConfig(
+        model_family=family,
+        quotas=UsageQuotas(
+            [
+                Quota(
+                    metric="requests",
+                    limit=2.0,
+                    per_seconds=_SHORT_WINDOW_SECONDS,
+                ),
+                Quota(
+                    metric="tokens",
+                    limit=2.0,
+                    per_seconds=_SHORT_WINDOW_SECONDS,
+                ),
+            ]
+        ),
+    )
+    new_cfg = PerModelConfig(
+        model_family=family,
+        quotas=UsageQuotas(
+            [
+                Quota(
+                    metric="requests",
+                    limit=2.0,
+                    per_seconds=_SHORT_WINDOW_SECONDS,
+                ),
+                Quota(
+                    metric="images",
+                    limit=2.0,
+                    per_seconds=_SHORT_WINDOW_SECONDS,
+                ),
+            ]
+        ),
+    )
+    return old_cfg, new_cfg
+
+
+async def _check_async_metric_set_change(
+    builder: RateLimiterBackendBuilderInterface,
+) -> None:
+    old_cfg, new_cfg = _metric_set_configs("async-metric-set")
+    old_backend = _build_async_backend(
+        builder,
+        old_cfg,
+        label="build(async-metric-set-old)",
+    )
+    if not _check_bool_claim(
+        _run_sync_step(
+            "supports_metric_set_change()",
+            old_backend.supports_metric_set_change,
+            deadline=_BUILDER_DEADLINE_SECONDS,
+        ),
+        "supports_metric_set_change",
+    ):
+        return
+
+    await _async_backend_step(
+        "await_for_capacity(requests=2, tokens=0)",
+        lambda: old_backend.await_for_capacity(
+            frozen_usage({"requests": 2, "tokens": 0})
+        ),
+    )
+    new_backend = _build_async_backend(
+        builder,
+        new_cfg,
+        label="build(async-metric-set-new)",
+    )
+    prepared = await _async_backend_step(
+        "prepare_reconfigured_backend(async-metric-set)",
+        lambda: old_backend.prepare_reconfigured_backend(new_backend, new_cfg),
+    )
+    _check(
+        isinstance(prepared, RateLimiterBackend),
+        "prepare_reconfigured_backend() must return a RateLimiterBackend",
+    )
+    prepared_backend = cast("RateLimiterBackend", prepared)
+    await _expect_async_timeout(
+        "await_for_capacity(requests=1, images=0, timeout=0)",
+        lambda: prepared_backend.await_for_capacity(
+            frozen_usage({"requests": 1, "images": 0}),
+            timeout=_TRY_ACQUIRE_TIMEOUT_SECONDS,
+        ),
+        "prepare_reconfigured_backend() must preserve surviving bucket consumption",
+    )
+    await _async_backend_step(
+        "await_for_capacity(requests=0, images=1, timeout=0)",
+        lambda: prepared_backend.await_for_capacity(
+            frozen_usage({"requests": 0, "images": 1}),
+            timeout=_TRY_ACQUIRE_TIMEOUT_SECONDS,
+        ),
+    )
+
+
+async def _check_async_per_build_isolation(
+    builder: RateLimiterBackendBuilderInterface,
+) -> None:
+    backend_a = _build_async_backend(
+        builder,
+        _config("async-isolation-a", limit=2.0),
+        label="build(async-isolation-a)",
+    )
+    await _async_backend_step(
+        "await_for_capacity(requests=2)",
+        lambda: backend_a.await_for_capacity(frozen_usage({"requests": 2})),
+    )
+    _build_async_backend(
+        builder,
+        _config("async-isolation-b", limit=5.0),
+        label="build(async-isolation-b)",
+    )
+    await _expect_async_value_error(
+        "await_for_capacity(requests=3, timeout=0)",
+        lambda: backend_a.await_for_capacity(
+            frozen_usage({"requests": 3}),
+            timeout=_TRY_ACQUIRE_TIMEOUT_SECONDS,
+        ),
+        "building another backend must not change an existing backend's quota limits",
+    )
+    await _expect_async_timeout(
+        "await_for_capacity(requests=1, timeout=0)",
+        lambda: backend_a.await_for_capacity(
+            frozen_usage({"requests": 1}),
+            timeout=_TRY_ACQUIRE_TIMEOUT_SECONDS,
+        ),
+        "building another backend must not reset an existing backend's consumed state",
+    )
+
+
+async def _async_refund_for_buckets(  # noqa: PLR0913
+    label: str,
+    backend: RateLimiterBackend,
+    reserved_usage,
+    actual_usage,
+    *,
+    reservation_id: str,
+    reservation_model_family: str,
+    reservation_bucket_ids=frozenset({_REQUESTS_BUCKET_ID}),
+    reservation_reserved_usage=None,
+) -> object:
+    return await _async_backend_step(
+        label,
+        lambda: backend.refund_capacity_for_buckets(
+            reserved_usage,
+            actual_usage,
+            bucket_ids=frozenset({_REQUESTS_BUCKET_ID}),
+            reservation_id=reservation_id,
+            reservation_model_family=reservation_model_family,
+            reservation_bucket_ids=reservation_bucket_ids,
+            reservation_reserved_usage=(
+                reserved_usage
+                if reservation_reserved_usage is None
+                else reservation_reserved_usage
+            ),
+        ),
+        allowed_exceptions=(UnknownReservationError, DuplicateRefundError, ValueError),
+    )
+
+
+async def _check_async_no_double_refund_credit(
+    backend: RateLimiterBackend,
+    message: str,
+) -> None:
+    await _expect_async_timeout(
+        "await_for_capacity(requests=2, timeout=0)",
+        lambda: backend.await_for_capacity(
+            frozen_usage({"requests": 2}),
+            timeout=_TRY_ACQUIRE_TIMEOUT_SECONDS,
+        ),
+        message,
+    )
+
+
+async def _check_async_durable_refund_dedup(
+    builder: RateLimiterBackendBuilderInterface,
+) -> None:
+    cfg = _config("async-durable-dedup", limit=2.0)
+    backend = _build_async_backend(
+        builder,
+        cfg,
+        label="build(async-durable-dedup)",
+    )
+    if not _check_bool_claim(
+        _run_sync_step(
+            "supports_durable_refund_dedup()",
+            backend.supports_durable_refund_dedup,
+            deadline=_BUILDER_DEADLINE_SECONDS,
+        ),
+        "supports_durable_refund_dedup",
+    ):
+        return
+
+    reservation_id = f"conformance-{uuid.uuid4().hex}"
+    reserved_usage = frozen_usage({"requests": 2})
+    await _async_backend_step(
+        "await_for_capacity(requests=2, reservation_id=...)",
+        lambda: backend.await_for_capacity(
+            reserved_usage,
+            reservation_id=reservation_id,
+            reservation_lifetime_seconds=_RESERVATION_LIFETIME_SECONDS,
+        ),
+    )
+    await _async_refund_for_buckets(
+        "refund_capacity_for_buckets(durable-first)",
+        backend,
+        reserved_usage,
+        frozen_usage({"requests": 1}),
+        reservation_id=reservation_id,
+        reservation_model_family=cfg.get_model_family(),
+    )
+    try:
+        await _async_refund_for_buckets(
+            "refund_capacity_for_buckets(durable-duplicate)",
+            backend,
+            reserved_usage,
+            frozen_usage({"requests": 1}),
+            reservation_id=reservation_id,
+            reservation_model_family=cfg.get_model_family(),
+        )
+    except DuplicateRefundError:
+        return
+    await _check_async_no_double_refund_credit(
+        backend,
+        "supports_durable_refund_dedup=True must not credit duplicate refunds twice",
+    )
+
+
 async def _check_async_marker_authority(
     builder: RateLimiterBackendBuilderInterface,
 ) -> None:
@@ -791,6 +1086,116 @@ async def _check_async_marker_authority(
         "refund_capacity_for_buckets() must return True after a marker-authorized refund",
     )
 
+    unknown_cfg = _config("async-marker-unknown", limit=2.0)
+    unknown_backend = _build_async_backend(
+        builder,
+        unknown_cfg,
+        label="build(async-marker-unknown)",
+    )
+    await _async_backend_step(
+        "await_for_capacity(requests=2)",
+        lambda: unknown_backend.await_for_capacity(frozen_usage({"requests": 2})),
+    )
+    try:
+        await _async_refund_for_buckets(
+            "refund_capacity_for_buckets(unknown-reservation)",
+            unknown_backend,
+            frozen_usage({"requests": 2}),
+            frozen_usage({"requests": 1}),
+            reservation_id=f"unknown-{uuid.uuid4().hex}",
+            reservation_model_family=unknown_cfg.get_model_family(),
+        )
+    except UnknownReservationError:
+        pass
+    else:
+        await _expect_async_timeout(
+            "await_for_capacity(requests=1, timeout=0)",
+            lambda: unknown_backend.await_for_capacity(
+                frozen_usage({"requests": 1}),
+                timeout=_TRY_ACQUIRE_TIMEOUT_SECONDS,
+            ),
+            "marker-authority backends must fail closed for unknown reservations",
+        )
+
+    duplicate_cfg = _config("async-marker-duplicate", limit=2.0)
+    duplicate_backend = _build_async_backend(
+        builder,
+        duplicate_cfg,
+        label="build(async-marker-duplicate)",
+    )
+    duplicate_reservation_id = f"conformance-{uuid.uuid4().hex}"
+    duplicate_reserved_usage = frozen_usage({"requests": 2})
+    await _async_backend_step(
+        "await_for_capacity(requests=2, reservation_id=...)",
+        lambda: duplicate_backend.await_for_capacity(
+            duplicate_reserved_usage,
+            reservation_id=duplicate_reservation_id,
+            reservation_lifetime_seconds=_RESERVATION_LIFETIME_SECONDS,
+        ),
+    )
+    await _async_refund_for_buckets(
+        "refund_capacity_for_buckets(duplicate-first)",
+        duplicate_backend,
+        duplicate_reserved_usage,
+        frozen_usage({"requests": 1}),
+        reservation_id=duplicate_reservation_id,
+        reservation_model_family=duplicate_cfg.get_model_family(),
+    )
+    try:
+        await _async_refund_for_buckets(
+            "refund_capacity_for_buckets(duplicate-second)",
+            duplicate_backend,
+            duplicate_reserved_usage,
+            frozen_usage({"requests": 1}),
+            reservation_id=duplicate_reservation_id,
+            reservation_model_family=duplicate_cfg.get_model_family(),
+        )
+    except DuplicateRefundError:
+        pass
+    else:
+        await _check_async_no_double_refund_credit(
+            duplicate_backend,
+            "marker-authority backends must not credit duplicate refunds twice",
+        )
+
+    mismatch_cfg = _config("async-marker-mismatch", limit=2.0)
+    mismatch_backend = _build_async_backend(
+        builder,
+        mismatch_cfg,
+        label="build(async-marker-mismatch)",
+    )
+    mismatch_reservation_id = f"conformance-{uuid.uuid4().hex}"
+    mismatch_reserved_usage = frozen_usage({"requests": 2})
+    await _async_backend_step(
+        "await_for_capacity(requests=2, reservation_id=...)",
+        lambda: mismatch_backend.await_for_capacity(
+            mismatch_reserved_usage,
+            reservation_id=mismatch_reservation_id,
+            reservation_lifetime_seconds=_RESERVATION_LIFETIME_SECONDS,
+        ),
+    )
+    try:
+        mismatch_result = await _async_refund_for_buckets(
+            "refund_capacity_for_buckets(metadata-mismatch)",
+            mismatch_backend,
+            mismatch_reserved_usage,
+            frozen_usage({"requests": 1}),
+            reservation_id=mismatch_reservation_id,
+            reservation_model_family=_family("forged-marker-family"),
+        )
+    except (UnknownReservationError, DuplicateRefundError, ValueError):
+        return
+    if mismatch_result is False:
+        return
+    await _expect_async_timeout(
+        "await_for_capacity(requests=1, timeout=0)",
+        lambda: mismatch_backend.await_for_capacity(
+            frozen_usage({"requests": 1}),
+            timeout=_TRY_ACQUIRE_TIMEOUT_SECONDS,
+        ),
+        "marker-authority backends must fail closed for reservation metadata mismatch",
+    )
+
 
 async def conformance_test_for(
     backend_builder: RateLimiterBackendBuilderInterface,
@@ -817,6 +1222,9 @@ async def conformance_test_for(
     await _check_async_refund_and_overuse(backend_builder)
     await _check_async_consume_and_capacity_updates(backend_builder)
     await _check_async_callbacks(backend_builder)
+    await _check_async_metric_set_change(backend_builder)
+    await _check_async_per_build_isolation(backend_builder)
+    await _check_async_durable_refund_dedup(backend_builder)
     await _check_async_marker_authority(backend_builder)
 
 
@@ -1080,6 +1488,195 @@ def _check_sync_callbacks(
         _check(event in events, f"callback event {event!r} was not emitted")
 
 
+def _check_sync_metric_set_change(
+    builder: SyncRateLimiterBackendBuilderInterface,
+) -> None:
+    old_cfg, new_cfg = _metric_set_configs("sync-metric-set")
+    old_backend = _build_sync_backend(
+        builder,
+        old_cfg,
+        label="build(sync-metric-set-old)",
+    )
+    if not _check_bool_claim(
+        _run_sync_step(
+            "supports_metric_set_change()",
+            old_backend.supports_metric_set_change,
+            deadline=_BUILDER_DEADLINE_SECONDS,
+        ),
+        "supports_metric_set_change",
+    ):
+        return
+
+    _sync_backend_step(
+        "wait_for_capacity(requests=2, tokens=0)",
+        lambda: old_backend.wait_for_capacity(
+            frozen_usage({"requests": 2, "tokens": 0})
+        ),
+    )
+    new_backend = _build_sync_backend(
+        builder,
+        new_cfg,
+        label="build(sync-metric-set-new)",
+    )
+    prepared = _sync_backend_step(
+        "prepare_reconfigured_backend(sync-metric-set)",
+        lambda: old_backend.prepare_reconfigured_backend(new_backend, new_cfg),
+    )
+    _check(
+        isinstance(prepared, SyncRateLimiterBackend),
+        "prepare_reconfigured_backend() must return a SyncRateLimiterBackend",
+    )
+    prepared_backend = cast("SyncRateLimiterBackend", prepared)
+    _expect_timeout(
+        "wait_for_capacity(requests=1, images=0, timeout=0)",
+        lambda: prepared_backend.wait_for_capacity(
+            frozen_usage({"requests": 1, "images": 0}),
+            timeout=_TRY_ACQUIRE_TIMEOUT_SECONDS,
+        ),
+        "prepare_reconfigured_backend() must preserve surviving bucket consumption",
+    )
+    _sync_backend_step(
+        "wait_for_capacity(requests=0, images=1, timeout=0)",
+        lambda: prepared_backend.wait_for_capacity(
+            frozen_usage({"requests": 0, "images": 1}),
+            timeout=_TRY_ACQUIRE_TIMEOUT_SECONDS,
+        ),
+    )
+
+
+def _check_sync_per_build_isolation(
+    builder: SyncRateLimiterBackendBuilderInterface,
+) -> None:
+    backend_a = _build_sync_backend(
+        builder,
+        _config("sync-isolation-a", limit=2.0),
+        label="build(sync-isolation-a)",
+    )
+    _sync_backend_step(
+        "wait_for_capacity(requests=2)",
+        lambda: backend_a.wait_for_capacity(frozen_usage({"requests": 2})),
+    )
+    _build_sync_backend(
+        builder,
+        _config("sync-isolation-b", limit=5.0),
+        label="build(sync-isolation-b)",
+    )
+    _expect_value_error(
+        "wait_for_capacity(requests=3, timeout=0)",
+        lambda: backend_a.wait_for_capacity(
+            frozen_usage({"requests": 3}),
+            timeout=_TRY_ACQUIRE_TIMEOUT_SECONDS,
+        ),
+        "building another backend must not change an existing backend's quota limits",
+    )
+    _expect_timeout(
+        "wait_for_capacity(requests=1, timeout=0)",
+        lambda: backend_a.wait_for_capacity(
+            frozen_usage({"requests": 1}),
+            timeout=_TRY_ACQUIRE_TIMEOUT_SECONDS,
+        ),
+        "building another backend must not reset an existing backend's consumed state",
+    )
+
+
+def _sync_refund_for_buckets(  # noqa: PLR0913
+    label: str,
+    backend: SyncRateLimiterBackend,
+    reserved_usage,
+    actual_usage,
+    *,
+    reservation_id: str,
+    reservation_model_family: str,
+    reservation_bucket_ids=frozenset({_REQUESTS_BUCKET_ID}),
+    reservation_reserved_usage=None,
+) -> object:
+    return _sync_backend_step(
+        label,
+        lambda: backend.refund_capacity_for_buckets(
+            reserved_usage,
+            actual_usage,
+            bucket_ids=frozenset({_REQUESTS_BUCKET_ID}),
+            reservation_id=reservation_id,
+            reservation_model_family=reservation_model_family,
+            reservation_bucket_ids=reservation_bucket_ids,
+            reservation_reserved_usage=(
+                reserved_usage
+                if reservation_reserved_usage is None
+                else reservation_reserved_usage
+            ),
+        ),
+        allowed_exceptions=(UnknownReservationError, DuplicateRefundError, ValueError),
+    )
+
+
+def _check_sync_no_double_refund_credit(
+    backend: SyncRateLimiterBackend,
+    message: str,
+) -> None:
+    _expect_timeout(
+        "wait_for_capacity(requests=2, timeout=0)",
+        lambda: backend.wait_for_capacity(
+            frozen_usage({"requests": 2}),
+            timeout=_TRY_ACQUIRE_TIMEOUT_SECONDS,
+        ),
+        message,
+    )
+
+
+def _check_sync_durable_refund_dedup(
+    builder: SyncRateLimiterBackendBuilderInterface,
+) -> None:
+    cfg = _config("sync-durable-dedup", limit=2.0)
+    backend = _build_sync_backend(
+        builder,
+        cfg,
+        label="build(sync-durable-dedup)",
+    )
+    if not _check_bool_claim(
+        _run_sync_step(
+            "supports_durable_refund_dedup()",
+            backend.supports_durable_refund_dedup,
+            deadline=_BUILDER_DEADLINE_SECONDS,
+        ),
+        "supports_durable_refund_dedup",
+    ):
+        return
+
+    reservation_id = f"conformance-{uuid.uuid4().hex}"
+    reserved_usage = frozen_usage({"requests": 2})
+    _sync_backend_step(
+        "wait_for_capacity(requests=2, reservation_id=...)",
+        lambda: backend.wait_for_capacity(
+            reserved_usage,
+            reservation_id=reservation_id,
+            reservation_lifetime_seconds=_RESERVATION_LIFETIME_SECONDS,
+        ),
+    )
+    _sync_refund_for_buckets(
+        "refund_capacity_for_buckets(durable-first)",
+        backend,
+        reserved_usage,
+        frozen_usage({"requests": 1}),
+        reservation_id=reservation_id,
+        reservation_model_family=cfg.get_model_family(),
+    )
+    try:
+        _sync_refund_for_buckets(
+            "refund_capacity_for_buckets(durable-duplicate)",
+            backend,
+            reserved_usage,
+            frozen_usage({"requests": 1}),
+            reservation_id=reservation_id,
+            reservation_model_family=cfg.get_model_family(),
+        )
+    except DuplicateRefundError:
+        return
+    _check_sync_no_double_refund_credit(
+        backend,
+        "supports_durable_refund_dedup=True must not credit duplicate refunds twice",
+    )
+
+
 def _check_sync_marker_authority(
     builder: SyncRateLimiterBackendBuilderInterface,
 ) -> None:
@@ -1126,6 +1723,116 @@ def _check_sync_marker_authority(
         "refund_capacity_for_buckets() must return True after a marker-authorized refund",
     )
 
+    unknown_cfg = _config("sync-marker-unknown", limit=2.0)
+    unknown_backend = _build_sync_backend(
+        builder,
+        unknown_cfg,
+        label="build(sync-marker-unknown)",
+    )
+    _sync_backend_step(
+        "wait_for_capacity(requests=2)",
+        lambda: unknown_backend.wait_for_capacity(frozen_usage({"requests": 2})),
+    )
+    try:
+        _sync_refund_for_buckets(
+            "refund_capacity_for_buckets(unknown-reservation)",
+            unknown_backend,
+            frozen_usage({"requests": 2}),
+            frozen_usage({"requests": 1}),
+            reservation_id=f"unknown-{uuid.uuid4().hex}",
+            reservation_model_family=unknown_cfg.get_model_family(),
+        )
+    except UnknownReservationError:
+        pass
+    else:
+        _expect_timeout(
+            "wait_for_capacity(requests=1, timeout=0)",
+            lambda: unknown_backend.wait_for_capacity(
+                frozen_usage({"requests": 1}),
+                timeout=_TRY_ACQUIRE_TIMEOUT_SECONDS,
+            ),
+            "marker-authority backends must fail closed for unknown reservations",
+        )
+
+    duplicate_cfg = _config("sync-marker-duplicate", limit=2.0)
+    duplicate_backend = _build_sync_backend(
+        builder,
+        duplicate_cfg,
+        label="build(sync-marker-duplicate)",
+    )
+    duplicate_reservation_id = f"conformance-{uuid.uuid4().hex}"
+    duplicate_reserved_usage = frozen_usage({"requests": 2})
+    _sync_backend_step(
+        "wait_for_capacity(requests=2, reservation_id=...)",
+        lambda: duplicate_backend.wait_for_capacity(
+            duplicate_reserved_usage,
+            reservation_id=duplicate_reservation_id,
+            reservation_lifetime_seconds=_RESERVATION_LIFETIME_SECONDS,
+        ),
+    )
+    _sync_refund_for_buckets(
+        "refund_capacity_for_buckets(duplicate-first)",
+        duplicate_backend,
+        duplicate_reserved_usage,
+        frozen_usage({"requests": 1}),
+        reservation_id=duplicate_reservation_id,
+        reservation_model_family=duplicate_cfg.get_model_family(),
+    )
+    try:
+        _sync_refund_for_buckets(
+            "refund_capacity_for_buckets(duplicate-second)",
+            duplicate_backend,
+            duplicate_reserved_usage,
+            frozen_usage({"requests": 1}),
+            reservation_id=duplicate_reservation_id,
+            reservation_model_family=duplicate_cfg.get_model_family(),
+        )
+    except DuplicateRefundError:
+        pass
+    else:
+        _check_sync_no_double_refund_credit(
+            duplicate_backend,
+            "marker-authority backends must not credit duplicate refunds twice",
+        )
+
+    mismatch_cfg = _config("sync-marker-mismatch", limit=2.0)
+    mismatch_backend = _build_sync_backend(
+        builder,
+        mismatch_cfg,
+        label="build(sync-marker-mismatch)",
+    )
+    mismatch_reservation_id = f"conformance-{uuid.uuid4().hex}"
+    mismatch_reserved_usage = frozen_usage({"requests": 2})
+    _sync_backend_step(
+        "wait_for_capacity(requests=2, reservation_id=...)",
+        lambda: mismatch_backend.wait_for_capacity(
+            mismatch_reserved_usage,
+            reservation_id=mismatch_reservation_id,
+            reservation_lifetime_seconds=_RESERVATION_LIFETIME_SECONDS,
+        ),
+    )
+    try:
+        mismatch_result = _sync_refund_for_buckets(
+            "refund_capacity_for_buckets(metadata-mismatch)",
+            mismatch_backend,
+            mismatch_reserved_usage,
+            frozen_usage({"requests": 1}),
+            reservation_id=mismatch_reservation_id,
+            reservation_model_family=_family("forged-marker-family"),
+        )
+    except (UnknownReservationError, DuplicateRefundError, ValueError):
+        return
+    if mismatch_result is False:
+        return
+    _expect_timeout(
+        "wait_for_capacity(requests=1, timeout=0)",
+        lambda: mismatch_backend.wait_for_capacity(
+            frozen_usage({"requests": 1}),
+            timeout=_TRY_ACQUIRE_TIMEOUT_SECONDS,
+        ),
+        "marker-authority backends must fail closed for reservation metadata mismatch",
+    )
+
 
 def sync_conformance_test_for(
     backend_builder: SyncRateLimiterBackendBuilderInterface,
@@ -1152,6 +1859,9 @@ def sync_conformance_test_for(
     _check_sync_refund_and_overuse(backend_builder)
     _check_sync_consume_and_capacity_updates(backend_builder)
     _check_sync_callbacks(backend_builder)
+    _check_sync_metric_set_change(backend_builder)
+    _check_sync_per_build_isolation(backend_builder)
+    _check_sync_durable_refund_dedup(backend_builder)
     _check_sync_marker_authority(backend_builder)
 
 
