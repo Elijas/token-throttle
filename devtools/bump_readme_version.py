@@ -20,15 +20,15 @@ def _replace_install_lines(content: str, version: str) -> str:
 
 
 def _replace_version_badge(content: str, version: str) -> str:
+    # README uses a dynamic PyPI shield (img.shields.io/pypi/v/...) since v4;
+    # the legacy static badge is replaced when present and otherwise skipped.
     badge_pattern = re.compile(
         r"(https://img\.shields\.io/badge/v)(\d+\.\d+\.\d+)(-version\?)"
     )
-    new_content, n = badge_pattern.subn(
+    new_content, _ = badge_pattern.subn(
         rf"\g<1>{version}\g<3>",
         content,
     )
-    if n == 0:
-        raise RuntimeError("No matching version badge found in README.md")
     return new_content
 
 
