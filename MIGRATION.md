@@ -1,5 +1,17 @@
 # Migration Guide
 
+## Migrating from v4.x to v5.0.0
+
+Custom backend interfaces are now structural `Protocol` classes. Backends that
+subclass `RateLimiterBackend`, `SyncRateLimiterBackend`, or the builder
+interfaces can keep inheriting the conservative default hooks, but custom
+backends that rely on structural typing must implement the full protocol
+surface, including cleanup hooks and optional authority hooks.
+
+Run `conformance_test_for(...)` or `sync_conformance_test_for(...)` against
+third-party backend builders before upgrading. See
+[`docs/custom-backends.md`](docs/custom-backends.md) for the full contract.
+
 ## Migrating from v3.x to v4.0.0
 
 v4.0.0 is intentionally not reservation-wire-compatible with v3.x during

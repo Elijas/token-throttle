@@ -87,6 +87,12 @@ class CardinalityLimitExceededError(ValueError):
     reason = "cardinality_limit_exceeded"
 
 
+class BackendConformanceError(Exception):
+    """Raised when a backend fails the public conformance contract."""
+
+    reason = "backend_conformance_error"
+
+
 class DuplicateRefundError(ValueError):
     """Raised when a refund is duplicate, already in progress, or already acquired."""
 

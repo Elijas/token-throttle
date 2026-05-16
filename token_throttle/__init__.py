@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING
 
 from token_throttle._exceptions import (
     AcquireRefundFailedError,
+    BackendConformanceError,
     CardinalityLimitExceededError,
     DuplicateRefundError,
     UnknownReservationError,
@@ -59,6 +60,11 @@ from token_throttle._interfaces._models import (
 from token_throttle._rate_limiter import RateLimiter
 from token_throttle._sync_rate_limiter import SyncRateLimiter
 from token_throttle._validation import MAX_TOTAL_KEY_LENGTH
+from token_throttle.conformance import (
+    conformance_test_for,
+    run_conformance_test_for,
+    sync_conformance_test_for,
+)
 from token_throttle.migration import (
     ConfigMigrationIssue,
     async_cleanup_legacy_buckets,
@@ -192,6 +198,7 @@ __all__ = [
     "MAX_RESERVATION_ID_LENGTH",
     "MAX_TOTAL_KEY_LENGTH",
     "AcquireRefundFailedError",
+    "BackendConformanceError",
     "BucketId",
     "CalculatedCapacity",
     "Capacities",
@@ -240,6 +247,7 @@ __all__ = [
     "UsageQuotas",
     "async_cleanup_legacy_buckets",
     "cleanup_legacy_buckets",
+    "conformance_test_for",
     "count_chat_input_tokens",
     "create_logging_callbacks",
     "create_loguru_callbacks",
@@ -248,6 +256,8 @@ __all__ = [
     "frozen_usage",
     "get_encoding",
     "openai_model_family_getter",
+    "run_conformance_test_for",
+    "sync_conformance_test_for",
     "validate_config_for_v2_0",
 ]
 

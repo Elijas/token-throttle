@@ -129,7 +129,8 @@ class PerModelConfigGetter(Protocol):
         ...
 
 
-class RateLimiterBackendBuilderInterface(ABC):
+@runtime_checkable
+class RateLimiterBackendBuilderInterface(Protocol):
     """
     Factory interface for asynchronous per-model-family backends.
 
@@ -158,7 +159,8 @@ class RateLimiterBackendBuilderInterface(ABC):
         _ = self
 
 
-class RateLimiterBackend(ABC):
+@runtime_checkable
+class RateLimiterBackend(Protocol):
     """
     Per-model-family backend that owns a set of token buckets.
 
@@ -405,7 +407,8 @@ if TYPE_CHECKING:
     from token_throttle._interfaces._callbacks import SyncRateLimiterCallbacks
 
 
-class SyncRateLimiterBackend(ABC):
+@runtime_checkable
+class SyncRateLimiterBackend(Protocol):
     """Synchronous per-model-family backend interface."""
 
     @abstractmethod
@@ -567,7 +570,8 @@ def sync_backend_uses_default_refund_capacity_for_buckets(
     )
 
 
-class SyncRateLimiterBackendBuilderInterface(ABC):
+@runtime_checkable
+class SyncRateLimiterBackendBuilderInterface(Protocol):
     """
     Factory interface for synchronous per-model-family backends.
 

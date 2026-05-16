@@ -466,7 +466,8 @@ Custom backends implement `RateLimiterBackend` or `SyncRateLimiterBackend`.
 Required operations are capacity wait/consume/refund and `set_max_capacity`.
 Optional extension points include `refund_capacity_for_buckets`,
 `apply_configured_max_capacity`, `supports_metric_set_change`, and
-`prepare_reconfigured_backend`.
+`prepare_reconfigured_backend`. See [`docs/custom-backends.md`](docs/custom-backends.md)
+for the protocol contract and conformance helper.
 
 Leave `supports_metric_set_change()` as `False` unless bucket additions/removals
 can preserve live state for surviving metrics. To return `True`, either keep
