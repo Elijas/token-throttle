@@ -442,8 +442,8 @@ def _async_redis_backend(
             return _AsyncLockStack(self._test_lock)
 
         @staticmethod
-        async def _extend_locks(_stack) -> None:
-            return None
+        async def _extend_locks(_stack, *, reservation_id=None) -> None:
+            _ = reservation_id
 
     cfg = _config()
     bucket = redis_modules["redis_bucket"](
@@ -478,8 +478,8 @@ def _sync_redis_backend(
             return _SyncLockStack(self._test_lock)
 
         @staticmethod
-        def _extend_locks(_stack) -> None:
-            return None
+        def _extend_locks(_stack, *, reservation_id=None) -> None:
+            _ = reservation_id
 
     cfg = _config()
     bucket = redis_modules["sync_redis_bucket"](

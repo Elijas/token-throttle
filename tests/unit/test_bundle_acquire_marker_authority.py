@@ -407,8 +407,8 @@ class _TestAsyncRedisBackend(RedisBackend):
         return _AsyncLockStack()
 
     @staticmethod
-    async def _extend_locks(_stack) -> None:
-        return None
+    async def _extend_locks(_stack, *, reservation_id=None) -> None:
+        _ = reservation_id
 
 
 class _TestSyncRedisBackend(SyncRedisBackend):
@@ -416,8 +416,8 @@ class _TestSyncRedisBackend(SyncRedisBackend):
         return _SyncLockStack()
 
     @staticmethod
-    def _extend_locks(_stack) -> None:
-        return None
+    def _extend_locks(_stack, *, reservation_id=None) -> None:
+        _ = reservation_id
 
 
 class _AsyncRedisBuilder:

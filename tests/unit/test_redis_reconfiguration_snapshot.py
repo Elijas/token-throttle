@@ -207,7 +207,9 @@ async def test_async_check_and_consume_uses_one_bucket_snapshot_during_reconfigu
     entered_get_capacities = asyncio.Event()
     allow_get_capacities = asyncio.Event()
 
-    async def fake_lock(*, timeout, blocking_timeout=None, buckets=None):
+    async def fake_lock(
+        *, timeout, blocking_timeout=None, buckets=None, reservation_id=None
+    ):
         effective_buckets = backend.sorted_buckets if buckets is None else buckets
         lock_snapshots.append(
             [bucket.full_redis_key for bucket in effective_buckets],
@@ -297,7 +299,7 @@ def test_sync_check_and_consume_uses_one_bucket_snapshot_during_reconfigure(
     allow_get_capacities = threading.Event()
     errors: list[BaseException] = []
 
-    def fake_lock(*, timeout, blocking_timeout=None, buckets=None):
+    def fake_lock(*, timeout, blocking_timeout=None, buckets=None, reservation_id=None):
         effective_buckets = backend.sorted_buckets if buckets is None else buckets
         lock_snapshots.append(
             [bucket.full_redis_key for bucket in effective_buckets],
@@ -379,7 +381,9 @@ async def test_async_waiter_fails_cleanly_when_metric_is_removed(monkeypatch):
     call_count = 0
     entered_wait = asyncio.Event()
 
-    async def fake_lock(*, timeout, blocking_timeout=None, buckets=None):
+    async def fake_lock(
+        *, timeout, blocking_timeout=None, buckets=None, reservation_id=None
+    ):
         return AsyncNoopContextManager()
 
     async def fake_get_capacities_unsafe(
@@ -404,6 +408,7 @@ async def test_async_waiter_fails_cleanly_when_metric_is_removed(monkeypatch):
         *,
         allow_negative=False,
         buckets=None,
+        **_kwargs,
     ) -> None:
         return None
 
@@ -458,7 +463,7 @@ def test_sync_waiter_fails_cleanly_when_metric_is_removed(monkeypatch):
     entered_wait = threading.Event()
     result: dict[str, BaseException] = {}
 
-    def fake_lock(*, timeout, blocking_timeout=None, buckets=None):
+    def fake_lock(*, timeout, blocking_timeout=None, buckets=None, reservation_id=None):
         return SyncNoopContextManager()
 
     def fake_get_capacities_unsafe(*, pipeline=None, current_time=None, buckets=None):
@@ -481,6 +486,7 @@ def test_sync_waiter_fails_cleanly_when_metric_is_removed(monkeypatch):
         *,
         allow_negative=False,
         buckets=None,
+        **_kwargs,
     ) -> None:
         return None
 
