@@ -615,7 +615,8 @@ class SyncOnWaitStartCallback(Protocol):
         model_family: str,
         usage: FrozenUsage,
         preconsumption_capacities: Capacities,
-    ) -> None: ...
+    ) -> None:
+        """Called by ``SyncRateLimiter`` when capacity required waiting."""
 
 
 @runtime_checkable
@@ -628,7 +629,8 @@ class SyncOnWaitEndCallback(Protocol):
         preconsumption_capacities: Capacities,
         postconsumption_capacities: Capacities,
         wait_time_s: float,
-    ) -> None: ...
+    ) -> None:
+        """Called by ``SyncRateLimiter`` after a waited acquire succeeds."""
 
 
 @runtime_checkable
@@ -643,12 +645,12 @@ class SyncOnCapacityConsumedCallback(Protocol):
         current_time: float,
     ) -> None:
         """
-        Called when capacity is consumed.
+        Called by ``SyncRateLimiter`` when capacity is consumed.
 
-        Not 100% delivery-guaranteed under task cancellation: if the
-        calling task is cancelled while a shielded backend write is
-        in flight and that write commits, the cancellation is suppressed
-        and this callback is skipped.
+        Sync callbacks are invoked after the backend write returns. If callback
+        timeout wrapping is enabled and the callback exceeds the timeout, the
+        limiter logs the timeout and continues; the helper thread may finish
+        later, but its result no longer affects limiter control flow.
         """
 
 
@@ -663,7 +665,8 @@ class SyncOnCapacityRefundedCallback(Protocol):
         refunded_usage: FrozenUsage,
         prerefund_capacities: Capacities,
         postrefund_capacities: Capacities,
-    ) -> None: ...
+    ) -> None:
+        """Called by ``SyncRateLimiter`` when unused capacity is refunded."""
 
 
 @runtime_checkable
@@ -674,7 +677,8 @@ class SyncOnMissingConsumptionDataCallback(Protocol):
         model_family: str,
         usage_metric: str,
         per_seconds: int,
-    ) -> None: ...
+    ) -> None:
+        """Called when sync bucket state is first initialized at full quota."""
 
 
 @runtime_checkable
@@ -683,7 +687,8 @@ class SyncOnLifecycleEventCallback(Protocol):
         self,
         *,
         event: LifecycleEvent,
-    ) -> None: ...
+    ) -> None:
+        """Called with structured sync limiter lifecycle events."""
 
 
 class SyncRateLimiterCallbacks(StrictDTO):
@@ -778,6 +783,7 @@ def create_logging_callbacks(
     capacity_refunded: str | None = "DEBUG",
     missing_consumption_data: str | None = "DEBUG",
 ) -> RateLimiterCallbacks:
+    """Create async callbacks that log through loguru when available, else stdlib."""
     for _name, _val in (
         ("wait_start", wait_start),
         ("wait_end_consumption", wait_end_consumption),
@@ -892,6 +898,7 @@ def create_sync_logging_callbacks(
     capacity_refunded: str | None = "DEBUG",
     missing_consumption_data: str | None = "DEBUG",
 ) -> SyncRateLimiterCallbacks:
+    """Create sync callbacks that log through loguru when available, else stdlib."""
     for _name, _val in (
         ("wait_start", wait_start),
         ("wait_end_consumption", wait_end_consumption),
@@ -1031,6 +1038,7 @@ def create_loguru_callbacks(
     capacity_refunded: str | None = None,
     missing_consumption_data: str | None = None,
 ) -> RateLimiterCallbacks:
+    """Create async callbacks that require loguru and raise ``ImportError`` if absent."""
     for _name, _val in (
         ("wait_start", wait_start),
         ("wait_end_consumption", wait_end_consumption),
@@ -1150,6 +1158,7 @@ def create_sync_loguru_callbacks(
     capacity_refunded: str | None = None,
     missing_consumption_data: str | None = None,
 ) -> SyncRateLimiterCallbacks:
+    """Create sync callbacks that require loguru and raise ``ImportError`` if absent."""
     for _name, _val in (
         ("wait_start", wait_start),
         ("wait_end_consumption", wait_end_consumption),

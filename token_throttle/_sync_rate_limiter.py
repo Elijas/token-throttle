@@ -524,6 +524,10 @@ class SyncRateLimiter:
     ``close_drain_timeout_seconds`` bounds how long ``close()`` waits for
     acquire calls that already registered a pending reservation to finish their
     limiter-side state update before the limiter is marked closed.
+
+    Refunds use the limiter's internal acquire-time reservation snapshot as
+    authority. Mutating or ``model_copy()``-ing the returned reservation does
+    not change the usage, bucket ids, or model family that this limiter refunds.
     """
 
     def __init__(  # noqa: PLR0913, PLR0915

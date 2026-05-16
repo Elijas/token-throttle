@@ -24,59 +24,143 @@ pip install "token-throttle>=3.0.0,<3.1.0"                   # Any provider + in
 
 ## Quickstart
 
-### OpenAI (built-in helpers)
+### Memory quickstart (zero-service)
+
+Copy-paste runnable.
 
 ```python
+import asyncio
+
+from token_throttle import MemoryBackendBuilder, PerModelConfig, Quota, RateLimiter, UsageQuotas
+
+
+async def main() -> None:
+    limiter = RateLimiter(
+        PerModelConfig(
+            quotas=UsageQuotas(
+                [
+                    Quota(metric="requests", limit=60, per_seconds=60),
+                    Quota(metric="tokens", limit=90_000, per_seconds=60),
+                ]
+            )
+        ),
+        backend=MemoryBackendBuilder(),
+    )
+
+    reservation = await limiter.acquire_capacity(
+        model="demo-model",
+        usage={"requests": 1, "tokens": 1_000},
+    )
+
+    # Replace this block with your provider call.
+    actual_usage = {"requests": 1, "tokens": 425}
+
+    await limiter.refund_capacity(
+        reservation=reservation,
+        actual_usage=actual_usage,
+    )
+
+    second_reservation = await limiter.acquire_capacity(
+        model="demo-model",
+        usage={"requests": 1, "tokens": 250},
+    )
+    await limiter.refund_capacity(
+        reservation=second_reservation,
+        actual_usage={"requests": 1, "tokens": 250},
+    )
+
+    state = limiter.snapshot_state()
+    assert state["in_flight_reservations"] == 0
+    assert state["model_families"] == 1
+
+    await limiter.aclose()
+    print("reserved 1000 tokens, refunded 575 unused tokens")
+
+
+
+asyncio.run(main())
+```
+
+### OpenAI (built-in helpers)
+
+Install token-throttle's Redis and tokenizer extras plus the OpenAI client:
+
+```bash
+pip install "token-throttle[redis,tiktoken]" openai
+```
+
+```python
+import asyncio
+
 import redis.asyncio as redis
 from openai import AsyncOpenAI
 from token_throttle import create_openai_redis_rate_limiter
 
-redis_client = redis.from_url("redis://localhost:6379")
-client = AsyncOpenAI()
-limiter = create_openai_redis_rate_limiter(
-    redis_client,
-    key_prefix="my-service-prod",
-    rpm=10_000,
-    tpm=2_000_000,
-)
 
-# 1. Reserve capacity (blocks until available)
-request = dict(model="gpt-4.1", messages=[{"role": "user", "content": "Hi"}])
-reservation = await limiter.acquire_capacity_for_request(**request)
+async def main() -> None:
+    redis_client = redis.from_url("redis://localhost:6379")
+    client = AsyncOpenAI()
+    limiter = create_openai_redis_rate_limiter(
+        redis_client,
+        key_prefix="my-service-prod",
+        rpm=10_000,
+        tpm=2_000_000,
+    )
 
-# 2. Make the API call
-response = await client.chat.completions.create(**request)
+    request = {
+        "model": "gpt-4.1",
+        "messages": [{"role": "user", "content": "Hi"}],
+    }
 
-# 3. Refund unused tokens
-await limiter.refund_capacity_from_response(reservation, response)
-# Or, when you already separated the usage object:
-# await limiter.refund_capacity_from_response(reservation, usage=response.usage)
+    reservation = await limiter.acquire_capacity_for_request(**request)
+    try:
+        response = await client.chat.completions.create(**request)
+    except Exception:
+        await limiter.refund_capacity(
+            reservation=reservation,
+            actual_usage={"requests": 1, "input_tokens": 0, "output_tokens": 0},
+        )
+        raise
+    else:
+        await limiter.refund_capacity_from_response(reservation, response)
+    finally:
+        await limiter.aclose()
+        await redis_client.aclose()
+
+
+asyncio.run(main())
 ```
+
+`OpenAIUsageCounter` supports text-only OpenAI payloads that use the real API
+fields `input` or `messages`. The plural `inputs` field is not an OpenAI request
+field and is rejected. Image, audio, and file inputs are unsupported; pass usage
+manually for those.
 
 ### Any provider (manual usage)
 
 ```python
-from token_throttle import RateLimiter, Quota, UsageQuotas, RedisBackendBuilder
-from token_throttle import PerModelConfig
+from token_throttle import PerModelConfig, Quota, RateLimiter, RedisBackendBuilder, UsageQuotas
 
 limiter = RateLimiter(
     lambda model: PerModelConfig(
-        quotas=UsageQuotas([
-            Quota(metric="requests", limit=1_000, per_seconds=60),
-            Quota(metric="input_tokens", limit=80_000, per_seconds=60),
-            Quota(metric="output_tokens", limit=20_000, per_seconds=60),
-        ]),
+        quotas=UsageQuotas(
+            [
+                Quota(metric="requests", limit=1_000, per_seconds=60),
+                Quota(metric="input_tokens", limit=80_000, per_seconds=60),
+                Quota(metric="output_tokens", limit=20_000, per_seconds=60),
+            ]
+        ),
     ),
     backend=RedisBackendBuilder(redis_client, key_prefix="my-service-prod"),
 )
 
-# Works with Anthropic, Gemini, local models — anything
+# Works with Anthropic, Gemini, local models: anything with known usage.
 reservation = await limiter.acquire_capacity(
     model="claude-sonnet-4-20250514",
     usage={"requests": 1, "input_tokens": 500, "output_tokens": 4_000},
 )
 
-response = await call_your_llm(...)  # Use whatever client you want
+response = await call_your_llm(...)  # Use whatever client you want.
 
 await limiter.refund_capacity(
     actual_usage={"requests": 1, "input_tokens": 480, "output_tokens": 1_200},
@@ -201,10 +285,11 @@ for telemetry; any `extra_usage` keys are accepted and then discarded with the
 unlimited reservation. If you toggle a model between limited and unlimited,
 keep `extra_usage` keys compatible with the limited quota metrics.
 
-`OpenAIUsageCounter` handles text-only OpenAI requests. It counts `input`,
-`inputs`, or `messages`, plus prompt-bearing request context such as
-`instructions`, tool/function definitions, and structured output schemas.
-Image/audio/file inputs are still unsupported; pass usage manually for those.
+`OpenAIUsageCounter` handles text-only OpenAI requests. It counts `input` or
+`messages`, plus prompt-bearing request context such as `instructions`,
+tool/function definitions, and structured output schemas. The plural `inputs`
+field is rejected because it is not an OpenAI request field. Image/audio/file
+inputs are still unsupported; pass usage manually for those.
 
 Custom `usage_counter` callables receive the same kwargs you pass to
 `acquire_capacity_for_request()`. They can accept `**request` for the whole

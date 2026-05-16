@@ -81,6 +81,19 @@ the TTL defaults to 7 days and is configurable via
 `refund_dedup_ttl_seconds`. Memory backends have no durable refund dedup and
 reject refunds for reservations missing from local in-flight state.
 
+v3.0.0 deliberately breaks Redis refund compatibility with v2.x reservations.
+Redis acquires write durable acquire markers, and refunds must consume the
+marker before crediting capacity. A Redis-backed v2 reservation presented to a
+v3 process raises `UnknownReservationError`; this is the intended fail-closed
+contract, not a transient Redis miss. Drain v2 traffic before deploying v3 and
+accept only a brief straggler refund-error window.
+
+v4.0.0 makes the limiter's internal reservation snapshot authoritative for
+refunds. Caller mutations or `model_copy()` changes to a returned reservation
+do not change refund scope or reserved usage. This preserves the acquire-time
+authority captured by the limiter and prevents user-space reservation edits
+from redirecting capacity credits during rollback or mixed-version windows.
+
 `max_reservation_lifetime_seconds` is optional on both public limiters. Memory
 backends leave it unbounded when omitted. Redis builders derive a default from
 the shorter of `bucket_ttl_seconds` and `refund_dedup_ttl_seconds` so every
@@ -93,6 +106,13 @@ the bound at limiter construction:
 `max_reservation_lifetime_seconds * 2`. This keeps bucket state, acquire
 markers, and refund dedup tombstones alive for the expected reservation
 lifecycle.
+
+Redis bucket-state TTLs are inactivity TTLs on `:last_checked`, `:capacity`,
+and max-capacity override state. They are refreshed when bucket state is read or
+written, not on unrelated acquire-marker or refund-dedup operations. The schema
+version registry key is intentionally long-lived and has no TTL. Acquire-marker
+and refund-dedup keys have their own TTL/lifetime budgets and should be sized
+from request latency, retry delay, and traffic rate.
 
 ### Unlimited configs
 

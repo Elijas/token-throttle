@@ -103,6 +103,8 @@ def _validate_key_segment(
 
 
 class SecondsIn(int, Enum):
+    """Common quota windows expressed in seconds."""
+
     MINUTE = 60
     HOUR = 3600
     DAY = 86400
@@ -286,9 +288,11 @@ class UsageQuotas:
 
     @property
     def is_unlimited(self) -> bool:
+        """Whether this quota set disables rate limiting."""
         return not bool(self._metrics)
 
     def add_metric(self, quota: Quota) -> None:
+        """Add one exact ``Quota`` to this mutable quota set."""
         if self._frozen:
             raise TypeError("UsageQuotas snapshot is frozen")
         if type(quota) is not Quota:
@@ -308,14 +312,17 @@ class UsageQuotas:
         self._metrics[quota.metric][quota.per_seconds] = quota
 
     def __iter__(self) -> Iterator[Quota]:
+        """Iterate over configured quotas."""
         for quotas in self._metrics.values():
             yield from quotas.values()
 
     @property
     def names(self) -> list[str]:
+        """Metric names configured in this quota set."""
         return list(self._metrics.keys())
 
     def get_quotas(self, item: str) -> list[Quota]:
+        """Return all quota windows for one metric name."""
         return list(self._metrics.get(item, {}).values())
 
 
@@ -552,6 +559,7 @@ class CapacityReservation(StrictDTO):
         return frozenset(normalized)
 
     def get_usage(self) -> FrozenUsage:
+        """Return the immutable usage reserved by this reservation."""
         return self.usage
 
 
@@ -586,6 +594,7 @@ class ReservationAuthoritySnapshot:
         )
 
     def to_reservation(self) -> CapacityReservation:
+        """Convert the internal snapshot back to a public reservation DTO."""
         return CapacityReservation(
             reservation_id=self.reservation_id,
             usage=self.usage,

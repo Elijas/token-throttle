@@ -2,6 +2,25 @@
 
 ## Migrating from v3.x to v4.0.0
 
+v4.0.0 is intentionally not reservation-wire-compatible with v3.x during
+rolling deploys. Drain or bound in-flight work before upgrading fleets that
+serialize reservations, use Redis cross-process refunds, or run canaries.
+
+### Reservation snapshot authority
+
+Refund authority now comes from the limiter's internal reservation snapshot
+captured at acquire time. Mutating or copying a returned
+`CapacityReservation` no longer changes what the limiter refunds. In
+particular, `reservation.model_copy(update={...})` is not a way to redirect or
+resize a refund; the issuing limiter refunds from its stored snapshot.
+
+This is a breaking hardening change for code that intentionally edited
+reservations before refund. Refund the original reservation object and pass the
+actual API usage through `refund_capacity(...)` /
+`refund_capacity_from_response(...)` instead.
+
+### AcquireRefundFailedError base class
+
 `AcquireRefundFailedError` is no longer an `asyncio.CancelledError` subclass.
 Code that recovered failed acquire-cleanup reservations with
 `except asyncio.CancelledError` must catch `AcquireRefundFailedError` directly:
@@ -27,6 +46,64 @@ delivery. This keeps the critical cleanup payload visible through
 branching: `"already_refunded"`, `"in_progress"`, or `"duplicate_acquire"`.
 The existing messages are unchanged.
 
+### Redis Cluster rejection
+
+Redis builders reject Redis Cluster deployments in v4.0.0. token-throttle uses
+multi-key Lua transactions and redis-py locks that require all touched keys to
+share the same single-node execution context. Do not rely on Cluster hash tags
+or partial slot pinning as a workaround; use standalone Redis, Sentinel, or a
+managed single-primary Redis-compatible deployment until Cluster support is
+explicitly documented.
+
+### Stricter public input validation
+
+v4.0.0 narrows several public inputs to exact, predictable shapes:
+
+- integer fields such as `per_seconds` and bucket ids reject `bool` and integer
+  subclasses; pass plain `int` values
+- Redis key segments, model families, model aliases, metrics, key prefixes,
+  and reservation ids reject whitespace, control characters, `:`, `{`, and `}`
+- bounded string fields enforce public length caps before key construction
+- DTO subclasses remain unsupported at security-sensitive boundaries
+
+These checks are fail-closed and raise `ValueError` or
+`CardinalityLimitExceededError`. Normalize external configuration before
+constructing token-throttle DTOs.
+
+### Rolling deploy v3 -> v4
+
+Do not run a rolling half-fleet with v3 and v4 processes sharing one Redis
+prefix while reservations are in flight. A v3 process can issue reservations
+whose runtime shape and refund assumptions are not authoritative to v4, and a
+v4 process can issue reservations whose hardening fields are ignored or
+misinterpreted by v3.
+
+Recommended rollout:
+
+1. Stop admitting new acquire work on v3 workers.
+2. Wait for in-flight v3 reservations to refund or expire according to your
+   request deadline and `max_reservation_lifetime_seconds`.
+3. Deploy v4 workers with the same Redis prefix.
+4. Watch `UnknownReservationError`, `DuplicateRefundError.reason`, and
+   `AcquireRefundFailedError.reason` counters during the cutover.
+
+### Mixed v3/v4 canary
+
+A mixed v3/v4 canary is not a safe half-fleet mode when both versions share a
+Redis prefix and can refund each other's reservations. Canary v4 with a
+separate `key_prefix`, isolated traffic, and separate quotas, or canary a full
+drained deployment slice. If you cannot isolate the prefix, treat the canary as
+a full migration and drain first.
+
+### Rollback v4 -> v3
+
+Rollback is not recommended once v4 has issued reservations. v4 reservation
+authority does not round-trip to v3, and v3 may not preserve v4's stricter
+refund assumptions. If rollback is unavoidable, stop v4 traffic, drain v4
+in-flight reservations, then start v3. Expect a short window of failed refunds
+for any reservation that crosses the version boundary; failed refunds are safer
+than double-crediting capacity.
+
 ## Migrating from v2.x to v3.0.0
 
 v3.0.0 requires Redis-backed refunds to prove that the backend previously issued
@@ -43,6 +120,24 @@ Duplicate refunds still fail as duplicates: once a legitimate v3 refund consumes
 the acquire marker and writes the refund tombstone, a retry raises
 `DuplicateRefundError`. Mixed v2/v3 Redis fleets are not supported because v2
 processes do not write acquire markers for v3 processes to consume.
+
+### Rolling deploy v2 -> v3
+
+The v2-reservation -> v3-refund contract is intentionally fail-closed:
+refunding a Redis-backed v2 reservation through a v3 process raises
+`UnknownReservationError`. That error means v3 could not prove the reservation
+was acquired, so it refuses to credit capacity.
+
+Recommended rollout:
+
+1. Stop or drain v2 traffic.
+2. Wait for normal request deadlines and queue retries to finish refunding v2
+   reservations.
+3. Deploy v3.
+4. Accept a brief refund-error window for stragglers and monitor
+   `UnknownReservationError`.
+
+Do not run v2/v3 as a durable mixed fleet on the same Redis prefix.
 
 ## Migrating from v1.4.x to v2.0.0
 
@@ -160,9 +255,27 @@ deleted = cleanup_legacy_buckets(redis_client, key_prefix="prod-api")
 print(f"deleted {deleted} legacy bucket state keys")
 ```
 
-For `redis.asyncio.Redis`, use `async_cleanup_legacy_buckets(...)`. The helper
-uses `SCAN`, checks only token-throttle bucket `:last_checked` and `:capacity`
-keys, and deletes only keys whose Redis `TTL` is `-1`.
+For `redis.asyncio.Redis`, use `async_cleanup_legacy_buckets(...)`. Both helpers
+are prefix-scoped: they scan only keys under
+`{key_prefix}:rate_limiting:*:last_checked` and
+`{key_prefix}:rate_limiting:*:capacity`, then delete only keys whose Redis
+`TTL` is `-1`. They do not touch acquire markers, refund-dedup keys, schema
+registry keys, max-capacity overrides, or keys for other prefixes.
+
+The cleanup is idempotent. Re-running it after a successful live run should
+delete `0` keys because only no-expiry legacy bucket-state keys are eligible.
+Run it separately for each deployment prefix that used token-throttle before
+FIX-38.
+
+Recommended dry-run workflow:
+
+1. Run the same Redis `SCAN` patterns for the target `key_prefix` and count
+   candidate `:last_checked` / `:capacity` keys whose `TTL` is `-1`.
+2. Confirm the prefix is the intended deployment and that in-flight
+   reservations have drained.
+3. Run `cleanup_legacy_buckets(...)` or `async_cleanup_legacy_buckets(...)`
+   during a maintenance window.
+4. Repeat the scan and verify the no-TTL candidate count is `0`.
 
 ## 7. Reservation Serialization Notes
 

@@ -122,19 +122,25 @@ class PerModelConfig(StrictDTO):
 
 @runtime_checkable
 class PerModelConfigGetter(Protocol):
+    """Callable that maps a request model name to ``PerModelConfig``."""
+
     def __call__(self, model_name: str, /) -> PerModelConfig:
         """model_name: The model identifier used in API requests (e.g., 'gpt-4o')."""
         ...
 
 
 class RateLimiterBackendBuilderInterface(ABC):
+    """Factory interface for async per-model-family backends."""
+
     @abstractmethod
     def build(
         self,
         cfg: PerModelConfig,
         *,
         callbacks: RateLimiterCallbacks | None = None,
-    ) -> RateLimiterBackend: ...
+    ) -> RateLimiterBackend:
+        """Build a backend for one resolved model-family config."""
+        ...
 
     async def aclose(self) -> None:
         """Release resources owned by this backend builder, if any."""
@@ -360,6 +366,8 @@ def backend_uses_default_refund_capacity_for_buckets(
 
 
 class BaseRateLimiter(ABC):
+    """Abstract base for async limiter implementations."""
+
     @abstractmethod
     async def acquire_capacity(
         self,
@@ -391,7 +399,7 @@ if TYPE_CHECKING:
 
 
 class SyncRateLimiterBackend(ABC):
-    """Synchronous counterpart of ``RateLimiterBackend`` — same contract."""
+    """Synchronous per-model-family backend interface."""
 
     @abstractmethod
     def wait_for_capacity(
@@ -553,13 +561,17 @@ def sync_backend_uses_default_refund_capacity_for_buckets(
 
 
 class SyncRateLimiterBackendBuilderInterface(ABC):
+    """Factory interface for sync per-model-family backends."""
+
     @abstractmethod
     def build(
         self,
         cfg: PerModelConfig,
         *,
         callbacks: SyncRateLimiterCallbacks | None = None,
-    ) -> SyncRateLimiterBackend: ...
+    ) -> SyncRateLimiterBackend:
+        """Build a sync backend for one resolved model-family config."""
+        ...
 
     def close(self) -> None:
         """Release resources owned by this backend builder, if any."""

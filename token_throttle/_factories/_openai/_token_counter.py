@@ -63,7 +63,11 @@ _UNSUPPORTED_CONTENT_FIELDS = (
 
 @runtime_checkable
 class EncodingGetter(Protocol):
-    def __call__(self, model_name: str) -> Encoding: ...
+    """Callable that returns a tiktoken encoding for an OpenAI model name."""
+
+    def __call__(self, model_name: str) -> Encoding:
+        """Return the encoding used to estimate tokens for ``model_name``."""
+        ...
 
 
 class OpenAIUsageCounter:
@@ -74,7 +78,9 @@ class OpenAIUsageCounter:
     content parts such as ``{"type": "input_text", "text": "..."}``, and
     JSON-serializable ``tool_calls`` / ``function_call`` payloads. Non-text
     image, file, and audio content is rejected because token cost cannot be
-    inferred locally.
+    inferred locally. Request payloads must use the OpenAI fields ``input`` or
+    ``messages``; plural ``inputs`` is rejected because it is not an OpenAI API
+    request field.
     """
 
     def __init__(self, get_encoding_func: EncodingGetter | None = None):
@@ -88,6 +94,7 @@ class OpenAIUsageCounter:
         return self._count_with_encoding(model, encoding, request)
 
     async def count_request_async(self, model: str, **request) -> FrozenUsage:
+        """Count request usage without blocking the event loop on tokenizer load."""
         self._validate_model(model)
         encoding = await self._get_cached_encoding_async(model)
         return self._count_with_encoding(model, encoding, request)

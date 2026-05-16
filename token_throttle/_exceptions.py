@@ -47,7 +47,14 @@ def _rebuild_acquire_refund_failed_error(
 
 
 class AcquireRefundFailedError(Exception):
-    """Raised when cancellation fallback cannot refund an acquired reservation."""
+    """
+    Raised when interrupted acquire delivery cannot refund reserved capacity.
+
+    This exception is a regular ``Exception``. It is not an
+    ``asyncio.CancelledError`` subclass; catch this class directly to recover
+    the delivered ``.reservation`` and inspect ``.interrupted_by`` or
+    ``.refund_error``.
+    """
 
     _MESSAGE = (
         "acquire was interrupted after capacity was reserved, and the fallback "
@@ -81,7 +88,7 @@ class CardinalityLimitExceededError(ValueError):
 
 
 class DuplicateRefundError(ValueError):
-    """Raised when a reservation has already been refunded."""
+    """Raised when a refund is duplicate, already in progress, or already acquired."""
 
     def __init__(
         self,
