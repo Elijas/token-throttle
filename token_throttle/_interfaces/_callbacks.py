@@ -783,7 +783,15 @@ def create_logging_callbacks(
     capacity_refunded: str | None = "DEBUG",
     missing_consumption_data: str | None = "DEBUG",
 ) -> RateLimiterCallbacks:
-    """Create async callbacks that log through loguru when available, else stdlib."""
+    """
+    Create async callbacks that log rate-limiter events.
+
+    Uses loguru when it is importable and passes a small API smoke test;
+    otherwise falls back to the stdlib ``token_throttle`` logger. Each keyword
+    selects the log level for one callback slot. Pass ``None`` to leave that
+    slot unset. The returned callbacks are suitable for ``RateLimiter`` and
+    async backends.
+    """
     for _name, _val in (
         ("wait_start", wait_start),
         ("wait_end_consumption", wait_end_consumption),
@@ -898,7 +906,15 @@ def create_sync_logging_callbacks(
     capacity_refunded: str | None = "DEBUG",
     missing_consumption_data: str | None = "DEBUG",
 ) -> SyncRateLimiterCallbacks:
-    """Create sync callbacks that log through loguru when available, else stdlib."""
+    """
+    Create synchronous callbacks that log rate-limiter events.
+
+    Uses loguru when it is importable and passes a small API smoke test;
+    otherwise falls back to the stdlib ``token_throttle`` logger. Each keyword
+    selects the log level for one callback slot. Pass ``None`` to leave that
+    slot unset. The returned callbacks are suitable for ``SyncRateLimiter`` and
+    synchronous backends.
+    """
     for _name, _val in (
         ("wait_start", wait_start),
         ("wait_end_consumption", wait_end_consumption),
@@ -1038,7 +1054,14 @@ def create_loguru_callbacks(
     capacity_refunded: str | None = None,
     missing_consumption_data: str | None = None,
 ) -> RateLimiterCallbacks:
-    """Create async callbacks that require loguru and raise ``ImportError`` if absent."""
+    """
+    Create async callbacks that emit only through loguru.
+
+    Unlike ``create_logging_callbacks``, this factory does not fall back to
+    stdlib logging. It raises ``ImportError`` when loguru is unavailable or its
+    logger API is not usable. Each keyword selects the loguru level for one
+    callback slot; pass ``None`` to leave that slot unset.
+    """
     for _name, _val in (
         ("wait_start", wait_start),
         ("wait_end_consumption", wait_end_consumption),
@@ -1158,7 +1181,14 @@ def create_sync_loguru_callbacks(
     capacity_refunded: str | None = None,
     missing_consumption_data: str | None = None,
 ) -> SyncRateLimiterCallbacks:
-    """Create sync callbacks that require loguru and raise ``ImportError`` if absent."""
+    """
+    Create synchronous callbacks that emit only through loguru.
+
+    Unlike ``create_sync_logging_callbacks``, this factory does not fall back
+    to stdlib logging. It raises ``ImportError`` when loguru is unavailable or
+    its logger API is not usable. Each keyword selects the loguru level for one
+    callback slot; pass ``None`` to leave that slot unset.
+    """
     for _name, _val in (
         ("wait_start", wait_start),
         ("wait_end_consumption", wait_end_consumption),

@@ -1,5 +1,6 @@
 import importlib
 import importlib.util
+from typing import TYPE_CHECKING
 
 from token_throttle._exceptions import (
     AcquireRefundFailedError,
@@ -66,6 +67,58 @@ from token_throttle.migration import (
 )
 
 __version__ = "3.0.0"
+
+if TYPE_CHECKING:
+    from token_throttle._capacity import CalculatedCapacity
+    from token_throttle._factories._openai._model_family import (
+        openai_model_family_getter,
+    )
+    from token_throttle._factories._openai._openai_rate_limiter import (
+        create_openai_redis_rate_limiter,
+    )
+    from token_throttle._factories._openai._openai_sync_rate_limiter import (
+        create_openai_redis_sync_rate_limiter,
+    )
+    from token_throttle._factories._openai._token_counter import (
+        EncodingGetter,
+        OpenAIUsageCounter,
+        count_chat_input_tokens,
+        get_encoding,
+    )
+    from token_throttle._limiter_backends._memory._backend import (
+        MemoryBackend,
+        MemoryBackendBuilder,
+    )
+    from token_throttle._limiter_backends._memory._bucket import MemoryBucket
+    from token_throttle._limiter_backends._memory._sync_backend import (
+        SyncMemoryBackend,
+        SyncMemoryBackendBuilder,
+    )
+    from token_throttle._limiter_backends._redis._backend import (
+        LOCK_TIMEOUT_SECONDS,
+        CapacitiesGetterResult,
+        RedisBackend,
+        RedisBackendBuilder,
+    )
+    from token_throttle._limiter_backends._redis._bucket import RedisBucket
+    from token_throttle._limiter_backends._redis._sync_backend import (
+        SyncRedisBackend,
+        SyncRedisBackendBuilder,
+    )
+    from token_throttle._limiter_backends._redis._sync_bucket import SyncRedisBucket
+
+    _STATIC_LAZY_EXPORTS = (
+        LOCK_TIMEOUT_SECONDS,
+        CapacitiesGetterResult,
+        RedisBackend,
+        RedisBackendBuilder,
+        RedisBucket,
+        SyncRedisBackend,
+        SyncRedisBackendBuilder,
+        SyncRedisBucket,
+        create_openai_redis_rate_limiter,
+        create_openai_redis_sync_rate_limiter,
+    )
 
 # Lazy imports: these pull in redis or tiktoken at import time.
 # Deferred via __getattr__ so `import token_throttle` works without optional deps.

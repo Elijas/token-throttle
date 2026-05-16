@@ -130,7 +130,14 @@ class PerModelConfigGetter(Protocol):
 
 
 class RateLimiterBackendBuilderInterface(ABC):
-    """Factory interface for async per-model-family backends."""
+    """
+    Factory interface for asynchronous per-model-family backends.
+
+    ``RateLimiter`` calls ``build()`` with a validated ``PerModelConfig`` each
+    time it needs backend state for a model family. Implementations may hold
+    shared resources such as Redis clients or connection pools. ``close()`` and
+    ``aclose()`` are optional cleanup hooks for those shared resources.
+    """
 
     @abstractmethod
     def build(
@@ -139,7 +146,7 @@ class RateLimiterBackendBuilderInterface(ABC):
         *,
         callbacks: RateLimiterCallbacks | None = None,
     ) -> RateLimiterBackend:
-        """Build a backend for one resolved model-family config."""
+        """Build an asynchronous backend for one validated model-family config."""
         ...
 
     async def aclose(self) -> None:
@@ -561,7 +568,14 @@ def sync_backend_uses_default_refund_capacity_for_buckets(
 
 
 class SyncRateLimiterBackendBuilderInterface(ABC):
-    """Factory interface for sync per-model-family backends."""
+    """
+    Factory interface for synchronous per-model-family backends.
+
+    ``SyncRateLimiter`` calls ``build()`` with a validated ``PerModelConfig``
+    each time it needs backend state for a model family. Implementations may
+    hold shared resources such as Redis clients. ``close()`` is the synchronous
+    cleanup hook for those shared resources.
+    """
 
     @abstractmethod
     def build(
@@ -570,7 +584,7 @@ class SyncRateLimiterBackendBuilderInterface(ABC):
         *,
         callbacks: SyncRateLimiterCallbacks | None = None,
     ) -> SyncRateLimiterBackend:
-        """Build a sync backend for one resolved model-family config."""
+        """Build a synchronous backend for one validated model-family config."""
         ...
 
     def close(self) -> None:

@@ -4,6 +4,14 @@ _MIN_FINE_TUNED_MODEL_ID_PARTS = 3
 
 
 def openai_model_family_getter(model: str, /) -> str:
+    """
+    Normalize an OpenAI model id into the family used for shared quotas.
+
+    Removes an ``openai/`` provider prefix, maps fine-tuned model ids to their
+    base model, and strips dated or ``-preview`` suffixes from common OpenAI
+    model names. The returned family is suitable for ``PerModelConfig`` so
+    related dated snapshots share the same rate-limit buckets.
+    """
     # Strip provider prefix if present, then collapse date/snapshot suffixes.
     # Matches -MMDD (e.g. -0613), -YYYYMMDD (e.g. -20241203), and
     # -YYYY-MM-DD (e.g. -2024-04-09), with optional -preview before

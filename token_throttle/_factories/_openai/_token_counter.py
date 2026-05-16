@@ -66,7 +66,7 @@ class EncodingGetter(Protocol):
     """Callable that returns a tiktoken encoding for an OpenAI model name."""
 
     def __call__(self, model_name: str) -> Encoding:
-        """Return the encoding used to estimate tokens for ``model_name``."""
+        """Return the tokenizer encoding to use for ``model_name``."""
         ...
 
 
@@ -84,17 +84,31 @@ class OpenAIUsageCounter:
     """
 
     def __init__(self, get_encoding_func: EncodingGetter | None = None):
+        """
+        Initialize the counter with an optional tokenizer lookup override.
+
+        By default, tokenizers are resolved via ``get_encoding`` and cached per
+        model. Tests and applications with custom routing can pass an
+        ``EncodingGetter`` to control tokenizer selection.
+        """
         self._get_encoding = get_encoding_func or get_encoding
         self._encoding_cache: dict[str, Encoding] = {}
         self._encoding_cache_lock = threading.RLock()
 
     def __call__(self, model: str, **request) -> FrozenUsage:
+        """Return reserved ``tokens`` and one ``requests`` unit for a request."""
         self._validate_model(model)
         encoding = self._get_cached_encoding(model)
         return self._count_with_encoding(model, encoding, request)
 
     async def count_request_async(self, model: str, **request) -> FrozenUsage:
-        """Count request usage without blocking the event loop on tokenizer load."""
+        """
+        Async-friendly request counter that loads missing tokenizers in a thread.
+
+        Cached tokenizers are reused synchronously. On a cold model, tokenizer
+        lookup runs through ``asyncio.to_thread`` so application startup or the
+        first request does not block the event loop.
+        """
         self._validate_model(model)
         encoding = await self._get_cached_encoding_async(model)
         return self._count_with_encoding(model, encoding, request)
@@ -217,6 +231,14 @@ def _get_request_payload_key(request: dict[str, object]) -> str:
 
 
 def get_encoding(model_name: str) -> Encoding:
+    """
+    Return the tiktoken encoding used for an OpenAI model name.
+
+    Strips an ``openai/`` provider prefix, asks tiktoken for an exact model
+    match, then falls back to known OpenAI model-family encodings before trying
+    tiktoken again. Raises ``ImportError`` with the package extra hint when
+    tiktoken is not installed.
+    """
     try:
         import tiktoken
     except ImportError as exc:
@@ -570,7 +592,14 @@ def count_chat_input_tokens(
     messages: list[dict[str, object]],
     **_,
 ) -> int:
-    """Calculate tokens for a chat completion request."""
+    """
+    Count input tokens for OpenAI chat-style message lists.
+
+    The counter applies the current chat-message framing constants used by
+    common GPT-4, GPT-4o, and GPT-3.5 models, counts text content parts
+    recursively, serializes tool/function call payloads as JSON, and rejects
+    unsupported non-text content through the shared validation helpers.
+    """
     num_tokens = 0
 
     for message in messages:
