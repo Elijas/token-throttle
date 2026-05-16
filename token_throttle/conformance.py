@@ -11,7 +11,7 @@ import time
 import uuid
 import warnings
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, NoReturn, cast
+from typing import TYPE_CHECKING, Any, NoReturn, SupportsFloat, SupportsIndex, cast
 
 from frozendict import frozendict
 
@@ -76,7 +76,13 @@ _DEFAULT_MARKER_RESERVED_USAGE = object()
 
 @dataclass(frozen=True)
 class ConformanceTiming:
-    """Wall-clock deadlines used by the public conformance helpers."""
+    """
+    Wall-clock deadlines used by the public conformance helpers.
+
+    When ``timing=`` is passed, the env var is ignored; set every desired field
+    on the dataclass. Scales below ~0.1 may cause correct backends to fail
+    conformance because internal probe deadlines have an implicit floor.
+    """
 
     builder_deadline_seconds: float = _BUILDER_DEADLINE_SECONDS
     operation_deadline_seconds: float = _OPERATION_DEADLINE_SECONDS
@@ -101,11 +107,25 @@ class _AsyncStepContext:
     allowed_exceptions: tuple[type[BaseException], ...]
 
 
-def _validate_timing_value(field_name: str, value: float) -> float:
-    value = float(value)
+def _validate_timing_value(field_name: str, value: object) -> float:
+    if isinstance(value, bool | str | bytes | bytearray | complex):
+        raise ValueError(  # noqa: TRY004 - public validator preserves ValueError.
+            f"{field_name} must be a positive finite number"
+        )
+    try:
+        value = float(cast("SupportsFloat | SupportsIndex", value))
+    except Exception:  # noqa: BLE001 - hostile __float__ errors must be sanitized.
+        raise ValueError(f"{field_name} must be a positive finite number") from None
     if value <= 0 or not math.isfinite(value):
         raise ValueError(f"{field_name} must be a positive finite number")
     return value
+
+
+def _scale_timing_value(field_name: str, value: float, scale: float) -> float:
+    scaled_value = value * scale
+    if not math.isfinite(scaled_value):
+        raise ValueError(f"{field_name} must be a positive finite number")
+    return scaled_value
 
 
 def _resolve_timing(timing: ConformanceTiming | None) -> ConformanceTiming:
@@ -117,19 +137,35 @@ def _resolve_timing(timing: ConformanceTiming | None) -> ConformanceTiming:
         else:
             try:
                 scale = float(scale_text)
-            except ValueError as exc:
+            except ValueError:
                 raise ValueError(
                     f"{_TIMING_SCALE_ENV} must be a positive finite number"
-                ) from exc
+                ) from None
             _validate_timing_value(_TIMING_SCALE_ENV, scale)
             timing = ConformanceTiming(
-                builder_deadline_seconds=default_timing.builder_deadline_seconds
-                * scale,
-                operation_deadline_seconds=default_timing.operation_deadline_seconds
-                * scale,
-                prompt_deadline_seconds=default_timing.prompt_deadline_seconds * scale,
-                wait_budget_seconds=default_timing.wait_budget_seconds * scale,
+                builder_deadline_seconds=_scale_timing_value(
+                    _TIMING_SCALE_ENV,
+                    default_timing.builder_deadline_seconds,
+                    scale,
+                ),
+                operation_deadline_seconds=_scale_timing_value(
+                    _TIMING_SCALE_ENV,
+                    default_timing.operation_deadline_seconds,
+                    scale,
+                ),
+                prompt_deadline_seconds=_scale_timing_value(
+                    _TIMING_SCALE_ENV,
+                    default_timing.prompt_deadline_seconds,
+                    scale,
+                ),
+                wait_budget_seconds=_scale_timing_value(
+                    _TIMING_SCALE_ENV,
+                    default_timing.wait_budget_seconds,
+                    scale,
+                ),
             )
+    elif not isinstance(timing, ConformanceTiming):
+        raise TypeError("timing must be a ConformanceTiming instance")
 
     return ConformanceTiming(
         builder_deadline_seconds=_validate_timing_value(
@@ -2730,7 +2766,8 @@ async def conformance_test_for(
     Backend operations are bounded by helper-owned deadlines. Pass
     ``ConformanceTiming`` to tune those deadlines, or set
     ``TOKEN_THROTTLE_CONFORMANCE_TIMING_SCALE`` to multiply the defaults for
-    slow runners.
+    slow runners. When ``timing=`` is passed, the env var is ignored; set every
+    desired field on the dataclass.
 
     The helper calls builder ``aclose()`` and ``close()`` hooks in cleanup when
     those methods exist. Builders that need to manage cleanup elsewhere can
@@ -3863,7 +3900,8 @@ def sync_conformance_test_for(
     Backend operations are bounded by helper-owned deadlines. Pass
     ``ConformanceTiming`` to tune those deadlines, or set
     ``TOKEN_THROTTLE_CONFORMANCE_TIMING_SCALE`` to multiply the defaults for
-    slow runners.
+    slow runners. When ``timing=`` is passed, the env var is ignored; set every
+    desired field on the dataclass.
 
     The helper calls builder ``close()`` in cleanup when that method exists.
     Builders that need to manage cleanup elsewhere can expose a wrapper without

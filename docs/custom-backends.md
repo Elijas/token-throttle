@@ -61,7 +61,10 @@ await conformance_test_for(
 ```
 
 For slow CI runners, set `TOKEN_THROTTLE_CONFORMANCE_TIMING_SCALE` to multiply
-all defaults, for example `TOKEN_THROTTLE_CONFORMANCE_TIMING_SCALE=2`.
+all defaults, for example `TOKEN_THROTTLE_CONFORMANCE_TIMING_SCALE=2`. When
+`timing=` is passed, the env var is ignored; set every desired field on the
+dataclass. Scales below ~0.1 may cause correct backends to fail conformance
+because internal probe deadlines have an implicit floor.
 
 ## Async Protocol
 

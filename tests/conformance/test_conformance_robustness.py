@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import traceback
 from typing import cast
 
 import pytest
@@ -345,31 +346,172 @@ def test_sync_callback_payload_shape_is_validated() -> None:
         sync_conformance_test_for(_BadSyncCallbackPayloadBuilder())
 
 
-def test_conformance_timing_scale_env(monkeypatch) -> None:
-    monkeypatch.setenv("TOKEN_THROTTLE_CONFORMANCE_TIMING_SCALE", "0.5")
+class TestConformanceTimingValidation:
+    def test_scale_env(self, monkeypatch) -> None:
+        monkeypatch.setenv("TOKEN_THROTTLE_CONFORMANCE_TIMING_SCALE", "0.5")
 
-    assert conformance._resolve_timing(None) == ConformanceTiming(
-        builder_deadline_seconds=2.5,
-        operation_deadline_seconds=5.0,
-        prompt_deadline_seconds=0.5,
-        wait_budget_seconds=2.5,
+        assert conformance._resolve_timing(None) == ConformanceTiming(
+            builder_deadline_seconds=2.5,
+            operation_deadline_seconds=5.0,
+            prompt_deadline_seconds=0.5,
+            wait_budget_seconds=2.5,
+        )
+
+    @pytest.mark.parametrize(
+        "value",
+        ["", "0", "-1", "inf", "nan", "1e309", "not-a-number"],
     )
+    def test_invalid_scale_env_is_rejected_without_value_leakage(
+        self,
+        monkeypatch,
+        value,
+    ) -> None:
+        monkeypatch.setenv("TOKEN_THROTTLE_CONFORMANCE_TIMING_SCALE", value)
 
+        with pytest.raises(
+            ValueError,
+            match="TOKEN_THROTTLE_CONFORMANCE_TIMING_SCALE "
+            "must be a positive finite number",
+        ) as exc_info:
+            conformance._resolve_timing(None)
 
-async def test_conformance_timing_scale_env_extends_prompt_deadline(
-    monkeypatch,
-) -> None:
-    monkeypatch.setenv("TOKEN_THROTTLE_CONFORMANCE_TIMING_SCALE", "1.0")
+        assert exc_info.value.__cause__ is None
+        if value in {"", "not-a-number"}:
+            assert exc_info.value.__suppress_context__
+        if value == "not-a-number":
+            assert value not in "".join(traceback.format_exception(exc_info.value))
 
-    with pytest.raises(
-        BackendConformanceError,
-        match="await_for_capacity\\(\\) did not return promptly",
-    ):
+    def test_scale_env_overflow_is_reported_as_env_error(self, monkeypatch) -> None:
+        monkeypatch.setenv("TOKEN_THROTTLE_CONFORMANCE_TIMING_SCALE", "1.0e308")
+
+        with pytest.raises(
+            ValueError,
+            match="TOKEN_THROTTLE_CONFORMANCE_TIMING_SCALE "
+            "must be a positive finite number",
+        ):
+            conformance._resolve_timing(None)
+
+    def test_explicit_timing_ignores_scale_env(self, monkeypatch) -> None:
+        monkeypatch.setenv("TOKEN_THROTTLE_CONFORMANCE_TIMING_SCALE", "3.0")
+
+        assert conformance._resolve_timing(
+            ConformanceTiming(operation_deadline_seconds=2.5)
+        ) == ConformanceTiming(
+            builder_deadline_seconds=5.0,
+            operation_deadline_seconds=2.5,
+            prompt_deadline_seconds=1.0,
+            wait_budget_seconds=5.0,
+        )
+
+    @pytest.mark.parametrize("value", [True, "1.0", 1 + 0j])
+    def test_explicit_timing_rejects_non_float_field_values(self, value) -> None:
+        timing = ConformanceTiming(builder_deadline_seconds=cast("float", value))
+
+        with pytest.raises(
+            ValueError,
+            match="builder_deadline_seconds must be a positive finite number",
+        ) as exc_info:
+            conformance._resolve_timing(timing)
+
+        assert exc_info.value.__cause__ is None
+
+    def test_explicit_timing_sanitizes_hostile_float_exception(self) -> None:
+        class _HostileFloat:
+            def __float__(self) -> float:
+                raise RuntimeError("secret-token-123")
+
+        timing = ConformanceTiming(
+            builder_deadline_seconds=cast("float", _HostileFloat())
+        )
+
+        with pytest.raises(
+            ValueError,
+            match="builder_deadline_seconds must be a positive finite number",
+        ) as exc_info:
+            conformance._resolve_timing(timing)
+
+        formatted = "".join(traceback.format_exception(exc_info.value))
+        assert exc_info.value.__cause__ is None
+        assert exc_info.value.__suppress_context__
+        assert "secret-token-123" not in formatted
+
+    def test_timing_requires_conformance_timing_instance(self) -> None:
+        class _DuckTiming:
+            builder_deadline_seconds = 1.0
+            operation_deadline_seconds = 2.0
+            prompt_deadline_seconds = 3.0
+            wait_budget_seconds = 4.0
+
+        with pytest.raises(TypeError, match="timing must be a ConformanceTiming"):
+            conformance._resolve_timing(cast("ConformanceTiming | None", _DuckTiming()))
+
+        with pytest.raises(TypeError, match="timing must be a ConformanceTiming"):
+            conformance._resolve_timing(cast("ConformanceTiming | None", {}))
+
+    async def test_scale_env_extends_prompt_deadline(self, monkeypatch) -> None:
+        monkeypatch.setenv("TOKEN_THROTTLE_CONFORMANCE_TIMING_SCALE", "1.0")
+
+        with pytest.raises(
+            BackendConformanceError,
+            match="await_for_capacity\\(\\) did not return promptly",
+        ):
+            await conformance_test_for(_SlowPromptAsyncBuilder())
+
+        monkeypatch.setenv("TOKEN_THROTTLE_CONFORMANCE_TIMING_SCALE", "2.0")
+
         await conformance_test_for(_SlowPromptAsyncBuilder())
 
-    monkeypatch.setenv("TOKEN_THROTTLE_CONFORMANCE_TIMING_SCALE", "2.0")
+    async def test_timing_context_resets_after_helper_failure(self) -> None:
+        outer_timing = ConformanceTiming(operation_deadline_seconds=0.25)
+        token = conformance._TIMING_CONTEXT.set(outer_timing)
+        helper_timing = ConformanceTiming(operation_deadline_seconds=0.05)
+        try:
+            with pytest.raises(BackendConformanceError):
+                await conformance_test_for(
+                    _MinimalAsyncBuilder(_HangingAsyncBackend()),
+                    timing=helper_timing,
+                )
+            assert conformance._TIMING_CONTEXT.get() == outer_timing
+        finally:
+            conformance._TIMING_CONTEXT.reset(token)
 
-    await conformance_test_for(_SlowPromptAsyncBuilder())
+    async def test_nested_timing_scopes_restore_outer_context(
+        self,
+        monkeypatch,
+    ) -> None:
+        outer_timing = ConformanceTiming(operation_deadline_seconds=0.5)
+        inner_timing = ConformanceTiming(operation_deadline_seconds=2.0)
+        original_check = conformance._check_async_basic_capacity
+        nested = False
+        observed: list[ConformanceTiming] = []
+
+        async def _nested_check(builder) -> None:
+            nonlocal nested
+            if nested:
+                await original_check(builder)
+                return
+            nested = True
+            observed.append(conformance._timing())
+            await conformance_test_for(
+                MemoryBackendBuilder(sleep_interval=0.01),
+                timing=inner_timing,
+            )
+            observed.append(conformance._timing())
+            raise BackendConformanceError("stop after nested timing probe")
+
+        monkeypatch.setattr(conformance, "_check_async_basic_capacity", _nested_check)
+
+        with pytest.raises(
+            BackendConformanceError,
+            match="stop after nested timing probe",
+        ):
+            await conformance_test_for(
+                MemoryBackendBuilder(sleep_interval=0.01),
+                timing=outer_timing,
+            )
+
+        assert observed == [outer_timing, outer_timing]
+        assert conformance._TIMING_CONTEXT.get() is None
 
 
 async def test_claim_method_exception_is_normalized() -> None:
