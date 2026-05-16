@@ -66,7 +66,7 @@ from token_throttle.migration import (
     validate_config_for_v2_0,
 )
 
-__version__ = "3.0.0"
+__version__ = "4.0.0"
 
 if TYPE_CHECKING:
     from token_throttle._capacity import CalculatedCapacity
