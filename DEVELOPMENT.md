@@ -18,17 +18,27 @@ uv run pytest tests/ -v --redis-url redis://localhost:6379
 
 ## CI structure
 
-CI runs five jobs (see `.github/workflows/ci.yml`):
+CI runs six jobs (see `.github/workflows/ci.yml`):
 
 | Job | What it does | Extras installed |
 |-----|-------------|-----------------|
-| `lint` | ruff check + format | dev only |
-| `test-unit-core` | Unit tests without optional deps | dev only |
-| `test-unit-full` | Unit tests with all optional deps | all extras + dev |
-| `test-integration` | Integration tests against Redis | all extras + dev |
-| `coverage` | Full suite + Codecov upload | all extras + dev |
+| `lint` | ruff check + format on Linux / Python 3.12 | dev only |
+| `test-unit-core` | Unit tests without optional deps on Linux / Python 3.12, 3.13, 3.14 | dev only |
+| `test-unit-full` | Unit tests with all optional deps on Linux / Python 3.12, 3.13, 3.14 | all extras + dev |
+| `test-unit-platform` | Unit tests with all optional deps on macOS and Windows / Python 3.13 | all extras + dev |
+| `test-integration` | Integration tests against Redis on Linux / Python 3.12, 3.13, 3.14 | all extras + dev |
+| `coverage` | Full suite + Codecov upload on Linux / Python 3.13 | all extras + dev |
 
-Matrix: Python 3.12 and 3.13. Redis 7 (alpine) as a GitHub service container.
+Supported Python matrix: Python 3.12, 3.13, and 3.14, matching
+`requires-python = ">=3.12"` and the package classifiers. Python 3.10 and 3.11
+are not supported or tested.
+
+Platform matrix: Linux remains the full test and Redis integration target.
+macOS and Windows run the all-extras unit suite on Python 3.13 to catch
+platform-specific unit bugs without multiplying every Python version across
+every operating system. Redis integration tests stay Linux-only because GitHub
+Actions service containers are Linux-oriented and this project targets Redis
+behavior rather than OS-specific Redis packaging.
 
 ## Known constraints and assumptions
 
