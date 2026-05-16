@@ -5,7 +5,7 @@ import inspect
 import time
 import uuid
 import warnings
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from token_throttle._exceptions import BackendConformanceError
 from token_throttle._interfaces._callbacks import (
@@ -85,7 +85,7 @@ def _check_bool_claim(value: object, method_name: str) -> bool:
         _fail(f"{method_name}() must be synchronous and return bool")
     if type(value) is not bool:
         _fail(f"{method_name}() must return bool, got {type(value).__name__}")
-    return value
+    return cast("bool", value)
 
 
 def _check_runtime_protocols(
