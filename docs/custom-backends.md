@@ -178,6 +178,19 @@ consume that marker before crediting capacity. A missing marker should raise
 `UnknownReservationError`; a consumed marker with a known refund tombstone should
 raise `DuplicateRefundError`.
 
+Authoritative refunds must fail closed when any marker metadata kwarg is omitted:
+`reservation_model_family`, `reservation_bucket_ids`, or
+`reservation_reserved_usage`. These kwargs remain optional in the structural
+protocol for compatibility with non-authoritative backends, but a backend that
+claims `supports_acquire_marker_authority()` must not silently default them to
+caller-supplied refund data.
+
+The refund target `bucket_ids` is also part of the authority check. It may be a
+surviving subset of the reservation bucket ids after reconfiguration, but the
+positional `reserved_usage` must match the corresponding projection of
+`reservation_reserved_usage`. Do not credit arbitrary caller-supplied buckets
+after only validating the marker metadata.
+
 ## TTL Hooks (FIX-53)
 
 `reservation_lifetime_seconds` is meaningful when `reservation_id` is supplied.
@@ -274,6 +287,9 @@ As of v5.1.0, the bundled helpers check:
 - refund semantics, overuse warnings, and max-capacity update behavior
 - callback emission and documented callback payload keys/types
 - marker authority positive behavior for backends that claim support
+- marker authority negative behavior for unknown, duplicate, forged-scope,
+  mismatched-metadata, and omitted-metadata refunds, including no-credit
+  side-effect checks
 - marker authority claim consistency, including rejection of default refund
   hooks for authoritative backends
 - durable refund dedup claim consistency and duplicate-refund behavior
@@ -286,6 +302,9 @@ The helpers do not check:
 - performance regressions beyond bounded helper deadlines
 - structured `token_throttle_event` `DEBUG` log emission
 - third-party storage durability or write-ahead guarantees
+- marker TTL expiry, durable marker garbage collection, or resistance to forged
+  `CapacityReservation.created_at_seconds`; test those with backend-specific
+  timing/storage instrumentation
 
 KNOWN UNKNOWN: post-write probes for third-party durable backends are still not
 portable. The conformance helper verifies observable behavior through the public

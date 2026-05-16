@@ -11,7 +11,7 @@ import time
 import uuid
 import warnings
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, NoReturn, cast
+from typing import TYPE_CHECKING, Any, NoReturn, cast
 
 from frozendict import frozendict
 
@@ -68,6 +68,9 @@ _PUBLIC_MODEL_NAME = "conformance-model"
 _RETURN_TIMESTAMP_SKEW_SECONDS = 24 * 60 * 60
 _BUCKET_ID_SIZE = 2
 _TIMING_SCALE_ENV = "TOKEN_THROTTLE_CONFORMANCE_TIMING_SCALE"
+_OMIT_MARKER_METADATA = object()
+_DEFAULT_MARKER_BUCKET_IDS = object()
+_DEFAULT_MARKER_RESERVED_USAGE = object()
 
 
 @dataclass(frozen=True)
@@ -1801,27 +1804,52 @@ async def _async_refund_for_buckets(  # noqa: PLR0913
     reserved_usage,
     actual_usage,
     *,
+    bucket_ids: set[BucketId] | frozenset[BucketId] | None = frozenset(
+        {_REQUESTS_BUCKET_ID}
+    ),
     reservation_id: str,
-    reservation_model_family: str,
-    reservation_bucket_ids=frozenset({_REQUESTS_BUCKET_ID}),
-    reservation_reserved_usage=None,
+    reservation_model_family: object,
+    reservation_bucket_ids: object = _DEFAULT_MARKER_BUCKET_IDS,
+    reservation_reserved_usage: object = _DEFAULT_MARKER_RESERVED_USAGE,
 ) -> object:
+    kwargs: dict[str, Any] = {
+        "bucket_ids": bucket_ids,
+        "reservation_id": reservation_id,
+    }
+    if reservation_model_family is not _OMIT_MARKER_METADATA:
+        kwargs["reservation_model_family"] = reservation_model_family
+    if reservation_bucket_ids is _DEFAULT_MARKER_BUCKET_IDS:
+        kwargs["reservation_bucket_ids"] = frozenset({_REQUESTS_BUCKET_ID})
+    elif reservation_bucket_ids is not _OMIT_MARKER_METADATA:
+        kwargs["reservation_bucket_ids"] = reservation_bucket_ids
+    if reservation_reserved_usage is _DEFAULT_MARKER_RESERVED_USAGE:
+        kwargs["reservation_reserved_usage"] = reserved_usage
+    elif reservation_reserved_usage is not _OMIT_MARKER_METADATA:
+        kwargs["reservation_reserved_usage"] = reservation_reserved_usage
     return await _async_backend_step(
         label,
         lambda: backend.refund_capacity_for_buckets(
             reserved_usage,
             actual_usage,
-            bucket_ids=frozenset({_REQUESTS_BUCKET_ID}),
-            reservation_id=reservation_id,
-            reservation_model_family=reservation_model_family,
-            reservation_bucket_ids=reservation_bucket_ids,
-            reservation_reserved_usage=(
-                reserved_usage
-                if reservation_reserved_usage is None
-                else reservation_reserved_usage
-            ),
+            **kwargs,
         ),
         allowed_exceptions=(UnknownReservationError, DuplicateRefundError, ValueError),
+    )
+
+
+async def _check_async_no_capacity(
+    backend: RateLimiterBackend,
+    usage: FrozenUsage,
+    label: str,
+    message: str,
+) -> None:
+    await _expect_async_timeout(
+        label,
+        lambda: backend.await_for_capacity(
+            usage,
+            timeout=_TRY_ACQUIRE_TIMEOUT_SECONDS,
+        ),
+        message,
     )
 
 
@@ -1829,12 +1857,10 @@ async def _check_async_no_double_refund_credit(
     backend: RateLimiterBackend,
     message: str,
 ) -> None:
-    await _expect_async_timeout(
+    await _check_async_no_capacity(
+        backend,
+        frozen_usage({"requests": 2}),
         "await_for_capacity(requests=2, timeout=0)",
-        lambda: backend.await_for_capacity(
-            frozen_usage({"requests": 2}),
-            timeout=_TRY_ACQUIRE_TIMEOUT_SECONDS,
-        ),
         message,
     )
 
@@ -1845,7 +1871,7 @@ async def _check_async_marker_metadata_mismatch(
     *,
     reservation_model_family: str | None = None,
     reservation_bucket_ids: frozenset[BucketId] | None = None,
-    reservation_reserved_usage: FrozenUsage | None = None,
+    reservation_reserved_usage: object = _DEFAULT_MARKER_RESERVED_USAGE,
 ) -> None:
     mismatch_cfg = _config(f"async-marker-mismatch-{mismatch_field}", limit=2.0)
     mismatch_backend = _build_async_backend(
@@ -1863,8 +1889,8 @@ async def _check_async_marker_metadata_mismatch(
             reservation_lifetime_seconds=_RESERVATION_LIFETIME_SECONDS,
         ),
     )
-    try:
-        mismatch_result = await _async_refund_for_buckets(
+    with contextlib.suppress(UnknownReservationError, DuplicateRefundError, ValueError):
+        await _async_refund_for_buckets(
             f"refund_capacity_for_buckets(metadata-mismatch-{mismatch_field})",
             mismatch_backend,
             mismatch_reserved_usage,
@@ -1882,18 +1908,115 @@ async def _check_async_marker_metadata_mismatch(
             ),
             reservation_reserved_usage=reservation_reserved_usage,
         )
-    except (UnknownReservationError, DuplicateRefundError, ValueError):
-        return
-    if mismatch_result is False:
-        return
-    await _expect_async_timeout(
+    await _check_async_no_capacity(
+        mismatch_backend,
+        frozen_usage({"requests": 1}),
         "await_for_capacity(requests=1, timeout=0)",
-        lambda: mismatch_backend.await_for_capacity(
-            frozen_usage({"requests": 1}),
-            timeout=_TRY_ACQUIRE_TIMEOUT_SECONDS,
-        ),
         "marker-authority backends must fail closed for "
         f"reservation metadata mismatch ({mismatch_field})",
+    )
+
+
+async def _check_async_marker_metadata_omission(
+    builder: RateLimiterBackendBuilderInterface,
+    omitted_field: str,
+) -> None:
+    omission_cfg = _config(f"async-marker-omitted-{omitted_field}", limit=2.0)
+    omission_backend = _build_async_backend(
+        builder,
+        omission_cfg,
+        label=f"build(async-marker-omitted-{omitted_field})",
+    )
+    omission_reservation_id = f"conformance-{uuid.uuid4().hex}"
+    omission_reserved_usage = frozen_usage({"requests": 2})
+    reservation_model_family: object = omission_cfg.get_model_family()
+    reservation_bucket_ids: object = frozenset({_REQUESTS_BUCKET_ID})
+    reservation_reserved_usage: object = omission_reserved_usage
+    if omitted_field == "reservation_model_family":
+        reservation_model_family = _OMIT_MARKER_METADATA
+    elif omitted_field == "reservation_bucket_ids":
+        reservation_bucket_ids = _OMIT_MARKER_METADATA
+    elif omitted_field == "reservation_reserved_usage":
+        reservation_reserved_usage = _OMIT_MARKER_METADATA
+    else:
+        _fail(f"unknown marker metadata omission field {omitted_field!r}")
+    await _async_backend_step(
+        "await_for_capacity(requests=2, reservation_id=...)",
+        lambda: omission_backend.await_for_capacity(
+            omission_reserved_usage,
+            reservation_id=omission_reservation_id,
+            reservation_lifetime_seconds=_RESERVATION_LIFETIME_SECONDS,
+        ),
+    )
+    with contextlib.suppress(UnknownReservationError, DuplicateRefundError, ValueError):
+        await _async_refund_for_buckets(
+            f"refund_capacity_for_buckets(metadata-omitted-{omitted_field})",
+            omission_backend,
+            omission_reserved_usage,
+            frozen_usage({"requests": 1}),
+            reservation_id=omission_reservation_id,
+            reservation_model_family=reservation_model_family,
+            reservation_bucket_ids=reservation_bucket_ids,
+            reservation_reserved_usage=reservation_reserved_usage,
+        )
+    await _check_async_no_capacity(
+        omission_backend,
+        frozen_usage({"requests": 1}),
+        "await_for_capacity(requests=1, timeout=0)",
+        "marker-authority backends must fail closed when "
+        f"{omitted_field} marker metadata is omitted",
+    )
+
+
+async def _check_async_marker_refund_scope_forgery(
+    builder: RateLimiterBackendBuilderInterface,
+) -> None:
+    scope_cfg = _two_metric_config("async-marker-refund-scope", limit=2.0)
+    scope_backend = _build_async_backend(
+        builder,
+        scope_cfg,
+        label="build(async-marker-refund-scope)",
+    )
+    scope_reservation_id = f"conformance-{uuid.uuid4().hex}"
+    marker_reserved_usage = frozen_usage({"requests": 2, "tokens": 0})
+    await _async_backend_step(
+        "await_for_capacity(requests=2, tokens=0, reservation_id=...)",
+        lambda: scope_backend.await_for_capacity(
+            marker_reserved_usage,
+            reservation_id=scope_reservation_id,
+            reservation_lifetime_seconds=_RESERVATION_LIFETIME_SECONDS,
+        ),
+    )
+    await _async_backend_step(
+        "await_for_capacity(requests=0, tokens=2)",
+        lambda: scope_backend.await_for_capacity(
+            frozen_usage({"requests": 0, "tokens": 2})
+        ),
+    )
+    with contextlib.suppress(UnknownReservationError, DuplicateRefundError, ValueError):
+        await _async_refund_for_buckets(
+            "refund_capacity_for_buckets(forged-refund-scope)",
+            scope_backend,
+            frozen_usage({"tokens": 2}),
+            frozen_usage({"tokens": 1}),
+            bucket_ids=frozenset({_TOKENS_BUCKET_ID}),
+            reservation_id=scope_reservation_id,
+            reservation_model_family=scope_cfg.get_model_family(),
+            reservation_bucket_ids=frozenset({_REQUESTS_BUCKET_ID, _TOKENS_BUCKET_ID}),
+            reservation_reserved_usage=marker_reserved_usage,
+        )
+    await _check_async_no_capacity(
+        scope_backend,
+        frozen_usage({"requests": 0, "tokens": 1}),
+        "await_for_capacity(requests=0, tokens=1, timeout=0)",
+        "marker-authority backends must fail closed for forged refund bucket_ids",
+    )
+    await _check_async_no_capacity(
+        scope_backend,
+        frozen_usage({"requests": 1, "tokens": 0}),
+        "await_for_capacity(requests=1, tokens=0, timeout=0)",
+        "marker-authority backends must not credit the genuine bucket for "
+        "forged refund bucket_ids",
     )
 
 
@@ -1934,7 +2057,7 @@ async def _check_async_durable_refund_dedup(
         reservation_id=reservation_id,
         reservation_model_family=cfg.get_model_family(),
     )
-    try:
+    with contextlib.suppress(DuplicateRefundError):
         await _async_refund_for_buckets(
             "refund_capacity_for_buckets(durable-duplicate)",
             backend,
@@ -1943,8 +2066,6 @@ async def _check_async_durable_refund_dedup(
             reservation_id=reservation_id,
             reservation_model_family=cfg.get_model_family(),
         )
-    except DuplicateRefundError:
-        return
     await _check_async_no_double_refund_credit(
         backend,
         "supports_durable_refund_dedup=True must not credit duplicate refunds twice",
@@ -2007,7 +2128,7 @@ async def _check_async_marker_authority(
         "await_for_capacity(requests=2)",
         lambda: unknown_backend.await_for_capacity(frozen_usage({"requests": 2})),
     )
-    try:
+    with contextlib.suppress(UnknownReservationError):
         await _async_refund_for_buckets(
             "refund_capacity_for_buckets(unknown-reservation)",
             unknown_backend,
@@ -2016,17 +2137,12 @@ async def _check_async_marker_authority(
             reservation_id=f"unknown-{uuid.uuid4().hex}",
             reservation_model_family=unknown_cfg.get_model_family(),
         )
-    except UnknownReservationError:
-        pass
-    else:
-        await _expect_async_timeout(
-            "await_for_capacity(requests=1, timeout=0)",
-            lambda: unknown_backend.await_for_capacity(
-                frozen_usage({"requests": 1}),
-                timeout=_TRY_ACQUIRE_TIMEOUT_SECONDS,
-            ),
-            "marker-authority backends must fail closed for unknown reservations",
-        )
+    await _check_async_no_capacity(
+        unknown_backend,
+        frozen_usage({"requests": 1}),
+        "await_for_capacity(requests=1, timeout=0)",
+        "marker-authority backends must fail closed for unknown reservations",
+    )
 
     duplicate_cfg = _config("async-marker-duplicate", limit=2.0)
     duplicate_backend = _build_async_backend(
@@ -2052,7 +2168,7 @@ async def _check_async_marker_authority(
         reservation_id=duplicate_reservation_id,
         reservation_model_family=duplicate_cfg.get_model_family(),
     )
-    try:
+    with contextlib.suppress(DuplicateRefundError):
         await _async_refund_for_buckets(
             "refund_capacity_for_buckets(duplicate-second)",
             duplicate_backend,
@@ -2061,13 +2177,10 @@ async def _check_async_marker_authority(
             reservation_id=duplicate_reservation_id,
             reservation_model_family=duplicate_cfg.get_model_family(),
         )
-    except DuplicateRefundError:
-        pass
-    else:
-        await _check_async_no_double_refund_credit(
-            duplicate_backend,
-            "marker-authority backends must not credit duplicate refunds twice",
-        )
+    await _check_async_no_double_refund_credit(
+        duplicate_backend,
+        "marker-authority backends must not credit duplicate refunds twice",
+    )
 
     await _check_async_marker_metadata_mismatch(
         builder,
@@ -2086,6 +2199,13 @@ async def _check_async_marker_authority(
         "reserved_usage",
         reservation_reserved_usage=frozen_usage({"requests": 1}),
     )
+    await _check_async_marker_refund_scope_forgery(builder)
+    for omitted_field in (
+        "reservation_model_family",
+        "reservation_bucket_ids",
+        "reservation_reserved_usage",
+    ):
+        await _check_async_marker_metadata_omission(builder, omitted_field)
 
 
 async def _check_async_public_reservation_round_trip(
@@ -2785,27 +2905,52 @@ def _sync_refund_for_buckets(  # noqa: PLR0913
     reserved_usage,
     actual_usage,
     *,
+    bucket_ids: set[BucketId] | frozenset[BucketId] | None = frozenset(
+        {_REQUESTS_BUCKET_ID}
+    ),
     reservation_id: str,
-    reservation_model_family: str,
-    reservation_bucket_ids=frozenset({_REQUESTS_BUCKET_ID}),
-    reservation_reserved_usage=None,
+    reservation_model_family: object,
+    reservation_bucket_ids: object = _DEFAULT_MARKER_BUCKET_IDS,
+    reservation_reserved_usage: object = _DEFAULT_MARKER_RESERVED_USAGE,
 ) -> object:
+    kwargs: dict[str, Any] = {
+        "bucket_ids": bucket_ids,
+        "reservation_id": reservation_id,
+    }
+    if reservation_model_family is not _OMIT_MARKER_METADATA:
+        kwargs["reservation_model_family"] = reservation_model_family
+    if reservation_bucket_ids is _DEFAULT_MARKER_BUCKET_IDS:
+        kwargs["reservation_bucket_ids"] = frozenset({_REQUESTS_BUCKET_ID})
+    elif reservation_bucket_ids is not _OMIT_MARKER_METADATA:
+        kwargs["reservation_bucket_ids"] = reservation_bucket_ids
+    if reservation_reserved_usage is _DEFAULT_MARKER_RESERVED_USAGE:
+        kwargs["reservation_reserved_usage"] = reserved_usage
+    elif reservation_reserved_usage is not _OMIT_MARKER_METADATA:
+        kwargs["reservation_reserved_usage"] = reservation_reserved_usage
     return _sync_backend_step(
         label,
         lambda: backend.refund_capacity_for_buckets(
             reserved_usage,
             actual_usage,
-            bucket_ids=frozenset({_REQUESTS_BUCKET_ID}),
-            reservation_id=reservation_id,
-            reservation_model_family=reservation_model_family,
-            reservation_bucket_ids=reservation_bucket_ids,
-            reservation_reserved_usage=(
-                reserved_usage
-                if reservation_reserved_usage is None
-                else reservation_reserved_usage
-            ),
+            **kwargs,
         ),
         allowed_exceptions=(UnknownReservationError, DuplicateRefundError, ValueError),
+    )
+
+
+def _check_sync_no_capacity(
+    backend: SyncRateLimiterBackend,
+    usage: FrozenUsage,
+    label: str,
+    message: str,
+) -> None:
+    _expect_timeout(
+        label,
+        lambda: backend.wait_for_capacity(
+            usage,
+            timeout=_TRY_ACQUIRE_TIMEOUT_SECONDS,
+        ),
+        message,
     )
 
 
@@ -2813,12 +2958,10 @@ def _check_sync_no_double_refund_credit(
     backend: SyncRateLimiterBackend,
     message: str,
 ) -> None:
-    _expect_timeout(
+    _check_sync_no_capacity(
+        backend,
+        frozen_usage({"requests": 2}),
         "wait_for_capacity(requests=2, timeout=0)",
-        lambda: backend.wait_for_capacity(
-            frozen_usage({"requests": 2}),
-            timeout=_TRY_ACQUIRE_TIMEOUT_SECONDS,
-        ),
         message,
     )
 
@@ -2829,7 +2972,7 @@ def _check_sync_marker_metadata_mismatch(
     *,
     reservation_model_family: str | None = None,
     reservation_bucket_ids: frozenset[BucketId] | None = None,
-    reservation_reserved_usage: FrozenUsage | None = None,
+    reservation_reserved_usage: object = _DEFAULT_MARKER_RESERVED_USAGE,
 ) -> None:
     mismatch_cfg = _config(f"sync-marker-mismatch-{mismatch_field}", limit=2.0)
     mismatch_backend = _build_sync_backend(
@@ -2847,8 +2990,8 @@ def _check_sync_marker_metadata_mismatch(
             reservation_lifetime_seconds=_RESERVATION_LIFETIME_SECONDS,
         ),
     )
-    try:
-        mismatch_result = _sync_refund_for_buckets(
+    with contextlib.suppress(UnknownReservationError, DuplicateRefundError, ValueError):
+        _sync_refund_for_buckets(
             f"refund_capacity_for_buckets(metadata-mismatch-{mismatch_field})",
             mismatch_backend,
             mismatch_reserved_usage,
@@ -2866,18 +3009,115 @@ def _check_sync_marker_metadata_mismatch(
             ),
             reservation_reserved_usage=reservation_reserved_usage,
         )
-    except (UnknownReservationError, DuplicateRefundError, ValueError):
-        return
-    if mismatch_result is False:
-        return
-    _expect_timeout(
+    _check_sync_no_capacity(
+        mismatch_backend,
+        frozen_usage({"requests": 1}),
         "wait_for_capacity(requests=1, timeout=0)",
-        lambda: mismatch_backend.wait_for_capacity(
-            frozen_usage({"requests": 1}),
-            timeout=_TRY_ACQUIRE_TIMEOUT_SECONDS,
-        ),
         "marker-authority backends must fail closed for "
         f"reservation metadata mismatch ({mismatch_field})",
+    )
+
+
+def _check_sync_marker_metadata_omission(
+    builder: SyncRateLimiterBackendBuilderInterface,
+    omitted_field: str,
+) -> None:
+    omission_cfg = _config(f"sync-marker-omitted-{omitted_field}", limit=2.0)
+    omission_backend = _build_sync_backend(
+        builder,
+        omission_cfg,
+        label=f"build(sync-marker-omitted-{omitted_field})",
+    )
+    omission_reservation_id = f"conformance-{uuid.uuid4().hex}"
+    omission_reserved_usage = frozen_usage({"requests": 2})
+    reservation_model_family: object = omission_cfg.get_model_family()
+    reservation_bucket_ids: object = frozenset({_REQUESTS_BUCKET_ID})
+    reservation_reserved_usage: object = omission_reserved_usage
+    if omitted_field == "reservation_model_family":
+        reservation_model_family = _OMIT_MARKER_METADATA
+    elif omitted_field == "reservation_bucket_ids":
+        reservation_bucket_ids = _OMIT_MARKER_METADATA
+    elif omitted_field == "reservation_reserved_usage":
+        reservation_reserved_usage = _OMIT_MARKER_METADATA
+    else:
+        _fail(f"unknown marker metadata omission field {omitted_field!r}")
+    _sync_backend_step(
+        "wait_for_capacity(requests=2, reservation_id=...)",
+        lambda: omission_backend.wait_for_capacity(
+            omission_reserved_usage,
+            reservation_id=omission_reservation_id,
+            reservation_lifetime_seconds=_RESERVATION_LIFETIME_SECONDS,
+        ),
+    )
+    with contextlib.suppress(UnknownReservationError, DuplicateRefundError, ValueError):
+        _sync_refund_for_buckets(
+            f"refund_capacity_for_buckets(metadata-omitted-{omitted_field})",
+            omission_backend,
+            omission_reserved_usage,
+            frozen_usage({"requests": 1}),
+            reservation_id=omission_reservation_id,
+            reservation_model_family=reservation_model_family,
+            reservation_bucket_ids=reservation_bucket_ids,
+            reservation_reserved_usage=reservation_reserved_usage,
+        )
+    _check_sync_no_capacity(
+        omission_backend,
+        frozen_usage({"requests": 1}),
+        "wait_for_capacity(requests=1, timeout=0)",
+        "marker-authority backends must fail closed when "
+        f"{omitted_field} marker metadata is omitted",
+    )
+
+
+def _check_sync_marker_refund_scope_forgery(
+    builder: SyncRateLimiterBackendBuilderInterface,
+) -> None:
+    scope_cfg = _two_metric_config("sync-marker-refund-scope", limit=2.0)
+    scope_backend = _build_sync_backend(
+        builder,
+        scope_cfg,
+        label="build(sync-marker-refund-scope)",
+    )
+    scope_reservation_id = f"conformance-{uuid.uuid4().hex}"
+    marker_reserved_usage = frozen_usage({"requests": 2, "tokens": 0})
+    _sync_backend_step(
+        "wait_for_capacity(requests=2, tokens=0, reservation_id=...)",
+        lambda: scope_backend.wait_for_capacity(
+            marker_reserved_usage,
+            reservation_id=scope_reservation_id,
+            reservation_lifetime_seconds=_RESERVATION_LIFETIME_SECONDS,
+        ),
+    )
+    _sync_backend_step(
+        "wait_for_capacity(requests=0, tokens=2)",
+        lambda: scope_backend.wait_for_capacity(
+            frozen_usage({"requests": 0, "tokens": 2})
+        ),
+    )
+    with contextlib.suppress(UnknownReservationError, DuplicateRefundError, ValueError):
+        _sync_refund_for_buckets(
+            "refund_capacity_for_buckets(forged-refund-scope)",
+            scope_backend,
+            frozen_usage({"tokens": 2}),
+            frozen_usage({"tokens": 1}),
+            bucket_ids=frozenset({_TOKENS_BUCKET_ID}),
+            reservation_id=scope_reservation_id,
+            reservation_model_family=scope_cfg.get_model_family(),
+            reservation_bucket_ids=frozenset({_REQUESTS_BUCKET_ID, _TOKENS_BUCKET_ID}),
+            reservation_reserved_usage=marker_reserved_usage,
+        )
+    _check_sync_no_capacity(
+        scope_backend,
+        frozen_usage({"requests": 0, "tokens": 1}),
+        "wait_for_capacity(requests=0, tokens=1, timeout=0)",
+        "marker-authority backends must fail closed for forged refund bucket_ids",
+    )
+    _check_sync_no_capacity(
+        scope_backend,
+        frozen_usage({"requests": 1, "tokens": 0}),
+        "wait_for_capacity(requests=1, tokens=0, timeout=0)",
+        "marker-authority backends must not credit the genuine bucket for "
+        "forged refund bucket_ids",
     )
 
 
@@ -2918,7 +3158,7 @@ def _check_sync_durable_refund_dedup(
         reservation_id=reservation_id,
         reservation_model_family=cfg.get_model_family(),
     )
-    try:
+    with contextlib.suppress(DuplicateRefundError):
         _sync_refund_for_buckets(
             "refund_capacity_for_buckets(durable-duplicate)",
             backend,
@@ -2927,8 +3167,6 @@ def _check_sync_durable_refund_dedup(
             reservation_id=reservation_id,
             reservation_model_family=cfg.get_model_family(),
         )
-    except DuplicateRefundError:
-        return
     _check_sync_no_double_refund_credit(
         backend,
         "supports_durable_refund_dedup=True must not credit duplicate refunds twice",
@@ -2991,7 +3229,7 @@ def _check_sync_marker_authority(
         "wait_for_capacity(requests=2)",
         lambda: unknown_backend.wait_for_capacity(frozen_usage({"requests": 2})),
     )
-    try:
+    with contextlib.suppress(UnknownReservationError):
         _sync_refund_for_buckets(
             "refund_capacity_for_buckets(unknown-reservation)",
             unknown_backend,
@@ -3000,17 +3238,12 @@ def _check_sync_marker_authority(
             reservation_id=f"unknown-{uuid.uuid4().hex}",
             reservation_model_family=unknown_cfg.get_model_family(),
         )
-    except UnknownReservationError:
-        pass
-    else:
-        _expect_timeout(
-            "wait_for_capacity(requests=1, timeout=0)",
-            lambda: unknown_backend.wait_for_capacity(
-                frozen_usage({"requests": 1}),
-                timeout=_TRY_ACQUIRE_TIMEOUT_SECONDS,
-            ),
-            "marker-authority backends must fail closed for unknown reservations",
-        )
+    _check_sync_no_capacity(
+        unknown_backend,
+        frozen_usage({"requests": 1}),
+        "wait_for_capacity(requests=1, timeout=0)",
+        "marker-authority backends must fail closed for unknown reservations",
+    )
 
     duplicate_cfg = _config("sync-marker-duplicate", limit=2.0)
     duplicate_backend = _build_sync_backend(
@@ -3036,7 +3269,7 @@ def _check_sync_marker_authority(
         reservation_id=duplicate_reservation_id,
         reservation_model_family=duplicate_cfg.get_model_family(),
     )
-    try:
+    with contextlib.suppress(DuplicateRefundError):
         _sync_refund_for_buckets(
             "refund_capacity_for_buckets(duplicate-second)",
             duplicate_backend,
@@ -3045,13 +3278,10 @@ def _check_sync_marker_authority(
             reservation_id=duplicate_reservation_id,
             reservation_model_family=duplicate_cfg.get_model_family(),
         )
-    except DuplicateRefundError:
-        pass
-    else:
-        _check_sync_no_double_refund_credit(
-            duplicate_backend,
-            "marker-authority backends must not credit duplicate refunds twice",
-        )
+    _check_sync_no_double_refund_credit(
+        duplicate_backend,
+        "marker-authority backends must not credit duplicate refunds twice",
+    )
 
     _check_sync_marker_metadata_mismatch(
         builder,
@@ -3070,6 +3300,13 @@ def _check_sync_marker_authority(
         "reserved_usage",
         reservation_reserved_usage=frozen_usage({"requests": 1}),
     )
+    _check_sync_marker_refund_scope_forgery(builder)
+    for omitted_field in (
+        "reservation_model_family",
+        "reservation_bucket_ids",
+        "reservation_reserved_usage",
+    ):
+        _check_sync_marker_metadata_omission(builder, omitted_field)
 
 
 def _check_sync_public_reservation_round_trip(

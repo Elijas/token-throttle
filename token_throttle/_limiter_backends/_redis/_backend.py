@@ -224,6 +224,44 @@ def _reservation_lifetime_ttl_ms(value: float | None) -> int:
     return max(1, math.ceil(value_float * 1000.0))
 
 
+def _require_acquire_marker_metadata(
+    *,
+    reservation_model_family: str | None,
+    reservation_bucket_ids: set[tuple[str, int]] | frozenset[tuple[str, int]] | None,
+    reservation_reserved_usage: FrozenUsage | None,
+) -> tuple[str, frozenset[tuple[str, int]], FrozenUsage]:
+    if (
+        reservation_model_family is None
+        or reservation_bucket_ids is None
+        or reservation_reserved_usage is None
+    ):
+        raise ValueError(
+            "reservation marker metadata is required for marker-authorized refunds"
+        )
+    return (
+        reservation_model_family,
+        frozenset(reservation_bucket_ids),
+        reservation_reserved_usage,
+    )
+
+
+def _validate_acquire_marker_refund_scope(
+    *,
+    reserved_usage: FrozenUsage,
+    refund_bucket_ids: frozenset[tuple[str, int]],
+    marker_bucket_ids: frozenset[tuple[str, int]],
+    marker_reserved_usage: FrozenUsage,
+) -> None:
+    if not refund_bucket_ids.issubset(marker_bucket_ids):
+        raise ValueError("refund bucket_ids do not match the acquire marker")
+    refund_metric_names = frozenset(metric for metric, _ in refund_bucket_ids)
+    for metric in refund_metric_names:
+        if metric not in marker_reserved_usage:
+            raise ValueError("refund reserved_usage does not match the acquire marker")
+        if float(reserved_usage[metric]) != float(marker_reserved_usage[metric]):
+            raise ValueError("refund reserved_usage does not match the acquire marker")
+
+
 def _decode_redis_script_status(value: object, *, context: str) -> str:
     if isinstance(value, bytes):
         try:
@@ -1995,17 +2033,26 @@ class RedisBackend(RateLimiterBackend):
                 raise UnknownReservationError(
                     "reservation was never acquired by this backend"
                 )
+            (
+                marker_model_family,
+                marker_bucket_ids,
+                marker_reserved_usage,
+            ) = _require_acquire_marker_metadata(
+                reservation_model_family=reservation_model_family,
+                reservation_bucket_ids=reservation_bucket_ids,
+                reservation_reserved_usage=reservation_reserved_usage,
+            )
+            _validate_acquire_marker_refund_scope(
+                reserved_usage=reserved_usage,
+                refund_bucket_ids=refund_bucket_ids,
+                marker_bucket_ids=marker_bucket_ids,
+                marker_reserved_usage=marker_reserved_usage,
+            )
             expected_marker_value = redis_acquired_marker_value(
                 reservation_id=reservation_id,
-                model_family=(
-                    reservation_model_family or self._limit_config.get_model_family()
-                ),
-                bucket_ids=(
-                    frozenset(reservation_bucket_ids)
-                    if reservation_bucket_ids is not None
-                    else backend_bucket_ids
-                ),
-                usage=reservation_reserved_usage or reserved_usage,
+                model_family=marker_model_family,
+                bucket_ids=marker_bucket_ids,
+                usage=marker_reserved_usage,
             )
         if not refund_bucket_ids:
             if (

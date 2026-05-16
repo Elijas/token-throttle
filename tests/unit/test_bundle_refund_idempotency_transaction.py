@@ -83,6 +83,16 @@ def _acquire_marker_key(reservation_id: str) -> str:
     return _redis_modules()["redis_acquired_marker_key"]("tenant", reservation_id)
 
 
+def _marker_refund_kwargs(reservation_id: str) -> dict[str, object]:
+    return {
+        "bucket_ids": frozenset({BUCKET_ID}),
+        "reservation_id": reservation_id,
+        "reservation_model_family": MODEL_FAMILY,
+        "reservation_bucket_ids": frozenset({BUCKET_ID}),
+        "reservation_reserved_usage": RESERVED,
+    }
+
+
 def _seed_acquire_marker(redis_client: object, reservation_id: str) -> None:
     redis_client.store[_acquire_marker_key(reservation_id)] = _acquire_marker_value(
         reservation_id
@@ -515,8 +525,7 @@ async def test_async_redis_failed_bucket_write_does_not_claim_tombstone() -> Non
         await backend.refund_capacity_for_buckets(
             RESERVED,
             ACTUAL,
-            bucket_ids=frozenset({BUCKET_ID}),
-            reservation_id="redis-r1",
+            **_marker_refund_kwargs("redis-r1"),
         )
 
     assert dedup_key not in redis_client.store
@@ -525,8 +534,7 @@ async def test_async_redis_failed_bucket_write_does_not_claim_tombstone() -> Non
     assert await backend.refund_capacity_for_buckets(
         RESERVED,
         ACTUAL,
-        bucket_ids=frozenset({BUCKET_ID}),
-        reservation_id="redis-r1",
+        **_marker_refund_kwargs("redis-r1"),
     )
     assert redis_client.store[bucket._capacity_key] == 90.0
     assert redis_client.store[dedup_key] == "1"
@@ -535,8 +543,7 @@ async def test_async_redis_failed_bucket_write_does_not_claim_tombstone() -> Non
         await backend.refund_capacity_for_buckets(
             RESERVED,
             ACTUAL,
-            bucket_ids=frozenset({BUCKET_ID}),
-            reservation_id="redis-r1",
+            **_marker_refund_kwargs("redis-r1"),
         )
     assert redis_client.store[bucket._capacity_key] == 90.0
 
@@ -562,8 +569,7 @@ def test_sync_redis_failed_bucket_write_does_not_claim_tombstone() -> None:
         backend.refund_capacity_for_buckets(
             RESERVED,
             ACTUAL,
-            bucket_ids=frozenset({BUCKET_ID}),
-            reservation_id="redis-r2",
+            **_marker_refund_kwargs("redis-r2"),
         )
 
     assert dedup_key not in redis_client.store
@@ -572,8 +578,7 @@ def test_sync_redis_failed_bucket_write_does_not_claim_tombstone() -> None:
     assert backend.refund_capacity_for_buckets(
         RESERVED,
         ACTUAL,
-        bucket_ids=frozenset({BUCKET_ID}),
-        reservation_id="redis-r2",
+        **_marker_refund_kwargs("redis-r2"),
     )
     assert redis_client.store[bucket._capacity_key] == 90.0
     assert redis_client.store[dedup_key] == "1"
@@ -582,8 +587,7 @@ def test_sync_redis_failed_bucket_write_does_not_claim_tombstone() -> None:
         backend.refund_capacity_for_buckets(
             RESERVED,
             ACTUAL,
-            bucket_ids=frozenset({BUCKET_ID}),
-            reservation_id="redis-r2",
+            **_marker_refund_kwargs("redis-r2"),
         )
     assert redis_client.store[bucket._capacity_key] == 90.0
 
@@ -600,8 +604,7 @@ async def test_async_redis_deferred_tombstone_serializes_concurrent_retries() ->
         backend.refund_capacity_for_buckets(
             RESERVED,
             ACTUAL,
-            bucket_ids=frozenset({BUCKET_ID}),
-            reservation_id="redis-r3",
+            **_marker_refund_kwargs("redis-r3"),
         )
     )
     await asyncio.wait_for(redis_client.first_dedup_set_entered.wait(), timeout=1)
@@ -609,8 +612,7 @@ async def test_async_redis_deferred_tombstone_serializes_concurrent_retries() ->
         backend.refund_capacity_for_buckets(
             RESERVED,
             ACTUAL,
-            bucket_ids=frozenset({BUCKET_ID}),
-            reservation_id="redis-r3",
+            **_marker_refund_kwargs("redis-r3"),
         )
     )
 

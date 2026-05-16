@@ -182,6 +182,184 @@ class _MarkerReservedUsageLiarBuilder(_PatchingMemoryBuilder):
         return backend
 
 
+class _MarkerRaisesAfterCreditBuilder(_PatchingMemoryBuilder):
+    def _patch_backend(
+        self,
+        backend: MemoryBackend,
+        cfg: PerModelConfig,
+    ) -> MemoryBackend:
+        original_refund = backend.refund_capacity_for_buckets
+
+        async def refund_capacity_for_buckets(  # noqa: PLR0913
+            reserved_usage: FrozenUsage,
+            actual_usage: FrozenUsage,
+            *,
+            bucket_ids=None,
+            reservation_id=None,
+            reservation_model_family=None,
+            reservation_bucket_ids=None,
+            reservation_reserved_usage=None,
+        ):
+            if (
+                reservation_id is not None
+                and reservation_model_family != cfg.get_model_family()
+            ):
+                await original_refund(
+                    reserved_usage,
+                    actual_usage,
+                    bucket_ids=bucket_ids,
+                    reservation_id=reservation_id,
+                    reservation_model_family=reservation_model_family,
+                    reservation_bucket_ids=reservation_bucket_ids,
+                    reservation_reserved_usage=reservation_reserved_usage,
+                )
+                raise ValueError("reservation model family mismatch")
+            return await original_refund(
+                reserved_usage,
+                actual_usage,
+                bucket_ids=bucket_ids,
+                reservation_id=reservation_id,
+                reservation_model_family=reservation_model_family,
+                reservation_bucket_ids=reservation_bucket_ids,
+                reservation_reserved_usage=reservation_reserved_usage,
+            )
+
+        backend.supports_acquire_marker_authority = lambda: True
+        backend.refund_capacity_for_buckets = refund_capacity_for_buckets
+        return backend
+
+
+class _MarkerOmittedMetadataDefaultLiarBuilder(_PatchingMemoryBuilder):
+    def _patch_backend(
+        self,
+        backend: MemoryBackend,
+        cfg: PerModelConfig,
+    ) -> MemoryBackend:
+        original_refund = backend.refund_capacity_for_buckets
+
+        async def refund_capacity_for_buckets(  # noqa: PLR0913
+            reserved_usage: FrozenUsage,
+            actual_usage: FrozenUsage,
+            *,
+            bucket_ids=None,
+            reservation_id=None,
+            reservation_model_family=None,
+            reservation_bucket_ids=None,
+            reservation_reserved_usage=None,
+        ):
+            if reservation_id is not None and (
+                reservation_model_family is None
+                or reservation_bucket_ids is None
+                or reservation_reserved_usage is None
+            ):
+                return await original_refund(
+                    reserved_usage,
+                    actual_usage,
+                    bucket_ids=bucket_ids,
+                    reservation_id=reservation_id,
+                    reservation_model_family=reservation_model_family,
+                    reservation_bucket_ids=reservation_bucket_ids,
+                    reservation_reserved_usage=reservation_reserved_usage,
+                )
+            if reservation_id is not None:
+                if reservation_model_family != cfg.get_model_family():
+                    raise ValueError("reservation model family mismatch")
+                expected_bucket_ids = frozenset(
+                    (q.metric, q.per_seconds) for q in cfg.quotas
+                )
+                if reservation_bucket_ids != expected_bucket_ids:
+                    raise ValueError("reservation bucket ids mismatch")
+                if reservation_reserved_usage != reserved_usage:
+                    raise ValueError("reservation usage mismatch")
+            return await original_refund(
+                reserved_usage,
+                actual_usage,
+                bucket_ids=bucket_ids,
+                reservation_id=reservation_id,
+                reservation_model_family=reservation_model_family,
+                reservation_bucket_ids=reservation_bucket_ids,
+                reservation_reserved_usage=reservation_reserved_usage,
+            )
+
+        backend.supports_acquire_marker_authority = lambda: True
+        backend.refund_capacity_for_buckets = refund_capacity_for_buckets
+        return backend
+
+
+class _MarkerRefundScopeLiarBuilder(_PatchingMemoryBuilder):
+    def _patch_backend(
+        self,
+        backend: MemoryBackend,
+        cfg: PerModelConfig,
+    ) -> MemoryBackend:
+        original_await = backend.await_for_capacity
+        original_refund = backend.refund_capacity_for_buckets
+        acquired_usage_by_id: dict[str, FrozenUsage] = {}
+
+        async def await_for_capacity(
+            usage: FrozenUsage,
+            *,
+            timeout=None,
+            reservation_id=None,
+            reservation_lifetime_seconds=None,
+        ):
+            result = await original_await(
+                usage,
+                timeout=timeout,
+                reservation_id=reservation_id,
+                reservation_lifetime_seconds=reservation_lifetime_seconds,
+            )
+            if reservation_id is not None:
+                acquired_usage_by_id[reservation_id] = usage
+            return result
+
+        async def refund_capacity_for_buckets(  # noqa: PLR0913
+            reserved_usage: FrozenUsage,
+            actual_usage: FrozenUsage,
+            *,
+            bucket_ids=None,
+            reservation_id=None,
+            reservation_model_family=None,
+            reservation_bucket_ids=None,
+            reservation_reserved_usage=None,
+        ):
+            marker_usage = (
+                acquired_usage_by_id.get(reservation_id)
+                if reservation_id is not None
+                else None
+            )
+            if reservation_id is not None and marker_usage is not None:
+                if (
+                    reservation_model_family is None
+                    or reservation_bucket_ids is None
+                    or reservation_reserved_usage is None
+                ):
+                    raise ValueError("reservation marker metadata missing")
+                if reservation_model_family != cfg.get_model_family():
+                    raise ValueError("reservation model family mismatch")
+                expected_bucket_ids = frozenset(
+                    (q.metric, q.per_seconds) for q in cfg.quotas
+                )
+                if reservation_bucket_ids != expected_bucket_ids:
+                    raise ValueError("reservation bucket ids mismatch")
+                if reservation_reserved_usage != marker_usage:
+                    raise ValueError("reservation usage mismatch")
+            return await original_refund(
+                reserved_usage,
+                actual_usage,
+                bucket_ids=bucket_ids,
+                reservation_id=reservation_id,
+                reservation_model_family=reservation_model_family,
+                reservation_bucket_ids=reservation_bucket_ids,
+                reservation_reserved_usage=reservation_reserved_usage,
+            )
+
+        backend.supports_acquire_marker_authority = lambda: True
+        backend.await_for_capacity = await_for_capacity
+        backend.refund_capacity_for_buckets = refund_capacity_for_buckets
+        return backend
+
+
 class _DurableDedupLiarBuilder(_PatchingMemoryBuilder):
     def _patch_backend(
         self,
@@ -409,6 +587,184 @@ class _SyncMarkerReservedUsageLiarBuilder(_PatchingSyncMemoryBuilder):
         return backend
 
 
+class _SyncMarkerRaisesAfterCreditBuilder(_PatchingSyncMemoryBuilder):
+    def _patch_backend(
+        self,
+        backend: SyncMemoryBackend,
+        cfg: PerModelConfig,
+    ) -> SyncMemoryBackend:
+        original_refund = backend.refund_capacity_for_buckets
+
+        def refund_capacity_for_buckets(  # noqa: PLR0913
+            reserved_usage: FrozenUsage,
+            actual_usage: FrozenUsage,
+            *,
+            bucket_ids=None,
+            reservation_id=None,
+            reservation_model_family=None,
+            reservation_bucket_ids=None,
+            reservation_reserved_usage=None,
+        ):
+            if (
+                reservation_id is not None
+                and reservation_model_family != cfg.get_model_family()
+            ):
+                original_refund(
+                    reserved_usage,
+                    actual_usage,
+                    bucket_ids=bucket_ids,
+                    reservation_id=reservation_id,
+                    reservation_model_family=reservation_model_family,
+                    reservation_bucket_ids=reservation_bucket_ids,
+                    reservation_reserved_usage=reservation_reserved_usage,
+                )
+                raise ValueError("reservation model family mismatch")
+            return original_refund(
+                reserved_usage,
+                actual_usage,
+                bucket_ids=bucket_ids,
+                reservation_id=reservation_id,
+                reservation_model_family=reservation_model_family,
+                reservation_bucket_ids=reservation_bucket_ids,
+                reservation_reserved_usage=reservation_reserved_usage,
+            )
+
+        backend.supports_acquire_marker_authority = lambda: True
+        backend.refund_capacity_for_buckets = refund_capacity_for_buckets
+        return backend
+
+
+class _SyncMarkerOmittedMetadataDefaultLiarBuilder(_PatchingSyncMemoryBuilder):
+    def _patch_backend(
+        self,
+        backend: SyncMemoryBackend,
+        cfg: PerModelConfig,
+    ) -> SyncMemoryBackend:
+        original_refund = backend.refund_capacity_for_buckets
+
+        def refund_capacity_for_buckets(  # noqa: PLR0913
+            reserved_usage: FrozenUsage,
+            actual_usage: FrozenUsage,
+            *,
+            bucket_ids=None,
+            reservation_id=None,
+            reservation_model_family=None,
+            reservation_bucket_ids=None,
+            reservation_reserved_usage=None,
+        ):
+            if reservation_id is not None and (
+                reservation_model_family is None
+                or reservation_bucket_ids is None
+                or reservation_reserved_usage is None
+            ):
+                return original_refund(
+                    reserved_usage,
+                    actual_usage,
+                    bucket_ids=bucket_ids,
+                    reservation_id=reservation_id,
+                    reservation_model_family=reservation_model_family,
+                    reservation_bucket_ids=reservation_bucket_ids,
+                    reservation_reserved_usage=reservation_reserved_usage,
+                )
+            if reservation_id is not None:
+                if reservation_model_family != cfg.get_model_family():
+                    raise ValueError("reservation model family mismatch")
+                expected_bucket_ids = frozenset(
+                    (q.metric, q.per_seconds) for q in cfg.quotas
+                )
+                if reservation_bucket_ids != expected_bucket_ids:
+                    raise ValueError("reservation bucket ids mismatch")
+                if reservation_reserved_usage != reserved_usage:
+                    raise ValueError("reservation usage mismatch")
+            return original_refund(
+                reserved_usage,
+                actual_usage,
+                bucket_ids=bucket_ids,
+                reservation_id=reservation_id,
+                reservation_model_family=reservation_model_family,
+                reservation_bucket_ids=reservation_bucket_ids,
+                reservation_reserved_usage=reservation_reserved_usage,
+            )
+
+        backend.supports_acquire_marker_authority = lambda: True
+        backend.refund_capacity_for_buckets = refund_capacity_for_buckets
+        return backend
+
+
+class _SyncMarkerRefundScopeLiarBuilder(_PatchingSyncMemoryBuilder):
+    def _patch_backend(
+        self,
+        backend: SyncMemoryBackend,
+        cfg: PerModelConfig,
+    ) -> SyncMemoryBackend:
+        original_wait = backend.wait_for_capacity
+        original_refund = backend.refund_capacity_for_buckets
+        acquired_usage_by_id: dict[str, FrozenUsage] = {}
+
+        def wait_for_capacity(
+            usage: FrozenUsage,
+            *,
+            timeout=None,
+            reservation_id=None,
+            reservation_lifetime_seconds=None,
+        ):
+            result = original_wait(
+                usage,
+                timeout=timeout,
+                reservation_id=reservation_id,
+                reservation_lifetime_seconds=reservation_lifetime_seconds,
+            )
+            if reservation_id is not None:
+                acquired_usage_by_id[reservation_id] = usage
+            return result
+
+        def refund_capacity_for_buckets(  # noqa: PLR0913
+            reserved_usage: FrozenUsage,
+            actual_usage: FrozenUsage,
+            *,
+            bucket_ids=None,
+            reservation_id=None,
+            reservation_model_family=None,
+            reservation_bucket_ids=None,
+            reservation_reserved_usage=None,
+        ):
+            marker_usage = (
+                acquired_usage_by_id.get(reservation_id)
+                if reservation_id is not None
+                else None
+            )
+            if reservation_id is not None and marker_usage is not None:
+                if (
+                    reservation_model_family is None
+                    or reservation_bucket_ids is None
+                    or reservation_reserved_usage is None
+                ):
+                    raise ValueError("reservation marker metadata missing")
+                if reservation_model_family != cfg.get_model_family():
+                    raise ValueError("reservation model family mismatch")
+                expected_bucket_ids = frozenset(
+                    (q.metric, q.per_seconds) for q in cfg.quotas
+                )
+                if reservation_bucket_ids != expected_bucket_ids:
+                    raise ValueError("reservation bucket ids mismatch")
+                if reservation_reserved_usage != marker_usage:
+                    raise ValueError("reservation usage mismatch")
+            return original_refund(
+                reserved_usage,
+                actual_usage,
+                bucket_ids=bucket_ids,
+                reservation_id=reservation_id,
+                reservation_model_family=reservation_model_family,
+                reservation_bucket_ids=reservation_bucket_ids,
+                reservation_reserved_usage=reservation_reserved_usage,
+            )
+
+        backend.supports_acquire_marker_authority = lambda: True
+        backend.wait_for_capacity = wait_for_capacity
+        backend.refund_capacity_for_buckets = refund_capacity_for_buckets
+        return backend
+
+
 async def test_truthful_marker_authority_and_durable_dedup_claims_pass() -> None:
     await conformance_test_for(_TruthfulMarkerAndDedupBuilder(sleep_interval=0.01))
 
@@ -437,6 +793,32 @@ async def test_marker_authority_rejects_reserved_usage_metadata_lie() -> None:
         await conformance_test_for(_MarkerReservedUsageLiarBuilder(sleep_interval=0.01))
 
 
+async def test_marker_authority_rejects_exception_after_credit_lie() -> None:
+    with pytest.raises(
+        BackendConformanceError,
+        match=r"reservation metadata mismatch \(model_family\)",
+    ):
+        await conformance_test_for(_MarkerRaisesAfterCreditBuilder(sleep_interval=0.01))
+
+
+async def test_marker_authority_rejects_omitted_metadata_default_lie() -> None:
+    with pytest.raises(
+        BackendConformanceError,
+        match="marker metadata is omitted",
+    ):
+        await conformance_test_for(
+            _MarkerOmittedMetadataDefaultLiarBuilder(sleep_interval=0.01)
+        )
+
+
+async def test_marker_authority_rejects_refund_scope_lie() -> None:
+    with pytest.raises(
+        BackendConformanceError,
+        match="forged refund bucket_ids",
+    ):
+        await conformance_test_for(_MarkerRefundScopeLiarBuilder(sleep_interval=0.01))
+
+
 def test_sync_marker_authority_rejects_bucket_ids_metadata_lie() -> None:
     with pytest.raises(
         BackendConformanceError,
@@ -452,6 +834,36 @@ def test_sync_marker_authority_rejects_reserved_usage_metadata_lie() -> None:
     ):
         sync_conformance_test_for(
             _SyncMarkerReservedUsageLiarBuilder(sleep_interval=0.01)
+        )
+
+
+def test_sync_marker_authority_rejects_exception_after_credit_lie() -> None:
+    with pytest.raises(
+        BackendConformanceError,
+        match=r"reservation metadata mismatch \(model_family\)",
+    ):
+        sync_conformance_test_for(
+            _SyncMarkerRaisesAfterCreditBuilder(sleep_interval=0.01)
+        )
+
+
+def test_sync_marker_authority_rejects_omitted_metadata_default_lie() -> None:
+    with pytest.raises(
+        BackendConformanceError,
+        match="marker metadata is omitted",
+    ):
+        sync_conformance_test_for(
+            _SyncMarkerOmittedMetadataDefaultLiarBuilder(sleep_interval=0.01)
+        )
+
+
+def test_sync_marker_authority_rejects_refund_scope_lie() -> None:
+    with pytest.raises(
+        BackendConformanceError,
+        match="forged refund bucket_ids",
+    ):
+        sync_conformance_test_for(
+            _SyncMarkerRefundScopeLiarBuilder(sleep_interval=0.01)
         )
 
 

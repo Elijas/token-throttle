@@ -152,6 +152,7 @@ async def test_async_refund_tombstone_replay_skips_capacity_write() -> None:
             reservation_id="replay-rid",
             reservation_model_family=FAMILY,
             reservation_bucket_ids=frozenset({("tokens", 60)}),
+            reservation_reserved_usage={"tokens": 30},
         )
 
     assert redis_client.store[_CAPACITY_KEY] == 70.0
@@ -176,6 +177,7 @@ def test_sync_refund_tombstone_replay_skips_capacity_write() -> None:
             reservation_id="replay-rid",
             reservation_model_family=FAMILY,
             reservation_bucket_ids=frozenset({("tokens", 60)}),
+            reservation_reserved_usage={"tokens": 30},
         )
 
     assert redis_client.store[_CAPACITY_KEY] == 70.0
