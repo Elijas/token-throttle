@@ -136,5 +136,5 @@ def test_sync_fix50_fault_probe_requires_refund_failure(monkeypatch) -> None:
         refund_success,
     )
 
-    with pytest.raises(BackendConformanceError, match="_SyncAcquireInterrupted"):
+    with pytest.raises(BackendConformanceError, match="_SyncAcquireInterruptedError"):
         conformance._check_sync_acquire_refund_failed_error(SyncMemoryBackendBuilder())

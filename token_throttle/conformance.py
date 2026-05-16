@@ -11,7 +11,7 @@ import time
 import uuid
 import warnings
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, NoReturn, cast
 
 from frozendict import frozendict
 
@@ -86,6 +86,15 @@ _TIMING_CONTEXT: contextvars.ContextVar[ConformanceTiming | None] = (
 _CALLBACK_FAILURES: contextvars.ContextVar[list[str] | None] = contextvars.ContextVar(
     "token_throttle_conformance_callback_failures", default=None
 )
+
+
+@dataclass(frozen=True)
+class _AsyncStepContext:
+    label: str
+    deadline: float
+    expiry: float
+    cancelling_at_entry: int
+    allowed_exceptions: tuple[type[BaseException], ...]
 
 
 def _validate_timing_value(field_name: str, value: float) -> float:
@@ -236,7 +245,62 @@ def _matches_allowed_exception(
     exc: BaseException,
     allowed_exceptions: tuple[type[BaseException], ...],
 ) -> bool:
-    return bool(allowed_exceptions) and isinstance(exc, allowed_exceptions)
+    return (
+        bool(allowed_exceptions)
+        and not isinstance(exc, BaseExceptionGroup)
+        and isinstance(exc, allowed_exceptions)
+    )
+
+
+_NON_NORMALIZED_EXCEPTION_TYPES = (
+    KeyboardInterrupt,
+    SystemExit,
+    GeneratorExit,
+    MemoryError,
+)
+_NON_NORMALIZED_GROUP_EXCEPTION_TYPES = (
+    *_NON_NORMALIZED_EXCEPTION_TYPES,
+    asyncio.CancelledError,
+)
+
+
+def _is_non_normalized_group_exception(exc: BaseException) -> bool:
+    return isinstance(exc, _NON_NORMALIZED_GROUP_EXCEPTION_TYPES)
+
+
+def _step_exception_message(label: str, exc: BaseException) -> str:
+    return f"{label} raised {type(exc).__name__}: {exc}"
+
+
+def _raise_normalized_step_exception(label: str, exc: BaseException) -> NoReturn:
+    raise BackendConformanceError(_step_exception_message(label, exc)) from exc
+
+
+def _raise_split_exception_group(
+    label: str,
+    exc: BaseExceptionGroup[BaseException],
+) -> NoReturn:
+    """
+    Propagate control/catastrophic grouped leaves; normalize grouped failures.
+
+    ``allowed_exceptions`` intentionally does not match exception groups. A
+    grouped backend failure is normalized unless it contains a control-flow or
+    catastrophic leaf, in which case that subgroup is propagated. For mixed
+    groups, the non-control remainder is preserved as a labeled
+    ``BackendConformanceError`` inside a new group.
+    """
+    control_group, backend_group = exc.split(_is_non_normalized_group_exception)
+    if control_group is None:
+        _raise_normalized_step_exception(label, exc)
+    if backend_group is None:
+        raise control_group
+    raise BaseExceptionGroup(
+        exc.message,
+        [
+            control_group,
+            BackendConformanceError(_step_exception_message(label, backend_group)),
+        ],
+    ) from exc
 
 
 def _run_sync_step(
@@ -276,28 +340,154 @@ def _run_sync_step(
         )
         warnings.warn(message, RuntimeWarning)
         raise BackendConformanceError(message) from exc
-    except BackendConformanceError:
+    except _NON_NORMALIZED_EXCEPTION_TYPES:
         raise
-    except (KeyboardInterrupt, SystemExit):
-        raise
-    except BaseException as exc:
+    except BaseExceptionGroup as exc:
+        _raise_split_exception_group(label, exc)
+    except Exception as exc:
         if _matches_allowed_exception(exc, allowed_exceptions):
             raise
-        raise BackendConformanceError(
-            f"{label} raised {type(exc).__name__}: {exc}"
-        ) from exc
+        _raise_normalized_step_exception(label, exc)
     finally:
         executor.shutdown(wait=not timed_out, cancel_futures=True)
 
 
-def _task_is_being_cancelled() -> bool:
+def _task_is_being_cancelled(cancelling_at_entry: int = 0) -> bool:
     task = asyncio.current_task()
-    return task is not None and task.cancelling() > 0
+    return task is not None and task.cancelling() > cancelling_at_entry
+
+
+def _current_task_cancelling_count() -> int:
+    task = asyncio.current_task()
+    if task is None:
+        return 0
+    return task.cancelling()
 
 
 def _consume_abandoned_task_result(task: asyncio.Future[object]) -> None:
     with contextlib.suppress(BaseException):
         task.result()
+
+
+def _cancel_and_consume_abandoned_future(task: asyncio.Future[object]) -> None:
+    task.add_done_callback(_consume_abandoned_task_result)
+    task.cancel()
+
+
+def _remaining_deadline_seconds(expiry: float) -> float:
+    return expiry - time.monotonic()
+
+
+async def _materialize_async_callable(
+    step: _AsyncStepContext,
+    callable_: Callable[[], object],
+) -> object:
+    remaining = _remaining_deadline_seconds(step.expiry)
+    if remaining <= 0:
+        raise BackendConformanceError(
+            f"{step.label} did not return within {step.deadline}s"
+        )
+
+    executor = concurrent.futures.ThreadPoolExecutor(
+        max_workers=1,
+        thread_name_prefix="token-throttle-conformance",
+    )
+    context = contextvars.copy_context()
+    future: concurrent.futures.Future[object] = executor.submit(
+        lambda: context.run(callable_)
+    )
+    async_future: asyncio.Future[object] = asyncio.wrap_future(future)
+    abandoned = False
+    try:
+        return await asyncio.wait_for(asyncio.shield(async_future), timeout=remaining)
+    except TimeoutError as exc:
+        if async_future.done():
+            if _matches_allowed_exception(exc, step.allowed_exceptions):
+                raise
+            _raise_normalized_step_exception(step.label, exc)
+        abandoned = True
+        message = (
+            f"{step.label} did not return within {step.deadline}s; thread may still be "
+            "running (cannot kill in-process)"
+        )
+        warnings.warn(message, RuntimeWarning)
+        _cancel_and_consume_abandoned_future(async_future)
+        future.cancel()
+        raise BackendConformanceError(message) from exc
+    except asyncio.CancelledError as exc:
+        if _task_is_being_cancelled(step.cancelling_at_entry):
+            abandoned = True
+            _cancel_and_consume_abandoned_future(async_future)
+            future.cancel()
+            raise
+        if _matches_allowed_exception(exc, step.allowed_exceptions):
+            raise
+        _raise_normalized_step_exception(step.label, exc)
+    except _NON_NORMALIZED_EXCEPTION_TYPES:
+        raise
+    except BaseExceptionGroup as exc:
+        _raise_split_exception_group(step.label, exc)
+    except Exception as exc:
+        if _matches_allowed_exception(exc, step.allowed_exceptions):
+            raise
+        _raise_normalized_step_exception(step.label, exc)
+    finally:
+        executor.shutdown(wait=not abandoned, cancel_futures=True)
+
+
+def _ensure_async_step_task(
+    step: _AsyncStepContext,
+    value: object,
+) -> asyncio.Future[object]:
+    try:
+        return asyncio.ensure_future(cast("Awaitable[object]", value))
+    except _NON_NORMALIZED_EXCEPTION_TYPES:
+        raise
+    except BaseExceptionGroup as exc:
+        _raise_split_exception_group(step.label, exc)
+    except Exception as exc:
+        if _matches_allowed_exception(exc, step.allowed_exceptions):
+            raise
+        _raise_normalized_step_exception(step.label, exc)
+
+
+async def _await_async_step_task(
+    step: _AsyncStepContext,
+    task: asyncio.Future[object],
+) -> object:
+    remaining = _remaining_deadline_seconds(step.expiry)
+    if remaining <= 0:
+        _cancel_and_consume_abandoned_future(task)
+        raise BackendConformanceError(
+            f"{step.label} did not return within {step.deadline}s"
+        )
+
+    try:
+        return await asyncio.wait_for(asyncio.shield(task), timeout=remaining)
+    except TimeoutError as exc:
+        if task.done() and not task.cancelled():
+            if _matches_allowed_exception(exc, step.allowed_exceptions):
+                raise
+            _raise_normalized_step_exception(step.label, exc)
+        _cancel_and_consume_abandoned_future(task)
+        raise BackendConformanceError(
+            f"{step.label} did not return within {step.deadline}s"
+        ) from exc
+    except asyncio.CancelledError as exc:
+        if _task_is_being_cancelled(step.cancelling_at_entry):
+            _cancel_and_consume_abandoned_future(task)
+            raise
+        if _matches_allowed_exception(exc, step.allowed_exceptions):
+            raise
+        _raise_normalized_step_exception(step.label, exc)
+    except _NON_NORMALIZED_EXCEPTION_TYPES:
+        raise
+    except BaseExceptionGroup as exc:
+        _raise_split_exception_group(step.label, exc)
+    except Exception as exc:
+        if _matches_allowed_exception(exc, step.allowed_exceptions):
+            raise
+        _raise_normalized_step_exception(step.label, exc)
 
 
 async def _run_async_step(
@@ -308,65 +498,47 @@ async def _run_async_step(
     expect_awaitable: bool = False,
     allowed_exceptions: tuple[type[BaseException], ...] = (),
 ) -> object:
-    """Run an awaitable under a wall-clock deadline; normalize exceptions."""
-    try:
-        value: object
-        if inspect.isawaitable(awaitable_or_coro_fn):
-            value = awaitable_or_coro_fn
-        elif callable(awaitable_or_coro_fn):
-            value = _run_sync_step(
-                label,
-                awaitable_or_coro_fn,
-                deadline=deadline,
-                allowed_exceptions=allowed_exceptions,
-            )
-        else:
-            value = awaitable_or_coro_fn
+    """
+    Run an awaitable under one wall-clock deadline; normalize exceptions.
 
-        if not inspect.isawaitable(value):
-            if expect_awaitable:
-                _fail(f"{label} returned non-awaitable {type(value).__name__}")
-            return value
+    ``allowed_exceptions`` matches only plain, non-grouped exceptions. Exception
+    groups are split first: embedded control-flow/catastrophic leaves propagate,
+    while non-control grouped backend failures are normalized.
+    """
+    step = _AsyncStepContext(
+        label=label,
+        deadline=deadline,
+        expiry=time.monotonic() + deadline,
+        cancelling_at_entry=_current_task_cancelling_count(),
+        allowed_exceptions=allowed_exceptions,
+    )
+    if inspect.isawaitable(awaitable_or_coro_fn):
+        value: object = awaitable_or_coro_fn
+    elif callable(awaitable_or_coro_fn):
+        value = await _materialize_async_callable(
+            step,
+            awaitable_or_coro_fn,
+        )
+    else:
+        value = awaitable_or_coro_fn
 
-        task = asyncio.ensure_future(cast("Awaitable[object]", value))
-        try:
-            return await asyncio.wait_for(asyncio.shield(task), timeout=deadline)
-        except TimeoutError as exc:
-            if task.done() and not task.cancelled():
-                if _matches_allowed_exception(exc, allowed_exceptions):
-                    raise
-                raise BackendConformanceError(
-                    f"{label} raised {type(exc).__name__}: {exc}"
-                ) from exc
-            task.add_done_callback(_consume_abandoned_task_result)
-            task.cancel()
-            raise BackendConformanceError(
-                f"{label} did not return within {deadline}s"
-            ) from exc
-    except BackendConformanceError:
-        raise
-    except asyncio.CancelledError as exc:
-        if _task_is_being_cancelled():
-            raise
-        raise BackendConformanceError(
-            f"{label} raised {type(exc).__name__}: {exc}"
-        ) from exc
-    except (KeyboardInterrupt, SystemExit):
-        raise
-    except BaseException as exc:
-        if _matches_allowed_exception(exc, allowed_exceptions):
-            raise
-        raise BackendConformanceError(
-            f"{label} raised {type(exc).__name__}: {exc}"
-        ) from exc
+    if not inspect.isawaitable(value):
+        if expect_awaitable:
+            _fail(f"{label} returned non-awaitable {type(value).__name__}")
+        return value
+
+    return await _await_async_step_task(step, _ensure_async_step_task(step, value))
 
 
 def _close_awaitable(value: object) -> None:
     if not inspect.isawaitable(value):
         return
+    if isinstance(value, asyncio.Future):
+        _cancel_and_consume_abandoned_future(value)
+        return
     close = getattr(value, "close", None)
     if callable(close):
-        with contextlib.suppress(Exception):
+        with contextlib.suppress(Exception, asyncio.CancelledError):
             close()
 
 
@@ -859,8 +1031,8 @@ class _SyncRefundFailureBuilder(SyncRateLimiterBackendBuilderInterface):
         self._builder.close()
 
 
-class _SyncAcquireInterrupted(BaseException):
-    """Internal sync control-flow exception for the FIX-50 probe."""
+class _SyncAcquireInterruptedError(Exception):
+    """Internal sync interruption exception for the FIX-50 probe."""
 
 
 def _check_async_claims(backend: RateLimiterBackend) -> None:
@@ -3009,7 +3181,7 @@ def _check_sync_acquire_refund_failed_error(
     builder: SyncRateLimiterBackendBuilderInterface,
 ) -> None:
     refund_error = RuntimeError("fault-injection")
-    interrupted_by = _SyncAcquireInterrupted("fault-injection")
+    interrupted_by = _SyncAcquireInterruptedError("fault-injection")
     cfg = _config("sync-acquire-refund-failed", limit=2.0)
     limiter = cast(
         "SyncRateLimiter",
