@@ -334,10 +334,10 @@ class TestLockTTLExpiry:
 
         real_extend = RedisBackend._extend_locks
 
-        async def expiring_extend(stack):
+        async def expiring_extend(stack, **kwargs):
             for lock in stack.locks:
                 await redis_client.delete(lock.name)
-            return await real_extend(stack)
+            return await real_extend(stack, **kwargs)
 
         backend._extend_locks = expiring_extend
 

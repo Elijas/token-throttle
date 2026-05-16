@@ -86,9 +86,9 @@ class TestMutatingPathsCallExtendLocks:
         calls = []
         orig_extend = backend._extend_locks
 
-        async def traced_extend(stack):
+        async def traced_extend(stack, **kwargs):
             calls.append("extend")
-            return await orig_extend(stack)
+            return await orig_extend(stack, **kwargs)
 
         monkeypatch.setattr(backend, "_extend_locks", traced_extend)
 
@@ -104,9 +104,9 @@ class TestMutatingPathsCallExtendLocks:
         calls = []
         orig_extend = backend._extend_locks
 
-        async def traced_extend(stack):
+        async def traced_extend(stack, **kwargs):
             calls.append("extend")
-            return await orig_extend(stack)
+            return await orig_extend(stack, **kwargs)
 
         monkeypatch.setattr(backend, "_extend_locks", traced_extend)
 
@@ -126,9 +126,9 @@ class TestMutatingPathsCallExtendLocks:
         calls = []
         orig_extend = backend._extend_locks
 
-        async def traced_extend(stack):
+        async def traced_extend(stack, **kwargs):
             calls.append("extend")
-            return await orig_extend(stack)
+            return await orig_extend(stack, **kwargs)
 
         monkeypatch.setattr(backend, "_extend_locks", traced_extend)
 
