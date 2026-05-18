@@ -1421,6 +1421,8 @@ class RateLimiter(BaseRateLimiter):
                     reservation,
                     interrupted_by=exc,
                 )
+            else:
+                self._forget_in_flight_reservation(reservation.reservation_id)
             raise
 
     async def _begin_pending_acquire(self, reservation: CapacityReservation) -> None:
@@ -1521,11 +1523,33 @@ class RateLimiter(BaseRateLimiter):
         try:
             await self._refund_undelivered_acquire(reservation)
         except BaseException as refund_error:
+            if await self._refund_committed_with_critical_exception(
+                reservation.reservation_id,
+                refund_error,
+            ):
+                raise
             raise AcquireRefundFailedError(
                 reservation=reservation,
                 refund_error=refund_error,
                 interrupted_by=interrupted_by,
             ) from refund_error
+
+    async def _refund_committed_with_critical_exception(
+        self,
+        reservation_id: str,
+        exc: BaseException,
+    ) -> bool:
+        if not (
+            isinstance(exc, _CRITICAL_LIFECYCLE_CALLBACK_EXCEPTION_TYPES)
+            or _lifecycle_callback_exception_group_contains_critical(exc)
+        ):
+            return False
+        async with self._refund_state_lock:
+            refund_state = self._refunded_reservation_ids.get(
+                reservation_id,
+                _REFUND_STATE_MISSING,
+            )
+        return _refund_state_is_committed(refund_state)
 
     async def _complete_acquire_state_update(
         self,

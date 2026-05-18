@@ -141,3 +141,115 @@ def test_sync_lifecycle_callback_futures_cancelled_error_propagates_and_refunds(
     assert limiter.snapshot_state()["in_flight_reservations"] == 0
     reservation = limiter.acquire_capacity({"tokens": 10}, MODEL, timeout=0)
     limiter.refund_capacity({"tokens": 0}, reservation)
+
+
+async def test_async_record_usage_lifecycle_cancellation_forgets_reservation_only() -> (
+    None
+):
+    raise_next_consumed = True
+
+    async def on_lifecycle_event(*, event) -> None:
+        nonlocal raise_next_consumed
+        if event.event_type != "capacity_consumed" or not raise_next_consumed:
+            return
+        raise_next_consumed = False
+        raise asyncio.CancelledError("record lifecycle cancellation")
+
+    limiter = RateLimiter(
+        _config(),
+        backend=MemoryBackendBuilder(),
+        callbacks=RateLimiterCallbacks(on_lifecycle_event=on_lifecycle_event),
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await limiter.record_usage({"tokens": 10}, MODEL)
+
+    assert limiter.snapshot_state()["in_flight_reservations"] == 0
+    with pytest.raises(TimeoutError):
+        await limiter.acquire_capacity({"tokens": 10}, MODEL, timeout=0)
+
+
+def test_sync_record_usage_lifecycle_cancellation_forgets_reservation_only() -> None:
+    raise_next_consumed = True
+
+    def on_lifecycle_event(*, event) -> None:
+        nonlocal raise_next_consumed
+        if event.event_type != "capacity_consumed" or not raise_next_consumed:
+            return
+        raise_next_consumed = False
+        raise asyncio.CancelledError("record lifecycle cancellation")
+
+    limiter = SyncRateLimiter(
+        _config(),
+        backend=SyncMemoryBackendBuilder(),
+        callbacks=SyncRateLimiterCallbacks(on_lifecycle_event=on_lifecycle_event),
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        limiter.record_usage({"tokens": 10}, MODEL)
+
+    assert limiter.snapshot_state()["in_flight_reservations"] == 0
+    with pytest.raises(TimeoutError):
+        limiter.acquire_capacity({"tokens": 10}, MODEL, timeout=0)
+
+
+async def test_async_fallback_refund_lifecycle_cancellation_is_not_refund_failure() -> (
+    None
+):
+    consumed_callback_entered = asyncio.Event()
+    block_next_consumed = True
+    cancel_next_refunded = True
+
+    async def on_lifecycle_event(*, event) -> None:
+        nonlocal block_next_consumed, cancel_next_refunded
+        if event.event_type == "capacity_consumed" and block_next_consumed:
+            block_next_consumed = False
+            consumed_callback_entered.set()
+            await asyncio.sleep(60)
+        if event.event_type == "capacity_refunded" and cancel_next_refunded:
+            cancel_next_refunded = False
+            raise asyncio.CancelledError("refund lifecycle cancellation")
+
+    limiter = RateLimiter(
+        _config(),
+        backend=MemoryBackendBuilder(),
+        callbacks=RateLimiterCallbacks(on_lifecycle_event=on_lifecycle_event),
+    )
+
+    task = asyncio.create_task(limiter.acquire_capacity({"tokens": 10}, MODEL))
+    await asyncio.wait_for(consumed_callback_entered.wait(), timeout=1.0)
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=1.0)
+
+    assert limiter.snapshot_state()["in_flight_reservations"] == 0
+    reservation = await limiter.acquire_capacity({"tokens": 10}, MODEL, timeout=0)
+    await limiter.refund_capacity({"tokens": 0}, reservation)
+
+
+def test_sync_fallback_refund_lifecycle_cancellation_is_not_refund_failure() -> None:
+    cancel_next_consumed = True
+    cancel_next_refunded = True
+
+    def on_lifecycle_event(*, event) -> None:
+        nonlocal cancel_next_consumed, cancel_next_refunded
+        if event.event_type == "capacity_consumed" and cancel_next_consumed:
+            cancel_next_consumed = False
+            raise asyncio.CancelledError("consume lifecycle cancellation")
+        if event.event_type == "capacity_refunded" and cancel_next_refunded:
+            cancel_next_refunded = False
+            raise asyncio.CancelledError("refund lifecycle cancellation")
+
+    limiter = SyncRateLimiter(
+        _config(),
+        backend=SyncMemoryBackendBuilder(),
+        callbacks=SyncRateLimiterCallbacks(on_lifecycle_event=on_lifecycle_event),
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        limiter.acquire_capacity({"tokens": 10}, MODEL)
+
+    assert limiter.snapshot_state()["in_flight_reservations"] == 0
+    reservation = limiter.acquire_capacity({"tokens": 10}, MODEL, timeout=0)
+    limiter.refund_capacity({"tokens": 0}, reservation)

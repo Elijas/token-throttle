@@ -1270,6 +1270,8 @@ class SyncRateLimiter:
                         model,
                         interrupted_by=exc,
                     )
+                else:
+                    self._forget_in_flight_reservation(reservation.reservation_id)
                 raise
         finally:
             self._end_acquire_delivery_cleanup(reservation.reservation_id)
@@ -1356,11 +1358,33 @@ class SyncRateLimiter:
             else:
                 self.refund_capacity(_zero_actual_usage(reservation), reservation)
         except BaseException as refund_error:
+            if self._refund_committed_with_critical_exception(
+                reservation.reservation_id,
+                refund_error,
+            ):
+                raise
             raise AcquireRefundFailedError(
                 reservation=reservation,
                 refund_error=refund_error,
                 interrupted_by=interrupted_by,
             ) from refund_error
+
+    def _refund_committed_with_critical_exception(
+        self,
+        reservation_id: str,
+        exc: BaseException,
+    ) -> bool:
+        if not (
+            isinstance(exc, _CRITICAL_LIFECYCLE_CALLBACK_EXCEPTION_TYPES)
+            or _lifecycle_callback_exception_group_contains_critical(exc)
+        ):
+            return False
+        with self._refund_state_lock:
+            refund_state = self._refunded_reservation_ids.get(
+                reservation_id,
+                _REFUND_STATE_MISSING,
+            )
+        return _refund_state_is_committed(refund_state)
 
     def refund_capacity(
         self,
