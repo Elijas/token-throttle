@@ -1,5 +1,6 @@
 import asyncio
 import collections
+import concurrent.futures
 import contextlib
 import inspect
 import logging
@@ -82,6 +83,8 @@ _REFUND_STATE_COMMITTED = "committed"
 _REFUND_STATE_FAILED = "failed"
 _REFUND_STATE_MISSING = object()
 _CRITICAL_LIFECYCLE_CALLBACK_EXCEPTION_TYPES = (
+    asyncio.CancelledError,
+    concurrent.futures.CancelledError,
     KeyboardInterrupt,
     SystemExit,
     GeneratorExit,
@@ -1911,12 +1914,16 @@ class SyncRateLimiter:
         except BaseException:
             self._forget_in_flight_reservation(reservation.reservation_id)
             raise
-        self._emit_reservation_lifecycle_event(
-            "capacity_consumed",
-            reservation,
-            request_id=request_id,
-            usage=frozendict(),
-        )
+        try:
+            self._emit_reservation_lifecycle_event(
+                "capacity_consumed",
+                reservation,
+                request_id=request_id,
+                usage=frozendict(),
+            )
+        except BaseException:
+            self._forget_in_flight_reservation(reservation.reservation_id)
+            raise
         return reservation
 
     def _raise_if_reservation_expired(

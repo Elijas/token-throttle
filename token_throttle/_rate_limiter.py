@@ -81,6 +81,7 @@ _REFUND_STATE_COMMITTED = "committed"
 _REFUND_STATE_FAILED = "failed"
 _REFUND_STATE_MISSING = object()
 _CRITICAL_LIFECYCLE_CALLBACK_EXCEPTION_TYPES = (
+    asyncio.CancelledError,
     KeyboardInterrupt,
     SystemExit,
     GeneratorExit,
@@ -1389,15 +1390,38 @@ class RateLimiter(BaseRateLimiter):
                         interrupted_by=interrupted_by,
                     )
                 raise interrupted_by
+            await self._emit_acquired_reservation_lifecycle_event(
+                reservation,
+                request_id=request_id,
+                usage=usage,
+                refund_undelivered=_block,
+            )
+            return reservation
+        finally:
+            await self._end_acquire_delivery_cleanup(reservation.reservation_id)
+
+    async def _emit_acquired_reservation_lifecycle_event(
+        self,
+        reservation: CapacityReservation,
+        *,
+        request_id: str | None,
+        usage: FrozenUsage,
+        refund_undelivered: bool,
+    ) -> None:
+        try:
             await self._emit_reservation_lifecycle_event(
                 "capacity_consumed",
                 reservation,
                 request_id=request_id,
                 usage=usage,
             )
-            return reservation
-        finally:
-            await self._end_acquire_delivery_cleanup(reservation.reservation_id)
+        except BaseException as exc:
+            if refund_undelivered:
+                await self._refund_undelivered_acquire_or_deliver(
+                    reservation,
+                    interrupted_by=exc,
+                )
+            raise
 
     async def _begin_pending_acquire(self, reservation: CapacityReservation) -> None:
         async with self._acquire_guard:
@@ -2206,12 +2230,16 @@ class RateLimiter(BaseRateLimiter):
         except BaseException:
             self._forget_in_flight_reservation(reservation.reservation_id)
             raise
-        await self._emit_reservation_lifecycle_event(
-            "capacity_consumed",
-            reservation,
-            request_id=request_id,
-            usage=frozendict(),
-        )
+        try:
+            await self._emit_reservation_lifecycle_event(
+                "capacity_consumed",
+                reservation,
+                request_id=request_id,
+                usage=frozendict(),
+            )
+        except BaseException:
+            self._forget_in_flight_reservation(reservation.reservation_id)
+            raise
         return reservation
 
     def _raise_if_reservation_expired(

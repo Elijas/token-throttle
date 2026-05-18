@@ -1,0 +1,143 @@
+"""Regression tests for lifecycle callback cancellation propagation."""
+
+import asyncio
+import concurrent.futures
+
+import pytest
+
+from token_throttle import (
+    PerModelConfig,
+    Quota,
+    RateLimiter,
+    RateLimiterCallbacks,
+    SyncRateLimiter,
+    SyncRateLimiterCallbacks,
+    UsageQuotas,
+)
+from token_throttle._limiter_backends._memory._backend import MemoryBackendBuilder
+from token_throttle._limiter_backends._memory._sync_backend import (
+    SyncMemoryBackendBuilder,
+)
+
+MODEL = "test-model"
+MODEL_FAMILY = "test-family"
+
+
+def _config() -> PerModelConfig:
+    return PerModelConfig(
+        model_family=MODEL_FAMILY,
+        quotas=UsageQuotas([Quota(metric="tokens", limit=10.0, per_seconds=3600)]),
+    )
+
+
+def _flatten_group(exc: BaseException) -> list[BaseException]:
+    if not isinstance(exc, BaseExceptionGroup):
+        return [exc]
+    leaves: list[BaseException] = []
+    for nested in exc.exceptions:
+        leaves.extend(_flatten_group(nested))
+    return leaves
+
+
+async def test_async_lifecycle_callback_cancellation_propagates_and_refunds() -> None:
+    callback_entered = asyncio.Event()
+    block_next_consumed = True
+
+    async def on_lifecycle_event(*, event) -> None:
+        nonlocal block_next_consumed
+        if event.event_type != "capacity_consumed" or not block_next_consumed:
+            return
+        block_next_consumed = False
+        callback_entered.set()
+        await asyncio.sleep(60)
+
+    limiter = RateLimiter(
+        _config(),
+        backend=MemoryBackendBuilder(),
+        callbacks=RateLimiterCallbacks(on_lifecycle_event=on_lifecycle_event),
+    )
+
+    task = asyncio.create_task(limiter.acquire_capacity({"tokens": 10}, MODEL))
+    await asyncio.wait_for(callback_entered.wait(), timeout=1.0)
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=1.0)
+
+    assert limiter.snapshot_state()["in_flight_reservations"] == 0
+    reservation = await limiter.acquire_capacity({"tokens": 10}, MODEL, timeout=0)
+    await limiter.refund_capacity({"tokens": 0}, reservation)
+
+
+async def test_async_lifecycle_callback_grouped_cancellation_propagates() -> None:
+    async def on_lifecycle_event(*, event) -> None:
+        if event.event_type == "capacity_consumed":
+            raise BaseExceptionGroup(
+                "grouped lifecycle cancellation",
+                [asyncio.CancelledError("cancelled"), ValueError("ordinary")],
+            )
+
+    limiter = RateLimiter(
+        _config(),
+        backend=MemoryBackendBuilder(),
+        callbacks=RateLimiterCallbacks(on_lifecycle_event=on_lifecycle_event),
+    )
+
+    with pytest.raises(BaseExceptionGroup) as exc_info:
+        await limiter.acquire_capacity({"tokens": 10}, MODEL)
+
+    leaves = _flatten_group(exc_info.value)
+    assert any(isinstance(leaf, asyncio.CancelledError) for leaf in leaves)
+    assert limiter.snapshot_state()["in_flight_reservations"] == 0
+
+
+def test_sync_lifecycle_callback_asyncio_cancelled_error_propagates_and_refunds() -> (
+    None
+):
+    raise_next_consumed = True
+
+    def on_lifecycle_event(*, event) -> None:
+        nonlocal raise_next_consumed
+        if event.event_type != "capacity_consumed" or not raise_next_consumed:
+            return
+        raise_next_consumed = False
+        raise asyncio.CancelledError("sync callback cancellation")
+
+    limiter = SyncRateLimiter(
+        _config(),
+        backend=SyncMemoryBackendBuilder(),
+        callbacks=SyncRateLimiterCallbacks(on_lifecycle_event=on_lifecycle_event),
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        limiter.acquire_capacity({"tokens": 10}, MODEL)
+
+    assert limiter.snapshot_state()["in_flight_reservations"] == 0
+    reservation = limiter.acquire_capacity({"tokens": 10}, MODEL, timeout=0)
+    limiter.refund_capacity({"tokens": 0}, reservation)
+
+
+def test_sync_lifecycle_callback_futures_cancelled_error_propagates_and_refunds() -> (
+    None
+):
+    raise_next_consumed = True
+
+    def on_lifecycle_event(*, event) -> None:
+        nonlocal raise_next_consumed
+        if event.event_type != "capacity_consumed" or not raise_next_consumed:
+            return
+        raise_next_consumed = False
+        raise concurrent.futures.CancelledError("sync future cancellation")
+
+    limiter = SyncRateLimiter(
+        _config(),
+        backend=SyncMemoryBackendBuilder(),
+        callbacks=SyncRateLimiterCallbacks(on_lifecycle_event=on_lifecycle_event),
+    )
+
+    with pytest.raises(concurrent.futures.CancelledError):
+        limiter.acquire_capacity({"tokens": 10}, MODEL)
+
+    assert limiter.snapshot_state()["in_flight_reservations"] == 0
+    reservation = limiter.acquire_capacity({"tokens": 10}, MODEL, timeout=0)
+    limiter.refund_capacity({"tokens": 0}, reservation)
