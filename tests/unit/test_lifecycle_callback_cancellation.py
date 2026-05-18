@@ -6,6 +6,7 @@ import concurrent.futures
 import pytest
 
 from token_throttle import (
+    CapacityReservation,
     PerModelConfig,
     Quota,
     RateLimiter,
@@ -23,10 +24,10 @@ MODEL = "test-model"
 MODEL_FAMILY = "test-family"
 
 
-def _config() -> PerModelConfig:
+def _config(*, limit: float = 10.0) -> PerModelConfig:
     return PerModelConfig(
         model_family=MODEL_FAMILY,
-        quotas=UsageQuotas([Quota(metric="tokens", limit=10.0, per_seconds=3600)]),
+        quotas=UsageQuotas([Quota(metric="tokens", limit=limit, per_seconds=3600)]),
     )
 
 
@@ -167,6 +168,39 @@ async def test_async_record_usage_lifecycle_cancellation_forgets_reservation_onl
     assert limiter.snapshot_state()["in_flight_reservations"] == 0
     with pytest.raises(TimeoutError):
         await limiter.acquire_capacity({"tokens": 10}, MODEL, timeout=0)
+
+
+async def test_async_record_usage_finalize_cancellation_forgets_reservation_only() -> (
+    None
+):
+    limiter = RateLimiter(_config(limit=100.0), backend=MemoryBackendBuilder())
+    finalize_entered = asyncio.Event()
+    release_finalize = asyncio.Event()
+    original_finalize = limiter._finalize_pending_acquire
+
+    async def controlled_finalize(
+        reservation: CapacityReservation,
+        model: str,
+    ) -> None:
+        finalize_entered.set()
+        await release_finalize.wait()
+        await original_finalize(reservation, model)
+
+    limiter._finalize_pending_acquire = controlled_finalize
+
+    task = asyncio.create_task(limiter.record_usage({"tokens": 10}, MODEL))
+    await asyncio.wait_for(finalize_entered.wait(), timeout=1.0)
+
+    task.cancel()
+    release_finalize.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=1.0)
+
+    assert limiter.snapshot_state()["in_flight_reservations"] == 0
+    with pytest.raises(TimeoutError):
+        await limiter.acquire_capacity({"tokens": 91}, MODEL, timeout=0)
+    reservation = await limiter.acquire_capacity({"tokens": 90}, MODEL, timeout=0)
+    await limiter.refund_capacity({"tokens": 0}, reservation)
 
 
 def test_sync_record_usage_lifecycle_cancellation_forgets_reservation_only() -> None:

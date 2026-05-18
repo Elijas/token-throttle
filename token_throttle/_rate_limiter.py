@@ -1389,6 +1389,8 @@ class RateLimiter(BaseRateLimiter):
                         reservation,
                         interrupted_by=interrupted_by,
                     )
+                else:
+                    self._forget_in_flight_reservation(reservation.reservation_id)
                 raise interrupted_by
             await self._emit_acquired_reservation_lifecycle_event(
                 reservation,

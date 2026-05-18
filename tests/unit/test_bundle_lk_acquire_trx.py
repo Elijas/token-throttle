@@ -67,11 +67,14 @@ async def _assert_async_cancel_after_backend_success_is_refundable(
         await limiter.refund_capacity({"tokens": 0}, next_reservation)
         return
 
-    assert reservation.reservation_id in limiter._in_flight_reservation_ids
-    assert reservation.reservation_id not in limiter._pending_acquire_reservations
-
-    await limiter.refund_capacity({"tokens": 0}, reservation)
     assert reservation.reservation_id not in limiter._in_flight_reservation_ids
+    assert reservation.reservation_id not in limiter._pending_acquire_reservations
+    with pytest.raises(TimeoutError):
+        await limiter.acquire_capacity({"tokens": 91}, MODEL, timeout=0)
+    next_reservation = await limiter.acquire_capacity({"tokens": 90}, MODEL, timeout=0)
+
+    await limiter.refund_capacity({"tokens": 0}, next_reservation)
+    assert next_reservation.reservation_id not in limiter._in_flight_reservation_ids
 
 
 class TestAsyncAcquireTransaction:
