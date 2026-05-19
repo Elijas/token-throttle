@@ -26,6 +26,8 @@ import token_throttle
 
 PRODUCTION_ROOT = pathlib.Path(token_throttle.__file__).parent
 CALLBACKS_FILE = PRODUCTION_ROOT / "_interfaces" / "_callbacks.py"
+RATE_LIMITER_FILE = PRODUCTION_ROOT / "_rate_limiter.py"
+SYNC_RATE_LIMITER_FILE = PRODUCTION_ROOT / "_sync_rate_limiter.py"
 
 
 def _iter_production_python_files() -> list[pathlib.Path]:
@@ -107,4 +109,58 @@ def test_no_hand_rolled_critical_exception_literal_ladder() -> None:
     )
 
 
-# Archetype B guards are added by Phase 2 of the refactor; see plan §2.17.
+# ---------------------------------------------------------------------------
+# Archetype B guards
+# ---------------------------------------------------------------------------
+
+
+def test_no_hand_rolled_forget_in_flight_on_base_exception() -> None:
+    """``except BaseException`` blocks that call ``_forget_in_flight_reservation``
+    must go through ``_refund_or_forget_reservation_on_raise`` instead.
+
+    The two exempt sites are the context-manager helpers themselves in
+    ``_rate_limiter.py`` and ``_sync_rate_limiter.py``; both live in methods
+    named ``_refund_or_forget_reservation_on_raise``. The scan skips lines
+    inside the helper bodies by tracking helper start/end ranges.
+    """
+    pattern_open = re.compile(r"^\s*except\s+BaseException\b")
+    forget_call = re.compile(r"_forget_in_flight_reservation\s*\(")
+    helper_def = re.compile(
+        r"^\s*(?:async\s+)?def\s+_refund_or_forget_reservation_on_raise\b"
+    )
+    method_start = re.compile(r"^\s*(?:async\s+)?def\s+|^\s*@")
+    offenders: list[tuple[pathlib.Path, int]] = []
+    for path in (RATE_LIMITER_FILE, SYNC_RATE_LIMITER_FILE):
+        lines = path.read_text(encoding="utf-8").splitlines()
+        helper_ranges: list[tuple[int, int]] = []
+        for idx, line in enumerate(lines):
+            if not helper_def.search(line):
+                continue
+            helper_indent = len(line) - len(line.lstrip())
+            end = len(lines)
+            # Skip to the end of the multi-line signature; the next method
+            # at the same indent (possibly preceded by a decorator) marks
+            # the helper's exit.
+            for j in range(idx + 1, len(lines)):
+                nxt = lines[j]
+                if nxt.strip() == "":
+                    continue
+                nxt_indent = len(nxt) - len(nxt.lstrip())
+                if nxt_indent <= helper_indent and method_start.search(nxt):
+                    end = j
+                    break
+            helper_ranges.append((idx, end))
+
+        for idx, line in enumerate(lines):
+            if not pattern_open.search(line):
+                continue
+            if any(start <= idx < end for start, end in helper_ranges):
+                continue
+            window = "\n".join(lines[idx : idx + 12])
+            if forget_call.search(window):
+                offenders.append((path, idx + 1))
+    assert not offenders, (
+        "Hand-rolled `except BaseException` ... `_forget_in_flight_reservation` "
+        "block detected. Use the `_refund_or_forget_reservation_on_raise` "
+        f"context manager instead. Offenders: {offenders}"
+    )

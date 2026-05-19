@@ -9,6 +9,8 @@ import sys
 import time
 import uuid
 import warnings
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Self
 
 from frozendict import frozendict
@@ -1375,31 +1377,29 @@ class RateLimiter(BaseRateLimiter):
                 else:
                     self._forget_in_flight_reservation(reservation.reservation_id)
                 raise interrupted_by
-            await self._emit_acquired_reservation_lifecycle_event(
+            async with self._refund_or_forget_reservation_on_raise(
                 reservation,
-                request_id=request_id,
-                usage=usage,
                 refund_undelivered=_block,
-            )
+            ):
+                await self._emit_reservation_lifecycle_event(
+                    "capacity_consumed",
+                    reservation,
+                    request_id=request_id,
+                    usage=usage,
+                )
             return reservation
         finally:
             await self._end_acquire_delivery_cleanup(reservation.reservation_id)
 
-    async def _emit_acquired_reservation_lifecycle_event(
+    @asynccontextmanager
+    async def _refund_or_forget_reservation_on_raise(
         self,
         reservation: CapacityReservation,
         *,
-        request_id: str | None,
-        usage: FrozenUsage,
         refund_undelivered: bool,
-    ) -> None:
+    ) -> AsyncIterator[None]:
         try:
-            await self._emit_reservation_lifecycle_event(
-                "capacity_consumed",
-                reservation,
-                request_id=request_id,
-                usage=usage,
-            )
+            yield
         except BaseException as exc:
             if refund_undelivered:
                 await self._refund_undelivered_acquire_or_deliver(
@@ -2236,21 +2236,17 @@ class RateLimiter(BaseRateLimiter):
         async with self._acquire_guard:
             self._raise_if_closed_or_closing()
             self._remember_in_flight_reservation(reservation)
-        try:
+        async with self._refund_or_forget_reservation_on_raise(
+            reservation,
+            refund_undelivered=False,
+        ):
             self._validate_shared_model_family_config(model, limit_config)
-        except BaseException:
-            self._forget_in_flight_reservation(reservation.reservation_id)
-            raise
-        try:
             await self._emit_reservation_lifecycle_event(
                 "capacity_consumed",
                 reservation,
                 request_id=request_id,
                 usage=frozendict(),
             )
-        except BaseException:
-            self._forget_in_flight_reservation(reservation.reservation_id)
-            raise
         return reservation
 
     def _raise_if_reservation_expired(

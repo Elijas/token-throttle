@@ -9,6 +9,8 @@ import threading
 import time
 import uuid
 import warnings
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Self
 
 from frozendict import frozendict
@@ -1233,7 +1235,11 @@ class SyncRateLimiter:
             raise
         self._begin_acquire_delivery_cleanup(reservation.reservation_id)
         try:
-            try:
+            with self._refund_or_forget_reservation_on_raise(
+                reservation,
+                model,
+                refund_undelivered=_block,
+            ):
                 self._finalize_pending_acquire(reservation, model)
                 self._emit_reservation_lifecycle_event(
                     "capacity_consumed",
@@ -1241,17 +1247,7 @@ class SyncRateLimiter:
                     request_id=request_id,
                     usage=usage,
                 )
-                return reservation
-            except BaseException as exc:
-                if _block:
-                    self._finalize_and_refund_undelivered_acquire(
-                        reservation,
-                        model,
-                        interrupted_by=exc,
-                    )
-                else:
-                    self._forget_in_flight_reservation(reservation.reservation_id)
-                raise
+            return reservation
         finally:
             self._end_acquire_delivery_cleanup(reservation.reservation_id)
 
@@ -1347,6 +1343,39 @@ class SyncRateLimiter:
                 refund_error=refund_error,
                 interrupted_by=interrupted_by,
             ) from refund_error
+
+    @contextmanager
+    def _refund_or_forget_reservation_on_raise(
+        self,
+        reservation: CapacityReservation,
+        model: str | None = None,
+        *,
+        refund_undelivered: bool,
+    ) -> Iterator[None]:
+        # ``model`` is required only on the refund branch; the forget branch
+        # (used for unlimited reservations and the non-blocking acquire path)
+        # has no use for it. The optional+fail-fast signature is the sync
+        # twin of the async helper; the parity asymmetry is documented in
+        # the refactor plan KNOWN UNKNOWN #2 (sync ``_finalize_and_refund_undelivered_acquire``
+        # does its own finalize, async expects finalize already done).
+        if refund_undelivered and model is None:
+            raise ValueError(
+                "model is required when refund_undelivered=True; "
+                "_finalize_and_refund_undelivered_acquire needs a model to finalize."
+            )
+        try:
+            yield
+        except BaseException as exc:
+            if refund_undelivered:
+                assert model is not None  # noqa: S101 - guarded above
+                self._finalize_and_refund_undelivered_acquire(
+                    reservation,
+                    model,
+                    interrupted_by=exc,
+                )
+            else:
+                self._forget_in_flight_reservation(reservation.reservation_id)
+            raise
 
     def _refund_committed_with_critical_exception(
         self,
@@ -1914,21 +1943,17 @@ class SyncRateLimiter:
         with self._acquire_guard:
             self._raise_if_closed_or_closing()
             self._remember_in_flight_reservation(reservation)
-        try:
+        with self._refund_or_forget_reservation_on_raise(
+            reservation,
+            refund_undelivered=False,
+        ):
             self._validate_shared_model_family_config(model, limit_config)
-        except BaseException:
-            self._forget_in_flight_reservation(reservation.reservation_id)
-            raise
-        try:
             self._emit_reservation_lifecycle_event(
                 "capacity_consumed",
                 reservation,
                 request_id=request_id,
                 usage=frozendict(),
             )
-        except BaseException:
-            self._forget_in_flight_reservation(reservation.reservation_id)
-            raise
         return reservation
 
     def _raise_if_reservation_expired(
