@@ -22,8 +22,11 @@ from token_throttle._exceptions import (
 )
 from token_throttle._interfaces._callable_utils import is_async_callable
 from token_throttle._interfaces._callbacks import (
+    LIFECYCLE_CALLBACK_CRITICAL_EXCEPTIONS,
     LifecycleEvent,
     RateLimiterCallbacks,
+    _exception_group_contains_critical,
+    safe_invoke_async_callback,
     with_callback_timeout,
 )
 from token_throttle._interfaces._interfaces import (
@@ -80,12 +83,6 @@ _REFUND_STATE_PENDING = "pending"
 _REFUND_STATE_COMMITTED = "committed"
 _REFUND_STATE_FAILED = "failed"
 _REFUND_STATE_MISSING = object()
-_CRITICAL_LIFECYCLE_CALLBACK_EXCEPTION_TYPES = (
-    asyncio.CancelledError,
-    KeyboardInterrupt,
-    SystemExit,
-    GeneratorExit,
-)
 _PROCESS_AFFINITY_ERROR = (
     "RateLimiter is process-affine; construct after fork()/spawn() or accept "
     "silent divergence"
@@ -144,15 +141,6 @@ def _request_id_from_value(value: object) -> str | None:
     if isinstance(value, str):
         return value
     return str(value)
-
-
-def _lifecycle_callback_exception_group_contains_critical(
-    exc: BaseException,
-) -> bool:
-    if not isinstance(exc, BaseExceptionGroup):
-        return False
-    critical, _non_critical = exc.split(_CRITICAL_LIFECYCLE_CALLBACK_EXCEPTION_TYPES)
-    return critical is not None
 
 
 def _refund_state_is_committed(state: object) -> bool:
@@ -753,17 +741,12 @@ class RateLimiter(BaseRateLimiter):
         )
         if callback is None:
             return
-        try:
-            await callback(event=event)
-        except _CRITICAL_LIFECYCLE_CALLBACK_EXCEPTION_TYPES:
-            raise
-        except BaseException as exc:
-            if _lifecycle_callback_exception_group_contains_critical(exc):
-                raise
-            msg = f"Rate limiter lifecycle callback raised {type(exc).__name__}: {exc}"
-            with contextlib.suppress(Warning):
-                warnings.warn(msg, RuntimeWarning, stacklevel=3)
-            _logger.warning(msg)
+        await safe_invoke_async_callback(
+            callback,
+            critical=LIFECYCLE_CALLBACK_CRITICAL_EXCEPTIONS,
+            log_label="Rate limiter lifecycle callback",
+            event=event,
+        )
 
     async def _emit_reservation_lifecycle_event(
         self,
@@ -1542,8 +1525,10 @@ class RateLimiter(BaseRateLimiter):
         exc: BaseException,
     ) -> bool:
         if not (
-            isinstance(exc, _CRITICAL_LIFECYCLE_CALLBACK_EXCEPTION_TYPES)
-            or _lifecycle_callback_exception_group_contains_critical(exc)
+            isinstance(exc, LIFECYCLE_CALLBACK_CRITICAL_EXCEPTIONS)
+            or _exception_group_contains_critical(
+                exc, LIFECYCLE_CALLBACK_CRITICAL_EXCEPTIONS
+            )
         ):
             return False
         async with self._refund_state_lock:

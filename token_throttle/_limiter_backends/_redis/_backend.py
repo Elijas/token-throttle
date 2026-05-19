@@ -23,7 +23,6 @@ except ImportError as exc:
 from frozendict import frozendict
 
 from token_throttle._exceptions import (
-    AcquireRefundFailedError,
     DuplicateRefundError,
     UnknownReservationError,
     _mark_unknown_reservation_forget_in_flight,
@@ -31,7 +30,11 @@ from token_throttle._exceptions import (
 from token_throttle._interfaces._callable_utils import (
     suppress_current_task_cancellation,
 )
-from token_throttle._interfaces._callbacks import RateLimiterCallbacks
+from token_throttle._interfaces._callbacks import (
+    BACKEND_CALLBACK_CRITICAL_EXCEPTIONS,
+    RateLimiterCallbacks,
+    safe_invoke_async_callback,
+)
 from token_throttle._interfaces._interfaces import (
     PerModelConfig,
     RateLimiterBackend,
@@ -79,21 +82,6 @@ _logger = logging.getLogger("token_throttle")
 _acquire_logger = logging.getLogger("token_throttle.acquire")
 _refund_logger = logging.getLogger("token_throttle.refund")
 _lock_logger = logging.getLogger("token_throttle.lock")
-
-_CRITICAL_CALLBACK_EXCEPTION_TYPES = (
-    AcquireRefundFailedError,
-    asyncio.CancelledError,
-    KeyboardInterrupt,
-    SystemExit,
-    GeneratorExit,
-)
-
-
-def _callback_exception_group_contains_critical(exc: BaseException) -> bool:
-    if not isinstance(exc, BaseExceptionGroup):
-        return False
-    critical, _non_critical = exc.split(_CRITICAL_CALLBACK_EXCEPTION_TYPES)
-    return critical is not None
 
 
 class CapacitiesGetterResult(typing.NamedTuple):
@@ -2452,29 +2440,13 @@ class RedisBackend(RateLimiterBackend):
         self._limit_config = cfg
 
     async def _invoke_callback_safe(self, callback, **kwargs) -> None:
-        """
-        Fire a user callback, suppressing exceptions to prevent capacity leaks.
-
-        Audited 2026-05 (R4 L03): exception ladder verified parity-clean across
-        all 4 _invoke_callback_safe implementations.
-        Audited 2026-05 (R4 L12:C03): non-group exotic exceptions are swallowed
-        or propagated by design; warning filters must not reopen the leak path.
-        Audited 2026-05 (R4 L12:C01/C02): BaseExceptionGroup containing
-        cancellation or process signals must propagate before best-effort logging.
-        """
-        try:
-            await callback(**kwargs)
-        except (AcquireRefundFailedError, asyncio.CancelledError):
-            raise
-        except (KeyboardInterrupt, SystemExit, GeneratorExit):
-            raise
-        except BaseException as exc:
-            if _callback_exception_group_contains_critical(exc):
-                raise
-            msg = f"Rate limiter callback raised {type(exc).__name__}: {exc}"
-            with contextlib.suppress(Warning):
-                warnings.warn(msg, RuntimeWarning, stacklevel=3)
-            _logger.warning(msg)
+        """Fire a user callback; delegates to the shared critical-exception dispatcher."""
+        await safe_invoke_async_callback(
+            callback,
+            critical=BACKEND_CALLBACK_CRITICAL_EXCEPTIONS,
+            log_label="Rate limiter callback",
+            **kwargs,
+        )
 
     async def _refund_cancelled_consumption(
         self,

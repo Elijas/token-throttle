@@ -36,6 +36,7 @@ from frozendict import frozendict
 from pydantic import Field, ValidationInfo, field_validator
 
 from token_throttle._dto import StrictDTO
+from token_throttle._exceptions import AcquireRefundFailedError
 from token_throttle._interfaces._callable_utils import (
     close_awaitable_if_possible,
     is_async_callable,
@@ -360,6 +361,81 @@ def _invoke_sync_callback_with_timeout(
             log_late_exception(future)
         else:
             future.add_done_callback(log_late_exception)
+
+
+# ---------------------------------------------------------------------------
+# Critical-exception protected callback dispatch
+#
+# Single source of truth for the "ladder" pattern formerly hand-rolled at
+# six dispatch sites (two `_emit_lifecycle_event` methods on the rate
+# limiters, four `_invoke_callback_safe` methods on the backends). Both
+# the critical-type tuples and the group-aware dispatcher live here so
+# the set of "must propagate" exceptions cannot drift between sync and
+# async, or between rate-limiter and backend, paths.
+# ---------------------------------------------------------------------------
+
+LIFECYCLE_CALLBACK_CRITICAL_EXCEPTIONS: tuple[type[BaseException], ...] = (
+    asyncio.CancelledError,
+    concurrent.futures.CancelledError,
+    KeyboardInterrupt,
+    SystemExit,
+    GeneratorExit,
+)
+
+BACKEND_CALLBACK_CRITICAL_EXCEPTIONS: tuple[type[BaseException], ...] = (
+    AcquireRefundFailedError,
+    *LIFECYCLE_CALLBACK_CRITICAL_EXCEPTIONS,
+)
+
+
+def _exception_group_contains_critical(
+    exc: BaseException,
+    critical: tuple[type[BaseException], ...],
+) -> bool:
+    if not isinstance(exc, BaseExceptionGroup):
+        return False
+    critical_part, _non_critical = exc.split(critical)
+    return critical_part is not None
+
+
+async def safe_invoke_async_callback(
+    callback,
+    *,
+    critical: tuple[type[BaseException], ...],
+    log_label: str,
+    **kwargs,
+) -> None:
+    try:
+        await callback(**kwargs)
+    except critical:
+        raise
+    except BaseException as exc:
+        if _exception_group_contains_critical(exc, critical):
+            raise
+        msg = f"{log_label} raised {type(exc).__name__}: {exc}"
+        with contextlib.suppress(Warning):
+            warnings.warn(msg, RuntimeWarning, stacklevel=3)
+        _stdlib_logger.warning(msg)
+
+
+def safe_invoke_sync_callback(
+    callback,
+    *,
+    critical: tuple[type[BaseException], ...],
+    log_label: str,
+    **kwargs,
+) -> None:
+    try:
+        _invoke_sync_callback_checked(callback, **kwargs)
+    except critical:
+        raise
+    except BaseException as exc:
+        if _exception_group_contains_critical(exc, critical):
+            raise
+        msg = f"{log_label} raised {type(exc).__name__}: {exc}"
+        with contextlib.suppress(Warning):
+            warnings.warn(msg, RuntimeWarning, stacklevel=3)
+        _stdlib_logger.warning(msg)
 
 
 def with_callback_timeout(
