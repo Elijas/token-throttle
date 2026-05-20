@@ -241,6 +241,16 @@ def test_async_outer_cleanup_sites_catch_base_exception() -> None:
             "_set_max_capacity_transactional",
             "_reconcile_runtime_max_capacity_after_failed_set",
         ),
+        (
+            RATE_LIMITER_FILE,
+            "_backend_task_succeeded_after_cancel",
+            "exception",
+        ),
+        (
+            RATE_LIMITER_FILE,
+            "_wait_for_set_max_capacity_task_while_cancelled",
+            "exception",
+        ),
     ]
     offenders = [
         (path, function_name, cleanup_call)

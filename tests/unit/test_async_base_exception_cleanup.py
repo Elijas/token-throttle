@@ -96,6 +96,55 @@ async def test_acquire_rolls_back_pending_state_on_outer_base_exception() -> Non
     await asyncio.wait_for(limiter.aclose(), timeout=1.0)
 
 
+@pytest.mark.parametrize("exception_type", [SystemExit, KeyboardInterrupt])
+def test_public_limiter_close_drains_after_callback_systemexit(
+    exception_type: type[BaseException],
+) -> None:
+    outcome: dict[str, Any] = {}
+
+    async def scenario() -> None:
+        async def callback(**_kwargs) -> None:
+            raise exception_type("simulated callback interrupt")
+
+        limiter = RateLimiter(
+            _config(),
+            backend=MemoryBackendBuilder(),
+            callbacks=RateLimiterCallbacks(on_capacity_consumed=callback),
+            close_drain_timeout_seconds=0.05,
+        )
+
+        try:
+            await limiter.acquire_capacity({"tokens": 1}, MODEL)
+        except BaseException as exc:
+            outcome["public_exception_type"] = type(exc)
+        else:  # pragma: no cover - the callback must interrupt the acquire.
+            outcome["public_exception_type"] = None
+
+        outcome["pending_acquires"] = set(limiter._pending_acquire_reservations)
+        outcome["in_flight_reservations"] = limiter.snapshot_state()[
+            "in_flight_reservations"
+        ]
+        try:
+            await asyncio.wait_for(limiter.aclose(), timeout=1.0)
+        except BaseException as exc:
+            outcome["close_exception"] = exc
+        else:
+            outcome["close_exception"] = None
+
+    with pytest.raises(exception_type, match="simulated callback interrupt"):
+        asyncio.run(scenario())
+
+    # CPython may deliver SystemExit/KeyboardInterrupt to the awaiting coroutine
+    # directly or as CancelledError before re-raising the original at loop level.
+    assert outcome["public_exception_type"] in {
+        exception_type,
+        asyncio.CancelledError,
+    }
+    assert outcome["pending_acquires"] == set()
+    assert outcome["in_flight_reservations"] == 0
+    assert outcome["close_exception"] is None
+
+
 async def test_set_max_capacity_reconciles_post_write_generator_exit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -116,3 +165,47 @@ async def test_set_max_capacity_reconciles_post_write_generator_exit(
 
     assert backend._bucket_registry[BUCKET_ID].max_capacity == 50.0
     assert _runtime_override(limiter) == 50.0
+
+
+def test_set_max_capacity_reconciles_post_write_systemexit() -> None:
+    outcome: dict[str, Any] = {}
+
+    async def scenario() -> None:
+        limiter = RateLimiter(_config(), backend=MemoryBackendBuilder())
+        reservation = await limiter.acquire_capacity({"tokens": 1}, MODEL)
+        backend = limiter._model_family_to_backend[MODEL_FAMILY]
+        original_set_max_capacity = backend.set_max_capacity
+
+        async def write_then_interrupt(
+            metric: str,
+            per_seconds: int,
+            value: float,
+        ) -> None:
+            await original_set_max_capacity(metric, per_seconds, value)
+            raise SystemExit("simulated set_max interrupt")
+
+        backend.set_max_capacity = write_then_interrupt
+
+        try:
+            await limiter.set_max_capacity(MODEL, "tokens", BUCKET_ID[1], 50.0)
+        except BaseException as exc:
+            outcome["public_exception_type"] = type(exc)
+        else:  # pragma: no cover - the backend write must interrupt set_max.
+            outcome["public_exception_type"] = None
+
+        outcome["backend_max_capacity"] = backend._bucket_registry[
+            BUCKET_ID
+        ].max_capacity
+        outcome["runtime_override"] = _runtime_override(limiter)
+        await limiter.refund_capacity({"tokens": 1}, reservation)
+        await asyncio.wait_for(limiter.aclose(), timeout=1.0)
+
+    with pytest.raises(SystemExit, match="simulated set_max interrupt"):
+        asyncio.run(scenario())
+
+    assert outcome["public_exception_type"] in {
+        SystemExit,
+        asyncio.CancelledError,
+    }
+    assert outcome["backend_max_capacity"] == pytest.approx(50.0)
+    assert outcome["runtime_override"] == pytest.approx(50.0)

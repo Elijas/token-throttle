@@ -1341,10 +1341,20 @@ class RateLimiter(BaseRateLimiter):
             issued_at_seconds = await backend_task
             reservation = _issued_reservation(reservation, issued_at_seconds)
         except asyncio.CancelledError as exc:
-            consumed = (
-                backend_task is not None
-                and await self._backend_task_succeeded_after_cancel(backend_task)
-            )
+            if backend_task is None:
+                consumed = False
+            else:
+                try:
+                    consumed = await self._backend_task_succeeded_after_cancel(
+                        backend_task
+                    )
+                except BaseException as helper_exc:
+                    interrupted_by = await self._complete_acquire_state_update(
+                        self._rollback_pending_acquire(reservation.reservation_id)
+                    )
+                    if interrupted_by is not None:
+                        raise interrupted_by from helper_exc
+                    raise
             if consumed:
                 issued_at_seconds = None
                 with contextlib.suppress(BaseException):
@@ -1588,6 +1598,11 @@ class RateLimiter(BaseRateLimiter):
                     break
             except Exception:  # noqa: BLE001
                 break
+            except BaseException:
+                if task.done() and not task.cancelled():
+                    with contextlib.suppress(BaseException):
+                        task.exception()
+                raise
         return task.done() and not task.cancelled() and task.exception() is None
 
     async def refund_capacity(
@@ -1852,6 +1867,11 @@ class RateLimiter(BaseRateLimiter):
                     return
             except Exception:  # noqa: BLE001 - caller inspects task.exception().
                 return
+            except BaseException:
+                if task.done() and not task.cancelled():
+                    with contextlib.suppress(BaseException):
+                        task.exception()
+                raise
 
     async def _set_max_capacity_transactional(  # noqa: PLR0913
         self,
@@ -1869,7 +1889,19 @@ class RateLimiter(BaseRateLimiter):
         try:
             await asyncio.shield(write_task)
         except asyncio.CancelledError:
-            await self._wait_for_set_max_capacity_task_while_cancelled(write_task)
+            try:
+                await self._wait_for_set_max_capacity_task_while_cancelled(write_task)
+            except BaseException:
+                await self._reconcile_runtime_max_capacity_after_failed_set(
+                    backend,
+                    model_family=model_family,
+                    model=model,
+                    metric=metric,
+                    per_seconds=per_seconds,
+                    value=value,
+                    while_cancelled=True,
+                )
+                raise
             if write_task.done() and write_task.cancelled():
                 await self._reconcile_runtime_max_capacity_after_failed_set(
                     backend,
