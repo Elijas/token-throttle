@@ -232,6 +232,12 @@ responses, or API keys.
 The conformance helper validates callback emission and callback payload shape.
 It does not require structured `DEBUG` log emission.
 
+`GeneratorExit` raised by a callback is treated as lifecycle-critical cleanup
+signal. On the public async limiter path, CPython may surface a callback-raised
+`GeneratorExit` to the awaiting caller as
+`RuntimeError("coroutine ignored GeneratorExit")`; use an application exception
+instead of `GeneratorExit` for callback control flow.
+
 Durable shared-state backends should also emit structured `DEBUG` logs under
 the same logger families used by Redis:
 

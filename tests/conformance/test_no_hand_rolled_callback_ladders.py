@@ -220,6 +220,9 @@ def test_async_outer_cleanup_sites_catch_base_exception() -> None:
     helper. The invariant is still common: if the cleanup call exists, at least
     one surrounding handler in that function must catch ``BaseException``.
     """
+    # Maintenance contract: when adding an async cleanup/reconciliation site
+    # whose cleanup must run for BaseException, register it here. Omitted sites
+    # are invisible to this guard, so review cannot rely on auto-discovery.
     required_sites = [
         (
             PRODUCTION_ROOT / "_limiter_backends" / "_memory" / "_backend.py",

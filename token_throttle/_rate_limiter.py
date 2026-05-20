@@ -1803,6 +1803,10 @@ class RateLimiter(BaseRateLimiter):
         per_seconds: int,
         value: float,
     ) -> bool:
+        # Intentionally outside the AST cleanup-site guard: this is a
+        # best-effort reconciliation reader, not state-mutation cleanup. If the
+        # read task raises BaseException after cancellation, False avoids a
+        # false local runtime-override commit.
         read_task = asyncio.create_task(
             self._backend_runtime_max_capacity_matches(
                 backend,
