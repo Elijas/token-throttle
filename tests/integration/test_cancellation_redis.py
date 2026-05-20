@@ -5,6 +5,7 @@ exercising the Redis-specific _refund_cancelled_consumption (with asyncio.shield
 """
 
 import asyncio
+import concurrent.futures
 import time
 
 import pytest
@@ -59,6 +60,37 @@ async def _get_redis_capacity(backend) -> float:
 @pytest.mark.redis
 class TestRedisCallbackCancellationRefundsCapacity:
     """CancelledError during post-consumption callbacks refunds capacity in Redis backend."""
+
+    @pytest.mark.parametrize(
+        "exception_type",
+        [concurrent.futures.CancelledError, GeneratorExit],
+    )
+    async def test_base_exception_callback_after_consume_refunds_capacity(
+        self,
+        redis_client,
+        exception_type: type[BaseException],
+    ):
+        calls = 0
+
+        async def callback(**kwargs):
+            _ = kwargs
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise exception_type
+
+        callbacks = RateLimiterCallbacks(on_capacity_consumed=callback)
+        builder = RedisBackendBuilder(redis_client, key_prefix="test")
+        backend = builder.build(_make_config(limit=100), callbacks=callbacks)
+
+        await backend.await_for_capacity(frozendict({"requests": 90.0}))
+        cap_before = await _get_redis_capacity(backend)
+
+        with pytest.raises(exception_type):
+            await backend.await_for_capacity(frozendict({"requests": 10.0}), timeout=0)
+
+        cap_after = await _get_redis_capacity(backend)
+        assert cap_after == pytest.approx(cap_before, abs=1.0)
 
     async def test_cancellation_during_on_capacity_consumed_in_check_and_consume(
         self,

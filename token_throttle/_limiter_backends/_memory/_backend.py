@@ -442,9 +442,9 @@ class MemoryBackend(RateLimiterBackend):
                 if deadline is not None and time.monotonic() >= deadline:
                     raise TimeoutError("Timed out waiting for capacity")
 
-        # All callbacks fired outside the lock.  If CancelledError arrives
-        # during any callback await, refund the consumed capacity so it is
-        # not permanently lost (the caller never receives a reservation).
+        # All callbacks fired outside the lock. If a critical BaseException
+        # arrives during any callback await, refund the consumed capacity so it
+        # is not permanently lost (the caller never receives a reservation).
         try:
             await self._fresh_start_buckets_callback(fresh)
             if self._callbacks and self._callbacks.on_capacity_consumed:
@@ -475,7 +475,7 @@ class MemoryBackend(RateLimiterBackend):
                     usage=frozendict(usage),
                     wait_time_s=wait_time_s,
                 )
-        except asyncio.CancelledError:
+        except BaseException:
             try:  # noqa: SIM105
                 await self._refund_cancelled_consumption(
                     usage,
@@ -484,12 +484,8 @@ class MemoryBackend(RateLimiterBackend):
                 )
             except BaseException:  # noqa: BLE001, S110
                 # Best-effort refund: asyncio.shield() inside the refund
-                # ensures the coroutine runs to completion even under
-                # re-cancel.  BaseException (not just Exception) is caught
-                # because the shielded refund itself may raise CancelledError
-                # or unexpected errors from the condition lock.  Safe to
-                # swallow: the original CancelledError is re-raised below,
-                # preserving structured-concurrency (TaskGroup) semantics.
+                # ensures the coroutine runs to completion even under re-cancel.
+                # Safe to swallow: the original interrupt is re-raised below.
                 pass
             raise
         return current_time

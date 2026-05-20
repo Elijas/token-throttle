@@ -1290,7 +1290,7 @@ class RateLimiter(BaseRateLimiter):
             request_id=_request_id_from_value(kwargs.get("request_id")),
         )
 
-    async def _acquire_capacity(
+    async def _acquire_capacity(  # noqa: PLR0915
         self,
         model: str,
         usage: FrozenUsage,
@@ -1375,6 +1375,13 @@ class RateLimiter(BaseRateLimiter):
             if interrupted_by is not None:
                 raise interrupted_by from exc
             _raise_backend_external_error(exc)
+        except BaseException as exc:
+            interrupted_by = await self._complete_acquire_state_update(
+                self._rollback_pending_acquire(reservation.reservation_id)
+            )
+            if interrupted_by is not None:
+                raise interrupted_by from exc
+            raise
         await self._begin_acquire_delivery_cleanup(reservation.reservation_id)
         try:
             interrupted_by = await self._complete_acquire_state_update(
@@ -1894,7 +1901,7 @@ class RateLimiter(BaseRateLimiter):
                         while_cancelled=True,
                     )
             raise
-        except Exception as exc:  # noqa: BLE001 - boundary wrapper preserves cause
+        except BaseException as exc:
             await self._reconcile_runtime_max_capacity_after_failed_set(
                 backend,
                 model_family=model_family,
@@ -1903,7 +1910,9 @@ class RateLimiter(BaseRateLimiter):
                 per_seconds=per_seconds,
                 value=value,
             )
-            _raise_backend_external_error(exc)
+            if isinstance(exc, Exception):
+                _raise_backend_external_error(exc)
+            raise
         self._commit_runtime_max_capacity(
             model_family,
             model,

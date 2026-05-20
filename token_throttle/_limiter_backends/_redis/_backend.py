@@ -1491,7 +1491,7 @@ class RedisBackend(RateLimiterBackend):
                         # result by update_max_capacity_from_result() inside
                         # _get_capacities_unsafe just above.
                         if usage_amount > bucket.max_capacity:
-                            raise ValueError(
+                            raise ValueError(  # noqa: TRY301
                                 f"Usage value for {usage_metric_name} ({usage_amount}) "
                                 f"exceeds bucket max capacity ({bucket.max_capacity})",
                             )
@@ -1581,7 +1581,7 @@ class RedisBackend(RateLimiterBackend):
                     usage=usage,
                     current_time=current_time,
                 )
-        except asyncio.CancelledError:
+        except BaseException:
             if consumed:
                 try:  # noqa: SIM105
                     await self._refund_cancelled_consumption(
@@ -1591,8 +1591,7 @@ class RedisBackend(RateLimiterBackend):
                     )
                 except BaseException:  # noqa: BLE001, S110
                     # Best-effort: shield ensures background completion.
-                    # Swallow so CancelledError always propagates for
-                    # structured concurrency (TaskGroups).
+                    # Swallow so the original interrupt always propagates.
                     pass
             raise
         return (

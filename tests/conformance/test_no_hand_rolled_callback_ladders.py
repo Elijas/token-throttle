@@ -19,6 +19,7 @@ recurs.
 
 from __future__ import annotations
 
+import ast
 import pathlib
 import re
 
@@ -28,6 +29,52 @@ PRODUCTION_ROOT = pathlib.Path(token_throttle.__file__).parent
 CALLBACKS_FILE = PRODUCTION_ROOT / "_interfaces" / "_callbacks.py"
 RATE_LIMITER_FILE = PRODUCTION_ROOT / "_rate_limiter.py"
 SYNC_RATE_LIMITER_FILE = PRODUCTION_ROOT / "_sync_rate_limiter.py"
+
+
+def _handler_catches_base_exception(handler: ast.ExceptHandler) -> bool:
+    if handler.type is None:
+        return True
+    if isinstance(handler.type, ast.Name):
+        return handler.type.id == "BaseException"
+    if isinstance(handler.type, ast.Tuple):
+        return any(
+            isinstance(elt, ast.Name) and elt.id == "BaseException"
+            for elt in handler.type.elts
+        )
+    return False
+
+
+def _handler_body_calls(handler: ast.ExceptHandler, function_name: str) -> bool:
+    for node in ast.walk(ast.Module(body=handler.body, type_ignores=[])):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Attribute) and func.attr == function_name:
+            return True
+        if isinstance(func, ast.Name) and func.id == function_name:
+            return True
+    return False
+
+
+def _function_has_base_exception_cleanup(
+    path: pathlib.Path,
+    function_name: str,
+    cleanup_call: str,
+) -> bool:
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.AsyncFunctionDef | ast.FunctionDef):
+            continue
+        if node.name != function_name:
+            continue
+        for child in ast.walk(node):
+            if not isinstance(child, ast.ExceptHandler):
+                continue
+            if not _handler_catches_base_exception(child):
+                continue
+            if _handler_body_calls(child, cleanup_call):
+                return True
+    return False
 
 
 def _iter_production_python_files() -> list[pathlib.Path]:
@@ -163,4 +210,49 @@ def test_no_hand_rolled_forget_in_flight_on_base_exception() -> None:
         "Hand-rolled `except BaseException` ... `_forget_in_flight_reservation` "
         "block detected. Use the `_refund_or_forget_reservation_on_raise` "
         f"context manager instead. Offenders: {offenders}"
+    )
+
+
+def test_async_outer_cleanup_sites_catch_base_exception() -> None:
+    """Async cleanup/reconciliation sites must not lag the critical taxonomy.
+
+    These are heterogeneous state transitions, so they do not share a clean
+    helper. The invariant is still common: if the cleanup call exists, at least
+    one surrounding handler in that function must catch ``BaseException``.
+    """
+    required_sites = [
+        (
+            PRODUCTION_ROOT / "_limiter_backends" / "_memory" / "_backend.py",
+            "await_for_capacity",
+            "_refund_cancelled_consumption",
+        ),
+        (
+            PRODUCTION_ROOT / "_limiter_backends" / "_redis" / "_backend.py",
+            "_check_and_consume_capacity",
+            "_refund_cancelled_consumption",
+        ),
+        (
+            RATE_LIMITER_FILE,
+            "_acquire_capacity",
+            "_rollback_pending_acquire",
+        ),
+        (
+            RATE_LIMITER_FILE,
+            "_set_max_capacity_transactional",
+            "_reconcile_runtime_max_capacity_after_failed_set",
+        ),
+    ]
+    offenders = [
+        (path, function_name, cleanup_call)
+        for path, function_name, cleanup_call in required_sites
+        if not _function_has_base_exception_cleanup(
+            path,
+            function_name,
+            cleanup_call,
+        )
+    ]
+    assert not offenders, (
+        "Async cleanup/reconciliation sites must catch BaseException so "
+        "KeyboardInterrupt/SystemExit/GeneratorExit and callback critical "
+        f"exceptions cannot bypass cleanup. Offenders: {offenders}"
     )
