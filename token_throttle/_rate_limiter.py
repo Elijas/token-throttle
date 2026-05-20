@@ -131,7 +131,19 @@ def _is_redis_cluster_client(value: object) -> bool:
     return False
 
 
+def _is_builtin_redis_backend_builder(backend: object) -> bool:
+    redis_backend_module = sys.modules.get(
+        "token_throttle._limiter_backends._redis._backend"
+    )
+    redis_builder_cls = getattr(redis_backend_module, "RedisBackendBuilder", None)
+    return isinstance(redis_builder_cls, type) and isinstance(
+        backend, redis_builder_cls
+    )
+
+
 def _raise_if_redis_cluster_backend(backend: object) -> None:
+    if not _is_builtin_redis_backend_builder(backend):
+        return
     redis_client = getattr(backend, "_redis", None)
     if _is_redis_cluster_client(redis_client):
         raise ValueError(_REDIS_CLUSTER_UNSUPPORTED_ERROR)
