@@ -60,6 +60,7 @@ class _CustomSyncBuilder:
 
 
 def test_async_rate_limiter_rejects_builtin_redis_cluster_builder_at_init():
+    pytest.importorskip("redis.asyncio")
     from token_throttle._limiter_backends._redis._backend import (  # noqa: PLC0415
         RedisBackendBuilder,
     )
@@ -82,6 +83,7 @@ def test_async_rate_limiter_accepts_custom_builder_with_private_cluster_client()
 
 
 def test_sync_rate_limiter_rejects_builtin_redis_cluster_builder_at_init():
+    pytest.importorskip("redis")
     from token_throttle._limiter_backends._redis._sync_backend import (  # noqa: PLC0415
         SyncRedisBackendBuilder,
     )
