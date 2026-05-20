@@ -372,6 +372,11 @@ def _invoke_sync_callback_with_timeout(
 # the critical-type tuples and the group-aware dispatcher live here so
 # the set of "must propagate" exceptions cannot drift between sync and
 # async, or between rate-limiter and backend, paths.
+#
+# Callback dispatch remains best-effort for ordinary exceptions, but
+# cancellation/termination signals and severe process-health failures
+# (out-of-memory or runaway recursion) propagate instead of being buried
+# behind RuntimeWarning.
 # ---------------------------------------------------------------------------
 
 LIFECYCLE_CALLBACK_CRITICAL_EXCEPTIONS: tuple[type[BaseException], ...] = (
@@ -380,6 +385,8 @@ LIFECYCLE_CALLBACK_CRITICAL_EXCEPTIONS: tuple[type[BaseException], ...] = (
     KeyboardInterrupt,
     SystemExit,
     GeneratorExit,
+    MemoryError,
+    RecursionError,
 )
 
 BACKEND_CALLBACK_CRITICAL_EXCEPTIONS: tuple[type[BaseException], ...] = (

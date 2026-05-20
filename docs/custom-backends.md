@@ -232,11 +232,20 @@ responses, or API keys.
 The conformance helper validates callback emission and callback payload shape.
 It does not require structured `DEBUG` log emission.
 
-`GeneratorExit` raised by a callback is treated as lifecycle-critical cleanup
-signal. On the public async limiter path, CPython may surface a callback-raised
-`GeneratorExit` to the awaiting caller as
-`RuntimeError("coroutine ignored GeneratorExit")`; use an application exception
-instead of `GeneratorExit` for callback control flow.
+Callbacks are best-effort for ordinary `Exception` subclasses: token-throttle
+emits a `RuntimeWarning` and continues. Critical exceptions propagate instead.
+Lifecycle and backend callbacks propagate `asyncio.CancelledError`,
+`concurrent.futures.CancelledError`, `KeyboardInterrupt`, `SystemExit`,
+`GeneratorExit`, `MemoryError`, and `RecursionError`. Backend callback dispatch
+also propagates `AcquireRefundFailedError`.
+
+`GeneratorExit` is treated as a lifecycle-critical cleanup signal. On the public
+async limiter path, CPython may surface a callback-raised `GeneratorExit` to the
+awaiting caller as `RuntimeError("coroutine ignored GeneratorExit")`; use an
+application exception instead of `GeneratorExit` for callback control flow.
+`MemoryError` and `RecursionError` also propagate because they indicate severe
+process-health or programming failures (out-of-memory or runaway recursion) that
+should not be hidden behind callback warning suppression.
 
 Durable shared-state backends should also emit structured `DEBUG` logs under
 the same logger families used by Redis:

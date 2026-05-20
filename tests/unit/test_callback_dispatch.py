@@ -57,6 +57,8 @@ def test_lifecycle_critical_exceptions_contents() -> None:
     assert KeyboardInterrupt in LIFECYCLE_CALLBACK_CRITICAL_EXCEPTIONS
     assert SystemExit in LIFECYCLE_CALLBACK_CRITICAL_EXCEPTIONS
     assert GeneratorExit in LIFECYCLE_CALLBACK_CRITICAL_EXCEPTIONS
+    assert MemoryError in LIFECYCLE_CALLBACK_CRITICAL_EXCEPTIONS
+    assert RecursionError in LIFECYCLE_CALLBACK_CRITICAL_EXCEPTIONS
 
 
 def test_backend_critical_exceptions_extends_lifecycle() -> None:
