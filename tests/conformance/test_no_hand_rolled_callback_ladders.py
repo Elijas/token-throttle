@@ -572,7 +572,7 @@ def test_cancellation_composition_site_discovery_matches_snapshot() -> None:
     """Make the auto-discovered cancellation-composition surface reviewable."""
     expected = [
         "_rate_limiter.py:_acquire_capacity:1345",
-        "_rate_limiter.py:_set_max_capacity_transactional:1921",
+        "_rate_limiter.py:_set_max_capacity_transactional:1897",
         "_limiter_backends/_redis/_backend.py:_check_and_consume_capacity:1567",
     ]
     actual = [site.label() for site in _discover_cancellation_composition_sites()]

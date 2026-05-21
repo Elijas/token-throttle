@@ -1547,35 +1547,11 @@ class RateLimiter(BaseRateLimiter):
                 LIFECYCLE_CALLBACK_CRITICAL_EXCEPTIONS,
             ):
                 raise
-            if await self._refund_committed_with_critical_exception(
-                reservation.reservation_id,
-                refund_error,
-            ):
-                raise
             raise AcquireRefundFailedError(
                 reservation=reservation,
                 refund_error=refund_error,
                 interrupted_by=interrupted_by,
             ) from refund_error
-
-    async def _refund_committed_with_critical_exception(
-        self,
-        reservation_id: str,
-        exc: BaseException,
-    ) -> bool:
-        if not (
-            isinstance(exc, LIFECYCLE_CALLBACK_CRITICAL_EXCEPTIONS)
-            or _exception_group_contains_critical(
-                exc, LIFECYCLE_CALLBACK_CRITICAL_EXCEPTIONS
-            )
-        ):
-            return False
-        async with self._refund_state_lock:
-            refund_state = self._refunded_reservation_ids.get(
-                reservation_id,
-                _REFUND_STATE_MISSING,
-            )
-        return _refund_state_is_committed(refund_state)
 
     async def _complete_acquire_state_update(
         self,

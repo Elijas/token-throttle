@@ -1352,11 +1352,6 @@ class SyncRateLimiter:
                 LIFECYCLE_CALLBACK_CRITICAL_EXCEPTIONS,
             ):
                 raise
-            if self._refund_committed_with_critical_exception(
-                reservation.reservation_id,
-                refund_error,
-            ):
-                raise
             raise AcquireRefundFailedError(
                 reservation=reservation,
                 refund_error=refund_error,
@@ -1395,25 +1390,6 @@ class SyncRateLimiter:
             else:
                 self._forget_in_flight_reservation(reservation.reservation_id)
             raise
-
-    def _refund_committed_with_critical_exception(
-        self,
-        reservation_id: str,
-        exc: BaseException,
-    ) -> bool:
-        if not (
-            isinstance(exc, LIFECYCLE_CALLBACK_CRITICAL_EXCEPTIONS)
-            or _exception_group_contains_critical(
-                exc, LIFECYCLE_CALLBACK_CRITICAL_EXCEPTIONS
-            )
-        ):
-            return False
-        with self._refund_state_lock:
-            refund_state = self._refunded_reservation_ids.get(
-                reservation_id,
-                _REFUND_STATE_MISSING,
-            )
-        return _refund_state_is_committed(refund_state)
 
     def refund_capacity(
         self,

@@ -297,6 +297,7 @@ _NON_NORMALIZED_EXCEPTION_TYPES = (
     SystemExit,
     GeneratorExit,
     MemoryError,
+    RecursionError,
 )
 _NON_NORMALIZED_GROUP_EXCEPTION_TYPES = (
     *_NON_NORMALIZED_EXCEPTION_TYPES,
