@@ -1024,6 +1024,7 @@ class RateLimiter(BaseRateLimiter):
                 try:
                     await asyncio.wait_for(asyncio.shield(wait_task), timeout=timeout)
                     return interrupted
+                # ast-guard: skip — drain wait only records interruption; no cleanup
                 except asyncio.CancelledError:
                     interrupted = True
                     if wait_task.done():
@@ -1043,6 +1044,7 @@ class RateLimiter(BaseRateLimiter):
             try:
                 await asyncio.shield(close_task)
                 break
+            # ast-guard: skip — close_task.result() re-raises task failures
             except asyncio.CancelledError:
                 interrupted = True
                 if close_task.done():
@@ -1523,6 +1525,7 @@ class RateLimiter(BaseRateLimiter):
             try:
                 await asyncio.shield(refund_task)
                 break
+            # ast-guard: skip — refund_task.result() re-raises task failures
             except asyncio.CancelledError:
                 if refund_task.done():
                     break
@@ -1537,6 +1540,13 @@ class RateLimiter(BaseRateLimiter):
         try:
             await self._refund_undelivered_acquire(reservation)
         except BaseException as refund_error:
+            if isinstance(
+                refund_error, LIFECYCLE_CALLBACK_CRITICAL_EXCEPTIONS
+            ) or _exception_group_contains_critical(
+                refund_error,
+                LIFECYCLE_CALLBACK_CRITICAL_EXCEPTIONS,
+            ):
+                raise
             if await self._refund_committed_with_critical_exception(
                 reservation.reservation_id,
                 refund_error,
@@ -1577,6 +1587,7 @@ class RateLimiter(BaseRateLimiter):
             try:
                 await asyncio.shield(task)
                 break
+            # ast-guard: skip — task.result() re-raises state-update failures
             except asyncio.CancelledError as exc:
                 if interrupted_by is None:
                     interrupted_by = exc
@@ -1593,16 +1604,23 @@ class RateLimiter(BaseRateLimiter):
             try:
                 await asyncio.shield(task)
                 break
-            except asyncio.CancelledError:
-                if task.done():
-                    break
-            except Exception:  # noqa: BLE001
+            except BaseException as exc:
+                if isinstance(exc, asyncio.CancelledError):
+                    if task.done():
+                        break
+                    continue
+                if isinstance(
+                    exc,
+                    LIFECYCLE_CALLBACK_CRITICAL_EXCEPTIONS,
+                ) or _exception_group_contains_critical(
+                    exc,
+                    LIFECYCLE_CALLBACK_CRITICAL_EXCEPTIONS,
+                ):
+                    if task.done() and not task.cancelled():
+                        with contextlib.suppress(BaseException):
+                            task.exception()
+                    raise
                 break
-            except BaseException:
-                if task.done() and not task.cancelled():
-                    with contextlib.suppress(BaseException):
-                        task.exception()
-                raise
         return task.done() and not task.cancelled() and task.exception() is None
 
     async def refund_capacity(
@@ -1818,6 +1836,7 @@ class RateLimiter(BaseRateLimiter):
         while True:
             try:
                 return await asyncio.shield(read_task)
+            # ast-guard: skip — best-effort read intentionally maps failure to False
             except asyncio.CancelledError:
                 if read_task.done():
                     with contextlib.suppress(BaseException):
@@ -1866,16 +1885,23 @@ class RateLimiter(BaseRateLimiter):
             try:
                 await asyncio.shield(task)
                 return
-            except asyncio.CancelledError:
-                if task.done():
-                    return
-            except Exception:  # noqa: BLE001 - caller inspects task.exception().
+            except BaseException as exc:
+                if isinstance(exc, asyncio.CancelledError):
+                    if task.done():
+                        return
+                    continue
+                if isinstance(
+                    exc,
+                    LIFECYCLE_CALLBACK_CRITICAL_EXCEPTIONS,
+                ) or _exception_group_contains_critical(
+                    exc,
+                    LIFECYCLE_CALLBACK_CRITICAL_EXCEPTIONS,
+                ):
+                    if task.done() and not task.cancelled():
+                        with contextlib.suppress(BaseException):
+                            task.exception()
+                    raise
                 return
-            except BaseException:
-                if task.done() and not task.cancelled():
-                    with contextlib.suppress(BaseException):
-                        task.exception()
-                raise
 
     async def _set_max_capacity_transactional(  # noqa: PLR0913
         self,
@@ -2215,6 +2241,7 @@ class RateLimiter(BaseRateLimiter):
             try:
                 await asyncio.shield(task)
                 break
+            # ast-guard: skip — task.result() re-raises refund-state failures
             except asyncio.CancelledError:
                 interrupted = True
                 if task.done():

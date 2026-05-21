@@ -22,6 +22,7 @@ from __future__ import annotations
 import ast
 import pathlib
 import re
+from dataclasses import dataclass
 
 import token_throttle
 
@@ -29,29 +30,180 @@ PRODUCTION_ROOT = pathlib.Path(token_throttle.__file__).parent
 CALLBACKS_FILE = PRODUCTION_ROOT / "_interfaces" / "_callbacks.py"
 RATE_LIMITER_FILE = PRODUCTION_ROOT / "_rate_limiter.py"
 SYNC_RATE_LIMITER_FILE = PRODUCTION_ROOT / "_sync_rate_limiter.py"
+MEMORY_BACKEND_FILE = PRODUCTION_ROOT / "_limiter_backends" / "_memory" / "_backend.py"
+MEMORY_SYNC_BACKEND_FILE = (
+    PRODUCTION_ROOT / "_limiter_backends" / "_memory" / "_sync_backend.py"
+)
+REDIS_BACKEND_FILE = PRODUCTION_ROOT / "_limiter_backends" / "_redis" / "_backend.py"
+REDIS_SYNC_BACKEND_FILE = (
+    PRODUCTION_ROOT / "_limiter_backends" / "_redis" / "_sync_backend.py"
+)
+CANCELLATION_DISCOVERY_FILES = (
+    RATE_LIMITER_FILE,
+    SYNC_RATE_LIMITER_FILE,
+    MEMORY_BACKEND_FILE,
+    MEMORY_SYNC_BACKEND_FILE,
+    REDIS_BACKEND_FILE,
+    REDIS_SYNC_BACKEND_FILE,
+)
+_DISCOVERY_FILE_ORDER = {
+    path: index for index, path in enumerate(CANCELLATION_DISCOVERY_FILES)
+}
+AST_GUARD_SKIP_MARKER = "ast-guard: skip"
+CANCELLED_ERROR_NAMES = {
+    "asyncio.CancelledError",
+    "concurrent.futures.CancelledError",
+}
+CRITICAL_EXCEPTION_LITERAL_NAMES = {
+    "asyncio.CancelledError",
+    "KeyboardInterrupt",
+    "SystemExit",
+    "GeneratorExit",
+    "MemoryError",
+    "RecursionError",
+}
+CRITICAL_EXCEPTION_TUPLE_NAMES = {
+    "BACKEND_CALLBACK_CRITICAL_EXCEPTIONS",
+    "LIFECYCLE_CALLBACK_CRITICAL_EXCEPTIONS",
+}
+KNOWN_CRITICAL_DISPATCH_HELPERS = {
+    "_exception_group_contains_critical",
+    "_raise_backend_external_error",
+    "safe_invoke_async_callback",
+    "safe_invoke_sync_callback",
+}
+
+
+@dataclass(frozen=True, order=True)
+class _DiscoveredCancellationSite:
+    relative_path: str
+    function_name: str
+    except_lineno: int
+
+    def label(self) -> str:
+        return f"{self.relative_path}:{self.function_name}:{self.except_lineno}"
+
+
+@dataclass(frozen=True)
+class _CancellationSiteDetail:
+    path: pathlib.Path
+    site: _DiscoveredCancellationSite
+    try_node: ast.Try
+    cancelled_handler: ast.ExceptHandler
+
+
+@dataclass(frozen=True)
+class _CleanupSite:
+    relative_path: str
+    function_name: str
+    cleanup_call: str
+
+    @property
+    def path(self) -> pathlib.Path:
+        return PRODUCTION_ROOT / self.relative_path
+
+    def key(self) -> tuple[str, str]:
+        return (self.relative_path, self.function_name)
+
+
+# Registered sites are an explicit acknowledgement that the discovered
+# cancellation-composition function is load-bearing and needs BaseException
+# cleanup. Discovery, not this list, decides which functions must be reviewed.
+REGISTERED_CANCELLATION_CLEANUP_SITES = (
+    _CleanupSite(
+        "_rate_limiter.py",
+        "_acquire_capacity",
+        "_rollback_pending_acquire",
+    ),
+    _CleanupSite(
+        "_rate_limiter.py",
+        "_backend_task_succeeded_after_cancel",
+        "exception",
+    ),
+    _CleanupSite(
+        "_rate_limiter.py",
+        "_wait_for_set_max_capacity_task_while_cancelled",
+        "exception",
+    ),
+    _CleanupSite(
+        "_rate_limiter.py",
+        "_set_max_capacity_transactional",
+        "_reconcile_runtime_max_capacity_after_failed_set",
+    ),
+    _CleanupSite(
+        "_limiter_backends/_redis/_backend.py",
+        "_check_and_consume_capacity",
+        "_refund_cancelled_consumption",
+    ),
+    _CleanupSite(
+        "_limiter_backends/_redis/_backend.py",
+        "await_for_capacity",
+        "_refund_cancelled_consumption",
+    ),
+)
+
+# Keep the older BaseException cleanup coverage for the async memory backend.
+# It is already fixed with a BaseException handler, so it is not discovered by
+# the CancelledError-specific AST pass above.
+ADDITIONAL_BASE_EXCEPTION_CLEANUP_SITES = (
+    _CleanupSite(
+        "_limiter_backends/_memory/_backend.py",
+        "await_for_capacity",
+        "_refund_cancelled_consumption",
+    ),
+)
+
+
+def _attribute_name(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        base = _attribute_name(node.value)
+        if base is None:
+            return None
+        return f"{base}.{node.attr}"
+    return None
+
+
+def _exception_type_names(node: ast.AST | None) -> tuple[str, ...]:
+    if node is None:
+        return ()
+    if isinstance(node, ast.Tuple):
+        names: list[str] = []
+        for elt in node.elts:
+            names.extend(_exception_type_names(elt))
+        return tuple(names)
+    name = _attribute_name(node)
+    return () if name is None else (name,)
 
 
 def _handler_catches_base_exception(handler: ast.ExceptHandler) -> bool:
     if handler.type is None:
         return True
-    if isinstance(handler.type, ast.Name):
-        return handler.type.id == "BaseException"
-    if isinstance(handler.type, ast.Tuple):
-        return any(
-            isinstance(elt, ast.Name) and elt.id == "BaseException"
-            for elt in handler.type.elts
-        )
-    return False
+    return "BaseException" in _exception_type_names(handler.type)
+
+
+def _handler_catches_exception(handler: ast.ExceptHandler) -> bool:
+    return "Exception" in _exception_type_names(handler.type)
+
+
+def _handler_catches_cancelled_error(handler: ast.ExceptHandler) -> bool:
+    return bool(CANCELLED_ERROR_NAMES.intersection(_exception_type_names(handler.type)))
+
+
+def _call_name(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return node.attr
+    return None
 
 
 def _handler_body_calls(handler: ast.ExceptHandler, function_name: str) -> bool:
     for node in ast.walk(ast.Module(body=handler.body, type_ignores=[])):
         if not isinstance(node, ast.Call):
             continue
-        func = node.func
-        if isinstance(func, ast.Attribute) and func.attr == function_name:
-            return True
-        if isinstance(func, ast.Name) and func.id == function_name:
+        if _call_name(node.func) == function_name:
             return True
     return False
 
@@ -75,6 +227,133 @@ def _function_has_base_exception_cleanup(
             if _handler_body_calls(child, cleanup_call):
                 return True
     return False
+
+
+def _has_ast_guard_skip_marker(lines: list[str], lineno: int) -> bool:
+    line_indexes = (lineno - 1, lineno - 2)
+    return any(
+        0 <= index < len(lines) and AST_GUARD_SKIP_MARKER in lines[index]
+        for index in line_indexes
+    )
+
+
+def _parent_map(tree: ast.AST) -> dict[ast.AST, ast.AST]:
+    parents: dict[ast.AST, ast.AST] = {}
+    for node in ast.walk(tree):
+        for child in ast.iter_child_nodes(node):
+            parents[child] = node
+    return parents
+
+
+def _enclosing_function(
+    node: ast.AST,
+    parents: dict[ast.AST, ast.AST],
+) -> ast.AsyncFunctionDef | ast.FunctionDef | None:
+    current: ast.AST | None = node
+    while current is not None:
+        if isinstance(current, (ast.AsyncFunctionDef, ast.FunctionDef)):
+            return current
+        current = parents.get(current)
+    return None
+
+
+def _relative_production_path(path: pathlib.Path) -> str:
+    return path.relative_to(PRODUCTION_ROOT).as_posix()
+
+
+def _discover_cancellation_composition_details() -> list[_CancellationSiteDetail]:
+    details: list[_CancellationSiteDetail] = []
+    for path in CANCELLATION_DISCOVERY_FILES:
+        text = path.read_text(encoding="utf-8")
+        lines = text.splitlines()
+        tree = ast.parse(text, filename=str(path))
+        parents = _parent_map(tree)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Try):
+                continue
+            function_node = _enclosing_function(node, parents)
+            if function_node is None:
+                continue
+            for handler in node.handlers:
+                if not _handler_catches_cancelled_error(handler):
+                    continue
+                if _has_ast_guard_skip_marker(lines, handler.lineno):
+                    continue
+                details.append(
+                    _CancellationSiteDetail(
+                        path=path,
+                        site=_DiscoveredCancellationSite(
+                            _relative_production_path(path),
+                            function_node.name,
+                            handler.lineno,
+                        ),
+                        try_node=node,
+                        cancelled_handler=handler,
+                    )
+                )
+    return sorted(
+        details,
+        key=lambda detail: (
+            _DISCOVERY_FILE_ORDER[detail.path],
+            detail.site.except_lineno,
+            detail.site.function_name,
+        ),
+    )
+
+
+def _discover_cancellation_composition_sites() -> list[_DiscoveredCancellationSite]:
+    return [detail.site for detail in _discover_cancellation_composition_details()]
+
+
+def _handler_references_critical_tuple(handler: ast.ExceptHandler) -> bool:
+    for node in ast.walk(ast.Module(body=handler.body, type_ignores=[])):
+        if isinstance(node, ast.Name) and node.id in CRITICAL_EXCEPTION_TUPLE_NAMES:
+            return True
+    return False
+
+
+def _handler_reraises(handler: ast.ExceptHandler) -> bool:
+    for node in ast.walk(ast.Module(body=handler.body, type_ignores=[])):
+        if isinstance(node, ast.Raise) and (
+            node.exc is None
+            or (
+                handler.name is not None
+                and isinstance(node.exc, ast.Name)
+                and node.exc.id == handler.name
+            )
+        ):
+            return True
+    return False
+
+
+def _handler_calls_known_critical_helper(handler: ast.ExceptHandler) -> bool:
+    for node in ast.walk(ast.Module(body=handler.body, type_ignores=[])):
+        if not isinstance(node, ast.Call):
+            continue
+        call_name = _call_name(node.func)
+        if call_name in KNOWN_CRITICAL_DISPATCH_HELPERS:
+            return True
+    return False
+
+
+def _exception_handler_preserves_critical_reachability(
+    handler: ast.ExceptHandler,
+) -> bool:
+    if _handler_calls_known_critical_helper(handler):
+        return True
+    return _handler_references_critical_tuple(handler) and _handler_reraises(handler)
+
+
+def _exception_handlers_before_base_exception(
+    try_node: ast.Try,
+) -> list[ast.ExceptHandler]:
+    handlers: list[ast.ExceptHandler] = []
+    for handler in try_node.handlers:
+        if _handler_catches_base_exception(handler):
+            return handlers
+        if _handler_catches_exception(handler):
+            handlers.append(handler)
+    return []
 
 
 def _iter_production_python_files() -> list[pathlib.Path]:
@@ -124,31 +403,29 @@ def test_no_hand_rolled_group_contains_critical_helper() -> None:
 
 
 def test_no_hand_rolled_critical_exception_literal_ladder() -> None:
-    """Detect a ladder where all five lifecycle-critical literals appear in
-    except-clause syntax within a ~10-line sliding window. Catches future
-    contributors re-introducing the hand-rolled pattern.
+    """Detect literal critical-exception ladders in except-clause syntax.
+
+    Four or more named lifecycle criticals in one ``try`` node is enough to
+    flag a future hand-rolled callback dispatcher. The canonical dispatcher
+    in ``_interfaces/_callbacks.py`` is the only place that should spell out
+    these families.
     """
-    sentinels = (
-        "asyncio.CancelledError",
-        "KeyboardInterrupt",
-        "SystemExit",
-        "GeneratorExit",
-    )
-    except_re = re.compile(r"^\s*except\s.*$")
-    offenders: list[tuple[pathlib.Path, int]] = []
+    offenders: list[tuple[pathlib.Path, int, tuple[str, ...]]] = []
     for path in _iter_production_python_files():
         if path == CALLBACKS_FILE:
             continue
-        lines = path.read_text(encoding="utf-8").splitlines()
-        for start in range(len(lines)):
-            window_lines = lines[start : start + 10]
-            window_text = "\n".join(window_lines)
-            if not all(sentinel in window_text for sentinel in sentinels):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Try):
                 continue
-            if not any(except_re.match(line) for line in window_lines):
-                continue
-            offenders.append((path, start + 1))
-            break
+            names: set[str] = set()
+            for handler in node.handlers:
+                names.update(_exception_type_names(handler.type))
+            matches = tuple(
+                sorted(CRITICAL_EXCEPTION_LITERAL_NAMES.intersection(names))
+            )
+            if len(matches) >= 4:
+                offenders.append((path, node.lineno, matches))
     assert not offenders, (
         "Hand-rolled critical-exception ladder detected. Replace with "
         "safe_invoke_async_callback / safe_invoke_sync_callback from "
@@ -216,56 +493,92 @@ def test_no_hand_rolled_forget_in_flight_on_base_exception() -> None:
 def test_async_outer_cleanup_sites_catch_base_exception() -> None:
     """Async cleanup/reconciliation sites must not lag the critical taxonomy.
 
-    These are heterogeneous state transitions, so they do not share a clean
-    helper. The invariant is still common: if the cleanup call exists, at least
-    one surrounding handler in that function must catch ``BaseException``.
+    Discovery finds every non-opted-out ``except asyncio.CancelledError`` /
+    ``except concurrent.futures.CancelledError`` site in the known limiter and
+    backend modules. Registration only supplies the cleanup call each
+    discovered load-bearing site must preserve under ``BaseException``.
     """
-    # Maintenance contract: when adding an async cleanup/reconciliation site
-    # whose cleanup must run for BaseException, register it here. Omitted sites
-    # are invisible to this guard, so review cannot rely on auto-discovery.
-    required_sites = [
-        (
-            PRODUCTION_ROOT / "_limiter_backends" / "_memory" / "_backend.py",
-            "await_for_capacity",
-            "_refund_cancelled_consumption",
-        ),
-        (
-            PRODUCTION_ROOT / "_limiter_backends" / "_redis" / "_backend.py",
-            "_check_and_consume_capacity",
-            "_refund_cancelled_consumption",
-        ),
-        (
-            RATE_LIMITER_FILE,
-            "_acquire_capacity",
-            "_rollback_pending_acquire",
-        ),
-        (
-            RATE_LIMITER_FILE,
-            "_set_max_capacity_transactional",
-            "_reconcile_runtime_max_capacity_after_failed_set",
-        ),
-        (
-            RATE_LIMITER_FILE,
-            "_backend_task_succeeded_after_cancel",
-            "exception",
-        ),
-        (
-            RATE_LIMITER_FILE,
-            "_wait_for_set_max_capacity_task_while_cancelled",
-            "exception",
-        ),
+    discovered_sites = _discover_cancellation_composition_sites()
+    registered_keys = {site.key() for site in REGISTERED_CANCELLATION_CLEANUP_SITES}
+    unregistered = [
+        site.label()
+        for site in discovered_sites
+        if (site.relative_path, site.function_name) not in registered_keys
     ]
+    assert not unregistered, (
+        "Discovered cancellation-composition sites must be registered with a "
+        "cleanup_call or explicitly opted out with "
+        f"`# {AST_GUARD_SKIP_MARKER} — <reason>` on/immediately above the "
+        f"except line. Unregistered sites: {unregistered}. Full discovery: "
+        f"{[site.label() for site in discovered_sites]}"
+    )
+
     offenders = [
-        (path, function_name, cleanup_call)
-        for path, function_name, cleanup_call in required_sites
+        (site.relative_path, site.function_name, site.cleanup_call)
+        for site in (
+            *REGISTERED_CANCELLATION_CLEANUP_SITES,
+            *ADDITIONAL_BASE_EXCEPTION_CLEANUP_SITES,
+        )
         if not _function_has_base_exception_cleanup(
-            path,
-            function_name,
-            cleanup_call,
+            site.path,
+            site.function_name,
+            site.cleanup_call,
         )
     ]
     assert not offenders, (
         "Async cleanup/reconciliation sites must catch BaseException so "
-        "KeyboardInterrupt/SystemExit/GeneratorExit and callback critical "
-        f"exceptions cannot bypass cleanup. Offenders: {offenders}"
+        "KeyboardInterrupt/SystemExit/GeneratorExit/MemoryError/RecursionError "
+        f"and callback critical exceptions cannot bypass cleanup. Offenders: "
+        f"{offenders}"
+    )
+
+
+def test_async_cleanup_exception_handlers_preserve_critical_reachability() -> None:
+    """``except Exception`` must not make later ``except BaseException`` dead.
+
+    v6 added ``MemoryError`` and ``RecursionError`` to the critical callback
+    taxonomy. They are ``Exception`` subclasses, so a cleanup-cancel try block
+    with ``except Exception`` before ``except BaseException`` must visibly
+    re-raise critical exceptions or delegate to the shared critical helper.
+    """
+    registered_keys = {site.key() for site in REGISTERED_CANCELLATION_CLEANUP_SITES}
+    offenders: list[str] = []
+    for detail in _discover_cancellation_composition_details():
+        if (
+            detail.site.relative_path,
+            detail.site.function_name,
+        ) not in registered_keys:
+            continue
+        for handler in _exception_handlers_before_base_exception(detail.try_node):
+            if _exception_handler_preserves_critical_reachability(handler):
+                continue
+            offenders.append(
+                f"{detail.site.label()} has except Exception at line "
+                f"{handler.lineno} before except BaseException without a "
+                "visible critical-exception re-raise"
+            )
+
+    assert not offenders, (
+        "Cancellation cleanup try blocks with `except Exception` before "
+        "`except BaseException` can intercept v6 critical Exception subclasses. "
+        "Add an explicit isinstance(exc, LIFECYCLE_CALLBACK_CRITICAL_EXCEPTIONS) "
+        "check plus re-raise, or call a known helper that checks or preserves "
+        "critical exceptions. "
+        f"Offenders: {offenders}"
+    )
+
+
+def test_cancellation_composition_site_discovery_matches_snapshot() -> None:
+    """Make the auto-discovered cancellation-composition surface reviewable."""
+    expected = [
+        "_rate_limiter.py:_acquire_capacity:1345",
+        "_rate_limiter.py:_set_max_capacity_transactional:1921",
+        "_limiter_backends/_redis/_backend.py:_check_and_consume_capacity:1567",
+    ]
+    actual = [site.label() for site in _discover_cancellation_composition_sites()]
+    assert actual == expected, (
+        "Cancellation-composition discovery changed. If a new site is "
+        "load-bearing, register its cleanup_call; if it is intentionally "
+        f"narrower, add `# {AST_GUARD_SKIP_MARKER} — <reason>` on/immediately "
+        f"above the except line. Actual discovery: {actual}"
     )

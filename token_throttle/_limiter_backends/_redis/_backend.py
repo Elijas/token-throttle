@@ -1413,6 +1413,7 @@ class RedisBackend(RateLimiterBackend):
             try:
                 await asyncio.shield(task)
                 break
+            # ast-guard: skip — callers use settled write outcome for cleanup
             except asyncio.CancelledError:
                 if task.done():
                     break
@@ -1703,6 +1704,7 @@ class RedisBackend(RateLimiterBackend):
             )
             try:
                 await asyncio.shield(write_task)
+            # ast-guard: skip — landed speedometer writes must not be refunded
             except asyncio.CancelledError:
                 consumed = await self._wait_for_task_outcome_while_cancelled(write_task)
                 if not consumed:
@@ -1810,7 +1812,7 @@ class RedisBackend(RateLimiterBackend):
                                 usage=frozendict(usage),
                                 wait_time_s=wait_time_s,
                             )
-                except asyncio.CancelledError:
+                except BaseException:
                     try:  # noqa: SIM105
                         await self._refund_cancelled_consumption(
                             usage,
@@ -1821,8 +1823,8 @@ class RedisBackend(RateLimiterBackend):
                         )
                     except BaseException:  # noqa: BLE001, S110
                         # Best-effort: shield ensures background completion.
-                        # Swallow so CancelledError always propagates for
-                        # structured concurrency (TaskGroups).
+                        # Swallow so the original critical callback failure
+                        # propagates without leaking consumed capacity.
                         pass
                     raise
                 return consumed_at_seconds
@@ -2172,6 +2174,7 @@ class RedisBackend(RateLimiterBackend):
                 )
             try:
                 await asyncio.shield(write_task)
+            # ast-guard: skip — landed refund writes suppress retry/double-refund
             except asyncio.CancelledError:
                 refunded = await self._wait_for_task_outcome_while_cancelled(write_task)
                 if not refunded:
