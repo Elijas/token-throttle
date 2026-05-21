@@ -247,6 +247,27 @@ application exception instead of `GeneratorExit` for callback control flow.
 process-health or programming failures (out-of-memory or runaway recursion) that
 should not be hidden behind callback warning suppression.
 
+## Backend Method Critical Exceptions (v7.0.0)
+
+Backend methods that raise lifecycle-critical exceptions propagate those
+exceptions raw to callers. This applies to `await_for_capacity()`,
+`wait_for_capacity()`, `consume_capacity()`, `refund_capacity()`,
+`refund_capacity_for_buckets()`, `set_max_capacity()`, and the async/sync
+configured max-capacity hooks.
+
+The same rule applies during interrupted-acquire cleanup. If an acquire has
+already committed backend capacity but is interrupted before the reservation is
+delivered, token-throttle attempts a cleanup refund. A cleanup refund failure
+caused by `asyncio.CancelledError`, `concurrent.futures.CancelledError`,
+`KeyboardInterrupt`, `SystemExit`, `GeneratorExit`, `MemoryError`, or
+`RecursionError` escapes raw. Severe failures therefore escape all recovery
+layers, symmetric with the callback contract above.
+
+`AcquireRefundFailedError` remains the recovery envelope for ordinary
+`Exception` subclasses that are not lifecycle-critical. This is a v7.0.0
+breaking change from v6.x, where interrupted-acquire cleanup could wrap
+critical-tuple backend failures in `AcquireRefundFailedError`.
+
 Durable shared-state backends should also emit structured `DEBUG` logs under
 the same logger families used by Redis:
 

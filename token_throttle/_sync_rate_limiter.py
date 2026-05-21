@@ -1345,6 +1345,13 @@ class SyncRateLimiter:
             else:
                 self.refund_capacity(_zero_actual_usage(reservation), reservation)
         except BaseException as refund_error:
+            if isinstance(
+                refund_error, LIFECYCLE_CALLBACK_CRITICAL_EXCEPTIONS
+            ) or _exception_group_contains_critical(
+                refund_error,
+                LIFECYCLE_CALLBACK_CRITICAL_EXCEPTIONS,
+            ):
+                raise
             if self._refund_committed_with_critical_exception(
                 reservation.reservation_id,
                 refund_error,
