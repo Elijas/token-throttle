@@ -8,8 +8,8 @@ import pytest
 from frozendict import frozendict
 
 from token_throttle import PerModelConfig, Quota, RateLimiterCallbacks, UsageQuotas
-from token_throttle._limiter_backends._redis._backend import RedisBackendBuilder
 
+pytest.importorskip("redis", reason="redis package not installed")
 redis_async = pytest.importorskip("redis.asyncio", reason="redis package not installed")
 
 pytestmark = pytest.mark.redis
@@ -53,6 +53,10 @@ async def test_async_redis_after_wait_end_critical_refunds_consumed_capacity(
     redis_client,
     exc_type: type[BaseException],
 ) -> None:
+    from token_throttle._limiter_backends._redis._backend import (  # noqa: PLC0415
+        RedisBackendBuilder,
+    )
+
     exc = exc_type("forced after_wait_end_consumption failure")
 
     async def after_wait_end_consumption(**_kwargs: object) -> None:
