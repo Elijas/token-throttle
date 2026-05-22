@@ -295,16 +295,28 @@ def _matches_allowed_exception(
 
 # Derived from the canonical critical-exception set so this harness cannot
 # drift behind it. These were hand-maintained literals before v7.0.1 and
-# silently lagged: RecursionError joined the critical set in v6.0.0 but was
-# missing here until v7.0.0, and the group set still omitted
-# concurrent.futures.CancelledError.
+# silently lagged the canonical set (RecursionError joined it in v6.0.0 but
+# was missing here until v7.0.0; the group set still omitted
+# concurrent.futures.CancelledError).
 #
-# Non-group handlers exclude the CancelledError types: asyncio.CancelledError
-# has its own dedicated `except` clause with task-cancellation logic, and
-# concurrent.futures.CancelledError (a BaseException subclass) falls through
-# every normalizing clause untouched. Group-leaf classification instead needs
-# the full critical set — any critical leaf must propagate, never be normalized
-# into a BackendConformanceError — so it uses the canonical tuple directly.
+# Both CancelledError types are filtered out of the non-group set — but their
+# actual non-group treatment differs, because their MROs differ:
+#   - asyncio.CancelledError is BaseException-but-NOT-Exception. The async
+#     runners catch it in a dedicated cancellation-aware `except` clause; the
+#     sync runner has none, so it falls through `except Exception` untouched
+#     and propagates raw. Either way it must stay out of the non-group set —
+#     listing it would preempt the dedicated async handler.
+#   - concurrent.futures.CancelledError IS an Exception subclass, so a bare
+#     one is caught by `except Exception` and normalized into a
+#     BackendConformanceError: a backend raising it bare is treated as a
+#     conformance failure (consistent with a spurious backend
+#     asyncio.CancelledError). Keeping it OUT of the non-group set is what
+#     preserves that normalization — adding it would force a raw re-raise.
+#
+# Group-leaf classification instead uses the full canonical set directly: any
+# critical exception that appears as a BaseExceptionGroup leaf is control flow
+# and must propagate, never be normalized. This is where
+# concurrent.futures.CancelledError reaches parity with asyncio.CancelledError.
 _CANCELLED_ERROR_TYPES = (asyncio.CancelledError, concurrent.futures.CancelledError)
 _NON_NORMALIZED_EXCEPTION_TYPES: tuple[type[BaseException], ...] = tuple(
     exc
