@@ -21,8 +21,10 @@ gh workflow run release.yml -f bump=major   # 0.6.0 -> 1.0.0
 5. `ruff check --fix` + `ruff format` — applies any lint autofixes and formatting
 6. Creates a second commit with lockfile/formatting changes (if any)
 7. Porcelain check — fails the release if the working tree is still dirty after all fixes
-8. Pushes to `main`
-9. Builds with `uv build` and publishes to PyPI via OIDC trusted publishing
+8. Creates an annotated `vX.Y.Z` tag and atomically pushes `main` plus the tag
+9. Internally re-dispatches `release.yml` on the immutable tag
+10. Re-runs full CI test suite on the tag
+11. Builds from the tag with `uv build` and publishes to PyPI via OIDC trusted publishing
 
 ### Version is tracked in two places
 
