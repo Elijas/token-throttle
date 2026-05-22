@@ -22,6 +22,7 @@ from token_throttle._exceptions import (
     UnknownReservationError,
 )
 from token_throttle._interfaces._callbacks import (
+    LIFECYCLE_CALLBACK_CRITICAL_EXCEPTIONS,
     LifecycleEvent,
     RateLimiterCallbacks,
     SyncRateLimiterCallbacks,
@@ -292,21 +293,28 @@ def _matches_allowed_exception(
     )
 
 
-_NON_NORMALIZED_EXCEPTION_TYPES = (
-    KeyboardInterrupt,
-    SystemExit,
-    GeneratorExit,
-    MemoryError,
-    RecursionError,
-)
-_NON_NORMALIZED_GROUP_EXCEPTION_TYPES = (
-    *_NON_NORMALIZED_EXCEPTION_TYPES,
-    asyncio.CancelledError,
+# Derived from the canonical critical-exception set so this harness cannot
+# drift behind it. These were hand-maintained literals before v7.0.1 and
+# silently lagged: RecursionError joined the critical set in v6.0.0 but was
+# missing here until v7.0.0, and the group set still omitted
+# concurrent.futures.CancelledError.
+#
+# Non-group handlers exclude the CancelledError types: asyncio.CancelledError
+# has its own dedicated `except` clause with task-cancellation logic, and
+# concurrent.futures.CancelledError (a BaseException subclass) falls through
+# every normalizing clause untouched. Group-leaf classification instead needs
+# the full critical set — any critical leaf must propagate, never be normalized
+# into a BackendConformanceError — so it uses the canonical tuple directly.
+_CANCELLED_ERROR_TYPES = (asyncio.CancelledError, concurrent.futures.CancelledError)
+_NON_NORMALIZED_EXCEPTION_TYPES: tuple[type[BaseException], ...] = tuple(
+    exc
+    for exc in LIFECYCLE_CALLBACK_CRITICAL_EXCEPTIONS
+    if not issubclass(exc, _CANCELLED_ERROR_TYPES)
 )
 
 
 def _is_non_normalized_group_exception(exc: BaseException) -> bool:
-    return isinstance(exc, _NON_NORMALIZED_GROUP_EXCEPTION_TYPES)
+    return isinstance(exc, LIFECYCLE_CALLBACK_CRITICAL_EXCEPTIONS)
 
 
 def _step_exception_message(label: str, exc: BaseException) -> str:
