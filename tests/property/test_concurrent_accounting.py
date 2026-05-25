@@ -25,6 +25,9 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pytest
+
+pytest.importorskip("redis", reason="redis package not installed")
+
 import redis as sync_redis
 import redis.asyncio as async_redis
 from hypothesis import given

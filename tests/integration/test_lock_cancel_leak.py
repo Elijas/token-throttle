@@ -17,6 +17,9 @@ import asyncio
 import secrets
 
 import pytest
+
+pytest.importorskip("redis", reason="redis package not installed")
+
 import redis.asyncio as aioredis
 from frozendict import frozendict
 

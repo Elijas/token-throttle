@@ -24,6 +24,8 @@ import secrets
 import pytest
 from frozendict import frozendict
 
+pytest.importorskip("redis", reason="redis package not installed")
+
 from token_throttle._interfaces._callbacks import RateLimiterCallbacks
 from token_throttle._interfaces._interfaces import PerModelConfig
 from token_throttle._interfaces._models import Quota, UsageQuotas

@@ -1,14 +1,8 @@
 import pytest
-import redis as sync_redis
-import redis.asyncio as redis
 
 from token_throttle._limiter_backends._memory._backend import MemoryBackendBuilder
 from token_throttle._limiter_backends._memory._sync_backend import (
     SyncMemoryBackendBuilder,
-)
-from token_throttle._limiter_backends._redis._backend import RedisBackendBuilder
-from token_throttle._limiter_backends._redis._sync_backend import (
-    SyncRedisBackendBuilder,
 )
 
 
@@ -19,6 +13,8 @@ def redis_url(request: pytest.FixtureRequest) -> str:
 
 @pytest.fixture
 async def redis_client(redis_url: str):
+    redis = pytest.importorskip("redis.asyncio", reason="redis package not installed")
+
     client = redis.from_url(redis_url)
     try:
         await client.flushdb()
@@ -32,6 +28,11 @@ async def redis_client(redis_url: str):
 def backend_builder(request: pytest.FixtureRequest):
     """Parameterized backend builder — runs tests against all backends."""
     if request.param == "redis":
+        pytest.importorskip("redis", reason="redis package not installed")
+        from token_throttle._limiter_backends._redis._backend import (  # noqa: PLC0415
+            RedisBackendBuilder,
+        )
+
         redis_client = request.getfixturevalue("redis_client")
         return RedisBackendBuilder(redis_client, key_prefix="test")
     if request.param == "memory":
@@ -41,6 +42,8 @@ def backend_builder(request: pytest.FixtureRequest):
 
 @pytest.fixture
 def sync_redis_client(redis_url: str):
+    sync_redis = pytest.importorskip("redis", reason="redis package not installed")
+
     client = sync_redis.from_url(redis_url)
     try:
         client.flushdb()
@@ -56,6 +59,11 @@ def sync_backend_builder(request: pytest.FixtureRequest):
     if request.param == "memory":
         return SyncMemoryBackendBuilder()
     if request.param == "redis":
+        pytest.importorskip("redis", reason="redis package not installed")
+        from token_throttle._limiter_backends._redis._sync_backend import (  # noqa: PLC0415
+            SyncRedisBackendBuilder,
+        )
+
         client = request.getfixturevalue("sync_redis_client")
         return SyncRedisBackendBuilder(client, key_prefix="test")
     raise ValueError(f"Unknown backend: {request.param}")

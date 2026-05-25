@@ -13,6 +13,9 @@ import asyncio
 import time
 
 import pytest
+
+pytest.importorskip("redis", reason="redis package not installed")
+
 import redis.exceptions
 from frozendict import frozendict
 

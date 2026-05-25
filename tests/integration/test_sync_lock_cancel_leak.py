@@ -12,6 +12,9 @@ import secrets
 from unittest.mock import patch
 
 import pytest
+
+pytest.importorskip("redis", reason="redis package not installed")
+
 import redis as sync_redis
 from frozendict import frozendict
 

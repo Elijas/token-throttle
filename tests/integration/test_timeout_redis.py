@@ -12,6 +12,9 @@ import contextlib
 import time
 
 import pytest
+
+pytest.importorskip("redis", reason="redis package not installed")
+
 import redis as sync_redis
 import redis.asyncio as redis
 

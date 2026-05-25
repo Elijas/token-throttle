@@ -1,4 +1,4 @@
-"""``tests/unit/`` must collect cleanly without the ``redis`` optional extra.
+"""Redis-dependent tests must collect cleanly without the ``redis`` extra.
 
 CI runs ``pytest tests/unit`` in no-extras tiers (``test-unit-core``,
 ``test-min-deps``) to verify the optional-dependency boundary. A test that
@@ -8,9 +8,11 @@ before any test-level skip can fire — because those modules eagerly
 
 The fix is to import the redis-gated symbol inside the test function (after a
 ``pytest.importorskip``) or to ``pytest.importorskip("redis")`` at module top
-before the import. This guard makes the requirement structural: instances #6
-and #8 of the recurring "X lags Y" archetype were both this exact bug, each
-caught only at release time with an opaque collection ImportError.
+before the import. ``tests/integration`` and ``tests/property`` are included
+because they are often run from developer environments that do not install the
+Redis extra. This guard makes the requirement structural: instances #6 and #8
+of the recurring "X lags Y" archetype were both this exact bug, each caught
+only at release time with an opaque collection ImportError.
 
 The set of redis-gated modules is auto-discovered (not hand-listed) so this
 guard cannot itself drift behind the backend package.
@@ -24,7 +26,11 @@ import pathlib
 import token_throttle
 
 _REPO_ROOT = pathlib.Path(token_throttle.__file__).parent.parent
-_UNIT_TEST_DIR = _REPO_ROOT / "tests" / "unit"
+_TEST_DIRS = (
+    _REPO_ROOT / "tests" / "unit",
+    _REPO_ROOT / "tests" / "integration",
+    _REPO_ROOT / "tests" / "property",
+)
 _REDIS_PKG_DIR = _REPO_ROOT / "token_throttle" / "_limiter_backends" / "_redis"
 _REDIS_PKG = "token_throttle._limiter_backends._redis"
 
@@ -69,12 +75,24 @@ def _redis_gated_modules() -> set[str]:
     }
 
 
-def _imports_any(node: ast.stmt, modules: set[str]) -> bool:
-    if isinstance(node, ast.ImportFrom):
-        return node.module in modules
+def _imports_redis_gated_backend(node: ast.stmt, gated: set[str]) -> bool:
     if isinstance(node, ast.Import):
-        return any(alias.name in modules for alias in node.names)
-    return False
+        return any(alias.name in gated for alias in node.names)
+    if not isinstance(node, ast.ImportFrom):
+        return False
+
+    module = node.module or ""
+    if module in gated:
+        return True
+    if module != _REDIS_PKG:
+        return False
+    return any(f"{_REDIS_PKG}.{alias.name}" in gated for alias in node.names)
+
+
+def _first_redis_optional_import_lineno(node: ast.stmt, gated: set[str]) -> int | None:
+    if _node_imports_redis_pkg(node) or _imports_redis_gated_backend(node, gated):
+        return node.lineno
+    return None
 
 
 def _is_redis_importorskip(node: ast.stmt) -> bool:
@@ -99,6 +117,14 @@ def _is_redis_importorskip(node: ast.stmt) -> bool:
     )
 
 
+def _scanned_test_files() -> list[pathlib.Path]:
+    paths: list[pathlib.Path] = []
+    for test_dir in _TEST_DIRS:
+        paths.extend(test_dir.rglob("test_*.py"))
+        paths.extend(test_dir.rglob("conftest.py"))
+    return sorted(set(paths))
+
+
 def test_redis_gated_module_set_is_non_empty() -> None:
     """Sanity check: the auto-discovery found redis-gated modules. A future
     refactor that empties this set would silently disarm the guard below.
@@ -110,21 +136,23 @@ def test_redis_gated_module_set_is_non_empty() -> None:
     )
 
 
-def test_unit_tests_collect_without_redis_extra() -> None:
+def test_tests_collect_without_redis_extra() -> None:
     gated = _redis_gated_modules()
     offenders: list[str] = []
-    for path in sorted(_UNIT_TEST_DIR.rglob("test_*.py")):
-        tree = ast.parse(path.read_text(encoding="utf-8"))
+    for path in _scanned_test_files():
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         seen_importorskip = False
         for node in tree.body:  # module level only — function-local imports are safe
             if _is_redis_importorskip(node):
                 seen_importorskip = True
-            elif _imports_any(node, gated) and not seen_importorskip:
-                offenders.append(f"{path.relative_to(_REPO_ROOT)}:{node.lineno}")
+            else:
+                lineno = _first_redis_optional_import_lineno(node, gated)
+                if lineno is not None and not seen_importorskip:
+                    offenders.append(f"{path.relative_to(_REPO_ROOT)}:{lineno}")
     assert not offenders, (
-        "Module-level import of a redis-gated backend module without a "
+        "Module-level import of redis or a redis-gated backend module without a "
         'preceding `pytest.importorskip("redis")` — this breaks '
-        "`pytest tests/unit` collection in no-extras CI tiers. Move the import "
-        "inside the test function, or importorskip at module top before the "
-        f"import. Offenders: {offenders}"
+        "`pytest` collection in no-extras environments. Move the import inside "
+        "the test function, or importorskip at module top before the import. "
+        f"Offenders: {offenders}"
     )

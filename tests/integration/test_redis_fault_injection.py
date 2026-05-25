@@ -18,6 +18,9 @@ import warnings
 from unittest.mock import patch
 
 import pytest
+
+pytest.importorskip("redis", reason="redis package not installed")
+
 import redis.asyncio as aioredis
 import redis.exceptions
 from frozendict import frozendict

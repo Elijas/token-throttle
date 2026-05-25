@@ -8,6 +8,8 @@ import warnings
 
 import pytest
 
+pytest.importorskip("redis", reason="redis package not installed")
+
 from token_throttle._interfaces._interfaces import PerModelConfig
 from token_throttle._interfaces._models import Quota, UsageQuotas
 from token_throttle._limiter_backends._redis._backend import (
