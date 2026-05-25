@@ -105,6 +105,8 @@ _PIPELINE_CMDS_PER_OVERRIDE = 1
 
 DEFAULT_LOCK_BLOCKING_TIMEOUT_SECONDS = 5.0
 DEFAULT_LOCK_SLEEP_SECONDS = 0.05
+LOCK_CANCEL_RELEASE_TIMEOUT_SECONDS = 0.25
+LOCK_CANCEL_REFUND_TIMEOUT_SECONDS = 1.0
 _MIN_PRODUCTION_REDIS_POOL_CONNECTIONS = 10
 _MISSING = object()
 _ACQUIRE_MARKER_SET_SCRIPT = """
@@ -295,14 +297,14 @@ def _warn_if_small_redis_pool(redis_client: object, *, stacklevel: int = 3) -> N
         and not isinstance(max_connections, bool)
         and max_connections < _MIN_PRODUCTION_REDIS_POOL_CONNECTIONS
     ):
-        warnings.warn(
+        message = (
             "Redis connection_pool.max_connections is less than 10. "
             "This is likely too small for production token-throttle workloads; "
             "prefer a BlockingConnectionPool sized to at least "
-            "max_concurrent_acquires plus Redis command headroom.",
-            RuntimeWarning,
-            stacklevel=stacklevel,
+            "max_concurrent_acquires plus Redis command headroom."
         )
+        warnings.warn(message, RuntimeWarning, stacklevel=stacklevel)
+        _lock_logger.warning(message)
 
 
 def _is_mock_object(value: object) -> bool:
@@ -358,15 +360,95 @@ def _ensure_buckets_match_backend(
         )
 
 
+def _log_background_lock_release_result(task: asyncio.Future[typing.Any]) -> None:
+    try:
+        task.result()
+    except asyncio.CancelledError:  # ast-guard: skip - best-effort cleanup
+        return
+    except Exception as exc:  # noqa: BLE001 - background cleanup cannot propagate
+        _lock_logger.warning(
+            "Redis lock cancellation cleanup failed in background: %s: %s",
+            type(exc).__name__,
+            exc,
+        )
+
+
+def _log_background_cancellation_refund_result(
+    task: asyncio.Future[typing.Any],
+) -> None:
+    try:
+        task.result()
+    except asyncio.CancelledError:  # ast-guard: skip - best-effort cleanup
+        return
+    except Exception as exc:  # noqa: BLE001 - background cleanup cannot propagate
+        _refund_logger.warning(
+            "Redis cancellation refund failed in background: %s: %s",
+            type(exc).__name__,
+            exc,
+        )
+
+
+async def _release_lock_token_bounded(
+    lock: redis.asyncio.lock.Lock,
+    token: str,
+    *,
+    redis_client: redis.asyncio.Redis,
+    timeout: float = LOCK_CANCEL_RELEASE_TIMEOUT_SECONDS,
+) -> None:
+    lua_release = lock.lua_release
+    if lua_release is None:
+        return
+    release_result = lua_release(keys=[lock.name], args=[token], client=redis_client)
+    if not inspect.isawaitable(release_result):
+        return
+    release_task = asyncio.ensure_future(release_result)
+    release_task.add_done_callback(_log_background_lock_release_result)
+    try:
+        await asyncio.wait_for(asyncio.shield(release_task), timeout=timeout)
+    except TimeoutError:
+        _lock_logger.warning(
+            "Redis lock cancellation cleanup exceeded %.3fs; release continues "
+            "in background.",
+            timeout,
+        )
+    except asyncio.CancelledError:  # ast-guard: skip - best-effort cleanup
+        _lock_logger.warning(
+            "Redis lock cancellation cleanup interrupted; release continues "
+            "in background."
+        )
+
+
 async def _shielded_lock_release(
     lock: redis.asyncio.lock.Lock,
     *,
     bucket_id: tuple[str, int],
     reservation_id: str | None,
 ) -> None:
-    """Release a Redis lock, shielded so the round-trip finishes even under cancel."""
+    """Release a Redis lock without letting cancellation hang the caller."""
+    release_task = asyncio.ensure_future(lock.release())
+    release_task.add_done_callback(_log_background_lock_release_result)
     try:
-        await asyncio.shield(lock.release())
+        current_task = asyncio.current_task()
+        if current_task is not None and current_task.cancelling():
+            await asyncio.wait_for(
+                asyncio.shield(release_task),
+                timeout=LOCK_CANCEL_RELEASE_TIMEOUT_SECONDS,
+            )
+        else:
+            await asyncio.shield(release_task)
+    except TimeoutError:
+        _lock_logger.warning(
+            "Redis lock release exceeded %.3fs; release continues in background.",
+            LOCK_CANCEL_RELEASE_TIMEOUT_SECONDS,
+        )
+        current_task = asyncio.current_task()
+        if current_task is not None and current_task.cancelling():
+            raise asyncio.CancelledError from None
+    except asyncio.CancelledError:  # ast-guard: skip - best-effort cleanup
+        _lock_logger.warning(
+            "Redis lock release interrupted; release continues in background."
+        )
+        raise
     finally:
         _debug_event(
             _lock_logger,
@@ -856,18 +938,14 @@ class RedisBackend(RateLimiterBackend):
                     # token. The LUA script is CAS: it only deletes if
                     # stored value matches our token, so even if another
                     # acquirer has since taken the lock we cannot release
-                    # theirs. asyncio.shield guards against re-cancel
-                    # during the release round-trip.
+                    # theirs. The bounded helper lets caller cancellation
+                    # propagate even if Redis cleanup is connection-starved.
                     with contextlib.suppress(Exception):
-                        lua_release = lock.lua_release
-                        if lua_release is not None:
-                            await asyncio.shield(
-                                lua_release(
-                                    keys=[lock.name],
-                                    args=[token],
-                                    client=self._redis,
-                                )
-                            )
+                        await _release_lock_token_bounded(
+                            lock,
+                            token,
+                            redis_client=self._redis,
+                        )
                     raise
                 if not acquired:
                     _raise_lock_timeout_error()
@@ -913,8 +991,14 @@ class RedisBackend(RateLimiterBackend):
         cleanly.
         """
         for lock in stack.locks:
+            reacquire = getattr(lock, "reacquire", None)
+            if reacquire is None:
+                delegated_lock = getattr(lock, "_real_lock", None)
+                reacquire = getattr(delegated_lock, "reacquire", None)
+            if not callable(reacquire):
+                continue
             try:
-                await lock.reacquire()
+                await reacquire()
             except redis.exceptions.LockNotOwnedError as exc:
                 raise redis.exceptions.LockError(
                     "Lock expired or was stolen mid-operation; aborting write."
@@ -1491,6 +1575,27 @@ class RedisBackend(RateLimiterBackend):
                 break
         return task.done() and not task.cancelled() and task.exception() is None
 
+    async def _wait_for_cancelled_refund_task(
+        self,
+        task: asyncio.Task[typing.Any],
+    ) -> bool:
+        deadline = time.monotonic() + LOCK_CANCEL_REFUND_TIMEOUT_SECONDS
+        while not task.done():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            try:
+                await asyncio.wait_for(asyncio.shield(task), timeout=remaining)
+                break
+            # ast-guard: skip - bounded refund cleanup under caller cancellation
+            except asyncio.CancelledError:
+                continue
+            except TimeoutError:
+                return False
+            except Exception:  # noqa: BLE001
+                break
+        return task.done()
+
     async def _check_and_consume_capacity(
         self,
         usage_: FrozenUsage,
@@ -1568,6 +1673,9 @@ class RedisBackend(RateLimiterBackend):
                         if usage_metric_name != capacity_metric_name:
                             continue
                         if usage_amount > capacity_amount:
+                            await self._fresh_start_buckets_callback(
+                                fresh_start_buckets
+                            )
                             return (
                                 False,
                                 preconsumption_capacities,
@@ -1713,13 +1821,14 @@ class RedisBackend(RateLimiterBackend):
                     if bucket.usage_metric != usage_metric_name:
                         continue
                     if usage_amount > bucket.max_capacity:
-                        warnings.warn(
-                            f"record_usage value for {usage_metric_name} ({usage_amount}) exceeds "
-                            f"bucket max capacity ({bucket.max_capacity}). "
-                            f"Capacity will go deeply negative.",
-                            RuntimeWarning,
-                            stacklevel=2,
+                        message = (
+                            f"record_usage value for {usage_metric_name} "
+                            f"({usage_amount}) exceeds bucket max capacity "
+                            f"({bucket.max_capacity}). Capacity will go deeply "
+                            "negative."
                         )
+                        warnings.warn(message, RuntimeWarning, stacklevel=2)
+                        _acquire_logger.warning(message)
 
             max_cap = {(b.usage_metric, b.per_seconds): b.max_capacity for b in buckets}
             postconsumption_dict = dict(preconsumption_capacities)
@@ -2580,7 +2689,22 @@ class RedisBackend(RateLimiterBackend):
             async with self._local_condition:
                 self._local_condition.notify_all()
 
-        await asyncio.shield(_do_refund())
+        refund_task = asyncio.create_task(_do_refund())
+        try:
+            await asyncio.shield(refund_task)
+        except asyncio.CancelledError:  # ast-guard: skip - bounded refund cleanup
+            settled = await self._wait_for_cancelled_refund_task(refund_task)
+            if not settled:
+                refund_task.add_done_callback(
+                    _log_background_cancellation_refund_result
+                )
+                _refund_logger.warning(
+                    "Redis cancellation refund exceeded %.3fs; refund continues "
+                    "in background.",
+                    LOCK_CANCEL_REFUND_TIMEOUT_SECONDS,
+                )
+                return
+            refund_task.result()
 
     async def _fresh_start_buckets_callback(
         self,

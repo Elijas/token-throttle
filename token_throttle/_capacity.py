@@ -14,6 +14,7 @@ _backward_clock_last_warning_at: float | None = None
 _BACKWARD_CLOCK_WARNING_INTERVAL_SECONDS = 300.0
 MIN_MAX_CAPACITY = 1e-9
 _logger = logging.getLogger("token_throttle")
+_acquire_logger = logging.getLogger("token_throttle.acquire")
 _MEMORY_BUCKET_ID_PARTS = 4
 _REDIS_BUCKET_ID_PARTS = 6
 
@@ -138,9 +139,9 @@ def calculate_capacity(  # noqa: PLR0913
     max_capacity = _validate_max_capacity_finite_positive(max_capacity)
     rate_per_sec = _validate_rate_per_sec_finite_positive(rate_per_sec)
 
-    # Partial state (one None, one non-None) is treated as a fresh start:
-    # anchoring with incomplete data would produce a wrong capacity value,
-    # so we reset to max_capacity. Any negative debt is intentionally lost.
+    # Backends should only pass None for genuine new buckets where both state
+    # fields are missing. Redis normalizes partial state before reaching this
+    # shared math so a missing key cannot reset a drained bucket to full.
     if last_checked is None or outdated_capacity is None:
         return CalculatedCapacity(amount=max_capacity, is_fresh_start=True)
 
@@ -187,14 +188,14 @@ def calculate_capacity(  # noqa: PLR0913
                     "token_throttle_bucket_id": bucket_id,
                 },
             )
-            warnings.warn(
+            message = (
                 f"Negative time_passed ({time_passed:.4f}s) detected in bucket "
                 f"'{bucket_id}' — likely NTP clock correction. "
                 "Clamping to 0. Further backward-clock warnings suppressed "
-                f"for {_BACKWARD_CLOCK_WARNING_INTERVAL_SECONDS:.0f}s.",
-                RuntimeWarning,
-                stacklevel=2,
+                f"for {_BACKWARD_CLOCK_WARNING_INTERVAL_SECONDS:.0f}s."
             )
+            warnings.warn(message, RuntimeWarning, stacklevel=2)
+            _acquire_logger.warning(message)
         time_passed = 0.0
 
     current_preconsumption_capacity = min(

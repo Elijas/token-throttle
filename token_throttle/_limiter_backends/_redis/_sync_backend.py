@@ -293,14 +293,14 @@ def _warn_if_small_redis_pool(redis_client: object, *, stacklevel: int = 3) -> N
         and not isinstance(max_connections, bool)
         and max_connections < _MIN_PRODUCTION_REDIS_POOL_CONNECTIONS
     ):
-        warnings.warn(
+        message = (
             "Redis connection_pool.max_connections is less than 10. "
             "This is likely too small for production token-throttle workloads; "
             "prefer a BlockingConnectionPool sized to at least "
-            "max_concurrent_acquires plus Redis command headroom.",
-            RuntimeWarning,
-            stacklevel=stacklevel,
+            "max_concurrent_acquires plus Redis command headroom."
         )
+        warnings.warn(message, RuntimeWarning, stacklevel=stacklevel)
+        _lock_logger.warning(message)
 
 
 def _is_mock_object(value: object) -> bool:
@@ -1472,6 +1472,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                         if usage_metric_name != capacity_metric_name:
                             continue
                         if usage_amount > capacity_amount:
+                            self._fresh_start_buckets_callback(fresh_start_buckets)
                             return (
                                 False,
                                 preconsumption_capacities,
@@ -1608,13 +1609,14 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                     if bucket.usage_metric != usage_metric_name:
                         continue
                     if usage_amount > bucket.max_capacity:
-                        warnings.warn(
-                            f"record_usage value for {usage_metric_name} ({usage_amount}) exceeds "
-                            f"bucket max capacity ({bucket.max_capacity}). "
-                            f"Capacity will go deeply negative.",
-                            RuntimeWarning,
-                            stacklevel=2,
+                        message = (
+                            f"record_usage value for {usage_metric_name} "
+                            f"({usage_amount}) exceeds bucket max capacity "
+                            f"({bucket.max_capacity}). Capacity will go deeply "
+                            "negative."
                         )
+                        warnings.warn(message, RuntimeWarning, stacklevel=2)
+                        _acquire_logger.warning(message)
 
             max_cap = {(b.usage_metric, b.per_seconds): b.max_capacity for b in buckets}
             postconsumption_dict = dict(preconsumption_capacities)
