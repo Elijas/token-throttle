@@ -1,10 +1,10 @@
 # Custom Backend Contract
 
-token-throttle v5 treats custom backends as structural protocols. A backend no
-longer needs nominal inheritance for type checking, but it must satisfy the
-full `RateLimiterBackend` or `SyncRateLimiterBackend` protocol. Subclassing the
-published protocol remains useful because it provides conservative default
-implementations for optional hooks.
+token-throttle v5 and later treat custom backends as structural protocols. A
+backend no longer needs nominal inheritance for type checking, but it must
+satisfy the full `RateLimiterBackend` or `SyncRateLimiterBackend` protocol.
+Subclassing the published protocol remains useful because it provides
+conservative default implementations for optional hooks.
 
 Run the conformance helper against custom backends before shipping:
 
@@ -23,6 +23,22 @@ async def test_async_backend_contract(async_builder):
 def test_sync_backend_contract(sync_builder):
     sync_conformance_test_for(
         sync_builder,
+        timing=ConformanceTiming(operation_deadline_seconds=20.0),
+    )
+```
+
+For synchronous test suites that still need to validate an async backend, use
+`run_conformance_test_for()`. It wraps `conformance_test_for()` in
+`asyncio.run(...)`:
+
+```python
+from token_throttle import MemoryBackendBuilder, run_conformance_test_for
+from token_throttle.conformance import ConformanceTiming
+
+
+def test_async_backend_contract_from_sync_suite() -> None:
+    run_conformance_test_for(
+        MemoryBackendBuilder(),
         timing=ConformanceTiming(operation_deadline_seconds=20.0),
     )
 ```
@@ -77,16 +93,16 @@ because internal probe deadlines have an implicit floor.
 
 `RateLimiterBackend` must provide:
 
-- `await_for_capacity(usage, *, timeout=None, reservation_id=None, reservation_lifetime_seconds=None) -> float | None`
-- `consume_capacity(usage, *, reservation_id=None, reservation_lifetime_seconds=None) -> float | None`
-- `refund_capacity(reserved_usage, actual_usage) -> None`
-- `refund_capacity_for_buckets(reserved_usage, actual_usage, *, bucket_ids=None, reservation_id=None, reservation_model_family=None, reservation_bucket_ids=None, reservation_reserved_usage=None) -> bool`
+- `async def await_for_capacity(usage, *, timeout=None, reservation_id=None, reservation_lifetime_seconds=None) -> float | None`
+- `async def consume_capacity(usage, *, reservation_id=None, reservation_lifetime_seconds=None) -> float | None`
+- `async def refund_capacity(reserved_usage, actual_usage) -> None`
+- `async def refund_capacity_for_buckets(reserved_usage, actual_usage, *, bucket_ids=None, reservation_id=None, reservation_model_family=None, reservation_bucket_ids=None, reservation_reserved_usage=None) -> bool`
 - `supports_durable_refund_dedup() -> bool`
 - `supports_acquire_marker_authority() -> bool`
-- `set_max_capacity(metric, per_seconds, value) -> None`
-- `apply_configured_max_capacity(metric, per_seconds, value) -> None`
+- `async def set_max_capacity(metric, per_seconds, value) -> None`
+- `async def apply_configured_max_capacity(metric, per_seconds, value) -> None`
 - `supports_metric_set_change() -> bool`
-- `prepare_reconfigured_backend(new_backend, cfg) -> RateLimiterBackend`
+- `async def prepare_reconfigured_backend(new_backend, cfg) -> RateLimiterBackend`
 
 The sync protocol uses the same semantics, with `wait_for_capacity()` replacing
 `await_for_capacity()` and synchronous return values throughout.
@@ -315,7 +331,7 @@ a redacted health surface, not a backend inventory API.
 
 ## Conformance Scope
 
-As of v5.1.0, the bundled helpers check:
+As of v7/v8, the bundled helpers check:
 
 - structural protocol shape for async and sync builders/backends
 - per-build isolation and runtime checking of every build result
@@ -335,12 +351,25 @@ As of v5.1.0, the bundled helpers check:
 - metric-set-change claim consistency and reconfiguration behavior
 - public limiter round-trip behavior across backend builders
 - the FIX-50 `AcquireRefundFailedError` shape exposed by public limiters
+- conformance-harness handling for the canonical lifecycle-critical exception
+  taxonomy, including `MemoryError` and `RecursionError` added in v6.0.0
 
 The helpers do not check:
 
 - performance regressions beyond bounded helper deadlines
 - structured `token_throttle_event` `DEBUG` log emission
 - third-party storage durability or write-ahead guarantees
+- every v6.0.0 callback severe-exception path in your backend implementation;
+  manually test that callback dispatch propagates `asyncio.CancelledError`,
+  `concurrent.futures.CancelledError`, `KeyboardInterrupt`, `SystemExit`,
+  `GeneratorExit`, `MemoryError`, `RecursionError`, and backend callback
+  `AcquireRefundFailedError`
+- every v7.0.0 backend-method severe-exception path; manually inject those
+  exceptions into `await_for_capacity()` / `wait_for_capacity()`,
+  `consume_capacity()`, `refund_capacity()`, `refund_capacity_for_buckets()`,
+  `set_max_capacity()`, and configured max-capacity hooks, including
+  interrupted-acquire cleanup, and assert they escape raw rather than being
+  wrapped in `AcquireRefundFailedError`
 - marker TTL expiry, durable marker garbage collection, or resistance to forged
   `CapacityReservation.created_at_seconds`; test those with backend-specific
   timing/storage instrumentation
