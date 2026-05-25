@@ -3,6 +3,9 @@ import threading
 import time
 
 import pytest
+
+pytest.importorskip("redis")
+
 import redis as sync_redis
 import redis.asyncio as redis
 
