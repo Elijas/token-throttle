@@ -428,6 +428,8 @@ def _current_task_cancelling_count() -> int:
 
 def _consume_abandoned_task_result(task: asyncio.Future[object]) -> None:
     with contextlib.suppress(BaseException):
+        task.exception()
+    with contextlib.suppress(BaseException):
         task.result()
 
 
@@ -441,6 +443,27 @@ def _cancel_and_consume_abandoned_future(task: asyncio.Future[object]) -> None:
     _remove_asyncio_shield_exception_logger(task)
     task.add_done_callback(_consume_abandoned_task_result)
     task.cancel()
+
+
+async def _cancel_and_drain_abandoned_future(task: asyncio.Future[object]) -> None:
+    _cancel_and_consume_abandoned_future(task)
+    current = asyncio.current_task()
+    uncancel_count = 0
+    if current is not None:
+        while current.cancelling():
+            current.uncancel()
+            uncancel_count += 1
+    try:
+        for _ in range(3):
+            if task.done():
+                break
+            await asyncio.sleep(0)
+        if task.done():
+            _consume_abandoned_task_result(task)
+    finally:
+        if current is not None:
+            for _ in range(uncancel_count):
+                current.cancel()
 
 
 def _remaining_deadline_seconds(expiry: float) -> float:
@@ -467,8 +490,9 @@ async def _materialize_async_callable(
     )
     async_future: asyncio.Future[object] = asyncio.wrap_future(future)
     abandoned = False
+    shielded: asyncio.Future[object] = asyncio.shield(async_future)
     try:
-        return await asyncio.wait_for(asyncio.shield(async_future), timeout=remaining)
+        return await asyncio.wait_for(shielded, timeout=remaining)
     except TimeoutError as exc:
         if async_future.done():
             if _matches_allowed_exception(exc, step.allowed_exceptions):
@@ -480,13 +504,15 @@ async def _materialize_async_callable(
             "running (cannot kill in-process)"
         )
         warnings.warn(message, RuntimeWarning)
+        _cancel_and_consume_abandoned_future(shielded)
         _cancel_and_consume_abandoned_future(async_future)
         future.cancel()
         raise BackendConformanceError(message) from exc
     except asyncio.CancelledError as exc:
         if _task_is_being_cancelled(step.cancelling_at_entry):
             abandoned = True
-            _cancel_and_consume_abandoned_future(async_future)
+            await _cancel_and_drain_abandoned_future(shielded)
+            await _cancel_and_drain_abandoned_future(async_future)
             future.cancel()
             raise
         if _matches_allowed_exception(exc, step.allowed_exceptions):
@@ -509,7 +535,9 @@ def _ensure_async_step_task(
     value: object,
 ) -> asyncio.Future[object]:
     try:
-        return asyncio.ensure_future(cast("Awaitable[object]", value))
+        task = asyncio.ensure_future(cast("Awaitable[object]", value))
+        task.add_done_callback(_consume_abandoned_task_result)
+        return task
     except _NON_NORMALIZED_EXCEPTION_TYPES:
         raise
     except BaseExceptionGroup as exc:
@@ -532,19 +560,25 @@ async def _await_async_step_task(
         )
 
     try:
-        return await asyncio.wait_for(asyncio.shield(task), timeout=remaining)
-    except TimeoutError as exc:
-        if task.done() and not task.cancelled():
-            if _matches_allowed_exception(exc, step.allowed_exceptions):
-                raise
-            _raise_normalized_step_exception(step.label, exc)
-        _cancel_and_consume_abandoned_future(task)
-        raise BackendConformanceError(
-            f"{step.label} did not return within {step.deadline}s"
-        ) from exc
+        done, _pending = await asyncio.wait({task}, timeout=remaining)
     except asyncio.CancelledError as exc:
         if _task_is_being_cancelled(step.cancelling_at_entry):
-            _cancel_and_consume_abandoned_future(task)
+            await _cancel_and_drain_abandoned_future(task)
+            raise
+        if _matches_allowed_exception(exc, step.allowed_exceptions):
+            raise
+        _raise_normalized_step_exception(step.label, exc)
+
+    if not done:
+        await _cancel_and_drain_abandoned_future(task)
+        raise BackendConformanceError(
+            f"{step.label} did not return within {step.deadline}s"
+        )
+
+    try:
+        return task.result()
+    except asyncio.CancelledError as exc:
+        if _task_is_being_cancelled(step.cancelling_at_entry):
             raise
         if _matches_allowed_exception(exc, step.allowed_exceptions):
             raise
