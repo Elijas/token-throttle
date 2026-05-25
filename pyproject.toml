@@ -26,12 +26,11 @@ classifiers = [
 ##############################
 
 requires-python = ">=3.12"
-dependencies = ["frozendict>=2.4.6,<3", "pydantic>=2.11.3,<3"]
+dependencies = ["frozendict>=2.4.6,<3", "pydantic>=2.12.0,<3"]
 
 [project.optional-dependencies]
 redis = ["redis>=5.2.1,<8"]
-tiktoken = ["tiktoken>=0.4.0,<1"]
-loguru = ["loguru>=0.7.3,<1"]
+tiktoken = ["tiktoken>=0.10.0,<1"]
 
 [project.urls]
 Repository = "https://github.com/Elijas/token-throttle"
@@ -43,7 +42,6 @@ Issues = "https://github.com/Elijas/token-throttle/issues"
 dev = [
     "bump-my-version>=1.1.2",
     "hypothesis>=6.100.0",
-    "loguru>=0.7.3",
     "mypy>=1.10",
     "openai>=1.0.0",
     "pytest>=8.3.5",
@@ -241,7 +239,7 @@ target-version = "py312"
     "ASYNC109",  # timeout is part of the public API, not an asyncio.timeout() replacement
 ]
 "token_throttle/_interfaces/_callbacks.py" = [
-    "PLC0415", # Intentional lazy import of optional dep (loguru)
+    "PLC0415", # Intentional lazy import of optional logging backend
 ]
 "token_throttle/_factories/_openai/_token_counter.py" = [
     "PLC0415", # Intentional lazy import of optional dep (tiktoken)
