@@ -12,7 +12,7 @@ Notable changes for token-throttle releases. For operator upgrade steps, see
 - Removes implicit loguru routing from generic logging callback factories;
   stdlib logging is the default path.
 - Raises dependency floors to `pydantic>=2.12.0` and `tiktoken>=0.10.0`.
-- Documents Python 3.14 support as pending the W6 migration note.
+- Retains Python 3.14 support after fixing the conformance harness behavior.
 - Refreshes README, migration, custom-backend, and public docstring coverage.
 
 ## v7.0.1 - 2026-05-22
