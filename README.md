@@ -14,7 +14,7 @@
 
 Works with any LLM provider and any client library — token-throttle limits the _rate_, not the _client_.
 
-> **v2.0.0** is a breaking release. See [MIGRATION.md](MIGRATION.md) for the upgrade guide.
+> **Breaking releases:** [v2](MIGRATION.md#migrating-from-v14x-to-v200), [v5](MIGRATION.md#migrating-from-v4x-to-v500), [v6](MIGRATION.md#migrating-from-v5x-to-v600), [v7](MIGRATION.md#migrating-from-v6x-to-v700), and [v8](MIGRATION.md#migrating-from-v7x-to-v800) each changed upgrade-sensitive contracts.
 
 Public constants and type aliases are documented in [docs/api.md](docs/api.md).
 
@@ -92,6 +92,7 @@ pip install "token-throttle[redis,tiktoken]" openai
 ```
 
 ```python
+# (fragment — see Memory quickstart for standalone context)
 import asyncio
 
 import redis.asyncio as redis
@@ -120,7 +121,9 @@ async def main() -> None:
     except Exception:
         await limiter.refund_capacity(
             reservation=reservation,
-            actual_usage={"requests": 1, "input_tokens": 0, "output_tokens": 0},
+            # The OpenAI helper uses OpenAIUsageCounter and the quota metric
+            # names "requests" and "tokens"; refund with those same keys.
+            actual_usage={"requests": 1, "tokens": 0},
         )
         raise
     else:
@@ -148,34 +151,41 @@ representative.
 ### Any provider (manual usage)
 
 ```python
-from token_throttle import PerModelConfig, Quota, RateLimiter, RedisBackendBuilder, UsageQuotas
+import asyncio
 
-limiter = RateLimiter(
-    lambda model: PerModelConfig(
-        quotas=UsageQuotas(
-            [
-                Quota(metric="requests", limit=1_000, per_seconds=60),
-                Quota(metric="input_tokens", limit=80_000, per_seconds=60),
-                Quota(metric="output_tokens", limit=20_000, per_seconds=60),
-            ]
+from token_throttle import MemoryBackendBuilder, PerModelConfig, Quota, RateLimiter, UsageQuotas
+
+
+async def call_your_llm() -> dict[str, int]:
+    return {"requests": 1, "input_tokens": 480, "output_tokens": 1_200}
+
+
+async def main() -> None:
+    limiter = RateLimiter(
+        PerModelConfig(
+            quotas=UsageQuotas(
+                [
+                    Quota(metric="requests", limit=1_000, per_seconds=60),
+                    Quota(metric="input_tokens", limit=80_000, per_seconds=60),
+                    Quota(metric="output_tokens", limit=20_000, per_seconds=60),
+                ]
+            ),
         ),
-    ),
-    backend=RedisBackendBuilder(redis_client, key_prefix="my-service-prod"),
-)
+        backend=MemoryBackendBuilder(),
+    )
 
-# Works with Anthropic, Gemini, local models: anything with known usage.
-reservation = await limiter.acquire_capacity(
-    model="claude-sonnet-4-20250514",
-    usage={"requests": 1, "input_tokens": 500, "output_tokens": 4_000},
-)
+    reservation = await limiter.acquire_capacity(
+        model="claude-sonnet-4-20250514",
+        usage={"requests": 1, "input_tokens": 500, "output_tokens": 4_000},
+    )
 
-response = await call_your_llm(...)  # Use whatever client you want.
+    actual_usage = await call_your_llm()
+    await limiter.refund_capacity(actual_usage=actual_usage, reservation=reservation)
+    await limiter.aclose()
+    print("unused 20 input tokens and 2800 output tokens returned to the pool")
 
-await limiter.refund_capacity(
-    actual_usage={"requests": 1, "input_tokens": 480, "output_tokens": 1_200},
-    reservation=reservation,
-)
-# Unused 2,800 output tokens returned to the pool
+
+asyncio.run(main())
 ```
 
 ## Why token-throttle
@@ -242,6 +252,7 @@ quotas = UsageQuotas([
 ### Per-model configuration
 
 ```python
+# (fragment — see Quotas example for context)
 def get_config(model_name: str) -> PerModelConfig:
     if model_name.startswith("gpt"):
         return PerModelConfig(
@@ -281,6 +292,7 @@ To disable rate limiting for a model while keeping the same API surface, return
 an unlimited config:
 
 ```python
+# (fragment — see Per-model configuration for context)
 PerModelConfig(
     quotas=UsageQuotas.unlimited(),
     model_family="paid-tier",
@@ -308,6 +320,7 @@ not need to accept unrelated kwargs like `model`.
 ### Backends
 
 ```python
+# (fragment — see Memory quickstart for standalone context)
 # Distributed (multiple workers/processes)
 from token_throttle import RedisBackendBuilder
 backend = RedisBackendBuilder(redis_client, key_prefix="my-service-prod")
@@ -481,6 +494,7 @@ Adjust bucket limits at runtime without rebuilding the limiter — useful for
 adaptive rate limiting (e.g., reacting to `x-ratelimit-*` response headers):
 
 ```python
+# (fragment — see Any provider example for standalone context)
 # After at least one acquire/record call for this model:
 await limiter.set_max_capacity(
     model="gpt-4o",
@@ -513,6 +527,7 @@ By default, `acquire_capacity` blocks until enough capacity is available.
 Use `timeout` to fail fast or cap the capacity wait:
 
 ```python
+# (fragment — see Any provider example for standalone context)
 # Non-blocking: check if capacity is available without waiting
 try:
     reservation = await limiter.acquire_capacity(
@@ -566,6 +581,7 @@ into counters or spans.
 Use `snapshot_state()` for a redacted point-in-time health check:
 
 ```python
+# (fragment — see Any provider example for standalone context)
 state = limiter.snapshot_state()
 # {
 #     "in_flight_reservations": 3,
@@ -584,6 +600,7 @@ For request correlation without changing existing callback signatures, use the
 additive lifecycle callback:
 
 ```python
+# (fragment — see Any provider example for standalone context)
 from token_throttle import LifecycleEvent, RateLimiterCallbacks
 
 async def on_lifecycle_event(*, event: LifecycleEvent) -> None:
@@ -628,13 +645,38 @@ PII surface:
 ## Sync API
 
 ```python
-from token_throttle import SyncRateLimiter, SyncMemoryBackendBuilder
+from token_throttle import (
+    PerModelConfig,
+    Quota,
+    SyncMemoryBackendBuilder,
+    SyncRateLimiter,
+    UsageQuotas,
+)
 
-limiter = SyncRateLimiter(get_config, backend=SyncMemoryBackendBuilder())
+limiter = SyncRateLimiter(
+    PerModelConfig(
+        quotas=UsageQuotas(
+            [
+                Quota(metric="requests", limit=60, per_seconds=60),
+                Quota(metric="tokens", limit=90_000, per_seconds=60),
+            ]
+        )
+    ),
+    backend=SyncMemoryBackendBuilder(),
+)
 
-reservation = limiter.acquire_capacity(model="gpt-4.1", usage={"requests": 1, "tokens": 500})
-response = call_llm_sync(...)
-limiter.refund_capacity(actual_usage={"requests": 1, "tokens": 320}, reservation=reservation)
+try:
+    reservation = limiter.acquire_capacity(
+        model="demo-model",
+        usage={"requests": 1, "tokens": 500},
+    )
+    limiter.refund_capacity(
+        actual_usage={"requests": 1, "tokens": 320},
+        reservation=reservation,
+    )
+    assert limiter.snapshot_state()["in_flight_reservations"] == 0
+finally:
+    limiter.close()
 ```
 
 ## Concurrency Model
@@ -654,12 +696,14 @@ blocks that loop; token-throttle emits a `RuntimeWarning` once per process.
 Both limiter types can own their close lifecycle through context managers:
 
 ```python
+# (fragment — see Memory quickstart for standalone context)
 async with RateLimiter(get_config, backend=MemoryBackendBuilder()) as limiter:
     reservation = await limiter.acquire_capacity({"tokens": 500}, model="gpt-4.1")
     await limiter.refund_capacity({"tokens": 320}, reservation)
 ```
 
 ```python
+# (fragment — see Sync API example for standalone context)
 with SyncRateLimiter(get_config, backend=SyncMemoryBackendBuilder()) as limiter:
     reservation = limiter.acquire_capacity({"tokens": 500}, model="gpt-4.1")
     limiter.refund_capacity({"tokens": 320}, reservation)
