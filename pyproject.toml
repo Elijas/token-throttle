@@ -35,7 +35,7 @@ tiktoken = ["tiktoken>=0.10.0,<1"]
 [project.urls]
 Repository = "https://github.com/Elijas/token-throttle"
 Documentation = "https://github.com/Elijas/token-throttle#readme"
-Changelog = "https://github.com/Elijas/token-throttle/blob/main/MIGRATION.md"
+Changelog = "https://github.com/Elijas/token-throttle/blob/main/CHANGELOG.md"
 Issues = "https://github.com/Elijas/token-throttle/issues"
 
 [dependency-groups]
