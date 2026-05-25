@@ -2,8 +2,6 @@
 R5 FIX-27 regression tests for OpenAI factory callback default merging.
 """
 
-from unittest.mock import MagicMock
-
 import pytest
 
 pytest.importorskip("redis", reason="redis package not installed")
@@ -11,7 +9,6 @@ pytest.importorskip("redis", reason="redis package not installed")
 import redis as _sync_redis
 import redis.asyncio as _async_redis
 
-import token_throttle._interfaces._callbacks as _callbacks_module
 from token_throttle._factories._openai._openai_rate_limiter import (
     create_openai_redis_rate_limiter,
 )
@@ -24,12 +21,12 @@ from token_throttle._interfaces._callbacks import (
 )
 
 
-def _async_redis_mock() -> MagicMock:
-    return MagicMock(spec=_async_redis.Redis)
+def _async_redis_mock() -> _async_redis.Redis:
+    return _async_redis.Redis()
 
 
-def _sync_redis_mock() -> MagicMock:
-    return MagicMock(spec=_sync_redis.Redis)
+def _sync_redis_mock() -> _sync_redis.Redis:
+    return _sync_redis.Redis()
 
 
 async def test_async_factory_merges_single_user_callback_with_default_logger():
@@ -136,16 +133,12 @@ async def test_async_factory_merged_default_logger_fires(caplog):
         callbacks=RateLimiterCallbacks(on_wait_start=on_wait_start),
     )
 
-    _callbacks_module._loguru_cache["factory"] = _callbacks_module._LOGURU_UNAVAILABLE
-    try:
-        with caplog.at_level("INFO", logger="token_throttle"):
-            await limiter._callbacks.on_missing_consumption_data(
-                model_family="gpt-4",
-                usage_metric="tokens",
-                per_seconds=60,
-            )
-    finally:
-        _callbacks_module._loguru_cache.clear()
+    with caplog.at_level("INFO", logger="token_throttle"):
+        await limiter._callbacks.on_missing_consumption_data(
+            model_family="gpt-4",
+            usage_metric="tokens",
+            per_seconds=60,
+        )
 
     assert "Rate limiter missing consumption data" in caplog.text
     assert "model_family='gpt-4'" in caplog.text

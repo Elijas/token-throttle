@@ -6,6 +6,9 @@ import pytest
 
 pytest.importorskip("redis", reason="redis package not installed")
 
+import redis as _sync_redis
+import redis.asyncio as _async_redis
+
 from token_throttle._interfaces._interfaces import PerModelConfig
 from token_throttle._interfaces._models import Quota, UsageQuotas
 from token_throttle._limiter_backends._redis._backend import RedisBackendBuilder
@@ -44,7 +47,7 @@ class _FakeAsyncPipeline:
         return results
 
 
-class _FakeAsyncRedis:
+class _FakeAsyncRedis(_async_redis.Redis):
     def __init__(self) -> None:
         self.store: dict[str, object] = {}
         self.deadlines: dict[str, float | None] = {}
@@ -105,7 +108,7 @@ class _FakeAsyncRedis:
         return _FakeAsyncPipeline(self)
 
 
-class _FakeSyncRedis:
+class _FakeSyncRedis(_sync_redis.Redis):
     pass
 
 

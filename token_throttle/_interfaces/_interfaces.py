@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from pydantic import Field, ValidationInfo, field_validator
@@ -18,13 +18,17 @@ from token_throttle._interfaces._models import (
     _validate_key_segment,
 )
 
-UsageCounter = Callable[..., FrozenUsage]
+UsageCounter = Callable[..., Mapping[str, int | float]]
 """Synchronous callable that derives a usage mapping from request kwargs.
 
 Counters should accept ``**kwargs`` so they receive the full request payload.
 Fixed-signature counters are still supported for compatibility, but that
 dispatch path is deprecated because request fields not named in the signature
 are filtered out before the counter is called.
+
+Runtime contract: the callable may return any mapping of metric name to finite
+non-negative ``int`` or ``float`` values. The limiter validates and freezes the
+mapping before using it.
 """
 
 

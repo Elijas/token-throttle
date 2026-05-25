@@ -537,7 +537,7 @@ async def test_async_redis_forged_reservation_is_unknown() -> None:
 
     with pytest.raises(
         UnknownReservationError,
-        match="reservation was never acquired by this backend",
+        match="reservation issued by a different limiter instance",
     ):
         await limiter.refund_capacity({"tokens": 0}, _forged_reservation())
 
@@ -548,7 +548,7 @@ def test_sync_redis_forged_reservation_is_unknown() -> None:
 
     with pytest.raises(
         UnknownReservationError,
-        match="reservation was never acquired by this backend",
+        match="reservation issued by a different limiter instance",
     ):
         limiter.refund_capacity({"tokens": 0}, _forged_reservation())
 
@@ -576,14 +576,17 @@ def test_sync_redis_duplicate_refund_raises_duplicate() -> None:
 
 
 @_REDIS_SKIP
-async def test_async_redis_cross_process_refund_uses_shared_marker() -> None:
+async def test_async_redis_cross_limiter_refund_rejects_shared_marker() -> None:
     redis_client = _AsyncRedis()
     builder = _AsyncRedisBuilder(redis_client)
     limiter_a = RateLimiter(_config(), backend=builder)
     limiter_b = RateLimiter(_config(), backend=builder)
     reservation = await limiter_a.acquire_capacity({"tokens": 30}, MODEL)
 
-    await limiter_b.refund_capacity({"tokens": 10}, reservation)
+    with pytest.raises(UnknownReservationError, match="different limiter instance"):
+        await limiter_b.refund_capacity({"tokens": 10}, reservation)
+
+    await limiter_a.refund_capacity({"tokens": 10}, reservation)
 
     assert (
         redis_acquired_marker_key(PREFIX, reservation.reservation_id)
@@ -596,14 +599,17 @@ async def test_async_redis_cross_process_refund_uses_shared_marker() -> None:
 
 
 @_REDIS_SKIP
-def test_sync_redis_cross_process_refund_uses_shared_marker() -> None:
+def test_sync_redis_cross_limiter_refund_rejects_shared_marker() -> None:
     redis_client = _SyncRedis()
     builder = _SyncRedisBuilder(redis_client)
     limiter_a = SyncRateLimiter(_config(), backend=builder)
     limiter_b = SyncRateLimiter(_config(), backend=builder)
     reservation = limiter_a.acquire_capacity({"tokens": 30}, MODEL)
 
-    limiter_b.refund_capacity({"tokens": 10}, reservation)
+    with pytest.raises(UnknownReservationError, match="different limiter instance"):
+        limiter_b.refund_capacity({"tokens": 10}, reservation)
+
+    limiter_a.refund_capacity({"tokens": 10}, reservation)
 
     assert (
         redis_acquired_marker_key(PREFIX, reservation.reservation_id)

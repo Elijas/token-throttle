@@ -1,7 +1,6 @@
 """Regression tests for FIX-53 OpenAI Redis factory TTL/lifetime knobs."""
 
 import math
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -22,12 +21,12 @@ from token_throttle._limiter_backends._redis._keys import (
 from token_throttle._limiter_backends._redis._ttl import DEFAULT_BUCKET_TTL_SECONDS
 
 
-def _async_redis_mock() -> MagicMock:
-    return MagicMock(spec=_async_redis.Redis)
+def _async_redis_mock() -> _async_redis.Redis:
+    return _async_redis.Redis()
 
 
-def _sync_redis_mock() -> MagicMock:
-    return MagicMock(spec=_sync_redis.Redis)
+def _sync_redis_mock() -> _sync_redis.Redis:
+    return _sync_redis.Redis()
 
 
 def test_async_openai_factory_preserves_redis_lifetime_defaults() -> None:

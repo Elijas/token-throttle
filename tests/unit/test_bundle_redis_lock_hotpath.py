@@ -11,6 +11,9 @@ import pytest
 
 pytest.importorskip("redis", reason="redis package not installed")
 
+import redis as _sync_redis
+import redis.asyncio as _async_redis
+
 from token_throttle._interfaces._interfaces import PerModelConfig
 from token_throttle._interfaces._models import Quota, UsageQuotas
 from token_throttle._limiter_backends._redis._backend import (
@@ -30,7 +33,7 @@ class _Pool:
         self.max_connections = max_connections
 
 
-class _FakeAsyncRedis:
+class _FakeAsyncRedis(_async_redis.Redis):
     def __init__(self, *, max_connections: int | None = 50) -> None:
         self.connection_pool = _Pool(max_connections)
 
@@ -38,7 +41,7 @@ class _FakeAsyncRedis:
         raise AssertionError("pipeline should not be used by these tests")
 
 
-class _FakeSyncRedis:
+class _FakeSyncRedis(_sync_redis.Redis):
     def __init__(self, *, max_connections: int | None = 50) -> None:
         self.connection_pool = _Pool(max_connections)
 

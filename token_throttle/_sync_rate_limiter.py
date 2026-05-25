@@ -28,7 +28,10 @@ from token_throttle._interfaces._callbacks import (
     LifecycleEvent,
     SyncRateLimiterCallbacks,
     _exception_group_contains_critical,
+    limiter_callback_context_active,
+    reset_limiter_callback_context,
     safe_invoke_sync_callback,
+    set_limiter_callback_context,
     with_sync_callback_timeout,
 )
 from token_throttle._interfaces._interfaces import (
@@ -148,6 +151,32 @@ def _raise_if_redis_cluster_backend(backend: object) -> None:
     redis_client = getattr(backend, "_redis", None)
     if _is_redis_cluster_client(redis_client):
         raise ValueError(_REDIS_CLUSTER_UNSUPPORTED_ERROR)
+
+
+def _validate_sync_backend_builder(backend: object) -> None:
+    if isinstance(backend, SyncRateLimiterBackendBuilderInterface):
+        return
+    build = getattr(backend, "build", None)
+    if callable(build):
+        return
+    if callable(getattr(backend, "build_async", None)):
+        raise TypeError(
+            "backend must be a sync BackendBuilder with "
+            "callable build(); got an object with build_async(). Use RateLimiter "
+            "for asynchronous backend builders."
+        )
+    raise TypeError(
+        "backend must be a BackendBuilder with callable "
+        f"build() (got {type(backend).__name__}); for async code use "
+        "RateLimiter with an asynchronous backend builder."
+    )
+
+
+def _raise_if_close_called_from_callback() -> None:
+    if limiter_callback_context_active():
+        raise RuntimeError(
+            "close()/aclose() cannot be called from inside a limiter callback"
+        )
 
 
 def _request_id_from_value(value: object) -> str | None:
@@ -332,11 +361,14 @@ def _cfg_with_preserved_runtime_max_capacity(
     )
 
 
-def _project_refund_scope(
+def _project_refund_scope(  # noqa: PLR0913
     reserved_usage: FrozenUsage,
     actual_usage: FrozenUsage,
     reservation_bucket_ids: frozenset[BucketId] | None,
     active_bucket_ids: set[BucketId] | frozenset[BucketId] | None,
+    *,
+    reservation_id: str | None = None,
+    model_family: str | None = None,
 ) -> tuple[FrozenUsage, FrozenUsage, frozenset[BucketId] | None]:
     """
     Shape refund data to the buckets that still correspond to the reservation.
@@ -377,12 +409,24 @@ def _project_refund_scope(
         if bucket_id in active_bucket_ids
     )
     if not surviving_bucket_ids:
-        warnings.warn(
+        message = (
             "Refund dropped: none of the reservation's bucket IDs exist in "
             "the current backend (bucket set was reconfigured after the "
-            "reservation was created).",
+            "reservation was created)."
+        )
+        warnings.warn(
+            message,
             RuntimeWarning,
             stacklevel=3,
+        )
+        _logger.warning(
+            message,
+            extra={
+                "reservation_id": reservation_id,
+                "model_family": model_family,
+                "old_bucket_ids": sorted(reservation_bucket_ids),
+                "active_bucket_ids": sorted(active_bucket_ids),
+            },
         )
         return frozendict(), frozendict(), surviving_bucket_ids
 
@@ -408,15 +452,27 @@ def _warn_refund_refresh_failed(
     *,
     model_name: str,
     model_family: str,
+    reservation_id: str | None = None,
     exc: Exception,
 ) -> None:
-    warnings.warn(
+    message = (
         "Failed to refresh backend during refund for "
         f"model '{model_name}' in model family '{model_family}' "
         f"({type(exc).__name__}: {exc}). Proceeding with cached backend state "
-        "to avoid leaking reserved capacity.",
+        "to avoid leaking reserved capacity."
+    )
+    warnings.warn(
+        message,
         RuntimeWarning,
         stacklevel=2,
+    )
+    _logger.warning(
+        message,
+        extra={
+            "reservation_id": reservation_id,
+            "model_family": model_family,
+            "model_name": model_name,
+        },
     )
 
 
@@ -427,10 +483,16 @@ def _raise_legacy_reservation_rejected() -> None:
     )
 
 
-def _raise_duplicate_refund(_reservation_id: str) -> None:
+def _raise_duplicate_refund(
+    reservation_id: str,
+    *,
+    model_family: str | None = None,
+) -> None:
     raise DuplicateRefundError(
         "reservation already refunded",
         reason="already_refunded",
+        reservation_id=reservation_id,
+        model_family=model_family,
     )
 
 
@@ -575,6 +637,7 @@ class SyncRateLimiter:
             )
         if callbacks is not None:
             _revalidate_dto(callbacks)
+        _validate_sync_backend_builder(backend)
         _raise_if_redis_cluster_backend(backend)
         self._max_reservation_lifetime_seconds = _resolve_backend_reservation_lifetime(
             backend,
@@ -716,6 +779,7 @@ class SyncRateLimiter:
             callback,
             critical=LIFECYCLE_CALLBACK_CRITICAL_EXCEPTIONS,
             log_label="Rate limiter lifecycle callback",
+            callback_slot="on_lifecycle_event",
             event=event,
         )
 
@@ -826,7 +890,10 @@ class SyncRateLimiter:
             >= self._max_model_families
         ):
             raise CardinalityLimitExceededError(
-                f"max_model_families exceeded: limit is {self._max_model_families}"
+                "max_model_families exceeded: "
+                f"offending model_family={model_family!r}; "
+                f"current_count={len(self._model_family_to_validated_signature)}; "
+                f"limit is {self._max_model_families}"
             )
 
     def _enforce_new_alias_cap(self, model: str) -> None:
@@ -835,7 +902,10 @@ class SyncRateLimiter:
             and len(self._model_name_to_model_family) >= self._max_aliases
         ):
             raise CardinalityLimitExceededError(
-                f"max_aliases exceeded: limit is {self._max_aliases}"
+                "max_aliases exceeded: "
+                f"offending alias={model!r}; "
+                f"current_count={len(self._model_name_to_model_family)}; "
+                f"limit is {self._max_aliases}"
             )
 
     def _remember_in_flight_reservation(
@@ -889,6 +959,18 @@ class SyncRateLimiter:
             )
             _raise_legacy_reservation_rejected()
 
+    def _verify_reservation_bound_to_limiter(
+        self,
+        reservation: CapacityReservation,
+    ) -> None:
+        self._verify_reservation_has_limiter_instance(reservation)
+        if reservation.limiter_instance_id != self._limiter_instance_id:
+            raise UnknownReservationError(
+                "reservation issued by a different limiter instance",
+                reservation_id=reservation.reservation_id,
+                model_family=reservation.model_family,
+            )
+
     def _reject_legacy_reservation_before_revalidation(
         self,
         reservation: object,
@@ -921,6 +1003,7 @@ class SyncRateLimiter:
         backend resources fails, the limiter is still marked closed so future
         operations fail cleanly instead of observing a permanent closing state.
         """
+        _raise_if_close_called_from_callback()
         self._check_close_entry()
         try:
             with self._acquire_guard:
@@ -1244,23 +1327,31 @@ class SyncRateLimiter:
             # while the slot is pending, cleanup treats the family as active.
             self._validate_shared_model_family_config(model, limit_config)
             backend = self._get_backend(limit_config)
-            if _block:
-                issued_at_seconds = backend.wait_for_capacity(
-                    usage,
-                    timeout=timeout,
-                    reservation_id=reservation.reservation_id,
-                    reservation_lifetime_seconds=(
-                        self._max_reservation_lifetime_seconds
-                    ),
-                )
-            else:
-                issued_at_seconds = backend.consume_capacity(
-                    usage,
-                    reservation_id=reservation.reservation_id,
-                    reservation_lifetime_seconds=(
-                        self._max_reservation_lifetime_seconds
-                    ),
-                )
+            callback_context_token = set_limiter_callback_context(
+                model_alias=model,
+                request_id=request_id,
+                reservation_id=reservation.reservation_id,
+            )
+            try:
+                if _block:
+                    issued_at_seconds = backend.wait_for_capacity(
+                        usage,
+                        timeout=timeout,
+                        reservation_id=reservation.reservation_id,
+                        reservation_lifetime_seconds=(
+                            self._max_reservation_lifetime_seconds
+                        ),
+                    )
+                else:
+                    issued_at_seconds = backend.consume_capacity(
+                        usage,
+                        reservation_id=reservation.reservation_id,
+                        reservation_lifetime_seconds=(
+                            self._max_reservation_lifetime_seconds
+                        ),
+                    )
+            finally:
+                reset_limiter_callback_context(callback_context_token)
             reservation = _issued_reservation(reservation, issued_at_seconds)
         except Exception as exc:  # noqa: BLE001 - boundary wrapper preserves cause
             self._rollback_pending_acquire(reservation.reservation_id)
@@ -1441,7 +1532,7 @@ class SyncRateLimiter:
         reservation = _revalidate_dto(reservation)
         reservation = self._authoritative_reservation_for_refund(reservation)
         is_unlimited = is_unlimited_reservation(reservation)
-        self._verify_reservation_has_limiter_instance(reservation)
+        self._verify_reservation_bound_to_limiter(reservation)
         if is_unlimited:
             self._forget_in_flight_reservation(reservation.reservation_id)
             return
@@ -1470,7 +1561,7 @@ class SyncRateLimiter:
         reservation = _revalidate_dto(reservation)
         reservation = self._authoritative_reservation_for_refund(reservation)
         is_unlimited = is_unlimited_reservation(reservation)
-        self._verify_reservation_has_limiter_instance(reservation)
+        self._verify_reservation_bound_to_limiter(reservation)
         if is_unlimited:
             self._forget_in_flight_reservation(reservation.reservation_id)
             return
@@ -1682,11 +1773,13 @@ class SyncRateLimiter:
                 if refund_state is not _REFUND_STATE_MISSING and (
                     _refund_state_is_committed(refund_state)
                 ):
-                    _raise_duplicate_refund(rid)
+                    _raise_duplicate_refund(rid, model_family=reservation.model_family)
                 if rid in self._refund_in_progress:
                     raise DuplicateRefundError(
                         "reservation refund already in progress",
                         reason="in_progress",
+                        reservation_id=rid,
+                        model_family=reservation.model_family,
                     )
                 self._remember_refund_state(rid, _REFUND_STATE_PENDING)
                 self._refund_in_progress.add(rid)
@@ -1706,7 +1799,9 @@ class SyncRateLimiter:
                 )
                 if not reservation_in_flight and not has_marker_authority:
                     raise UnknownReservationError(  # noqa: TRY301
-                        "reservation was never acquired by this backend"
+                        "reservation was never acquired by this backend",
+                        reservation_id=rid,
+                        model_family=reservation.model_family,
                     )
                 # If `_refresh_backend_for_reservation` swallowed an exception (it
                 # downgrades refresh failures to RuntimeWarning to keep refunds
@@ -1725,6 +1820,8 @@ class SyncRateLimiter:
                     actual_usage,
                     reservation.bucket_ids,
                     active_bucket_ids,
+                    reservation_id=reservation.reservation_id,
+                    model_family=reservation.model_family,
                 )
                 try:
                     refund_backend = backend
@@ -2018,6 +2115,7 @@ class SyncRateLimiter:
             _warn_refund_refresh_failed(
                 model_name=model_name,
                 model_family=reservation.model_family,
+                reservation_id=reservation.reservation_id,
                 exc=exc,
             )
             return
@@ -2047,6 +2145,7 @@ class SyncRateLimiter:
             _warn_refund_refresh_failed(
                 model_name=model_name,
                 model_family=reservation.model_family,
+                reservation_id=reservation.reservation_id,
                 exc=exc,
             )
 
@@ -2107,13 +2206,20 @@ class SyncRateLimiter:
                     "changes correctly."
                 )
 
-            warnings.warn(
+            message = (
                 f"Callable config for model family '{model_family}' changed metric set "
                 f"(was {sorted(old_snapshot)}, now {sorted(new_snapshot)}). "
                 "Rebuilding backend; consumption state for surviving metrics will be "
-                "transferred by backends that support it.",
-                UserWarning,
-                stacklevel=2,
+                "transferred by backends that support it."
+            )
+            warnings.warn(message, UserWarning, stacklevel=2)
+            _logger.warning(
+                message,
+                extra={
+                    "model_family": model_family,
+                    "old_bucket_ids": sorted(old_snapshot),
+                    "active_bucket_ids": sorted(new_snapshot),
+                },
             )
             rebuild_cfg = _cfg_with_preserved_runtime_max_capacity(
                 cfg,

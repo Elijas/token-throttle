@@ -101,6 +101,8 @@ class DuplicateRefundError(ValueError):
         message: str | None = None,
         *,
         reason: DuplicateRefundReason | None = None,
+        reservation_id: str | None = None,
+        model_family: str | None = None,
     ) -> None:
         if reason is None:
             reason = _infer_duplicate_refund_reason(message)
@@ -108,6 +110,15 @@ class DuplicateRefundError(ValueError):
             raise ValueError(f"unknown duplicate refund reason: {reason!r}")
         if message is None:
             message = _DUPLICATE_REFUND_MESSAGES[reason]
+        self.reservation_id = reservation_id
+        self.model_family = model_family
+        context = []
+        if reservation_id is not None:
+            context.append(f"reservation_id={reservation_id!r}")
+        if model_family is not None:
+            context.append(f"model_family={model_family!r}")
+        if context:
+            message = f"{message} ({', '.join(context)})"
         super().__init__(message)
         self.reason = reason
 
@@ -116,6 +127,24 @@ class UnknownReservationError(ValueError):
     """Raised when a backend has no record that a reservation was acquired."""
 
     reason = "unknown_reservation"
+
+    def __init__(
+        self,
+        message: str = "reservation was never acquired by this backend",
+        *,
+        reservation_id: str | None = None,
+        model_family: str | None = None,
+    ) -> None:
+        self.reservation_id = reservation_id
+        self.model_family = model_family
+        context = []
+        if reservation_id is not None:
+            context.append(f"reservation_id={reservation_id!r}")
+        if model_family is not None:
+            context.append(f"model_family={model_family!r}")
+        if context:
+            message = f"{message} ({', '.join(context)})"
+        super().__init__(message)
 
 
 _UNKNOWN_RESERVATION_FORGET_IN_FLIGHT_ATTR = (

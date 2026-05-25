@@ -8,7 +8,6 @@ import pytest
 
 import token_throttle._rate_limiter as async_limiter_module
 import token_throttle._sync_rate_limiter as sync_limiter_module
-from token_throttle._exceptions import UnknownReservationError
 from token_throttle._interfaces._interfaces import (
     PerModelConfig,
     RateLimiterBackend,
@@ -280,14 +279,17 @@ class _LyingSyncBuilder:
         return self.backend
 
 
-def _forged_reservation() -> CapacityReservation:
+def _forged_reservation(
+    *,
+    limiter_instance_id: str = "manual-modern",
+) -> CapacityReservation:
     return CapacityReservation(
         reservation_id="forged",
         usage={"tokens": 1},
         model_family=FAMILY,
         bucket_ids={("tokens", 60)},
         model=MODEL,
-        limiter_instance_id="manual-modern",
+        limiter_instance_id=limiter_instance_id,
         created_at_seconds=time.time(),
     )
 
@@ -297,7 +299,10 @@ async def test_async_custom_backend_marker_authority_lie_is_rejected() -> None:
     limiter = RateLimiter(_one_metric_config(), backend=builder)
 
     with pytest.raises(RuntimeError, match="supports_acquire_marker_authority=True"):
-        await limiter.refund_capacity({"tokens": 0}, _forged_reservation())
+        await limiter.refund_capacity(
+            {"tokens": 0},
+            _forged_reservation(limiter_instance_id=limiter._limiter_instance_id),
+        )
 
     assert builder.backend.refunded is False
 
@@ -307,7 +312,10 @@ def test_sync_custom_backend_marker_authority_lie_is_rejected() -> None:
     limiter = SyncRateLimiter(_one_metric_config(), backend=builder)
 
     with pytest.raises(RuntimeError, match="supports_acquire_marker_authority=True"):
-        limiter.refund_capacity({"tokens": 0}, _forged_reservation())
+        limiter.refund_capacity(
+            {"tokens": 0},
+            _forged_reservation(limiter_instance_id=limiter._limiter_instance_id),
+        )
 
     assert builder.backend.refunded is False
 
@@ -327,30 +335,22 @@ else:
 
 
 @pytest.mark.skipif(not _HAS_REDIS_HELPERS, reason="redis package not installed")
-async def test_async_redis_cross_process_usage_rewrite_is_rejected_by_marker() -> None:
+async def test_async_redis_same_limiter_rewrite_uses_snapshot() -> None:
     redis_client = _AsyncRedis()
     builder = _AsyncRedisBuilder(redis_client)
     limiter_a = RateLimiter(_one_metric_config(), backend=builder)
-    limiter_b = RateLimiter(_one_metric_config(), backend=builder)
     reservation = await limiter_a.acquire_capacity({"tokens": 1}, MODEL)
     rewritten = reservation.model_copy(update={"usage": {"tokens": 10}})
 
-    with pytest.raises(UnknownReservationError):
-        await limiter_b.refund_capacity({"tokens": 0}, rewritten)
-
-    await limiter_b.refund_capacity({"tokens": 0}, reservation)
+    await limiter_a.refund_capacity({"tokens": 0}, rewritten)
 
 
 @pytest.mark.skipif(not _HAS_REDIS_HELPERS, reason="redis package not installed")
-def test_sync_redis_cross_process_usage_rewrite_is_rejected_by_marker() -> None:
+def test_sync_redis_same_limiter_rewrite_uses_snapshot() -> None:
     redis_client = _SyncRedis()
     builder = _SyncRedisBuilder(redis_client)
     limiter_a = SyncRateLimiter(_one_metric_config(), backend=builder)
-    limiter_b = SyncRateLimiter(_one_metric_config(), backend=builder)
     reservation = limiter_a.acquire_capacity({"tokens": 1}, MODEL)
     rewritten = reservation.model_copy(update={"usage": {"tokens": 10}})
 
-    with pytest.raises(UnknownReservationError):
-        limiter_b.refund_capacity({"tokens": 0}, rewritten)
-
-    limiter_b.refund_capacity({"tokens": 0}, reservation)
+    limiter_a.refund_capacity({"tokens": 0}, rewritten)

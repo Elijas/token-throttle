@@ -4,6 +4,9 @@ import pytest
 
 pytest.importorskip("redis", reason="redis package not installed")
 
+import redis as _sync_redis
+import redis.asyncio as _async_redis
+
 from token_throttle._interfaces._interfaces import PerModelConfig
 from token_throttle._interfaces._models import Quota, UsageQuotas
 from token_throttle._limiter_backends._redis._backend import (
@@ -21,6 +24,14 @@ from token_throttle._limiter_backends._redis._sync_bucket import SyncRedisBucket
 class _RedisClient:
     def __init__(self, connection_pool: object | None = None) -> None:
         self.connection_pool = connection_pool
+
+
+class _AsyncRedisClient(_RedisClient, _async_redis.Redis):
+    pass
+
+
+class _SyncRedisClient(_RedisClient, _sync_redis.Redis):
+    pass
 
 
 def _config() -> PerModelConfig:
@@ -92,7 +103,7 @@ def test_sync_backend_rejects_mixed_prefix_buckets() -> None:
 
 def test_async_stock_builder_satisfies_prefix_invariant() -> None:
     cfg = _config()
-    redis_client = _RedisClient()
+    redis_client = _AsyncRedisClient()
 
     backend = RedisBackendBuilder(redis_client, key_prefix="tenant-a").build(cfg)
 
@@ -101,7 +112,7 @@ def test_async_stock_builder_satisfies_prefix_invariant() -> None:
 
 def test_sync_stock_builder_satisfies_prefix_invariant() -> None:
     cfg = _config()
-    redis_client = _RedisClient()
+    redis_client = _SyncRedisClient()
 
     backend = SyncRedisBackendBuilder(redis_client, key_prefix="tenant-a").build(cfg)
 

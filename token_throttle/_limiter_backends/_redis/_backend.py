@@ -33,6 +33,7 @@ from token_throttle._interfaces._callable_utils import (
 from token_throttle._interfaces._callbacks import (
     BACKEND_CALLBACK_CRITICAL_EXCEPTIONS,
     RateLimiterCallbacks,
+    current_limiter_callback_context,
     safe_invoke_async_callback,
 )
 from token_throttle._interfaces._interfaces import (
@@ -511,13 +512,11 @@ class RedisBackendBuilder(RateLimiterBackendBuilderInterface):
         lock_sleep_seconds: float = DEFAULT_LOCK_SLEEP_SECONDS,
     ) -> None:
         super().__init__()
-        client_module = type(redis_client).__module__
-        if client_module.startswith("redis.") and not isinstance(
-            redis_client, redis.asyncio.Redis
-        ):
+        if not isinstance(redis_client, redis.asyncio.Redis):
             raise TypeError(
-                "redis_client must be a redis.asyncio.Redis instance "
-                f"(got {type(redis_client).__name__})"
+                "redis_client expected redis.asyncio.Redis, "
+                f"got {type(redis_client).__name__}; for sync use redis.Redis "
+                "with SyncRedisBackendBuilder"
             )
         self._redis = redis_client
         self._owns_redis_client = owns_redis_client
@@ -1277,6 +1276,8 @@ class RedisBackend(RateLimiterBackend):
                 raise DuplicateRefundError(
                     "reservation already acquired",
                     reason="duplicate_acquire",
+                    reservation_id=reservation_id,
+                    model_family=self._limit_config.get_model_family(),
                 )
             raise RedisScriptResultError(
                 "Redis acquire marker script returned unknown status "
@@ -1367,6 +1368,7 @@ class RedisBackend(RateLimiterBackend):
         acquired_marker_value: str,
         refund_dedup_key: str,
         reservation_id: str | None = None,
+        reservation_model_family: str | None = None,
     ) -> None:
         for bucket in buckets:
             _debug_event(
@@ -1438,16 +1440,22 @@ class RedisBackend(RateLimiterBackend):
             raise DuplicateRefundError(
                 "reservation already refunded",
                 reason="already_refunded",
+                reservation_id=reservation_id,
+                model_family=reservation_model_family,
             )
         if status == "unknown_reservation":
             raise _mark_unknown_reservation_forget_in_flight(
                 UnknownReservationError(
-                    "reservation was never acquired by this backend"
+                    "reservation was never acquired by this backend",
+                    reservation_id=reservation_id,
+                    model_family=reservation_model_family,
                 )
             )
         if status == "marker_mismatch":
             raise UnknownReservationError(
-                "reservation was never acquired by this backend"
+                "reservation was never acquired by this backend",
+                reservation_id=reservation_id,
+                model_family=reservation_model_family,
             )
         raise RedisScriptResultError(
             "Redis refund marker script returned unknown status "
@@ -1747,6 +1755,7 @@ class RedisBackend(RateLimiterBackend):
             if self._callbacks and self._callbacks.on_capacity_consumed:
                 await self._invoke_callback_safe(
                     self._callbacks.on_capacity_consumed,
+                    callback_slot="on_capacity_consumed",
                     model_family=self._limit_config.get_model_family(),
                     preconsumption_capacities=preconsumption_capacities,
                     postconsumption_capacities=postconsumption_capacities,
@@ -1908,6 +1917,7 @@ class RedisBackend(RateLimiterBackend):
         if self._callbacks and self._callbacks.on_capacity_consumed:
             await self._invoke_callback_safe(
                 self._callbacks.on_capacity_consumed,
+                callback_slot="on_capacity_consumed",
                 model_family=self._limit_config.get_model_family(),
                 preconsumption_capacities=preconsumption_capacities,
                 postconsumption_capacities=postconsumption_capacities,
@@ -1959,7 +1969,7 @@ class RedisBackend(RateLimiterBackend):
                 # a caller-level wait timeout.
                 if deadline is None:  # pragma: no cover
                     raise
-                raise TimeoutError("Timed out waiting for capacity") from exc
+                raise self._capacity_timeout_error(usage, frozendict()) from exc
             if available:
                 try:
                     if has_waited:
@@ -1978,11 +1988,13 @@ class RedisBackend(RateLimiterBackend):
                         ):
                             await self._invoke_callback_safe(
                                 self._callbacks.after_wait_end_consumption,
+                                callback_slot="after_wait_end_consumption",
                                 model_family=self._limit_config.get_model_family(),
                                 preconsumption_capacities=preconsumption,
                                 postconsumption_capacities=postconsumption,
                                 usage=frozendict(usage),
                                 wait_time_s=wait_time_s,
+                                **current_limiter_callback_context(),
                             )
                 except BaseException:
                     try:  # noqa: SIM105
@@ -2002,7 +2014,11 @@ class RedisBackend(RateLimiterBackend):
                 return consumed_at_seconds
 
             if deadline is not None and time.monotonic() >= deadline:
-                raise TimeoutError("Timed out waiting for capacity")
+                raise self._capacity_timeout_error(
+                    usage,
+                    preconsumption,
+                    buckets=buckets,
+                )
 
             if not has_waited:
                 has_waited = True
@@ -2012,26 +2028,38 @@ class RedisBackend(RateLimiterBackend):
                     if deadline is None:
                         await self._invoke_callback_safe(
                             self._callbacks.on_wait_start,
+                            callback_slot="on_wait_start",
                             model_family=self._limit_config.get_model_family(),
                             preconsumption_capacities=preconsumption,
                             usage=usage,
+                            **current_limiter_callback_context(),
                         )
                     else:
                         remaining = deadline - callback_started
                         if remaining <= 0:
-                            raise TimeoutError("Timed out waiting for capacity")
+                            raise self._capacity_timeout_error(
+                                usage,
+                                preconsumption,
+                                buckets=buckets,
+                            )
                         await asyncio.wait_for(
                             self._invoke_callback_safe(
                                 self._callbacks.on_wait_start,
+                                callback_slot="on_wait_start",
                                 model_family=self._limit_config.get_model_family(),
                                 preconsumption_capacities=preconsumption,
                                 usage=usage,
+                                **current_limiter_callback_context(),
                             ),
                             timeout=remaining,
                         )
                     wait_start_callback_overhead += time.monotonic() - callback_started
                     if deadline is not None and time.monotonic() >= deadline:
-                        raise TimeoutError("Timed out waiting for capacity")
+                        raise self._capacity_timeout_error(
+                            usage,
+                            preconsumption,
+                            buckets=buckets,
+                        )
 
             computed = self._compute_sleep_for_wait(
                 usage,
@@ -2083,6 +2111,45 @@ class RedisBackend(RateLimiterBackend):
             wait = deficit / rate_per_sec
             max_wait = max(max_wait, wait)
         return max_wait if max_wait > 0 else self._sleep_interval
+
+    def _capacity_timeout_error(
+        self,
+        usage: FrozenUsage,
+        preconsumption: Capacities,
+        *,
+        buckets: tuple[RedisBucket, ...] | list[RedisBucket] | None = None,
+        computed_sleep: float | None = None,
+    ) -> TimeoutError:
+        bottleneck_id: tuple[str, int] | None = None
+        available: float | None = None
+        requested: float | None = None
+        largest_deficit = 0.0
+        for bucket_id, cap_amount in preconsumption.items():
+            metric, _ = bucket_id
+            usage_amount = usage.get(metric)
+            if usage_amount is None:
+                continue
+            deficit = float(usage_amount) - float(cap_amount)
+            if deficit > largest_deficit:
+                largest_deficit = deficit
+                bottleneck_id = bucket_id
+                available = float(cap_amount)
+                requested = float(usage_amount)
+        if computed_sleep is None:
+            with contextlib.suppress(Exception):
+                if buckets is None:
+                    computed_sleep = self._compute_sleep(usage, preconsumption)
+                else:
+                    computed_sleep = self._compute_sleep_for_wait(
+                        usage,
+                        preconsumption,
+                        buckets=tuple(buckets),
+                    )
+        return TimeoutError(
+            "Timed out waiting for capacity "
+            f"(bottleneck={bottleneck_id}, available={available}, "
+            f"requested={requested}, computed_sleep={computed_sleep})"
+        )
 
     async def refund_capacity(
         self,
@@ -2192,7 +2259,9 @@ class RedisBackend(RateLimiterBackend):
         if reservation_id is not None:
             if acquired_marker_key is None or refund_dedup_key is None:
                 raise UnknownReservationError(
-                    "reservation was never acquired by this backend"
+                    "reservation was never acquired by this backend",
+                    reservation_id=reservation_id,
+                    model_family=reservation_model_family,
                 )
             (
                 marker_model_family,
@@ -2230,6 +2299,7 @@ class RedisBackend(RateLimiterBackend):
                     acquired_marker_value=expected_marker_value,
                     refund_dedup_key=refund_dedup_key,
                     reservation_id=reservation_id,
+                    reservation_model_family=reservation_model_family,
                 )
             return True
         # Calculate how much to refund for each metric
@@ -2342,6 +2412,7 @@ class RedisBackend(RateLimiterBackend):
                         acquired_marker_value=expected_marker_value,
                         refund_dedup_key=refund_dedup_key,
                         reservation_id=reservation_id,
+                        reservation_model_family=reservation_model_family,
                     )
                 )
             try:
@@ -2364,6 +2435,7 @@ class RedisBackend(RateLimiterBackend):
         if self._callbacks and self._callbacks.on_capacity_refunded:
             await self._invoke_callback_safe(
                 self._callbacks.on_capacity_refunded,
+                callback_slot="on_capacity_refunded",
                 model_family=self._limit_config.get_model_family(),
                 reserved_usage=reserved_usage,
                 actual_usage=actual_usage,
@@ -2614,12 +2686,19 @@ class RedisBackend(RateLimiterBackend):
         self._usage_metric_names = {bucket.usage_metric for bucket in buckets}
         self._limit_config = cfg
 
-    async def _invoke_callback_safe(self, callback, **kwargs) -> None:
+    async def _invoke_callback_safe(
+        self,
+        callback,
+        *,
+        callback_slot: str = "callback",
+        **kwargs,
+    ) -> None:
         """Fire a user callback; delegates to the shared critical-exception dispatcher."""
         await safe_invoke_async_callback(
             callback,
             critical=BACKEND_CALLBACK_CRITICAL_EXCEPTIONS,
             log_label="Rate limiter callback",
+            callback_slot=callback_slot,
             **kwargs,
         )
 
@@ -2718,6 +2797,7 @@ class RedisBackend(RateLimiterBackend):
             for bucket in fresh_start_buckets:
                 await self._invoke_callback_safe(
                     self._callbacks.on_missing_consumption_data,
+                    callback_slot="on_missing_consumption_data",
                     model_family=self._limit_config.get_model_family(),
                     usage_metric=bucket.usage_metric,
                     per_seconds=bucket.per_seconds,

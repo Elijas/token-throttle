@@ -203,8 +203,13 @@ async def test_redis_refund_dedup_ttl_default_and_configurable() -> None:
         True,
     )
 
+    import redis as _sync_redis  # noqa: PLC0415
+
+    class _StrictSyncDedupRedis(_SyncDedupRedis, _sync_redis.Redis):
+        pass
+
     sync_builder = redis_modules.sync_redis_backend_builder(
-        _SyncDedupRedis(),
+        _StrictSyncDedupRedis(),
         key_prefix="tenant",
         refund_dedup_ttl_seconds=456,
     )

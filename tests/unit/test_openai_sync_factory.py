@@ -7,8 +7,6 @@ Closes L04 P01 (sync OpenAI factory missing) and L09 Y01-Y04 (eager
 validation of rpm/tpm/redis_client/callbacks at construction time).
 """
 
-from unittest.mock import MagicMock
-
 import pytest
 
 pytest.importorskip("redis", reason="redis package not installed")
@@ -29,9 +27,9 @@ from token_throttle._sync_rate_limiter import SyncRateLimiter
 from token_throttle._validation import _UNLIMITED_FLAG
 
 
-def _sync_redis_mock() -> MagicMock:
-    """A MagicMock that passes the factory's isinstance(_, redis.Redis) check."""
-    return MagicMock(spec=_sync_redis.Redis)
+def _sync_redis_mock() -> _sync_redis.Redis:
+    """A Redis client instance that passes the factory's runtime type check."""
+    return _sync_redis.Redis()
 
 
 # 1. Happy-path smoke: factory returns a SyncRateLimiter with the right wiring.
@@ -113,17 +111,17 @@ def test_factory_eager_validation_rpm_non_int():
 
 # 7. Y02 closure: non-redis.Redis instances rejected at construction.
 def test_factory_redis_client_type_check():
-    with pytest.raises(TypeError, match=r"redis_client must be a redis\.Redis"):
+    with pytest.raises(TypeError, match=r"expected redis\.Redis"):
         create_openai_redis_sync_rate_limiter(
             None, key_prefix="test", rpm=100, tpm=10_000
         )
-    with pytest.raises(TypeError, match=r"redis_client must be a redis\.Redis"):
+    with pytest.raises(TypeError, match=r"expected redis\.Redis"):
         create_openai_redis_sync_rate_limiter(
             "redis://localhost:6379", key_prefix="test", rpm=100, tpm=10_000
         )
     # Async client must NOT be accepted (cross-mode misuse footgun).
-    async_client = MagicMock(spec=_async_redis.Redis)
-    with pytest.raises(TypeError, match=r"redis_client must be a redis\.Redis"):
+    async_client = _async_redis.Redis()
+    with pytest.raises(TypeError, match=r"expected redis\.Redis"):
         create_openai_redis_sync_rate_limiter(
             async_client, key_prefix="test", rpm=100, tpm=10_000
         )

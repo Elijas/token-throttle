@@ -16,6 +16,7 @@ from token_throttle._exceptions import (
 from token_throttle._interfaces._callbacks import (
     BACKEND_CALLBACK_CRITICAL_EXCEPTIONS,
     RateLimiterCallbacks,
+    current_limiter_callback_context,
     safe_invoke_async_callback,
 )
 from token_throttle._interfaces._interfaces import (
@@ -268,6 +269,8 @@ class MemoryBackend(RateLimiterBackend):
                 raise DuplicateRefundError(
                     "reservation already acquired",
                     reason="duplicate_acquire",
+                    reservation_id=reservation_id,
+                    model_family=self._limit_config.get_model_family(),
                 )
             current_time = time.time()
             preconsumption_capacities, fresh_start_buckets = self._get_capacities(
@@ -345,6 +348,7 @@ class MemoryBackend(RateLimiterBackend):
         if self._callbacks and self._callbacks.on_capacity_consumed:
             await self._invoke_callback_safe(
                 self._callbacks.on_capacity_consumed,
+                callback_slot="on_capacity_consumed",
                 model_family=self._limit_config.get_model_family(),
                 preconsumption_capacities=preconsumption_capacities,
                 postconsumption_capacities=postconsumption_capacities,
@@ -389,6 +393,8 @@ class MemoryBackend(RateLimiterBackend):
                         raise DuplicateRefundError(
                             "reservation already acquired",
                             reason="duplicate_acquire",
+                            reservation_id=reservation_id,
+                            model_family=self._limit_config.get_model_family(),
                         )
                     preconsumption, fresh = self._get_capacities(current_time)
                     ok, postconsumption = self._try_consume_locked(
@@ -401,6 +407,8 @@ class MemoryBackend(RateLimiterBackend):
                                 raise DuplicateRefundError(
                                     "reservation already acquired",
                                     reason="duplicate_acquire",
+                                    reservation_id=reservation_id,
+                                    model_family=self._limit_config.get_model_family(),
                                 )
                             self._acquired_reservation_ids.add(reservation_id)
                         self._set_capacities(postconsumption, current_time)
@@ -408,7 +416,7 @@ class MemoryBackend(RateLimiterBackend):
                         consumed_buckets = list(self._buckets)
                         break
                     if deadline is not None and time.monotonic() >= deadline:
-                        raise TimeoutError("Timed out waiting for capacity")
+                        raise self._capacity_timeout_error(usage, preconsumption)
                     if not has_waited:
                         has_waited = True
                         first_failed_pre = preconsumption
@@ -438,26 +446,30 @@ class MemoryBackend(RateLimiterBackend):
                 if deadline is None:
                     await self._invoke_callback_safe(
                         self._callbacks.on_wait_start,
+                        callback_slot="on_wait_start",
                         model_family=self._limit_config.get_model_family(),
                         preconsumption_capacities=first_failed_pre,
                         usage=usage,
+                        **current_limiter_callback_context(),
                     )
                 else:
                     remaining = deadline - callback_started
                     if remaining <= 0:
-                        raise TimeoutError("Timed out waiting for capacity")
+                        raise self._capacity_timeout_error(usage, first_failed_pre)
                     await asyncio.wait_for(
                         self._invoke_callback_safe(
                             self._callbacks.on_wait_start,
+                            callback_slot="on_wait_start",
                             model_family=self._limit_config.get_model_family(),
                             preconsumption_capacities=first_failed_pre,
                             usage=usage,
+                            **current_limiter_callback_context(),
                         ),
                         timeout=remaining,
                     )
                 wait_start_callback_overhead += time.monotonic() - callback_started
                 if deadline is not None and time.monotonic() >= deadline:
-                    raise TimeoutError("Timed out waiting for capacity")
+                    raise self._capacity_timeout_error(usage, first_failed_pre)
 
         # All callbacks fired outside the lock. If a critical BaseException
         # arrives during any callback await, refund the consumed capacity so it
@@ -467,6 +479,7 @@ class MemoryBackend(RateLimiterBackend):
             if self._callbacks and self._callbacks.on_capacity_consumed:
                 await self._invoke_callback_safe(
                     self._callbacks.on_capacity_consumed,
+                    callback_slot="on_capacity_consumed",
                     model_family=self._limit_config.get_model_family(),
                     preconsumption_capacities=preconsumption,
                     postconsumption_capacities=postconsumption,
@@ -486,11 +499,13 @@ class MemoryBackend(RateLimiterBackend):
                 )
                 await self._invoke_callback_safe(
                     self._callbacks.after_wait_end_consumption,
+                    callback_slot="after_wait_end_consumption",
                     model_family=self._limit_config.get_model_family(),
                     preconsumption_capacities=preconsumption,
                     postconsumption_capacities=postconsumption,
                     usage=frozendict(usage),
                     wait_time_s=wait_time_s,
+                    **current_limiter_callback_context(),
                 )
         except BaseException:
             try:  # noqa: SIM105
@@ -538,6 +553,37 @@ class MemoryBackend(RateLimiterBackend):
             wait = deficit / rate_per_sec
             max_wait = max(max_wait, wait)
         return max_wait if max_wait > 0 else self._sleep_interval
+
+    def _capacity_timeout_error(
+        self,
+        usage: FrozenUsage,
+        preconsumption: Capacities,
+        *,
+        computed_sleep: float | None = None,
+    ) -> TimeoutError:
+        bottleneck_id: tuple[str, int] | None = None
+        available: float | None = None
+        requested: float | None = None
+        largest_deficit = 0.0
+        for bucket_id, cap_amount in preconsumption.items():
+            metric, _ = bucket_id
+            usage_amount = usage.get(metric)
+            if usage_amount is None:
+                continue
+            deficit = float(usage_amount) - float(cap_amount)
+            if deficit > largest_deficit:
+                largest_deficit = deficit
+                bottleneck_id = bucket_id
+                available = float(cap_amount)
+                requested = float(usage_amount)
+        if computed_sleep is None:
+            with contextlib.suppress(Exception):
+                computed_sleep = self._compute_sleep(usage, preconsumption)
+        return TimeoutError(
+            "Timed out waiting for capacity "
+            f"(bottleneck={bottleneck_id}, available={available}, "
+            f"requested={requested}, computed_sleep={computed_sleep})"
+        )
 
     async def refund_capacity(
         self,
@@ -635,9 +681,13 @@ class MemoryBackend(RateLimiterBackend):
                     raise DuplicateRefundError(
                         "reservation already refunded",
                         reason="already_refunded",
+                        reservation_id=reservation_id,
+                        model_family=self._limit_config.get_model_family(),
                     )
                 raise UnknownReservationError(
-                    "reservation was never acquired by this backend"
+                    "reservation was never acquired by this backend",
+                    reservation_id=reservation_id,
+                    model_family=self._limit_config.get_model_family(),
                 )
             current_time = time.time()
             prerefund_capacities, fresh_start_buckets = self._get_capacities(
@@ -687,6 +737,7 @@ class MemoryBackend(RateLimiterBackend):
         if self._callbacks and self._callbacks.on_capacity_refunded:
             await self._invoke_callback_safe(
                 self._callbacks.on_capacity_refunded,
+                callback_slot="on_capacity_refunded",
                 model_family=self._limit_config.get_model_family(),
                 reserved_usage=reserved_usage,
                 actual_usage=actual_usage,
@@ -785,12 +836,19 @@ class MemoryBackend(RateLimiterBackend):
         )
         self._limit_config = cfg
 
-    async def _invoke_callback_safe(self, callback, **kwargs) -> None:
+    async def _invoke_callback_safe(
+        self,
+        callback,
+        *,
+        callback_slot: str = "callback",
+        **kwargs,
+    ) -> None:
         """Fire a user callback; delegates to the shared critical-exception dispatcher."""
         await safe_invoke_async_callback(
             callback,
             critical=BACKEND_CALLBACK_CRITICAL_EXCEPTIONS,
             log_label="Rate limiter callback",
+            callback_slot=callback_slot,
             **kwargs,
         )
 
@@ -864,6 +922,7 @@ class MemoryBackend(RateLimiterBackend):
             for bucket in fresh_start_buckets:
                 await self._invoke_callback_safe(
                     self._callbacks.on_missing_consumption_data,
+                    callback_slot="on_missing_consumption_data",
                     model_family=self._limit_config.get_model_family(),
                     usage_metric=bucket.usage_metric,
                     per_seconds=bucket.per_seconds,

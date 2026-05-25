@@ -4,8 +4,6 @@ Tests for OpenAI factory and model family regex.
 Source: token_throttle/_factories/_openai/_openai_rate_limiter.py
 """
 
-from unittest.mock import MagicMock
-
 import pytest
 
 pytest.importorskip("redis", reason="redis package not installed")
@@ -22,9 +20,8 @@ from token_throttle._interfaces._callbacks import RateLimiterCallbacks
 from token_throttle._rate_limiter import RateLimiter
 
 
-def _async_redis_mock() -> MagicMock:
-    """A MagicMock that passes the factory's isinstance(_, redis.asyncio.Redis)."""
-    return MagicMock(spec=_async_redis.Redis)
+def _async_redis_mock() -> _async_redis.Redis:
+    return _async_redis.Redis()
 
 
 class TestModelFamilyGetter:
@@ -272,7 +269,7 @@ class TestCreateOpenAIRedisRateLimiter:
             rpm=100,
             tpm=10000,
         )
-        # Default callbacks are created via create_loguru_callbacks
+        # Default callbacks are created via create_logging_callbacks
         assert limiter._callbacks is not None
 
     def test_quota_limits_match_parameters(self):
@@ -340,22 +337,16 @@ class TestCreateOpenAIRedisRateLimiter:
             )
 
     def test_factory_redis_client_type_check(self):
-        with pytest.raises(
-            TypeError, match=r"redis_client must be a redis\.asyncio\.Redis"
-        ):
+        with pytest.raises(TypeError, match=r"expected redis\.asyncio\.Redis"):
             create_openai_redis_rate_limiter(
                 None, key_prefix="test", rpm=100, tpm=10_000
             )
-        with pytest.raises(
-            TypeError, match=r"redis_client must be a redis\.asyncio\.Redis"
-        ):
+        with pytest.raises(TypeError, match=r"expected redis\.asyncio\.Redis"):
             create_openai_redis_rate_limiter(
                 "redis://localhost:6379", key_prefix="test", rpm=100, tpm=10_000
             )
-        sync_client = MagicMock(spec=_sync_redis.Redis)
-        with pytest.raises(
-            TypeError, match=r"redis_client must be a redis\.asyncio\.Redis"
-        ):
+        sync_client = _sync_redis.Redis()
+        with pytest.raises(TypeError, match=r"expected redis\.asyncio\.Redis"):
             create_openai_redis_rate_limiter(
                 sync_client, key_prefix="test", rpm=100, tpm=10_000
             )

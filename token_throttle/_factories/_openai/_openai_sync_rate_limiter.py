@@ -86,9 +86,9 @@ def create_openai_redis_sync_rate_limiter(  # noqa: PLR0913
     """
     if not isinstance(redis_client, _sync_redis.Redis):
         raise TypeError(
-            f"redis_client must be a redis.Redis (sync) instance "
-            f"(got {type(redis_client).__name__}). For an async client, use "
-            f"create_openai_redis_rate_limiter instead."
+            f"redis_client expected redis.Redis, got "
+            f"{type(redis_client).__name__}; for async use redis.asyncio.Redis "
+            "with create_openai_redis_rate_limiter"
         )
     if isinstance(rpm, bool) or not isinstance(rpm, int):
         raise TypeError(f"rpm must be an int (got {type(rpm).__name__})")

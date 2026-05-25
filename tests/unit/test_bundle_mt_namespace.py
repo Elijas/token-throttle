@@ -7,6 +7,9 @@ from pydantic import ValidationError
 
 pytest.importorskip("redis", reason="redis package not installed")
 
+import redis as _sync_redis
+import redis.asyncio as _async_redis
+
 from token_throttle._factories._openai._openai_rate_limiter import (
     create_openai_redis_rate_limiter,
 )
@@ -21,7 +24,7 @@ from token_throttle._limiter_backends._redis._sync_backend import (
 )
 
 
-class _AsyncRedisStore:
+class _AsyncRedisStore(_async_redis.Redis):
     def __init__(self) -> None:
         self.store: dict[str, object] = {}
 
@@ -43,7 +46,7 @@ class _AsyncRedisStore:
         return int(existed)
 
 
-class _SyncRedisStore:
+class _SyncRedisStore(_sync_redis.Redis):
     def __init__(self) -> None:
         self.store: dict[str, object] = {}
 

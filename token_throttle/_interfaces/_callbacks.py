@@ -1,23 +1,4 @@
-"""
-Callback infrastructure for the rate limiter.
-
-Loguru detection staleness contract
------------------------------------
-``_probe_loguru()`` runs once per process and caches its result. If
-loguru becomes available or breaks AFTER the first probe, the cache
-will not auto-invalidate. To force a re-probe, either:
-
-- call :func:`_reset_loguru_cache` programmatically, or
-- set the ``TOKEN_THROTTLE_LOGURU_DETECT_AGAIN`` environment variable
-  to a non-empty value before the next callback fires.
-
-The cache stores a *factory* callable (or an unavailability sentinel),
-not a resolved logger. Each ``_log()`` invocation calls the factory,
-which re-reads ``loguru.logger`` from ``sys.modules``. This means
-in-process loguru API drift (monkey-patching, hot reload, a future
-loguru release renaming ``.log()``) surfaces as a clear ``AttributeError``
-at the call site instead of being masked by a stale poisoned reference.
-"""
+"""Callback infrastructure for the rate limiter."""
 
 from __future__ import annotations
 
@@ -27,7 +8,6 @@ import contextlib
 import contextvars
 import inspect
 import logging
-import os
 import threading
 import warnings
 from typing import Protocol, runtime_checkable
@@ -48,101 +28,14 @@ type BucketId = tuple[MetricName, PerSeconds]
 type FrozenUsage = frozendict[MetricName, float]
 type Capacities = frozendict[BucketId, float]
 
-# ---------------------------------------------------------------------------
-# Auto-detect loguru vs stdlib logging
-# ---------------------------------------------------------------------------
-
 _stdlib_logger = logging.getLogger("token_throttle")
-
-# Sentinel: the probe has run and concluded loguru is not usable for any
-# reason (missing, broken install, API drifted at probe time, etc.).
-_LOGURU_UNAVAILABLE: object = object()
-
-# Module-level detection cache.
-#
-# Schema: ``{"factory": <zero-arg callable> | _LOGURU_UNAVAILABLE}``.
-# Missing key → not yet probed.
-#
-# Storing a factory rather than a resolved logger means each ``_log()``
-# call re-reads ``loguru.logger`` (cheap via ``sys.modules``) so any
-# post-probe API drift (e.g. ``.log`` renamed) surfaces as a clear
-# ``AttributeError`` at the call site instead of being masked by a stale
-# cached reference.
-_loguru_cache: dict[str, object] = {}
-
-_LOGURU_DETECT_AGAIN_ENV = "TOKEN_THROTTLE_LOGURU_DETECT_AGAIN"
-
-
-def _resolve_loguru_logger():
-    """
-    Fresh resolution + API smoke-test of the loguru logger.
-
-    Imports ``loguru.logger`` (cached via ``sys.modules`` after the first
-    real import) and verifies that ``.log`` is callable. Any exception
-    that import or attribute lookup raises propagates — callers handle
-    the catching.
-    """
-    from loguru import logger
-
-    if not callable(getattr(logger, "log", None)):
-        # ImportError signals "the loguru API we need is not importable"
-        # so the upstream `except Exception` in _probe_loguru routes us
-        # to the stdlib fallback uniformly with other import failures.
-        raise ImportError(  # noqa: TRY004 - ImportError is the bridge's contract
-            "loguru.logger.log is not callable; loguru API has drifted."
-        )
-    return logger
-
-
-def _probe_loguru():
-    """
-    Detect loguru and return a logger factory, or ``None``.
-
-    On first call (or after a reset), attempts to import loguru and
-    smoke-test the API. Caches a factory callable on success or the
-    ``_LOGURU_UNAVAILABLE`` sentinel on any failure (including non-
-    ``ImportError`` failures from broken installs). Subsequent calls
-    return the cached value.
-
-    Returns a zero-arg callable that yields a working ``loguru.Logger``
-    when loguru is usable, otherwise ``None``.
-    """
-    if os.environ.get(_LOGURU_DETECT_AGAIN_ENV):
-        _loguru_cache.pop("factory", None)
-
-    if "factory" not in _loguru_cache:
-        try:
-            _resolve_loguru_logger()
-        except Exception as exc:  # noqa: BLE001 - any import-time failure → fall back
-            # Broad on purpose. Broken loguru installs raise
-            # ImportError / ModuleNotFoundError (most common) plus
-            # AttributeError / RuntimeError / OSError / TypeError /
-            # ValueError on import side effects, and the API smoke-test
-            # raises ImportError on .log drift. Excludes BaseException
-            # so KeyboardInterrupt and SystemExit propagate.
-            _stdlib_logger.warning(
-                "loguru not usable (%s: %s); falling back to stdlib logging",
-                type(exc).__name__,
-                exc,
-            )
-            _loguru_cache["factory"] = _LOGURU_UNAVAILABLE
-        else:
-            _loguru_cache["factory"] = _resolve_loguru_logger
-
-    factory = _loguru_cache["factory"]
-    return None if factory is _LOGURU_UNAVAILABLE else factory
-
-
-def _reset_loguru_cache() -> None:
-    """
-    Drop the cached loguru detection result so the next probe re-runs.
-
-    Call this after a runtime install (e.g. ``%pip install loguru`` in
-    a notebook, plugin loaders) or in tests that toggle availability.
-    The cache is shared by sync and async paths, so a single reset
-    suffices for both. See module docstring for the staleness contract.
-    """
-    _loguru_cache.pop("factory", None)
+_IN_LIMITER_CALLBACK: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "token_throttle_in_limiter_callback",
+    default=False,
+)
+_LIMITER_CALLBACK_CONTEXT: contextvars.ContextVar[dict[str, object] | None] = (
+    contextvars.ContextVar("token_throttle_limiter_callback_context", default=None)
+)
 
 
 _EXPECTED_CALLBACK_PARAMS: dict[str, frozenset[str]] = {
@@ -234,6 +127,32 @@ _STDLIB_LEVEL_MAP: dict[str, int] = {
 }
 
 
+def limiter_callback_context_active() -> bool:
+    """Return whether execution is currently inside limiter callback dispatch."""
+    return _IN_LIMITER_CALLBACK.get()
+
+
+def set_limiter_callback_context(
+    **context: object,
+) -> contextvars.Token[dict[str, object] | None]:
+    """Set request/reservation context propagated to backend callback payloads."""
+    return _LIMITER_CALLBACK_CONTEXT.set(
+        {key: value for key, value in context.items() if value is not None}
+    )
+
+
+def reset_limiter_callback_context(
+    token: contextvars.Token[dict[str, object] | None],
+) -> None:
+    """Restore the previous request/reservation callback context."""
+    _LIMITER_CALLBACK_CONTEXT.reset(token)
+
+
+def current_limiter_callback_context() -> dict[str, object]:
+    """Return the current request/reservation callback context, if any."""
+    return dict(_LIMITER_CALLBACK_CONTEXT.get() or {})
+
+
 def _validate_log_level(level: str | None, param_name: str) -> None:
     if level is None:
         return
@@ -244,57 +163,86 @@ def _validate_log_level(level: str | None, param_name: str) -> None:
     if not level.strip():
         raise ValueError(f"{param_name} must not be empty or whitespace-only")
     if level.upper() not in _STDLIB_LEVEL_MAP:
-        loguru_factory = _probe_loguru()
-        if loguru_factory is None:
-            raise ValueError(
-                f"Unknown log level {level!r} for {param_name}; "
-                f"valid levels: {sorted(_STDLIB_LEVEL_MAP)}"
-            )
+        raise ValueError(
+            f"Unknown log level {level!r} for {param_name}; "
+            f"valid levels: {sorted(_STDLIB_LEVEL_MAP)}"
+        )
+
+
+def _log_context(kwargs: dict[str, object]) -> str:
+    return " ".join(f"{key}={value!r}" for key, value in kwargs.items())
 
 
 def _log(level: str, message: str, **kwargs) -> None:
-    """
-    Log using loguru if available, otherwise stdlib logging.
-
-    ``level`` must be a non-None string.  Callers are closures inside the
-    ``create_*_callbacks`` factories; those closures are only registered when
-    their level parameter is truthy (see e.g. ``on_wait_start if wait_start
-    else None`` guards), so ``_log`` is never reachable with ``level=None``.
-
-    Resolves the loguru logger fresh per call (via the cached factory)
-    so post-probe API drift surfaces as a clear error at the call site
-    rather than from a poisoned cached reference.
-    """
+    """Log rate-limiter callback events through stdlib logging only."""
     if not isinstance(level, str):
         raise TypeError(f"_log level must be str, got {type(level).__name__}")
-    loguru_factory = _probe_loguru()
-    if loguru_factory is not None:
-        loguru_factory().log(level, message, **kwargs)
+    # Intentional KeyError on unknown levels: callers validate public inputs.
+    stdlib_level = _STDLIB_LEVEL_MAP[level.upper()]
+    if kwargs:
+        _stdlib_logger.log(
+            stdlib_level,
+            "%s | %s",
+            message,
+            _log_context(kwargs),
+            extra=kwargs,
+        )
     else:
-        # Intentional KeyError on unknown levels — _log() is private and only
-        # called from create_*_callbacks() factories with known level strings.
-        stdlib_level = _STDLIB_LEVEL_MAP[level.upper()]
-        if kwargs:
-            extra = " ".join(f"{k}={v!r}" for k, v in kwargs.items())
-            _stdlib_logger.log(stdlib_level, "%s | %s", message, extra)
-        else:
-            _stdlib_logger.log(stdlib_level, message)
+        _stdlib_logger.log(stdlib_level, message)
 
 
-def _log_callback_timeout(timeout: float) -> None:
+def _callback_log_extra(
+    callback_slot: str | None,
+    kwargs: dict[str, object],
+) -> dict[str, object]:
+    extra = current_limiter_callback_context()
+    event = kwargs.get("event")
+    for name in ("model_family", "reservation_id"):
+        value = kwargs.get(name)
+        if value is None and event is not None:
+            value = getattr(event, name, None)
+        if value is not None:
+            extra[name] = value
+    if "bucket_id" in kwargs and kwargs["bucket_id"] is not None:
+        extra["bucket_id"] = kwargs["bucket_id"]
+    elif "usage_metric" in kwargs and "per_seconds" in kwargs:
+        extra["bucket_id"] = (kwargs["usage_metric"], kwargs["per_seconds"])
+    elif event is not None:
+        bucket_ids = getattr(event, "bucket_ids", None)
+        if bucket_ids is not None and len(bucket_ids) == 1:
+            extra["bucket_id"] = next(iter(bucket_ids))
+    if callback_slot is not None:
+        extra["callback_slot"] = callback_slot
+    return extra
+
+
+def _log_callback_timeout(
+    timeout: float,
+    *,
+    callback_slot: str | None,
+    kwargs: dict[str, object],
+) -> None:
+    extra = _callback_log_extra(callback_slot, kwargs)
     _stdlib_logger.warning(
-        "Rate limiter callback exceeded %.3fs timeout; skipping", timeout
+        "Rate limiter callback exceeded %.3fs timeout; skipping",
+        timeout,
+        extra=extra,
     )
 
 
-def _log_late_callback_exception(exc: BaseException) -> None:
+def _log_late_callback_exception(
+    exc: BaseException,
+    *,
+    callback_slot: str | None,
+    kwargs: dict[str, object],
+) -> None:
     msg = (
         "Rate limiter callback raised after callback_timeout elapsed "
         f"{type(exc).__name__}: {exc}"
     )
     with contextlib.suppress(Warning):
         warnings.warn(msg, RuntimeWarning, stacklevel=3)
-    _stdlib_logger.warning(msg)
+    _stdlib_logger.warning(msg, extra=_callback_log_extra(callback_slot, kwargs))
 
 
 def _invoke_sync_callback_checked(callback, **kwargs) -> None:
@@ -310,21 +258,29 @@ def _invoke_sync_callback_checked(callback, **kwargs) -> None:
 async def _invoke_async_callback_with_timeout(
     callback,
     callback_timeout: float | None,
+    *,
+    callback_slot: str | None = None,
     **kwargs,
 ) -> None:
-    kwargs = _accepted_callback_kwargs(callback, kwargs)
+    callback_kwargs = _accepted_callback_kwargs(callback, kwargs)
     if callback_timeout is None:
-        await callback(**kwargs)
+        await callback(**callback_kwargs)
         return
     try:
-        await asyncio.wait_for(callback(**kwargs), timeout=callback_timeout)
+        await asyncio.wait_for(callback(**callback_kwargs), timeout=callback_timeout)
     except TimeoutError:
-        _log_callback_timeout(callback_timeout)
+        _log_callback_timeout(
+            callback_timeout,
+            callback_slot=callback_slot,
+            kwargs=kwargs,
+        )
 
 
 def _invoke_sync_callback_with_timeout(
     callback,
     callback_timeout: float | None,
+    *,
+    callback_slot: str | None = None,
     **kwargs,
 ) -> None:
     kwargs = _accepted_callback_kwargs(callback, kwargs)
@@ -349,7 +305,11 @@ def _invoke_sync_callback_with_timeout(
         try:
             done.result()
         except BaseException as exc:  # noqa: BLE001 - cannot propagate after timeout
-            _log_late_callback_exception(exc)
+            _log_late_callback_exception(
+                exc,
+                callback_slot=callback_slot,
+                kwargs=kwargs,
+            )
 
     # Timeout-wrapped sync callbacks run in a helper thread.  Copy the caller's
     # contextvars context so ambient tracing/request state survives dispatch.
@@ -358,7 +318,11 @@ def _invoke_sync_callback_with_timeout(
     try:
         future.result(timeout=callback_timeout)
     except concurrent.futures.TimeoutError:
-        _log_callback_timeout(callback_timeout)
+        _log_callback_timeout(
+            callback_timeout,
+            callback_slot=callback_slot,
+            kwargs=kwargs,
+        )
         if future.done():
             log_late_exception(future)
         else:
@@ -429,8 +393,10 @@ async def safe_invoke_async_callback(
     *,
     critical: tuple[type[BaseException], ...],
     log_label: str,
+    callback_slot: str | None = None,
     **kwargs,
 ) -> None:
+    token = _IN_LIMITER_CALLBACK.set(True)
     try:
         await callback(**_accepted_callback_kwargs(callback, kwargs))
     except critical:
@@ -441,7 +407,12 @@ async def safe_invoke_async_callback(
         msg = f"{log_label} raised {type(exc).__name__}: {exc}"
         with contextlib.suppress(Warning):
             warnings.warn(msg, RuntimeWarning, stacklevel=3)
-        _stdlib_logger.warning(msg)
+        _stdlib_logger.warning(
+            msg,
+            extra=_callback_log_extra(callback_slot, kwargs),
+        )
+    finally:
+        _IN_LIMITER_CALLBACK.reset(token)
 
 
 def safe_invoke_sync_callback(
@@ -449,8 +420,10 @@ def safe_invoke_sync_callback(
     *,
     critical: tuple[type[BaseException], ...],
     log_label: str,
+    callback_slot: str | None = None,
     **kwargs,
 ) -> None:
+    token = _IN_LIMITER_CALLBACK.set(True)
     try:
         _invoke_sync_callback_checked(
             callback, **_accepted_callback_kwargs(callback, kwargs)
@@ -463,7 +436,12 @@ def safe_invoke_sync_callback(
         msg = f"{log_label} raised {type(exc).__name__}: {exc}"
         with contextlib.suppress(Warning):
             warnings.warn(msg, RuntimeWarning, stacklevel=3)
-        _stdlib_logger.warning(msg)
+        _stdlib_logger.warning(
+            msg,
+            extra=_callback_log_extra(callback_slot, kwargs),
+        )
+    finally:
+        _IN_LIMITER_CALLBACK.reset(token)
 
 
 def with_callback_timeout(
@@ -474,22 +452,39 @@ def with_callback_timeout(
         return None
     callbacks.revalidate()
 
-    def wrap(callback):
+    def wrap(callback, callback_slot: str):
         if callback is None:
             return None
 
         async def wrapped(**kwargs) -> None:
-            await _invoke_async_callback_with_timeout(callback, timeout, **kwargs)
+            await _invoke_async_callback_with_timeout(
+                callback,
+                timeout,
+                callback_slot=callback_slot,
+                **kwargs,
+            )
 
         return wrapped
 
     return RateLimiterCallbacks(
-        on_wait_start=wrap(callbacks.on_wait_start),
-        after_wait_end_consumption=wrap(callbacks.after_wait_end_consumption),
-        on_capacity_consumed=wrap(callbacks.on_capacity_consumed),
-        on_capacity_refunded=wrap(callbacks.on_capacity_refunded),
-        on_missing_consumption_data=wrap(callbacks.on_missing_consumption_data),
-        on_lifecycle_event=wrap(callbacks.on_lifecycle_event),
+        on_wait_start=wrap(callbacks.on_wait_start, "on_wait_start"),
+        after_wait_end_consumption=wrap(
+            callbacks.after_wait_end_consumption,
+            "after_wait_end_consumption",
+        ),
+        on_capacity_consumed=wrap(
+            callbacks.on_capacity_consumed,
+            "on_capacity_consumed",
+        ),
+        on_capacity_refunded=wrap(
+            callbacks.on_capacity_refunded,
+            "on_capacity_refunded",
+        ),
+        on_missing_consumption_data=wrap(
+            callbacks.on_missing_consumption_data,
+            "on_missing_consumption_data",
+        ),
+        on_lifecycle_event=wrap(callbacks.on_lifecycle_event, "on_lifecycle_event"),
     )
 
 
@@ -501,22 +496,39 @@ def with_sync_callback_timeout(
         return None
     callbacks.revalidate()
 
-    def wrap(callback):
+    def wrap(callback, callback_slot: str):
         if callback is None:
             return None
 
         def wrapped(**kwargs) -> None:
-            _invoke_sync_callback_with_timeout(callback, timeout, **kwargs)
+            _invoke_sync_callback_with_timeout(
+                callback,
+                timeout,
+                callback_slot=callback_slot,
+                **kwargs,
+            )
 
         return wrapped
 
     return SyncRateLimiterCallbacks(
-        on_wait_start=wrap(callbacks.on_wait_start),
-        after_wait_end_consumption=wrap(callbacks.after_wait_end_consumption),
-        on_capacity_consumed=wrap(callbacks.on_capacity_consumed),
-        on_capacity_refunded=wrap(callbacks.on_capacity_refunded),
-        on_missing_consumption_data=wrap(callbacks.on_missing_consumption_data),
-        on_lifecycle_event=wrap(callbacks.on_lifecycle_event),
+        on_wait_start=wrap(callbacks.on_wait_start, "on_wait_start"),
+        after_wait_end_consumption=wrap(
+            callbacks.after_wait_end_consumption,
+            "after_wait_end_consumption",
+        ),
+        on_capacity_consumed=wrap(
+            callbacks.on_capacity_consumed,
+            "on_capacity_consumed",
+        ),
+        on_capacity_refunded=wrap(
+            callbacks.on_capacity_refunded,
+            "on_capacity_refunded",
+        ),
+        on_missing_consumption_data=wrap(
+            callbacks.on_missing_consumption_data,
+            "on_missing_consumption_data",
+        ),
+        on_lifecycle_event=wrap(callbacks.on_lifecycle_event, "on_lifecycle_event"),
     )
 
 
@@ -877,7 +889,7 @@ def _merge_sync_rate_limiter_callbacks(
 
 
 # ---------------------------------------------------------------------------
-# Auto-detect callback factories (loguru if available, else stdlib logging)
+# Stdlib logging callback factories
 # ---------------------------------------------------------------------------
 
 
@@ -892,11 +904,10 @@ def create_logging_callbacks(
     """
     Create async callbacks that log rate-limiter events.
 
-    Uses loguru when it is importable and passes a small API smoke test;
-    otherwise falls back to the stdlib ``token_throttle`` logger. Each keyword
-    selects the log level for one callback slot. Pass ``None`` to leave that
-    slot unset. The returned callbacks are suitable for ``RateLimiter`` and
-    async backends.
+    Emits through the stdlib ``token_throttle`` logger. Each keyword selects
+    the log level for one callback slot. Pass ``None`` to leave that slot
+    unset. The returned callbacks are suitable for ``RateLimiter`` and async
+    backends.
     """
     for _name, _val in (
         ("wait_start", wait_start),
@@ -912,34 +923,46 @@ def create_logging_callbacks(
     capacity_refunded_level = capacity_refunded
     missing_consumption_data_level = missing_consumption_data
 
-    async def on_wait_start(
+    async def on_wait_start(  # noqa: PLR0913
         *,
         model_family: str,
         usage: FrozenUsage,
         preconsumption_capacities: Capacities,
+        model_alias: str | None = None,
+        request_id: str | None = None,
+        reservation_id: str | None = None,
     ) -> None:
         assert wait_start_level is not None  # noqa: S101
         _log(
             wait_start_level,
             "Rate limiter wait starting",
             model_family=model_family,
+            model_alias=model_alias,
+            request_id=request_id,
+            reservation_id=reservation_id,
             usage=usage,
             preconsumption_capacities=preconsumption_capacities,
         )
 
-    async def after_wait_end_consumption(
+    async def after_wait_end_consumption(  # noqa: PLR0913
         *,
         model_family: str,
         usage: FrozenUsage,
         preconsumption_capacities: Capacities,
         postconsumption_capacities: Capacities,
         wait_time_s: float,
+        model_alias: str | None = None,
+        request_id: str | None = None,
+        reservation_id: str | None = None,
     ) -> None:
         assert wait_end_consumption_level is not None  # noqa: S101
         _log(
             wait_end_consumption_level,
             "Rate limiter wait complete",
             model_family=model_family,
+            model_alias=model_alias,
+            request_id=request_id,
+            reservation_id=reservation_id,
             usage=usage,
             preconsumption_capacities=preconsumption_capacities,
             postconsumption_capacities=postconsumption_capacities,
@@ -1031,10 +1054,9 @@ def create_sync_logging_callbacks(
     """
     Create synchronous callbacks that log rate-limiter events.
 
-    Uses loguru when it is importable and passes a small API smoke test;
-    otherwise falls back to the stdlib ``token_throttle`` logger. Each keyword
-    selects the log level for one callback slot. Pass ``None`` to leave that
-    slot unset. The returned callbacks are suitable for ``SyncRateLimiter`` and
+    Emits through the stdlib ``token_throttle`` logger. Each keyword selects
+    the log level for one callback slot. Pass ``None`` to leave that slot
+    unset. The returned callbacks are suitable for ``SyncRateLimiter`` and
     synchronous backends.
     """
     for _name, _val in (
@@ -1051,34 +1073,46 @@ def create_sync_logging_callbacks(
     capacity_refunded_level = capacity_refunded
     missing_consumption_data_level = missing_consumption_data
 
-    def on_wait_start(
+    def on_wait_start(  # noqa: PLR0913
         *,
         model_family: str,
         usage: FrozenUsage,
         preconsumption_capacities: Capacities,
+        model_alias: str | None = None,
+        request_id: str | None = None,
+        reservation_id: str | None = None,
     ) -> None:
         assert wait_start_level is not None  # noqa: S101
         _log(
             wait_start_level,
             "Rate limiter wait starting",
             model_family=model_family,
+            model_alias=model_alias,
+            request_id=request_id,
+            reservation_id=reservation_id,
             usage=usage,
             preconsumption_capacities=preconsumption_capacities,
         )
 
-    def after_wait_end_consumption(
+    def after_wait_end_consumption(  # noqa: PLR0913
         *,
         model_family: str,
         usage: FrozenUsage,
         preconsumption_capacities: Capacities,
         postconsumption_capacities: Capacities,
         wait_time_s: float,
+        model_alias: str | None = None,
+        request_id: str | None = None,
+        reservation_id: str | None = None,
     ) -> None:
         assert wait_end_consumption_level is not None  # noqa: S101
         _log(
             wait_end_consumption_level,
             "Rate limiter wait complete",
             model_family=model_family,
+            model_alias=model_alias,
+            request_id=request_id,
+            reservation_id=reservation_id,
             usage=usage,
             preconsumption_capacities=preconsumption_capacities,
             postconsumption_capacities=postconsumption_capacities,
@@ -1137,297 +1171,6 @@ def create_sync_logging_callbacks(
         assert missing_consumption_data_level is not None  # noqa: S101
         _log(
             missing_consumption_data_level,
-            "Rate limiter missing consumption data",
-            model_family=model_family,
-            usage_metric=usage_metric,
-            per_seconds=per_seconds,
-            missing_state_reason=missing_state_reason,
-            missing_state_keys=missing_state_keys,
-            present_state_keys=present_state_keys,
-        )
-
-    return SyncRateLimiterCallbacks(
-        on_wait_start=on_wait_start if wait_start else None,
-        after_wait_end_consumption=(
-            after_wait_end_consumption if wait_end_consumption else None
-        ),
-        on_capacity_consumed=on_capacity_consumed if capacity_consumed else None,
-        on_capacity_refunded=on_capacity_refunded if capacity_refunded else None,
-        on_missing_consumption_data=(
-            on_missing_consumption_data if missing_consumption_data else None
-        ),
-    )
-
-
-# ---------------------------------------------------------------------------
-# Loguru-only callback factories (backward compatibility)
-# ---------------------------------------------------------------------------
-
-
-def _get_loguru_logger():
-    """
-    Resolve a working loguru logger or raise ``ImportError``.
-
-    Used by the explicit ``create_loguru_callbacks`` factories. Calls
-    the cached factory each invocation so post-probe API drift surfaces
-    via the live attribute lookup at the call site.
-    """
-    loguru_factory = _probe_loguru()
-    if loguru_factory is None:
-        raise ImportError(
-            'The "loguru" package is required for loguru callbacks. '
-            'Install it with: pip install "token-throttle[loguru]"'
-        )
-    return loguru_factory()
-
-
-def create_loguru_callbacks(
-    *,
-    # Defaults are None (opt-in), unlike create_logging_callbacks which defaults
-    # to "DEBUG" (opt-out).  This is intentional: the loguru factories predate
-    # create_logging_callbacks and changing their defaults would break callers.
-    wait_start: str | None = None,
-    wait_end_consumption: str | None = None,
-    capacity_consumed: str | None = None,
-    capacity_refunded: str | None = None,
-    missing_consumption_data: str | None = None,
-) -> RateLimiterCallbacks:
-    """
-    Create async callbacks that emit only through loguru.
-
-    Unlike ``create_logging_callbacks``, this factory does not fall back to
-    stdlib logging. It raises ``ImportError`` when loguru is unavailable or its
-    logger API is not usable. Each keyword selects the loguru level for one
-    callback slot; pass ``None`` to leave that slot unset.
-    """
-    for _name, _val in (
-        ("wait_start", wait_start),
-        ("wait_end_consumption", wait_end_consumption),
-        ("capacity_consumed", capacity_consumed),
-        ("capacity_refunded", capacity_refunded),
-        ("missing_consumption_data", missing_consumption_data),
-    ):
-        _validate_log_level(_val, _name)
-
-    async def on_wait_start(
-        *,
-        model_family: str,
-        usage: FrozenUsage,
-        preconsumption_capacities: Capacities,
-    ) -> None:
-        logger = _get_loguru_logger()
-        logger.log(
-            wait_start,
-            "Rate limiter wait starting",
-            model_family=model_family,
-            usage=usage,
-            preconsumption_capacities=preconsumption_capacities,
-        )
-
-    async def after_wait_end_consumption(
-        *,
-        model_family: str,
-        usage: FrozenUsage,
-        preconsumption_capacities: Capacities,
-        postconsumption_capacities: Capacities,
-        wait_time_s: float,
-    ) -> None:
-        logger = _get_loguru_logger()
-        logger.log(
-            wait_end_consumption,
-            "Rate limiter wait complete",
-            model_family=model_family,
-            usage=usage,
-            preconsumption_capacities=preconsumption_capacities,
-            postconsumption_capacities=postconsumption_capacities,
-            wait_time_s=wait_time_s,
-        )
-
-    async def on_capacity_consumed(
-        *,
-        model_family: str,
-        usage: FrozenUsage,
-        preconsumption_capacities: Capacities,
-        postconsumption_capacities: Capacities,
-        current_time: float,
-    ) -> None:
-        logger = _get_loguru_logger()
-        logger.log(
-            capacity_consumed,
-            "Rate limiter capacity consumed",
-            model_family=model_family,
-            usage=usage,
-            preconsumption_capacities=preconsumption_capacities,
-            postconsumption_capacities=postconsumption_capacities,
-            current_time=current_time,
-        )
-
-    async def on_capacity_refunded(  # noqa: PLR0913
-        *,
-        model_family: str,
-        reserved_usage: FrozenUsage,
-        actual_usage: FrozenUsage,
-        refunded_usage: FrozenUsage,
-        prerefund_capacities: Capacities,
-        postrefund_capacities: Capacities,
-    ) -> None:
-        logger = _get_loguru_logger()
-        logger.log(
-            capacity_refunded,
-            "Rate limiter capacity refunded",
-            model_family=model_family,
-            reserved_usage=reserved_usage,
-            actual_usage=actual_usage,
-            refunded_usage=refunded_usage,
-            prerefund_capacities=prerefund_capacities,
-            postrefund_capacities=postrefund_capacities,
-        )
-
-    async def on_missing_consumption_data(  # noqa: PLR0913
-        *,
-        model_family: str,
-        usage_metric: str,
-        per_seconds: int,
-        missing_state_reason: str | None = None,
-        missing_state_keys: tuple[str, ...] | None = None,
-        present_state_keys: tuple[str, ...] | None = None,
-    ) -> None:
-        logger = _get_loguru_logger()
-        logger.log(
-            missing_consumption_data,
-            "Rate limiter missing consumption data",
-            model_family=model_family,
-            usage_metric=usage_metric,
-            per_seconds=per_seconds,
-            missing_state_reason=missing_state_reason,
-            missing_state_keys=missing_state_keys,
-            present_state_keys=present_state_keys,
-        )
-
-    return RateLimiterCallbacks(
-        on_wait_start=on_wait_start if wait_start else None,
-        after_wait_end_consumption=(
-            after_wait_end_consumption if wait_end_consumption else None
-        ),
-        on_capacity_consumed=on_capacity_consumed if capacity_consumed else None,
-        on_capacity_refunded=on_capacity_refunded if capacity_refunded else None,
-        on_missing_consumption_data=(
-            on_missing_consumption_data if missing_consumption_data else None
-        ),
-    )
-
-
-def create_sync_loguru_callbacks(
-    *,
-    wait_start: str | None = None,
-    wait_end_consumption: str | None = None,
-    capacity_consumed: str | None = None,
-    capacity_refunded: str | None = None,
-    missing_consumption_data: str | None = None,
-) -> SyncRateLimiterCallbacks:
-    """
-    Create synchronous callbacks that emit only through loguru.
-
-    Unlike ``create_sync_logging_callbacks``, this factory does not fall back
-    to stdlib logging. It raises ``ImportError`` when loguru is unavailable or
-    its logger API is not usable. Each keyword selects the loguru level for one
-    callback slot; pass ``None`` to leave that slot unset.
-    """
-    for _name, _val in (
-        ("wait_start", wait_start),
-        ("wait_end_consumption", wait_end_consumption),
-        ("capacity_consumed", capacity_consumed),
-        ("capacity_refunded", capacity_refunded),
-        ("missing_consumption_data", missing_consumption_data),
-    ):
-        _validate_log_level(_val, _name)
-
-    def on_wait_start(
-        *,
-        model_family: str,
-        usage: FrozenUsage,
-        preconsumption_capacities: Capacities,
-    ) -> None:
-        logger = _get_loguru_logger()
-        logger.log(
-            wait_start,
-            "Rate limiter wait starting",
-            model_family=model_family,
-            usage=usage,
-            preconsumption_capacities=preconsumption_capacities,
-        )
-
-    def after_wait_end_consumption(
-        *,
-        model_family: str,
-        usage: FrozenUsage,
-        preconsumption_capacities: Capacities,
-        postconsumption_capacities: Capacities,
-        wait_time_s: float,
-    ) -> None:
-        logger = _get_loguru_logger()
-        logger.log(
-            wait_end_consumption,
-            "Rate limiter wait complete",
-            model_family=model_family,
-            usage=usage,
-            preconsumption_capacities=preconsumption_capacities,
-            postconsumption_capacities=postconsumption_capacities,
-            wait_time_s=wait_time_s,
-        )
-
-    def on_capacity_consumed(
-        *,
-        model_family: str,
-        usage: FrozenUsage,
-        preconsumption_capacities: Capacities,
-        postconsumption_capacities: Capacities,
-        current_time: float,
-    ) -> None:
-        logger = _get_loguru_logger()
-        logger.log(
-            capacity_consumed,
-            "Rate limiter capacity consumed",
-            model_family=model_family,
-            usage=usage,
-            preconsumption_capacities=preconsumption_capacities,
-            postconsumption_capacities=postconsumption_capacities,
-            current_time=current_time,
-        )
-
-    def on_capacity_refunded(  # noqa: PLR0913
-        *,
-        model_family: str,
-        reserved_usage: FrozenUsage,
-        actual_usage: FrozenUsage,
-        refunded_usage: FrozenUsage,
-        prerefund_capacities: Capacities,
-        postrefund_capacities: Capacities,
-    ) -> None:
-        logger = _get_loguru_logger()
-        logger.log(
-            capacity_refunded,
-            "Rate limiter capacity refunded",
-            model_family=model_family,
-            reserved_usage=reserved_usage,
-            actual_usage=actual_usage,
-            refunded_usage=refunded_usage,
-            prerefund_capacities=prerefund_capacities,
-            postrefund_capacities=postrefund_capacities,
-        )
-
-    def on_missing_consumption_data(  # noqa: PLR0913
-        *,
-        model_family: str,
-        usage_metric: str,
-        per_seconds: int,
-        missing_state_reason: str | None = None,
-        missing_state_keys: tuple[str, ...] | None = None,
-        present_state_keys: tuple[str, ...] | None = None,
-    ) -> None:
-        logger = _get_loguru_logger()
-        logger.log(
-            missing_consumption_data,
             "Rate limiter missing consumption data",
             model_family=model_family,
             usage_metric=usage_metric,
