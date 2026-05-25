@@ -1,3 +1,4 @@
+import logging
 import math
 import warnings
 
@@ -8,7 +9,13 @@ from token_throttle._capacity import (
     _validate_rate_per_sec_finite_positive,
     calculate_capacity,
 )
-from token_throttle._validation import validate_per_seconds
+from token_throttle._validation import (
+    validate_metric,
+    validate_model_family,
+    validate_per_seconds,
+)
+
+_logger = logging.getLogger("token_throttle")
 
 
 class MemoryBucket:
@@ -28,10 +35,17 @@ class MemoryBucket:
     ) -> None:
         self.capacity: float | None = None
         self.last_checked: float | None = None
-        self.usage_metric = metric
+        self.usage_metric = validate_metric(metric)
+        self.model_family = validate_model_family(model_family)
         self.per_seconds = validate_per_seconds(per_seconds)
-        self._bucket_id = f"memory:{model_family}:{metric}:{int(self.per_seconds)}"
+        self._bucket_id = (
+            f"memory:{self.model_family}:{self.usage_metric}:{int(self.per_seconds)}"
+        )
         self.max_capacity = limit
+
+    @property
+    def bucket_id(self) -> str:
+        return self._bucket_id
 
     @property
     def max_capacity(self) -> float:
@@ -104,6 +118,21 @@ class MemoryBucket:
         if self.last_checked is not None and self.capacity is not None:
             time_passed = current_time - self.last_checked
             if time_passed < 0:
+                _logger.warning(
+                    "Negative time_passed detected while updating memory bucket max "
+                    "capacity; metric=%s model_family=%s value=%.4f bucket_id=%s. "
+                    "Likely NTP clock correction. Clamping to 0.",
+                    self.usage_metric,
+                    self.model_family,
+                    time_passed,
+                    self.bucket_id,
+                    extra={
+                        "token_throttle_metric": self.usage_metric,
+                        "token_throttle_model_family": self.model_family,
+                        "token_throttle_value": time_passed,
+                        "token_throttle_bucket_id": self.bucket_id,
+                    },
+                )
                 warnings.warn(
                     f"Negative time_passed ({time_passed:.4f}s) detected in bucket "
                     f"'{self._bucket_id}' — likely NTP clock correction. "

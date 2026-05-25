@@ -503,6 +503,19 @@ def validate_metric(metric: object, *, max_length: int = MAX_METRIC_LENGTH) -> s
     return _validate_key_segment(metric, field_name="metric", max_length=max_length)
 
 
+def validate_model_family(
+    model_family: object,
+    *,
+    max_length: int = MAX_MODEL_FAMILY_LENGTH,
+) -> str:
+    """Validate a model_family key segment."""
+    return _validate_key_segment(
+        model_family,
+        field_name="model_family",
+        max_length=max_length,
+    )
+
+
 def validate_per_seconds(per_seconds: object) -> int:
     """
     Validate the per_seconds parameter for set_max_capacity.

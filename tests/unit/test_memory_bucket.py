@@ -32,6 +32,40 @@ def make_bucket(
     )
 
 
+class TestKeySegmentValidation:
+    def test_valid_bucket_preserves_internal_bucket_id_shape(self):
+        bucket = make_bucket(
+            limit=100,
+            per_seconds=60,
+            metric="requests",
+            model_family="family",
+        )
+
+        assert bucket.usage_metric == "requests"
+        assert bucket.model_family == "family"
+        assert bucket.bucket_id == "memory:family:requests:60"
+
+    @pytest.mark.parametrize(
+        ("metric", "model_family", "match"),
+        [
+            ("", "family", "metric must not be empty"),
+            ("   ", "family", "metric must not be whitespace-only"),
+            ("request tokens", "family", "metric must not contain whitespace"),
+            ("requests", "", "model_family must not be empty"),
+            ("requests", "family:v1", "model_family must not contain ':'"),
+            ("requests", " family", "model_family must not contain leading"),
+        ],
+    )
+    def test_rejects_invalid_metric_or_model_family_key_segments(
+        self,
+        metric: str,
+        model_family: str,
+        match: str,
+    ):
+        with pytest.raises(ValueError, match=match):
+            make_bucket(metric=metric, model_family=model_family)
+
+
 class TestFreshStart:
     """When capacity and last_checked are None (initial state), bucket returns max_capacity."""
 
@@ -204,6 +238,26 @@ class TestEdgeCases:
         bucket.set_capacity(40.0, current_time=1010.0)
         with pytest.warns(RuntimeWarning, match="memory:my-model:tokens:60"):
             bucket.get_capacity(current_time=1000.0)
+
+    def test_set_max_capacity_negative_time_logs_warning_context(self, caplog):
+        bucket = make_bucket(
+            limit=100,
+            per_seconds=60,
+            model_family="my-model",
+            metric="tokens",
+        )
+        bucket.set_capacity(40.0, current_time=1010.0)
+
+        with (
+            caplog.at_level("WARNING", logger="token_throttle"),
+            pytest.warns(RuntimeWarning, match="Negative time_passed"),
+        ):
+            bucket.set_max_capacity(50.0, current_time=1000.0)
+
+        assert "metric=tokens" in caplog.text
+        assert "model_family=my-model" in caplog.text
+        assert "value=-10.0000" in caplog.text
+        assert "bucket_id=memory:my-model:tokens:60" in caplog.text
 
 
 class TestSetCapacity:

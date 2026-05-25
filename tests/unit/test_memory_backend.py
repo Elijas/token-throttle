@@ -463,6 +463,45 @@ class TestNegativeRefundWarning:
         with pytest.warns(RuntimeWarning, match="exceeds reserved usage"):
             await backend.refund_capacity(reserved, actual)
 
+    async def test_overuse_logs_warning_context(self, caplog):
+        builder = MemoryBackendBuilder()
+        backend = builder.build(_make_config())
+        reserved = frozendict({"tokens": 100.0, "requests": 1.0})
+        actual = frozendict({"tokens": 200.0, "requests": 1.0})
+        await backend.await_for_capacity(reserved)
+
+        with (
+            caplog.at_level("WARNING", logger="token_throttle"),
+            pytest.warns(RuntimeWarning, match="exceeds reserved usage"),
+        ):
+            await backend.refund_capacity(reserved, actual)
+
+        assert "Actual usage exceeds reserved usage" in caplog.text
+        assert "metric=tokens" in caplog.text
+        assert "model_family=test-family" in caplog.text
+        assert "value=-100.0" in caplog.text
+        assert "bucket_id=memory:test-family:tokens:60" in caplog.text
+
+
+class TestConsumeOveruseWarningLogging:
+    async def test_record_usage_overuse_logs_warning_context(self, caplog):
+        builder = MemoryBackendBuilder()
+        backend = builder.build(_make_config())
+
+        with (
+            caplog.at_level("WARNING", logger="token_throttle"),
+            pytest.warns(RuntimeWarning, match="record_usage value"),
+        ):
+            await backend.consume_capacity(
+                frozendict({"tokens": 2000.0, "requests": 1.0})
+            )
+
+        assert "record_usage value exceeds bucket max capacity" in caplog.text
+        assert "metric=tokens" in caplog.text
+        assert "model_family=test-family" in caplog.text
+        assert "value=2000.0" in caplog.text
+        assert "bucket_id=memory:test-family:tokens:60" in caplog.text
+
 
 # ---------------------------------------------------------------------------
 # End-to-end: callback exception must not leak capacity via rate limiter

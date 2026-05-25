@@ -1,5 +1,6 @@
 """Shared token-bucket capacity math — used by all backends (Redis, in-memory, sync, async)."""
 
+import logging
 import math
 import time
 import warnings
@@ -12,6 +13,23 @@ _backward_clock_warned: bool = False
 _backward_clock_last_warning_at: float | None = None
 _BACKWARD_CLOCK_WARNING_INTERVAL_SECONDS = 300.0
 MIN_MAX_CAPACITY = 1e-9
+_logger = logging.getLogger("token_throttle")
+_MEMORY_BUCKET_ID_PARTS = 4
+_REDIS_BUCKET_ID_PARTS = 6
+
+
+def _bucket_context_from_bucket_id(bucket_id: str) -> tuple[str, str]:
+    """Best-effort extraction for memory and Redis bucket key formats."""
+    parts = bucket_id.split(":")
+    if len(parts) >= _MEMORY_BUCKET_ID_PARTS and parts[0] == "memory":
+        return parts[1], parts[2]
+    if (
+        len(parts) >= _REDIS_BUCKET_ID_PARTS
+        and parts[1] == "rate_limiting"
+        and parts[2] == "bucket"
+    ):
+        return parts[3], parts[4]
+    return "<unknown>", "<unknown>"
 
 
 class CalculatedCapacity(StrictDTO):
@@ -152,6 +170,23 @@ def calculate_capacity(  # noqa: PLR0913
         if should_warn:
             _backward_clock_warned = True
             _backward_clock_last_warning_at = now
+            model_family, metric = _bucket_context_from_bucket_id(bucket_id)
+            _logger.warning(
+                "Negative time_passed detected; metric=%s model_family=%s "
+                "value=%.4f bucket_id=%s. Likely NTP clock correction. "
+                "Clamping to 0. Further backward-clock warnings suppressed for %.0fs.",
+                metric,
+                model_family,
+                time_passed,
+                bucket_id,
+                _BACKWARD_CLOCK_WARNING_INTERVAL_SECONDS,
+                extra={
+                    "token_throttle_metric": metric,
+                    "token_throttle_model_family": model_family,
+                    "token_throttle_value": time_passed,
+                    "token_throttle_bucket_id": bucket_id,
+                },
+            )
             warnings.warn(
                 f"Negative time_passed ({time_passed:.4f}s) detected in bucket "
                 f"'{bucket_id}' — likely NTP clock correction. "

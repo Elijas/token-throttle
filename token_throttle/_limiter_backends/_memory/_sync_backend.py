@@ -282,6 +282,23 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
                     if bucket.usage_metric != usage_metric:
                         continue
                     if usage_amount > bucket.max_capacity:
+                        model_family = self._limit_config.get_model_family()
+                        _logger.warning(
+                            "record_usage value exceeds bucket max capacity; "
+                            "metric=%s model_family=%s value=%s bucket_id=%s "
+                            "max_capacity=%s",
+                            usage_metric,
+                            model_family,
+                            usage_amount,
+                            bucket.bucket_id,
+                            bucket.max_capacity,
+                            extra={
+                                "token_throttle_metric": usage_metric,
+                                "token_throttle_model_family": model_family,
+                                "token_throttle_value": usage_amount,
+                                "token_throttle_bucket_id": bucket.bucket_id,
+                            },
+                        )
                         warnings.warn(
                             f"record_usage value for {usage_metric} ({usage_amount}) exceeds "
                             f"bucket max capacity ({bucket.max_capacity}). "
@@ -549,6 +566,31 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
             refund_amount = float(reserved_amount) - float(actual_amount)
 
             if refund_amount < 0:
+                model_family = self._limit_config.get_model_family()
+                for bucket_metric, per_seconds in sorted(refund_bucket_ids):
+                    if bucket_metric != metric:
+                        continue
+                    memory_bucket_id = (
+                        f"memory:{model_family}:{metric}:{int(per_seconds)}"
+                    )
+                    _logger.warning(
+                        "Actual usage exceeds reserved usage; metric=%s "
+                        "model_family=%s value=%s bucket_id=%s "
+                        "actual_usage=%s reserved_usage=%s reservation_id=%s",
+                        metric,
+                        model_family,
+                        refund_amount,
+                        memory_bucket_id,
+                        actual_amount,
+                        reserved_amount,
+                        reservation_id,
+                        extra={
+                            "token_throttle_metric": metric,
+                            "token_throttle_model_family": model_family,
+                            "token_throttle_value": refund_amount,
+                            "token_throttle_bucket_id": memory_bucket_id,
+                        },
+                    )
                 warnings.warn(
                     f"Actual usage ({actual_amount}) for {metric} exceeds "
                     f"reserved usage ({reserved_amount}). Applying negative refund.",

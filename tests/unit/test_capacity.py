@@ -45,11 +45,14 @@ class TestClockSkewBehavior:
     caller-level fix (using Redis server time) can be validated separately.
     """
 
-    def test_negative_time_passed_clamps_to_zero(self):
+    def test_negative_time_passed_clamps_to_zero(self, caplog):
         """When current_time < last_checked, time_passed is clamped to 0."""
         _cap._backward_clock_warned = False
         _cap._backward_clock_last_warning_at = None
-        with warnings.catch_warnings(record=True) as w:
+        with (
+            caplog.at_level("WARNING", logger="token_throttle"),
+            warnings.catch_warnings(record=True) as w,
+        ):
             warnings.simplefilter("always")
             result = calculate_capacity(
                 last_checked=100.0,
@@ -57,13 +60,17 @@ class TestClockSkewBehavior:
                 current_time=90.0,  # 10s "behind" last_checked
                 max_capacity=100.0,
                 rate_per_sec=1.0,
-                bucket_id="test:clock-skew",
+                bucket_id="memory:family:tokens:60",
             )
         # Capacity preserved (no negative refill), but also not reduced
         assert result.amount == 50.0
         assert result.is_fresh_start is False
         assert len(w) == 1
         assert "Negative time_passed" in str(w[0].message)
+        assert "metric=tokens" in caplog.text
+        assert "model_family=family" in caplog.text
+        assert "value=-10.0000" in caplog.text
+        assert "bucket_id=memory:family:tokens:60" in caplog.text
 
     def test_negative_time_warning_is_throttled_not_global_once(self, monkeypatch):
         """Backward-clock warnings re-emit after the throttle window."""
