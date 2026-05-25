@@ -510,17 +510,14 @@ class RedisBackendBuilder(RateLimiterBackendBuilderInterface):
     key is intentionally exempt from expiry because it is a long-lived registry.
 
     ``refund_dedup_ttl_seconds`` controls how long Redis remembers successful
-    refund reservation ids for cross-process idempotency. The default is
-    7 days.
+    refund ids for cross-process idempotency (default: 7 days).
 
     ``owns_redis_client`` defaults to ``False`` because Redis clients are often
-    shared across limiters. Set it to ``True`` only when this builder is the
-    lifecycle owner for ``redis_client``; then limiter ``aclose()`` cascades to
-    ``redis_client.aclose()``.
+    shared across limiters. Set it to ``True`` only when this builder owns
+    ``redis_client``; then limiter ``aclose()`` cascades to the client.
 
     For bounded Redis deployments, prefer ``redis.asyncio.BlockingConnectionPool``
-    and size ``max_connections`` to at least ``max_concurrent_acquires`` plus
-    headroom for lock acquire/release, ``TIME``, and pipeline commands.
+    sized for concurrent acquires plus lock, ``TIME``, and pipeline headroom.
     """
 
     def __init__(  # noqa: PLR0913
@@ -574,6 +571,7 @@ class RedisBackendBuilder(RateLimiterBackendBuilderInterface):
         self,
         max_reservation_lifetime_seconds: float | None,
     ) -> float | None:
+        """Resolve caller lifetime input against Redis bucket and refund TTL settings."""
         return resolve_max_reservation_lifetime_seconds_from_ttls(
             max_reservation_lifetime_seconds=max_reservation_lifetime_seconds,
             bucket_ttl_seconds=self._bucket_ttl_seconds,
@@ -584,6 +582,7 @@ class RedisBackendBuilder(RateLimiterBackendBuilderInterface):
         self,
         max_reservation_lifetime_seconds: float | None,
     ) -> None:
+        """Validate that Redis TTLs outlive the maximum refundable reservation lifetime."""
         validate_reservation_lifetime_ttl_invariant(
             max_reservation_lifetime_seconds=max_reservation_lifetime_seconds,
             bucket_ttl_seconds=self._bucket_ttl_seconds,
@@ -701,6 +700,7 @@ class RedisBackend(RateLimiterBackend):
         self._diagnostic_waiters: dict[str, DiagnosticWaiterState] = {}
 
     def add_bucket(self, bucket: RedisBucket) -> None:
+        """Add a Redis bucket for this backend; it must share the Redis client and key prefix."""
         _ensure_bucket_matches_backend(
             bucket,
             key_prefix=self._key_prefix,
@@ -2990,6 +2990,7 @@ class RedisBackend(RateLimiterBackend):
         buckets: list[RedisBucket],
         cfg: PerModelConfig,
     ) -> None:
+        """Install reconfigured Redis buckets after validating client and key-prefix ownership."""
         _ensure_buckets_match_backend(
             buckets,
             key_prefix=self._key_prefix,

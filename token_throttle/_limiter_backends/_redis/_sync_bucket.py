@@ -592,6 +592,7 @@ class SyncRedisBucket:
     __hash__ = None  # type: ignore[assignment]
 
     def lock(self, **kwargs) -> redis.lock.Lock:
+        """Create this bucket's Redis lock; callers must pass redis-py lock options."""
         return redis.lock.Lock(self._redis, self._lock_key, **kwargs)
 
     def get_capacity(
@@ -708,6 +709,7 @@ class SyncRedisBucket:
         outdated_capacity,
         current_time: float,
     ) -> CalculatedCapacity:
+        """Calculate refilled capacity from Redis state; inputs must be decoded values."""
         return calculate_capacity(
             last_checked=last_checked,
             outdated_capacity=outdated_capacity,

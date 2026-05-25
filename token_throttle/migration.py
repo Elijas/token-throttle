@@ -1,4 +1,9 @@
-"""Pre-upgrade validation helpers for token-throttle configuration dictionaries."""
+"""
+Pre-upgrade helpers for token-throttle v1.4.x to v2.0.0 migrations.
+
+This module does not cover later v5, v6, v7, or v8 breaking changes; use
+``MIGRATION.md`` for those release-specific upgrade notes.
+"""
 
 from __future__ import annotations
 

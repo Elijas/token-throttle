@@ -465,6 +465,7 @@ class SyncRedisBackendBuilder(SyncRateLimiterBackendBuilderInterface):
         self,
         max_reservation_lifetime_seconds: float | None,
     ) -> float | None:
+        """Resolve caller lifetime input against Redis bucket and refund TTL settings."""
         return resolve_max_reservation_lifetime_seconds_from_ttls(
             max_reservation_lifetime_seconds=max_reservation_lifetime_seconds,
             bucket_ttl_seconds=self._bucket_ttl_seconds,
@@ -475,6 +476,7 @@ class SyncRedisBackendBuilder(SyncRateLimiterBackendBuilderInterface):
         self,
         max_reservation_lifetime_seconds: float | None,
     ) -> None:
+        """Validate that Redis TTLs outlive the maximum refundable reservation lifetime."""
         validate_reservation_lifetime_ttl_invariant(
             max_reservation_lifetime_seconds=max_reservation_lifetime_seconds,
             bucket_ttl_seconds=self._bucket_ttl_seconds,
@@ -585,6 +587,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         self._diagnostic_waiters: dict[str, DiagnosticWaiterState] = {}
 
     def add_bucket(self, bucket: SyncRedisBucket) -> None:
+        """Add a sync Redis bucket; it must share this backend's client and key prefix."""
         _ensure_bucket_matches_backend(
             bucket,
             key_prefix=self._key_prefix,
@@ -2635,6 +2638,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         buckets: list[SyncRedisBucket],
         cfg: PerModelConfig,
     ) -> None:
+        """Install reconfigured sync Redis buckets after client and key-prefix validation."""
         _ensure_buckets_match_backend(
             buckets,
             key_prefix=self._key_prefix,

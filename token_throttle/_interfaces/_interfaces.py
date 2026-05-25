@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Annotated, Protocol, runtime_checkable
 
 from pydantic import Field, ValidationInfo, field_validator
 
@@ -19,8 +19,7 @@ from token_throttle._interfaces._models import (
     _validate_key_segment,
 )
 
-UsageCounter = Callable[..., Mapping[str, int | float]]
-"""Synchronous callable that derives a usage mapping from request kwargs.
+_USAGE_COUNTER_DOC = """Synchronous callable that derives a usage mapping from request kwargs.
 
 Counters should accept ``**kwargs`` so they receive the full request payload.
 Fixed-signature counters are still supported for compatibility, but that
@@ -31,6 +30,9 @@ Runtime contract: the callable may return any mapping of metric name to finite
 non-negative ``int`` or ``float`` values. The limiter validates and freezes the
 mapping before using it.
 """
+UsageCounter = Annotated[Callable[..., Mapping[str, int | float]], _USAGE_COUNTER_DOC]
+if not TYPE_CHECKING:
+    UsageCounter.__doc__ = _USAGE_COUNTER_DOC
 
 
 class PerModelConfig(StrictDTO):

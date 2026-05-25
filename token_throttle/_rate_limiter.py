@@ -631,24 +631,24 @@ class RateLimiter(BaseRateLimiter):
     """
     Top-level async rate limiter — the main public entry point.
 
-    Architecture:
-      1. A *config* (static ``PerModelConfig`` or callable ``PerModelConfigGetter``)
-         resolves a model name to quotas, a ``model_family``, and an optional
-         ``usage_counter``.
-      2. Each unique ``model_family`` gets its own ``RateLimiterBackend``,
-         built lazily on first use and cached for the limiter's lifetime.
-      3. ``acquire_capacity`` blocks until capacity is available;
-         ``record_usage`` consumes immediately (capacity may go negative).
-         Both return a ``CapacityReservation`` that must be passed to
-         ``refund_capacity`` after the API call completes.
+    A config resolves model names to quotas and model families. Each model
+    family gets a lazy backend. ``acquire_capacity`` blocks until capacity is
+    available; ``record_usage`` consumes immediately. Refunds use the
+    limiter's acquire-time reservation snapshot as authority.
 
-    ``close_drain_timeout_seconds`` bounds how long ``aclose()`` waits for
-    acquire calls that already registered a pending reservation to finish their
-    limiter-side state update before the limiter is marked closed.
+    Example usage:
+    ```python
+    import asyncio
+    from token_throttle import MemoryBackendBuilder, PerModelConfig, Quota, RateLimiter, UsageQuotas
 
-    Refunds use the limiter's internal acquire-time reservation snapshot as
-    authority. Mutating or ``model_copy()``-ing the returned reservation does
-    not change the usage, bucket ids, or model family that this limiter refunds.
+    async def main() -> None:
+        cfg = PerModelConfig(quotas=UsageQuotas([Quota(metric="tokens", limit=1000)]))
+        limiter = RateLimiter(cfg, backend=MemoryBackendBuilder())
+        reservation = await limiter.acquire_capacity({"tokens": 100}, model="demo")
+        await limiter.refund_capacity({"tokens": 60}, reservation)
+        await limiter.aclose()
+    asyncio.run(main())
+    ```
     """
 
     def __init__(  # noqa: PLR0913, PLR0915

@@ -955,6 +955,7 @@ class MemoryBackend(RateLimiterBackend):
         buckets: list[MemoryBucket],
         cfg: PerModelConfig,
     ) -> None:
+        """Install migrated bucket state after config revalidation under the backend condition."""
         self._condition = condition
         self._buckets = buckets
         self._usage_metric_names = {bucket.usage_metric for bucket in buckets}

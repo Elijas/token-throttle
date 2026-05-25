@@ -603,6 +603,17 @@ class SyncRateLimiter:
     Refunds use the limiter's internal acquire-time reservation snapshot as
     authority. Mutating or ``model_copy()``-ing the returned reservation does
     not change the usage, bucket ids, or model family that this limiter refunds.
+
+    Example usage:
+    ```python
+    from token_throttle import SyncMemoryBackendBuilder, PerModelConfig, Quota, SyncRateLimiter, UsageQuotas
+
+    cfg = PerModelConfig(quotas=UsageQuotas([Quota(metric="tokens", limit=1000)]))
+    limiter = SyncRateLimiter(cfg, backend=SyncMemoryBackendBuilder())
+    reservation = limiter.acquire_capacity({"tokens": 100}, model="demo")
+    limiter.refund_capacity({"tokens": 60}, reservation)
+    limiter.close()
+    ```
     """
 
     def __init__(  # noqa: PLR0913, PLR0915

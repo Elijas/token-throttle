@@ -694,6 +694,7 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
         reserved_usage: FrozenUsage,
         actual_usage: FrozenUsage,
     ) -> None:
+        """Refund unused sync memory capacity; usage keys must match configured buckets."""
         self.refund_capacity_for_buckets(
             reserved_usage,
             actual_usage,
@@ -927,6 +928,7 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
         buckets: list[MemoryBucket],
         cfg: PerModelConfig,
     ) -> None:
+        """Install migrated bucket state after config revalidation under the backend condition."""
         self._condition = condition
         self._buckets = buckets
         self._usage_metric_names = {bucket.usage_metric for bucket in buckets}

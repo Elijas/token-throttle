@@ -146,6 +146,14 @@ class Quota(StrictDTO):
     the Python level — this is a CPython limitation, not a library bug.
     Do not mutate instances after construction; hash stability depends
     on immutability.
+
+    Example usage:
+    ```python
+    from token_throttle import Quota
+
+    quota = Quota(metric="tokens", limit=90_000, per_seconds=60)
+    assert quota.metric == "tokens"
+    ```
     """
 
     DEFAULT_SECONDS: ClassVar[int] = 60
@@ -235,6 +243,14 @@ class UsageQuotas:
     class and exact ``Quota`` instances only. Iterable inputs are materialized
     with a hard cap of 1000 entries to prevent unbounded generator consumption
     at validation boundaries.
+
+    Example usage:
+    ```python
+    from token_throttle import Quota, UsageQuotas
+
+    quotas = UsageQuotas([Quota(metric="requests", limit=60)])
+    assert quotas.names == ["requests"]
+    ```
     """
 
     def __init__(
@@ -424,6 +440,18 @@ class CapacityReservation(StrictDTO):
     Same ``frozen=True`` caveat as ``Quota``: ``object.__setattr__``
     and ``__dict__`` writes bypass Pydantic's freeze at the CPython level.
     Mutating ``is_unlimited`` via this vector would bypass metering.
+
+    Example usage:
+    ```python
+    from token_throttle import CapacityReservation
+
+    reservation = CapacityReservation(
+        usage={"tokens": 500},
+        model_family="gpt-4o",
+        limiter_instance_id="limiter-1",
+    )
+    assert reservation.usage["tokens"] == 500.0
+    ```
     """
 
     reservation_id: str = Field(
