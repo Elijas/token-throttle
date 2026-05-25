@@ -22,6 +22,21 @@ except ImportError as exc:
     ) from exc
 from frozendict import frozendict
 
+from token_throttle._capacity import calculate_capacity
+from token_throttle._diagnostic import (
+    BackendBucketLimit,
+    BackendIntrospectionDiagnostic,
+    BucketDiagnostic,
+    DiagnosticIssue,
+    DiagnosticOverrideSource,
+    DiagnosticWaiterState,
+    RedisBackendHealthDiagnostic,
+    backend_type_for_object,
+    make_bucket_diagnostic,
+    unavailable_bucket_diagnostic,
+    wait_bucket_diagnostics,
+    waiter_diagnostic_from_state,
+)
 from token_throttle._exceptions import (
     DuplicateRefundError,
     UnknownReservationError,
@@ -304,6 +319,16 @@ def _warn_if_small_redis_pool(redis_client: object, *, stacklevel: int = 3) -> N
         _lock_logger.warning(message)
 
 
+def _private_pool_count(pool: object, attr_name: str) -> int | None:
+    value = getattr(pool, attr_name, None)
+    if value is None:
+        return None
+    try:
+        return len(value)
+    except TypeError:
+        return None
+
+
 def _is_mock_object(value: object) -> bool:
     return type(value).__module__.startswith("unittest.mock")
 
@@ -557,6 +582,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         self._limit_config = limit_config
         self._usage_metric_names: set[str] = {bucket.usage_metric for bucket in buckets}
         self._local_condition = threading.Condition()
+        self._diagnostic_waiters: dict[str, DiagnosticWaiterState] = {}
 
     def add_bucket(self, bucket: SyncRedisBucket) -> None:
         _ensure_bucket_matches_backend(
@@ -591,6 +617,234 @@ class SyncRedisBackend(SyncRateLimiterBackend):
 
     def supports_acquire_marker_authority(self) -> bool:
         return True
+
+    def introspect(self) -> BackendIntrospectionDiagnostic:
+        as_of_monotonic = time.monotonic()
+        buckets = self._snapshot_buckets()
+        issues: list[DiagnosticIssue] = []
+        try:
+            bucket_diagnostics = self._introspect_buckets_read_only(
+                buckets,
+                as_of_monotonic=as_of_monotonic,
+                issues=issues,
+            )
+        except Exception as exc:  # noqa: BLE001
+            issues.append(
+                DiagnosticIssue(
+                    severity="warning",
+                    component="redis_backend",
+                    message=f"Redis backend introspection failed: {type(exc).__name__}: {exc}",
+                    model_family=self._limit_config.get_model_family(),
+                )
+            )
+            quota_limits = {
+                (quota.metric, int(quota.per_seconds)): float(quota.limit)
+                for quota in self._limit_config.quotas
+            }
+            bucket_diagnostics = tuple(
+                unavailable_bucket_diagnostic(
+                    model_family=self._limit_config.get_model_family(),
+                    bucket_id=(bucket.usage_metric, int(bucket.per_seconds)),
+                    configured_limit=quota_limits.get(
+                        (bucket.usage_metric, int(bucket.per_seconds)),
+                        bucket.configured_max_capacity,
+                    ),
+                    local_override=None,
+                    backend_type=backend_type_for_object(self),
+                    as_of_monotonic=as_of_monotonic,
+                )
+                for bucket in buckets
+            )
+        with self._local_condition:
+            waiters = tuple(
+                waiter_diagnostic_from_state(state, as_of_monotonic=as_of_monotonic)
+                for state in sorted(
+                    self._diagnostic_waiters.values(),
+                    key=lambda item: (item.wait_started_monotonic, item.waiter_id),
+                )
+            )
+        return BackendIntrospectionDiagnostic(
+            model_family=self._limit_config.get_model_family(),
+            backend_type=backend_type_for_object(self),
+            as_of_monotonic=as_of_monotonic,
+            buckets=bucket_diagnostics,
+            waits=waiters,
+            memory_health=None,
+            redis_health=self._redis_backend_health(bucket_count=len(buckets)),
+            issues=tuple(issues),
+        )
+
+    def _introspect_buckets_read_only(
+        self,
+        buckets: tuple[SyncRedisBucket, ...],
+        *,
+        as_of_monotonic: float,
+        issues: list[DiagnosticIssue],
+    ) -> tuple[BucketDiagnostic, ...]:
+        if not buckets:
+            return ()
+        current_time = sync_server_time(self._redis)
+        pipeline = self._redis.pipeline()
+        for bucket in buckets:
+            pipeline.get(bucket._last_checked_key)  # noqa: SLF001
+            pipeline.get(bucket._capacity_key)  # noqa: SLF001
+            pipeline.get(bucket._max_capacity_key)  # noqa: SLF001
+        try:
+            results = pipeline.execute()
+        except redis.exceptions.ResponseError as exc:
+            _raise_pipeline_response_error("SyncRedisBackend.introspect", exc)
+        results = _validate_pipeline_results(
+            results,
+            context="SyncRedisBackend.introspect",
+            expected_count=len(buckets) * 3,
+        )
+        diagnostics: list[BucketDiagnostic] = []
+        quota_limits = {
+            (quota.metric, int(quota.per_seconds)): float(quota.limit)
+            for quota in self._limit_config.quotas
+        }
+        for index, bucket in enumerate(buckets):
+            offset = index * 3
+            diagnostics.append(
+                self._diagnostic_bucket_from_raw(
+                    bucket,
+                    last_checked_raw=results[offset],
+                    capacity_raw=results[offset + 1],
+                    override_raw=results[offset + 2],
+                    current_time=current_time,
+                    as_of_monotonic=as_of_monotonic,
+                    configured_limit=quota_limits.get(
+                        (bucket.usage_metric, int(bucket.per_seconds)),
+                        bucket.configured_max_capacity,
+                    ),
+                    issues=issues,
+                )
+            )
+        return tuple(diagnostics)
+
+    def _diagnostic_bucket_from_raw(  # noqa: PLR0913
+        self,
+        bucket: SyncRedisBucket,
+        *,
+        last_checked_raw: object,
+        capacity_raw: object,
+        override_raw: object,
+        current_time: float,
+        as_of_monotonic: float,
+        configured_limit: float,
+        issues: list[DiagnosticIssue],
+    ) -> BucketDiagnostic:
+        metric = bucket.usage_metric
+        per_seconds = int(bucket.per_seconds)
+        try:
+            last_checked = _validate_redis_get_result(
+                last_checked_raw,
+                context=(
+                    f"SyncRedisBackend.introspect({bucket.full_redis_key}) last_checked"
+                ),
+            )
+            stored_capacity = _validate_redis_get_result(
+                capacity_raw,
+                context=f"SyncRedisBackend.introspect({bucket.full_redis_key}) capacity",
+            )
+            override_raw = _validate_redis_get_result(
+                override_raw,
+                context=(
+                    f"SyncRedisBackend.introspect({bucket.full_redis_key}) "
+                    "max_capacity_override"
+                ),
+            )
+            override = bucket._deserialize_max_capacity_override(override_raw)  # noqa: SLF001
+            effective = configured_limit if override is None else override
+            source: DiagnosticOverrideSource = "none" if override is None else "backend"
+            if (last_checked is None) != (stored_capacity is None):
+                issues.append(
+                    DiagnosticIssue(
+                        severity="warning",
+                        component="redis_backend",
+                        message="Redis bucket has partial state",
+                        model_family=self._limit_config.get_model_family(),
+                        metric=metric,
+                        per_seconds=per_seconds,
+                    )
+                )
+                return make_bucket_diagnostic(
+                    model_family=self._limit_config.get_model_family(),
+                    metric=metric,
+                    per_seconds=per_seconds,
+                    backend_type=backend_type_for_object(self),
+                    current_capacity=None,
+                    configured_limit=configured_limit,
+                    effective_max_capacity=effective,
+                    override_source=source,
+                    status="partial_missing",
+                    as_of_monotonic=as_of_monotonic,
+                )
+            calculated = calculate_capacity(
+                last_checked=(None if last_checked is None else float(last_checked)),
+                outdated_capacity=(
+                    None if stored_capacity is None else float(stored_capacity)
+                ),
+                current_time=current_time,
+                max_capacity=effective,
+                rate_per_sec=effective / per_seconds,
+                bucket_id=bucket.full_redis_key,
+            )
+            return make_bucket_diagnostic(
+                model_family=self._limit_config.get_model_family(),
+                metric=metric,
+                per_seconds=per_seconds,
+                backend_type=backend_type_for_object(self),
+                current_capacity=calculated.amount,
+                configured_limit=configured_limit,
+                effective_max_capacity=effective,
+                override_source=source,
+                status="fresh_start" if calculated.is_fresh_start else "ok",
+                as_of_monotonic=as_of_monotonic,
+            )
+        except Exception as exc:  # noqa: BLE001
+            issues.append(
+                DiagnosticIssue(
+                    severity="warning",
+                    component="redis_backend",
+                    message=f"Redis bucket introspection failed: {type(exc).__name__}: {exc}",
+                    model_family=self._limit_config.get_model_family(),
+                    metric=metric,
+                    per_seconds=per_seconds,
+                )
+            )
+            return unavailable_bucket_diagnostic(
+                model_family=self._limit_config.get_model_family(),
+                bucket_id=(metric, per_seconds),
+                configured_limit=configured_limit,
+                local_override=None,
+                backend_type=backend_type_for_object(self),
+                as_of_monotonic=as_of_monotonic,
+                status="corrupt",
+            )
+
+    def _redis_backend_health(
+        self, *, bucket_count: int
+    ) -> RedisBackendHealthDiagnostic:
+        pool = getattr(self._redis, "connection_pool", None)
+        max_connections = getattr(pool, "max_connections", None)
+        if type(max_connections) is not int:
+            max_connections = None
+        in_use = _private_pool_count(pool, "_in_use_connections")
+        available = _private_pool_count(pool, "_available_connections")
+        return RedisBackendHealthDiagnostic(
+            model_family_count=1,
+            bucket_count=bucket_count,
+            connection_pool_class=None if pool is None else type(pool).__name__,
+            connection_pool_max_connections=max_connections,
+            connection_pool_in_use_connections=in_use,
+            connection_pool_available_connections=available,
+            pool_counts_observed_with_private_attrs=(
+                in_use is not None or available is not None
+            ),
+            local_marker_count_estimate=0,
+            local_refund_dedup_count_estimate=0,
+        )
 
     def _refund_dedup_key(self, reservation_id: str | None) -> str | None:
         if reservation_id is None:
@@ -1679,7 +1933,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
             )
         return current_time
 
-    def wait_for_capacity(
+    def wait_for_capacity(  # noqa: PLR0915
         self,
         usage: FrozenUsage,
         *,
@@ -1692,126 +1946,147 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         timeout = validate_timeout(timeout)
         usage = frozendict({metric: float(amount) for metric, amount in usage.items()})
         deadline = None if timeout is None else time.monotonic() + timeout
+        waiter_key = reservation_id or f"redis:{uuid.uuid4().hex}"
+        waiter_registered = False
         has_waited = False
         wait_started_at: float | None = None
         wait_start_callback_overhead = 0.0
-        while True:
-            remaining = (
-                None if deadline is None else max(0.0, deadline - time.monotonic())
-            )
-            try:
-                (
-                    available,
-                    preconsumption,
-                    postconsumption,
-                    consumed_monotonic,
-                    consumed_at_seconds,
-                    buckets,
-                ) = self._normalize_check_result(
-                    self._check_and_consume_capacity(
-                        usage,
-                        lock_blocking_timeout=remaining,
-                        reservation_id=reservation_id,
-                        reservation_lifetime_seconds=reservation_lifetime_seconds,
-                    )
+        try:
+            while True:
+                remaining = (
+                    None if deadline is None else max(0.0, deadline - time.monotonic())
                 )
-            except redis.exceptions.LockError as exc:
-                # When deadline is None (no caller timeout), the configured
-                # Redis lock blocking timeout still bounds lock polling.
-                # Propagating raw LockError preserves that distinction from
-                # a caller-level wait timeout.
-                if deadline is None:  # pragma: no cover
-                    raise
-                raise self._capacity_timeout_error(usage, frozendict()) from exc
-            if available:
                 try:
-                    if has_waited:
-                        wait_time_s = max(
-                            0.0,
-                            (consumed_monotonic or time.monotonic())
-                            - (
-                                wait_started_at
-                                or (consumed_monotonic or time.monotonic())
-                            )
-                            - wait_start_callback_overhead,
-                        )
-                        if (
-                            self._callbacks
-                            and self._callbacks.after_wait_end_consumption
-                        ):
-                            self._invoke_callback_safe(
-                                self._callbacks.after_wait_end_consumption,
-                                callback_slot="after_wait_end_consumption",
-                                model_family=self._limit_config.get_model_family(),
-                                preconsumption_capacities=preconsumption,
-                                postconsumption_capacities=postconsumption,
-                                usage=frozendict(usage),
-                                wait_time_s=wait_time_s,
-                                **current_limiter_callback_context(),
-                            )
-                except BaseException:
-                    # KI/SystemExit are the sync analogue of asyncio.CancelledError:
-                    # they can interrupt mid-statement and need the same best-effort
-                    # refund to avoid leaking capacity. Do not narrow to Exception.
-                    try:  # noqa: SIM105
-                        self._refund_cancelled_consumption(
+                    (
+                        available,
+                        preconsumption,
+                        postconsumption,
+                        consumed_monotonic,
+                        consumed_at_seconds,
+                        buckets,
+                    ) = self._normalize_check_result(
+                        self._check_and_consume_capacity(
                             usage,
-                            buckets=buckets,
-                            acquired_marker_key=self._acquired_marker_key(
-                                reservation_id
-                            ),
+                            lock_blocking_timeout=remaining,
+                            reservation_id=reservation_id,
+                            reservation_lifetime_seconds=reservation_lifetime_seconds,
                         )
-                    except BaseException:  # noqa: BLE001, S110
-                        # Best-effort: sync interrupts mirror async cancellation
-                        # cleanup. Swallow so the original interrupt propagates.
-                        pass
-                    raise
-                return consumed_at_seconds
+                    )
+                except redis.exceptions.LockError as exc:
+                    # When deadline is None (no caller timeout), the configured
+                    # Redis lock blocking timeout still bounds lock polling.
+                    # Propagating raw LockError preserves that distinction from
+                    # a caller-level wait timeout.
+                    if deadline is None:  # pragma: no cover
+                        raise
+                    raise self._capacity_timeout_error(usage, frozendict()) from exc
+                if available:
+                    try:
+                        if has_waited:
+                            wait_time_s = max(
+                                0.0,
+                                (consumed_monotonic or time.monotonic())
+                                - (
+                                    wait_started_at
+                                    or (consumed_monotonic or time.monotonic())
+                                )
+                                - wait_start_callback_overhead,
+                            )
+                            if (
+                                self._callbacks
+                                and self._callbacks.after_wait_end_consumption
+                            ):
+                                self._invoke_callback_safe(
+                                    self._callbacks.after_wait_end_consumption,
+                                    callback_slot="after_wait_end_consumption",
+                                    model_family=self._limit_config.get_model_family(),
+                                    preconsumption_capacities=preconsumption,
+                                    postconsumption_capacities=postconsumption,
+                                    usage=frozendict(usage),
+                                    wait_time_s=wait_time_s,
+                                    **current_limiter_callback_context(),
+                                )
+                    except BaseException:
+                        # KI/SystemExit are the sync analogue of asyncio.CancelledError:
+                        # they can interrupt mid-statement and need the same best-effort
+                        # refund to avoid leaking capacity. Do not narrow to Exception.
+                        try:  # noqa: SIM105
+                            self._refund_cancelled_consumption(
+                                usage,
+                                buckets=buckets,
+                                acquired_marker_key=self._acquired_marker_key(
+                                    reservation_id
+                                ),
+                            )
+                        except BaseException:  # noqa: BLE001, S110
+                            # Best-effort: sync interrupts mirror async cancellation
+                            # cleanup. Swallow so the original interrupt propagates.
+                            pass
+                        raise
+                    return consumed_at_seconds
 
-            if deadline is not None and time.monotonic() >= deadline:
-                raise self._capacity_timeout_error(
+                with self._local_condition:
+                    self._upsert_diagnostic_waiter_locked(
+                        waiter_key,
+                        reservation_id=reservation_id,
+                        usage=usage,
+                        capacities=dict(preconsumption),
+                        buckets=buckets,
+                        deadline=deadline,
+                        wait_started_at=wait_started_at,
+                    )
+                    waiter_registered = True
+
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise self._capacity_timeout_error(
+                        usage,
+                        preconsumption,
+                        buckets=buckets,
+                    )
+
+                if not has_waited:
+                    has_waited = True
+                    wait_started_at = time.monotonic()
+                    if self._callbacks and self._callbacks.on_wait_start:
+                        callback_started = time.monotonic()
+                        if deadline is not None and callback_started >= deadline:
+                            raise self._capacity_timeout_error(
+                                usage,
+                                preconsumption,
+                                buckets=buckets,
+                            )
+                        self._invoke_callback_safe(
+                            self._callbacks.on_wait_start,
+                            callback_slot="on_wait_start",
+                            model_family=self._limit_config.get_model_family(),
+                            preconsumption_capacities=preconsumption,
+                            usage=usage,
+                            **current_limiter_callback_context(),
+                        )
+                        wait_start_callback_overhead += (
+                            time.monotonic() - callback_started
+                        )
+                        if deadline is not None and time.monotonic() >= deadline:
+                            raise self._capacity_timeout_error(
+                                usage,
+                                preconsumption,
+                                buckets=buckets,
+                            )
+
+                computed = self._compute_sleep_for_wait(
                     usage,
                     preconsumption,
                     buckets=buckets,
                 )
-
-            if not has_waited:
-                has_waited = True
-                wait_started_at = time.monotonic()
-                if self._callbacks and self._callbacks.on_wait_start:
-                    callback_started = time.monotonic()
-                    if deadline is not None and callback_started >= deadline:
-                        raise self._capacity_timeout_error(
-                            usage,
-                            preconsumption,
-                            buckets=buckets,
-                        )
-                    self._invoke_callback_safe(
-                        self._callbacks.on_wait_start,
-                        callback_slot="on_wait_start",
-                        model_family=self._limit_config.get_model_family(),
-                        preconsumption_capacities=preconsumption,
-                        usage=usage,
-                        **current_limiter_callback_context(),
-                    )
-                    wait_start_callback_overhead += time.monotonic() - callback_started
-                    if deadline is not None and time.monotonic() >= deadline:
-                        raise self._capacity_timeout_error(
-                            usage,
-                            preconsumption,
-                            buckets=buckets,
-                        )
-
-            computed = self._compute_sleep_for_wait(
-                usage,
-                preconsumption,
-                buckets=buckets,
-            )
-            effective = min(computed, self.MAX_CROSS_WORKER_POLL)
-            if deadline is not None:
-                effective = min(effective, max(0, deadline - time.monotonic()))
-            with self._local_condition:
-                self._local_condition.wait(timeout=max(0.001, effective))
+                effective = min(computed, self.MAX_CROSS_WORKER_POLL)
+                if deadline is not None:
+                    effective = min(effective, max(0, deadline - time.monotonic()))
+                with self._local_condition:
+                    self._local_condition.wait(timeout=max(0.001, effective))
+        finally:
+            if waiter_registered:
+                with self._local_condition:
+                    self._diagnostic_waiters.pop(waiter_key, None)
 
     def _compute_sleep(
         self,
@@ -1886,6 +2161,45 @@ class SyncRedisBackend(SyncRateLimiterBackend):
             "Timed out waiting for capacity "
             f"(bottleneck={bottleneck_id}, available={available}, "
             f"requested={requested}, computed_sleep={computed_sleep})"
+        )
+
+    def _upsert_diagnostic_waiter_locked(  # noqa: PLR0913
+        self,
+        waiter_key: str,
+        *,
+        reservation_id: str | None,
+        usage: FrozenUsage,
+        capacities: dict[tuple[str, int], float],
+        buckets: tuple[SyncRedisBucket, ...],
+        deadline: float | None,
+        wait_started_at: float | None,
+    ) -> None:
+        started = wait_started_at or time.monotonic()
+        if not hasattr(self, "_diagnostic_waiters"):
+            self._diagnostic_waiters = {}
+        limits = {
+            (bucket.usage_metric, int(bucket.per_seconds)): BackendBucketLimit(
+                effective_max_capacity=bucket.max_capacity,
+                refill_rate_per_second=bucket.max_capacity / int(bucket.per_seconds),
+            )
+            for bucket in buckets
+        }
+        self._diagnostic_waiters[waiter_key] = DiagnosticWaiterState(
+            waiter_id=waiter_key,
+            reservation_id=reservation_id,
+            model_family=self._limit_config.get_model_family(),
+            model=None,
+            request_id=None,
+            state="waiting_for_capacity",
+            usage=usage,
+            wait_started_monotonic=started,
+            timeout_deadline_monotonic=deadline,
+            blocked_buckets=wait_bucket_diagnostics(
+                model_family=self._limit_config.get_model_family(),
+                usage=usage,
+                capacities=capacities,
+                limits=limits,
+            ),
         )
 
     def refund_capacity(
