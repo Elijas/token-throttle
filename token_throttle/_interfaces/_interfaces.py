@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from pydantic import Field, ValidationInfo, field_validator
 
+from token_throttle._diagnostic import BackendIntrospectionDiagnostic
 from token_throttle._dto import StrictDTO
 from token_throttle._interfaces._callable_utils import is_async_callable
 from token_throttle._interfaces._callbacks import RateLimiterCallbacks
@@ -378,6 +379,15 @@ def backend_uses_default_refund_capacity_for_buckets(
     )
 
 
+@runtime_checkable
+class BackendIntrospectable(Protocol):
+    """Optional async backend diagnostic protocol."""
+
+    async def introspect(self) -> BackendIntrospectionDiagnostic:
+        """Return a read-only best-effort diagnostic snapshot."""
+        ...
+
+
 class BaseRateLimiter(ABC):
     """Abstract base for async limiter implementations."""
 
@@ -572,6 +582,15 @@ def sync_backend_uses_default_refund_capacity_for_buckets(
         getattr(type(backend), "refund_capacity_for_buckets", None)
         is SyncRateLimiterBackend.refund_capacity_for_buckets
     )
+
+
+@runtime_checkable
+class SyncBackendIntrospectable(Protocol):
+    """Optional sync backend diagnostic protocol."""
+
+    def introspect(self) -> BackendIntrospectionDiagnostic:
+        """Return a read-only best-effort diagnostic snapshot."""
+        ...
 
 
 @runtime_checkable
