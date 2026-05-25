@@ -15,6 +15,14 @@ from typing import Self
 
 from frozendict import frozendict
 
+from token_throttle._diagnostic import (
+    BackendIntrospectionDiagnostic,
+    DiagnosticIssue,
+    LimiterSnapshot,
+    RateLimiterDiagnostic,
+    backend_type_from_name,
+    build_rate_limiter_diagnostic,
+)
 from token_throttle._exceptions import (
     AcquireRefundFailedError,
     CardinalityLimitExceededError,
@@ -2831,3 +2839,101 @@ class RateLimiter(BaseRateLimiter):
             )
         else:
             self._model_family_to_runtime_max_capacity.pop(model_family, None)
+
+    async def diagnose(self) -> RateLimiterDiagnostic:
+        """
+        Return a rich, best-effort operator diagnostic snapshot.
+
+        Unlike ``snapshot_state()``, this may perform bounded backend I/O for
+        known buckets. It does not mutate limiter or backend capacity state.
+        """
+        snapshot = await self._diagnostic_snapshot()
+        backend_results: list[BackendIntrospectionDiagnostic] = []
+        issues: list[DiagnosticIssue] = []
+        unsupported: list[str] = []
+        for model_family, backend in snapshot.backends.items():
+            introspect = getattr(backend, "introspect", None)
+            if not callable(introspect):
+                unsupported.append(type(backend).__name__)
+                issues.append(
+                    DiagnosticIssue(
+                        severity="info",
+                        component="custom_backend",
+                        message="backend does not implement optional introspect()",
+                        model_family=model_family,
+                    )
+                )
+                continue
+            try:
+                raw_result = introspect()
+                if inspect.isawaitable(raw_result):
+                    raw_result = await raw_result
+                result = BackendIntrospectionDiagnostic.model_validate(raw_result)
+            except Exception as exc:  # noqa: BLE001
+                issues.append(
+                    DiagnosticIssue(
+                        severity="warning",
+                        component="limiter",
+                        message=(
+                            f"backend introspect() failed: {type(exc).__name__}: {exc}"
+                        ),
+                        model_family=model_family,
+                    )
+                )
+                continue
+            backend_results.append(result)
+            issues.extend(result.issues)
+        return build_rate_limiter_diagnostic(
+            snapshot=snapshot,
+            backend_results=backend_results,
+            unsupported_backend_class_names=tuple(sorted(set(unsupported))),
+            issues=issues,
+        )
+
+    async def _diagnostic_snapshot(self) -> LimiterSnapshot:
+        as_of_monotonic = time.monotonic()
+        generated_at = time.time()
+        async with self._lock:
+            backends = dict(self._model_family_to_backend)
+            quotas = {
+                model_family: dict(bucket_limits)
+                for model_family, bucket_limits in self._model_family_to_quotas.items()
+            }
+            runtime_overrides = {
+                model_family: dict(overrides)
+                for model_family, overrides in (
+                    self._model_family_to_runtime_max_capacity.items()
+                )
+            }
+        async with self._acquire_guard:
+            pending = set(self._pending_acquire_reservations)
+            delivery_cleanup = set(self._acquire_delivery_cleanup_reservations)
+            in_flight = set(self._in_flight_reservation_ids)
+            families = dict(self._in_flight_reservation_family)
+            reservation_snapshots = dict(self._reservation_snapshots)
+            closed = self._closed
+            closing = self._closing
+        async with self._refund_state_lock:
+            committed_refunds = sum(
+                1
+                for refund_state in self._refunded_reservation_ids.values()
+                if _refund_state_is_committed(refund_state)
+            )
+        return LimiterSnapshot(
+            limiter_type="async",
+            limiter_instance_id=self._limiter_instance_id,
+            backend_type=backend_type_from_name(_backend_type_name(self._backend)),
+            generated_at_unix_seconds=generated_at,
+            as_of_monotonic=as_of_monotonic,
+            closed=closed,
+            closing=closing,
+            backends=backends,
+            quotas=quotas,
+            local_runtime_overrides=runtime_overrides,
+            pending_acquire_reservations=pending,
+            acquire_delivery_cleanup_reservations=delivery_cleanup,
+            in_flight_reservation_ids=in_flight,
+            in_flight_reservation_family=families,
+            reservation_snapshots=reservation_snapshots,
+            committed_refund_dedup_count=committed_refunds,
+        )
