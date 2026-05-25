@@ -400,12 +400,24 @@ class SyncRedisBucket:
 
     def _handle_corrupt_override(self, reason: str, *, raw_value: object) -> None:
         _logger.warning(
-            "Ignoring corrupt Redis max_capacity override for bucket %s at key %s: "
-            "%s (raw=%r). Treating it as missing override.",
+            "Corrupt Redis max_capacity override for bucket %s at key %s: "
+            "%s (raw=%r). Refusing to ignore the operator override.",
             self.full_redis_key,
             self._max_capacity_key,
             reason,
             _safe_redis_value_repr(raw_value),
+        )
+
+    def _raise_corrupt_override(
+        self,
+        reason: str,
+        *,
+        raw_value: object,
+    ) -> typing.NoReturn:
+        self._handle_corrupt_override(reason, raw_value=raw_value)
+        raise MaxCapacityOverrideParseError(
+            "Invalid Redis max_capacity override for bucket "
+            f"{self.full_redis_key} at key {self._max_capacity_key}: {reason}"
         )
 
     def _handle_legacy_override(
@@ -450,53 +462,34 @@ class SyncRedisBucket:
             try:
                 decoded = raw_value.decode()
             except UnicodeDecodeError:
-                self._handle_corrupt_override("not valid UTF-8", raw_value=raw_value)
-                return None
+                self._raise_corrupt_override("not valid UTF-8", raw_value=raw_value)
 
         if isinstance(decoded, str):
             try:
                 decoded = json.loads(decoded)
             except json.JSONDecodeError:
-                self._handle_corrupt_override("not valid JSON", raw_value=raw_value)
-                return None
+                self._raise_corrupt_override("not valid JSON", raw_value=raw_value)
 
         if not isinstance(decoded, dict):
-            if self._parse_positive_finite_value(decoded) is not None:
-                self._handle_legacy_override(
-                    "Era 2",
-                    "bare numeric override without configured_max_capacity anchor",
-                    raw_value=raw_value,
-                )
-                return None
-            self._handle_corrupt_override(
+            self._raise_corrupt_override(
                 "JSON must decode to an object", raw_value=raw_value
             )
-            return None
 
         override_value = self._parse_positive_finite_value(
             decoded.get(self._OVERRIDE_LIMIT_KEY)
         )
         if override_value is None:
-            self._handle_corrupt_override(
+            self._raise_corrupt_override(
                 "invalid override_max_capacity", raw_value=raw_value
             )
-            return None
 
         configured_limit = self._parse_positive_finite_value(
             decoded.get(self._CONFIGURED_LIMIT_KEY)
         )
         if configured_limit is None:
-            if self._CONFIGURED_LIMIT_KEY not in decoded:
-                self._handle_legacy_override(
-                    "Era 2",
-                    "JSON override without configured_max_capacity anchor",
-                    raw_value=raw_value,
-                )
-                return None
-            self._handle_corrupt_override(
+            self._raise_corrupt_override(
                 "invalid configured_max_capacity", raw_value=raw_value
             )
-            return None
         if not math.isclose(
             configured_limit,
             self._max_capacity_default,

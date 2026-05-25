@@ -12,10 +12,18 @@ from token_throttle._limiter_backends._memory._backend import MemoryBackendBuild
 from token_throttle._rate_limiter import RateLimiter
 
 try:
+    from token_throttle._limiter_backends._redis._bucket import (
+        MaxCapacityOverrideParseError as AsyncMaxCapacityOverrideParseError,
+    )
     from token_throttle._limiter_backends._redis._bucket import RedisBucket
+    from token_throttle._limiter_backends._redis._sync_bucket import (
+        MaxCapacityOverrideParseError as SyncMaxCapacityOverrideParseError,
+    )
     from token_throttle._limiter_backends._redis._sync_bucket import SyncRedisBucket
 except ImportError:
+    AsyncMaxCapacityOverrideParseError = None
     RedisBucket = None
+    SyncMaxCapacityOverrideParseError = None
     SyncRedisBucket = None
 
 MODEL = "test-model"
@@ -106,7 +114,7 @@ async def test_async_redis_post_write_readback_failure_does_not_abort_commit(
         json.dumps({"override_max_capacity": 50.0}).encode(),
     ],
 )
-async def test_async_redis_bad_legacy_override_does_not_refresh_ttl(
+async def test_async_redis_bad_legacy_override_raises_without_refreshing_ttl(
     payload: bytes,
 ) -> None:
     if RedisBucket is None:
@@ -116,7 +124,9 @@ async def test_async_redis_bad_legacy_override_does_not_refresh_ttl(
     redis_client.get.return_value = payload
     bucket = RedisBucket(quota, cfg, redis_client, key_prefix="test")
 
-    assert await bucket.refresh_max_capacity_from_redis() == pytest.approx(100.0)
+    assert AsyncMaxCapacityOverrideParseError is not None
+    with pytest.raises(AsyncMaxCapacityOverrideParseError):
+        await bucket.refresh_max_capacity_from_redis()
     redis_client.expire.assert_not_called()
 
 
@@ -127,7 +137,9 @@ async def test_async_redis_bad_legacy_override_does_not_refresh_ttl(
         json.dumps({"override_max_capacity": 50.0}).encode(),
     ],
 )
-def test_sync_redis_bad_legacy_override_does_not_refresh_ttl(payload: bytes) -> None:
+def test_sync_redis_bad_legacy_override_raises_without_refreshing_ttl(
+    payload: bytes,
+) -> None:
     if SyncRedisBucket is None:
         pytest.skip("redis package not installed")
     quota, cfg = _redis_bucket_config()
@@ -135,5 +147,7 @@ def test_sync_redis_bad_legacy_override_does_not_refresh_ttl(payload: bytes) -> 
     redis_client.get.return_value = payload
     bucket = SyncRedisBucket(quota, cfg, redis_client, key_prefix="test")
 
-    assert bucket.refresh_max_capacity_from_redis() == pytest.approx(100.0)
+    assert SyncMaxCapacityOverrideParseError is not None
+    with pytest.raises(SyncMaxCapacityOverrideParseError):
+        bucket.refresh_max_capacity_from_redis()
     redis_client.expire.assert_not_called()

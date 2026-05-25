@@ -110,8 +110,8 @@ def test_update_max_capacity_from_result_rejects_non_canonical_input(
 ) -> None:
     bucket = RedisBucket(quota, limit_config, AsyncMock(), key_prefix="test")
 
-    bucket.update_max_capacity_from_result(b"not-json")
-    assert bucket.max_capacity == pytest.approx(20.0)
+    with pytest.raises(MaxCapacityOverrideParseError, match="not valid JSON"):
+        bucket.update_max_capacity_from_result(b"not-json")
 
     with pytest.raises(MaxCapacityOverrideParseError, match="must be bytes"):
         bucket.update_max_capacity_from_result(42)
@@ -129,8 +129,8 @@ def test_json_override_rejects_bool_and_numeric_string(
         }
     ).encode()
 
-    bucket.update_max_capacity_from_result(payload)
-    assert bucket.max_capacity == pytest.approx(20.0)
+    with pytest.raises(MaxCapacityOverrideParseError, match="override_max_capacity"):
+        bucket.update_max_capacity_from_result(payload)
 
 
 async def test_pipeline_response_error_is_translated(

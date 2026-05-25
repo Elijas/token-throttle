@@ -10,7 +10,10 @@ pytest.importorskip("redis", reason="redis package not installed")
 from token_throttle._interfaces._interfaces import PerModelConfig
 from token_throttle._interfaces._models import Quota, UsageQuotas
 from token_throttle._limiter_backends._redis._backend import RedisBackend
-from token_throttle._limiter_backends._redis._bucket import RedisBucket
+from token_throttle._limiter_backends._redis._bucket import (
+    MaxCapacityOverrideParseError,
+    RedisBucket,
+)
 
 
 @pytest.fixture
@@ -63,11 +66,14 @@ async def test_d01_backend_probe_warns_on_era1_legacy_key(
 @pytest.mark.parametrize(
     ("payload", "expected_warning"),
     [
-        (b"85.0", "bare numeric override"),
-        (json.dumps({"override_max_capacity": 85.0}).encode(), "without configured"),
+        (b"85.0", "JSON must decode to an object"),
+        (
+            json.dumps({"override_max_capacity": 85.0}).encode(),
+            "invalid configured_max_capacity",
+        ),
     ],
 )
-def test_d02_era2_legacy_shapes_warn_and_fall_back_to_default(
+def test_d02_era2_legacy_shapes_now_raise(
     quota: Quota,
     limit_config: PerModelConfig,
     caplog: pytest.LogCaptureFixture,
@@ -76,15 +82,17 @@ def test_d02_era2_legacy_shapes_warn_and_fall_back_to_default(
 ) -> None:
     bucket = _bucket(quota, limit_config)
 
-    with caplog.at_level("WARNING"):
+    with (
+        caplog.at_level("WARNING"),
+        pytest.raises(MaxCapacityOverrideParseError),
+    ):
         bucket.update_max_capacity_from_result(payload)
 
     assert bucket.max_capacity == pytest.approx(float(quota.limit))
-    assert "Era 2" in caplog.text
     assert expected_warning in caplog.text
 
 
-async def test_d03_non_utf8_override_warns_and_recovers(
+async def test_d03_non_utf8_override_warns_and_raises(
     quota: Quota,
     limit_config: PerModelConfig,
     caplog: pytest.LogCaptureFixture,
@@ -93,12 +101,14 @@ async def test_d03_non_utf8_override_warns_and_recovers(
     redis_client.get.return_value = b"\xff"
     bucket = _bucket(quota, limit_config, redis_client)
 
-    with caplog.at_level("WARNING"):
-        result = await bucket.get_max_capacity()
+    with (
+        caplog.at_level("WARNING"),
+        pytest.raises(MaxCapacityOverrideParseError),
+    ):
+        await bucket.get_max_capacity()
 
-    assert result == pytest.approx(float(quota.limit))
     assert "not valid UTF-8" in caplog.text
-    assert "Treating it as missing override" in caplog.text
+    assert "Refusing to ignore" in caplog.text
 
 
 def test_d05_float_anchor_uses_isclose() -> None:

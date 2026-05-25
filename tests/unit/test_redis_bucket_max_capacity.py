@@ -15,7 +15,10 @@ pytest.importorskip("redis", reason="redis package not installed")
 
 from token_throttle._interfaces._interfaces import PerModelConfig
 from token_throttle._interfaces._models import Quota, UsageQuotas
-from token_throttle._limiter_backends._redis._bucket import RedisBucket
+from token_throttle._limiter_backends._redis._bucket import (
+    MaxCapacityOverrideParseError,
+    RedisBucket,
+)
 
 
 @pytest.fixture
@@ -137,22 +140,25 @@ class TestGetMaxCapacity:
         mock_redis.get.assert_called_once_with(bucket._max_capacity_key)
 
     def test_handles_invalid_redis_value(self, bucket, mock_redis):
-        """get_max_capacity() ignores corrupt Redis override values."""
+        """get_max_capacity() surfaces corrupt Redis override values."""
         mock_redis.get.return_value = b"not-a-number"
 
-        assert asyncio.run(bucket.get_max_capacity()) == pytest.approx(20.0)
+        with pytest.raises(MaxCapacityOverrideParseError, match="not valid JSON"):
+            asyncio.run(bucket.get_max_capacity())
 
     def test_raises_on_nan_from_redis(self, bucket, mock_redis):
-        """get_max_capacity() ignores non-canonical NaN."""
+        """get_max_capacity() surfaces non-canonical NaN."""
         mock_redis.get.return_value = b"nan"
 
-        assert asyncio.run(bucket.get_max_capacity()) == pytest.approx(20.0)
+        with pytest.raises(MaxCapacityOverrideParseError, match="not valid JSON"):
+            asyncio.run(bucket.get_max_capacity())
 
     def test_raises_on_inf_from_redis(self, bucket, mock_redis):
-        """get_max_capacity() ignores non-canonical inf."""
+        """get_max_capacity() surfaces non-canonical inf."""
         mock_redis.get.return_value = b"inf"
 
-        assert asyncio.run(bucket.get_max_capacity()) == pytest.approx(20.0)
+        with pytest.raises(MaxCapacityOverrideParseError, match="not valid JSON"):
+            asyncio.run(bucket.get_max_capacity())
 
 
 class TestSetMaxCapacity:
@@ -315,29 +321,29 @@ class TestUpdateMaxCapacityFromResult:
         assert bucket._rate_per_sec == pytest.approx(float(quota.limit))
 
     def test_invalid_bytes_raise(self, bucket):
-        """Non-canonical bytes input falls back to default."""
-        bucket.update_max_capacity_from_result(b"not-a-number")
-        assert bucket.max_capacity == pytest.approx(20.0)
+        """Non-canonical bytes input surfaces to the caller."""
+        with pytest.raises(MaxCapacityOverrideParseError, match="not valid JSON"):
+            bucket.update_max_capacity_from_result(b"not-a-number")
 
     def test_nan_raises(self, bucket):
-        """NaN bytes input falls back to default."""
-        bucket.update_max_capacity_from_result(b"nan")
-        assert bucket.max_capacity == pytest.approx(20.0)
+        """NaN bytes input surfaces to the caller."""
+        with pytest.raises(MaxCapacityOverrideParseError, match="not valid JSON"):
+            bucket.update_max_capacity_from_result(b"nan")
 
     def test_inf_raises(self, bucket):
-        """Inf bytes input falls back to default."""
-        bucket.update_max_capacity_from_result(b"inf")
-        assert bucket.max_capacity == pytest.approx(20.0)
+        """Inf bytes input surfaces to the caller."""
+        with pytest.raises(MaxCapacityOverrideParseError, match="not valid JSON"):
+            bucket.update_max_capacity_from_result(b"inf")
 
     def test_negative_raises(self, bucket):
-        """Negative bare value falls back to default."""
-        bucket.update_max_capacity_from_result(b"-5.0")
-        assert bucket.max_capacity == pytest.approx(20.0)
+        """Negative bare value surfaces to the caller."""
+        with pytest.raises(MaxCapacityOverrideParseError, match="object"):
+            bucket.update_max_capacity_from_result(b"-5.0")
 
     def test_zero_raises(self, bucket):
-        """Zero bare value falls back to default."""
-        bucket.update_max_capacity_from_result(b"0")
-        assert bucket.max_capacity == pytest.approx(20.0)
+        """Zero bare value surfaces to the caller."""
+        with pytest.raises(MaxCapacityOverrideParseError, match="object"):
+            bucket.update_max_capacity_from_result(b"0")
 
     def test_stale_override_metadata_for_old_config_is_ignored(self, bucket, quota):
         """Fresh processes should ignore overrides written against an old static limit."""
@@ -371,16 +377,16 @@ class TestUpdateMaxCapacityFromResult:
         assert bucket._max_capacity_cache_time > 0
 
     def test_bare_numeric_string_rejected(self, bucket):
-        """Bare numeric strings are ignored as legacy unanchored overrides."""
-        bucket.update_max_capacity_from_result(b"15.0")
-        assert bucket.max_capacity == pytest.approx(20.0)
+        """Bare numeric strings are invalid unanchored overrides."""
+        with pytest.raises(MaxCapacityOverrideParseError, match="object"):
+            bucket.update_max_capacity_from_result(b"15.0")
 
     def test_dict_missing_configured_max_capacity_rejected(self, bucket):
-        """Dict without configured_max_capacity is ignored as a legacy override."""
+        """Dict without configured_max_capacity surfaces to the caller."""
         payload = json.dumps({"override_max_capacity": 5.0}).encode()
 
-        bucket.update_max_capacity_from_result(payload)
-        assert bucket.max_capacity == pytest.approx(20.0)
+        with pytest.raises(MaxCapacityOverrideParseError, match="configured"):
+            bucket.update_max_capacity_from_result(payload)
 
     def test_no_redis_call(self, bucket, mock_redis):
         """update_max_capacity_from_result does not call Redis."""
