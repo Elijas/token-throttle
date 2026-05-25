@@ -4,11 +4,24 @@ import logging
 import math
 import threading
 import time
+import uuid
 import warnings
 from typing import ClassVar
 
 from frozendict import frozendict
 
+from token_throttle._diagnostic import (
+    BackendBucketLimit,
+    BackendIntrospectionDiagnostic,
+    BucketDiagnostic,
+    DiagnosticOverrideSource,
+    DiagnosticWaiterState,
+    MemoryBackendHealthDiagnostic,
+    backend_type_for_object,
+    make_bucket_diagnostic,
+    wait_bucket_diagnostics,
+    waiter_diagnostic_from_state,
+)
 from token_throttle._exceptions import (
     DuplicateRefundError,
     UnknownReservationError,
@@ -110,9 +123,74 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
             collections.deque()
         )
         self._refunded_reservation_ids_cap = self.REFUNDED_RESERVATION_IDS_CAP
+        self._diagnostic_waiters: dict[str, DiagnosticWaiterState] = {}
 
     def supports_metric_set_change(self) -> bool:
         return True
+
+    def introspect(self) -> BackendIntrospectionDiagnostic:
+        as_of_monotonic = time.monotonic()
+        current_time = time.time()
+        with self._condition:
+            buckets = list(self._buckets)
+            quota_limits = {
+                (quota.metric, int(quota.per_seconds)): float(quota.limit)
+                for quota in self._limit_config.quotas
+            }
+            bucket_diagnostics: list[BucketDiagnostic] = []
+            for bucket in buckets:
+                bucket_id = (bucket.usage_metric, int(bucket.per_seconds))
+                configured_limit = quota_limits.get(bucket_id, bucket.max_capacity)
+                capacity = bucket.get_capacity(current_time)
+                effective = bucket.max_capacity
+                source: DiagnosticOverrideSource = (
+                    "backend"
+                    if not math.isclose(
+                        configured_limit,
+                        effective,
+                        rel_tol=1e-12,
+                        abs_tol=0.0,
+                    )
+                    else "none"
+                )
+                bucket_diagnostics.append(
+                    make_bucket_diagnostic(
+                        model_family=self._limit_config.get_model_family(),
+                        metric=bucket.usage_metric,
+                        per_seconds=int(bucket.per_seconds),
+                        backend_type=backend_type_for_object(self),
+                        current_capacity=capacity.amount,
+                        configured_limit=configured_limit,
+                        effective_max_capacity=effective,
+                        override_source=source,
+                        status="fresh_start" if capacity.is_fresh_start else "ok",
+                        as_of_monotonic=as_of_monotonic,
+                    )
+                )
+            waiters = tuple(
+                waiter_diagnostic_from_state(state, as_of_monotonic=as_of_monotonic)
+                for state in sorted(
+                    self._diagnostic_waiters.values(),
+                    key=lambda item: (item.wait_started_monotonic, item.waiter_id),
+                )
+            )
+            memory_health = MemoryBackendHealthDiagnostic(
+                model_family_count=1,
+                bucket_count=len(buckets),
+                acquired_reservation_id_count=len(self._acquired_reservation_ids),
+                refund_dedup_count=len(self._refunded_reservation_ids),
+                refund_dedup_cap=self._refunded_reservation_ids_cap,
+            )
+        return BackendIntrospectionDiagnostic(
+            model_family=self._limit_config.get_model_family(),
+            backend_type=backend_type_for_object(self),
+            as_of_monotonic=as_of_monotonic,
+            buckets=tuple(bucket_diagnostics),
+            waits=waiters,
+            memory_health=memory_health,
+            redis_health=None,
+            issues=(),
+        )
 
     def _get_capacities(
         self,
@@ -365,6 +443,8 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
         timeout = validate_timeout(timeout)
         usage = frozendict({metric: float(amount) for metric, amount in usage.items()})
         deadline = None if timeout is None else time.monotonic() + timeout
+        waiter_key = reservation_id or f"memory:{uuid.uuid4().hex}"
+        waiter_registered = False
         has_waited = False
         first_failed_pre: Capacities = frozendict()
         wait_started_at: float | None = None
@@ -376,69 +456,85 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
         consumed_monotonic = time.monotonic()
         consumed_buckets: list[MemoryBucket] | None = None
 
-        while True:
-            should_fire_wait_start = False
-            with self._condition:
-                while True:
-                    current_time = time.time()
-                    if reservation_id is not None and (
-                        reservation_id in self._acquired_reservation_ids
-                    ):
-                        raise DuplicateRefundError(
-                            "reservation already acquired",
-                            reason="duplicate_acquire",
-                            reservation_id=reservation_id,
-                            model_family=self._limit_config.get_model_family(),
+        try:
+            while True:
+                should_fire_wait_start = False
+                with self._condition:
+                    while True:
+                        current_time = time.time()
+                        if reservation_id is not None and (
+                            reservation_id in self._acquired_reservation_ids
+                        ):
+                            raise DuplicateRefundError(
+                                "reservation already acquired",
+                                reason="duplicate_acquire",
+                                reservation_id=reservation_id,
+                                model_family=self._limit_config.get_model_family(),
+                            )
+                        preconsumption, fresh = self._get_capacities(current_time)
+                        ok, postconsumption = self._try_consume_locked(
+                            usage,
+                            preconsumption,
                         )
-                    preconsumption, fresh = self._get_capacities(current_time)
-                    ok, postconsumption = self._try_consume_locked(
-                        usage,
-                        preconsumption,
-                    )
+                        if ok:
+                            if reservation_id is not None:
+                                self._acquired_reservation_ids.add(reservation_id)
+                            self._set_capacities(postconsumption, current_time)
+                            consumed_monotonic = time.monotonic()
+                            consumed_buckets = list(self._buckets)
+                            break
+                        self._upsert_diagnostic_waiter_locked(
+                            waiter_key,
+                            reservation_id=reservation_id,
+                            usage=usage,
+                            capacities=dict(preconsumption),
+                            deadline=deadline,
+                            wait_started_at=wait_started_at,
+                        )
+                        waiter_registered = True
+                        if deadline is not None and time.monotonic() >= deadline:
+                            raise self._capacity_timeout_error(usage, preconsumption)
+                        if not has_waited:
+                            has_waited = True
+                            first_failed_pre = preconsumption
+                            wait_started_at = time.monotonic()
+                            should_fire_wait_start = True
+                            break
+                        computed = min(
+                            self._compute_sleep(usage, preconsumption),
+                            self.MAX_CROSS_WORKER_POLL,
+                        )
+                        if deadline is not None:
+                            computed = min(
+                                computed, max(0, deadline - time.monotonic())
+                            )
+                        self._condition.wait(timeout=max(0.001, computed))
                     if ok:
-                        if reservation_id is not None:
-                            self._acquired_reservation_ids.add(reservation_id)
-                        self._set_capacities(postconsumption, current_time)
-                        consumed_monotonic = time.monotonic()
-                        consumed_buckets = list(self._buckets)
                         break
-                    if deadline is not None and time.monotonic() >= deadline:
-                        raise self._capacity_timeout_error(usage, preconsumption)
-                    if not has_waited:
-                        has_waited = True
-                        first_failed_pre = preconsumption
-                        wait_started_at = time.monotonic()
-                        should_fire_wait_start = True
-                        break
-                    computed = min(
-                        self._compute_sleep(usage, preconsumption),
-                        self.MAX_CROSS_WORKER_POLL,
-                    )
-                    if deadline is not None:
-                        computed = min(computed, max(0, deadline - time.monotonic()))
-                    self._condition.wait(timeout=max(0.001, computed))
-                if ok:
-                    break
 
-            if (
-                should_fire_wait_start
-                and self._callbacks
-                and self._callbacks.on_wait_start
-            ):
-                callback_started = time.monotonic()
-                if deadline is not None and callback_started >= deadline:
-                    raise self._capacity_timeout_error(usage, first_failed_pre)
-                self._invoke_callback_safe(
-                    self._callbacks.on_wait_start,
-                    callback_slot="on_wait_start",
-                    model_family=self._limit_config.get_model_family(),
-                    preconsumption_capacities=first_failed_pre,
-                    usage=usage,
-                    **current_limiter_callback_context(),
-                )
-                wait_start_callback_overhead += time.monotonic() - callback_started
-                if deadline is not None and time.monotonic() >= deadline:
-                    raise self._capacity_timeout_error(usage, first_failed_pre)
+                if (
+                    should_fire_wait_start
+                    and self._callbacks
+                    and self._callbacks.on_wait_start
+                ):
+                    callback_started = time.monotonic()
+                    if deadline is not None and callback_started >= deadline:
+                        raise self._capacity_timeout_error(usage, first_failed_pre)
+                    self._invoke_callback_safe(
+                        self._callbacks.on_wait_start,
+                        callback_slot="on_wait_start",
+                        model_family=self._limit_config.get_model_family(),
+                        preconsumption_capacities=first_failed_pre,
+                        usage=usage,
+                        **current_limiter_callback_context(),
+                    )
+                    wait_start_callback_overhead += time.monotonic() - callback_started
+                    if deadline is not None and time.monotonic() >= deadline:
+                        raise self._capacity_timeout_error(usage, first_failed_pre)
+        finally:
+            if waiter_registered:
+                with self._condition:
+                    self._diagnostic_waiters.pop(waiter_key, None)
 
         # All callbacks fired outside the lock.  If BaseException arrives
         # during any callback, refund the consumed capacity so it is not
@@ -555,6 +651,42 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
             "Timed out waiting for capacity "
             f"(bottleneck={bottleneck_id}, available={available}, "
             f"requested={requested}, computed_sleep={computed_sleep})"
+        )
+
+    def _upsert_diagnostic_waiter_locked(  # noqa: PLR0913
+        self,
+        waiter_key: str,
+        *,
+        reservation_id: str | None,
+        usage: FrozenUsage,
+        capacities: dict[tuple[str, int], float],
+        deadline: float | None,
+        wait_started_at: float | None,
+    ) -> None:
+        started = wait_started_at or time.monotonic()
+        limits = {
+            (bucket.usage_metric, int(bucket.per_seconds)): BackendBucketLimit(
+                effective_max_capacity=bucket.max_capacity,
+                refill_rate_per_second=bucket.max_capacity / int(bucket.per_seconds),
+            )
+            for bucket in self._buckets
+        }
+        self._diagnostic_waiters[waiter_key] = DiagnosticWaiterState(
+            waiter_id=waiter_key,
+            reservation_id=reservation_id,
+            model_family=self._limit_config.get_model_family(),
+            model=None,
+            request_id=None,
+            state="waiting_for_capacity",
+            usage=usage,
+            wait_started_monotonic=started,
+            timeout_deadline_monotonic=deadline,
+            blocked_buckets=wait_bucket_diagnostics(
+                model_family=self._limit_config.get_model_family(),
+                usage=usage,
+                capacities=capacities,
+                limits=limits,
+            ),
         )
 
     def refund_capacity(
