@@ -911,6 +911,12 @@ class SyncRateLimiter:
         acquire/record/refund operations raise ``RuntimeError``; reservations
         that remain unrefunded may no longer be refundable.
 
+        Close first drains pending acquires, marks the limiter closed to block
+        new public work, then waits for already-started refunds to leave their
+        per-reservation critical sections before closing backend resources.
+        The pending-acquire and refund drains are bounded by
+        ``close_drain_timeout_seconds`` when configured.
+
         Close is terminal once started: if draining pending acquires or closing
         backend resources fails, the limiter is still marked closed so future
         operations fail cleanly instead of observing a permanent closing state.
@@ -937,6 +943,7 @@ class SyncRateLimiter:
                         self._closed = True
                         self._closing = False
                 if not already_closed:
+                    in_flight_count = self._wait_for_refund_lock_drain()
                     self._backend.close()
         except BaseException:
             with self._acquire_guard:
@@ -944,18 +951,9 @@ class SyncRateLimiter:
                 self._closing = False
             raise
 
-        with self._refund_state_lock:
-            refund_locks = list(self._refund_locks.values())
-        acquired_locks = []
-        try:
-            for lock in refund_locks:
-                lock.acquire()
-                acquired_locks.append(lock)
+        if already_closed:
             with self._refund_state_lock:
                 in_flight_count = len(self._in_flight_reservation_ids)
-        finally:
-            for lock in reversed(acquired_locks):
-                lock.release()
         self._clear_retained_state_after_close()
         _logger.warning(
             "limiter closed; %d reservations still in flight may not be refundable.",
@@ -969,6 +967,31 @@ class SyncRateLimiter:
         raise TimeoutError(
             "Timed out waiting for pending acquire reservations to drain"
         )
+
+    def _wait_for_refund_lock_drain(self) -> int:
+        with self._refund_state_lock:
+            refund_locks = list(self._refund_locks.values())
+        acquired_locks: list[threading.Lock] = []
+        deadline = None
+        if self._close_drain_timeout_seconds is not None:
+            deadline = time.monotonic() + self._close_drain_timeout_seconds
+        try:
+            for lock in refund_locks:
+                if deadline is None:
+                    lock.acquire()
+                    acquired_locks.append(lock)
+                    continue
+                remaining = max(0.0, deadline - time.monotonic())
+                if not lock.acquire(timeout=remaining):
+                    raise TimeoutError(
+                        "Timed out waiting for in-flight refunds to drain"
+                    )
+                acquired_locks.append(lock)
+            with self._refund_state_lock:
+                return len(self._in_flight_reservation_ids)
+        finally:
+            for lock in reversed(acquired_locks):
+                lock.release()
 
     def _clear_retained_state_after_close(self) -> None:
         self._model_family_to_backend.clear()
