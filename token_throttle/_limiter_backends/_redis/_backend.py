@@ -52,6 +52,8 @@ from token_throttle._validation import (
 
 from ._bucket import (
     RedisBucket,
+    _bucket_state_missing_keys,
+    _bucket_state_present_keys,
     _normalize_bucket_state_pair,
     _raise_pipeline_response_error,
     _safe_redis_value_repr,
@@ -970,12 +972,18 @@ class RedisBackend(RateLimiterBackend):
         # Usage class.
         new_capacities: dict[tuple[str, int], float] = {}
         fresh_start_buckets: list[RedisBucket] = []
+        partial_state_buckets: list[RedisBucket] = []
         for i, bucket in enumerate(target_buckets):
             idx = i * _PIPELINE_CMDS_PER_BUCKET
+            last_checked_raw = results[idx + RedisBucket.PIPELINE_LAST_CHECKED_OFFSET]
+            capacity_raw = results[idx + RedisBucket.PIPELINE_CAPACITY_OFFSET]
+            missing_keys = _bucket_state_missing_keys(last_checked_raw, capacity_raw)
+            present_keys = _bucket_state_present_keys(last_checked_raw, capacity_raw)
             last_checked, capacity = _normalize_bucket_state_pair(
-                results[idx + RedisBucket.PIPELINE_LAST_CHECKED_OFFSET],
-                results[idx + RedisBucket.PIPELINE_CAPACITY_OFFSET],
+                last_checked_raw,
+                capacity_raw,
                 context=f"RedisBackend._get_capacities_unsafe({bucket.full_redis_key})",
+                current_time=current_time,
             )
             _validate_expire_result(
                 results[idx + 2],
@@ -1011,11 +1019,66 @@ class RedisBackend(RateLimiterBackend):
                 current_time,
             )
             result = _revalidate_dto(result)
-            if result.is_fresh_start:
+            if len(missing_keys) == 1:
+                bucket._set_missing_consumption_data_context(  # noqa: SLF001
+                    reason="partial_state_drained",
+                    missing_keys=missing_keys,
+                    present_keys=present_keys,
+                )
+                partial_state_buckets.append(bucket)
                 fresh_start_buckets.append(bucket)
+            elif result.is_fresh_start:
+                bucket._set_missing_consumption_data_context(  # noqa: SLF001
+                    reason="fresh_start",
+                    missing_keys=missing_keys,
+                    present_keys=present_keys,
+                )
+                fresh_start_buckets.append(bucket)
+            else:
+                bucket._set_missing_consumption_data_context(  # noqa: SLF001
+                    reason=None,
+                    missing_keys=(),
+                    present_keys=present_keys,
+                )
             new_capacities[(bucket.usage_metric, int(bucket.per_seconds))] = (
                 result.amount
             )
+
+        if partial_state_buckets:
+            repair_pipeline = self._redis.pipeline()
+            for bucket in partial_state_buckets:
+                await bucket.set_capacity(
+                    0.0,
+                    pipeline=repair_pipeline,
+                    current_time=current_time,
+                    execute=False,
+                )
+            try:
+                repair_results = await repair_pipeline.execute()
+            except redis.exceptions.ResponseError as exc:
+                _raise_pipeline_response_error(
+                    "RedisBackend._get_capacities_unsafe partial-state repair", exc
+                )
+            repair_results = _validate_pipeline_results(
+                repair_results,
+                context="RedisBackend._get_capacities_unsafe partial-state repair",
+                expected_count=2 * len(partial_state_buckets),
+            )
+            for i, bucket in enumerate(partial_state_buckets):
+                _validate_set_result(
+                    repair_results[i * 2],
+                    context=(
+                        "RedisBackend._get_capacities_unsafe partial-state repair"
+                        f"({bucket.full_redis_key}) last_checked"
+                    ),
+                )
+                _validate_set_result(
+                    repair_results[i * 2 + 1],
+                    context=(
+                        "RedisBackend._get_capacities_unsafe partial-state repair"
+                        f"({bucket.full_redis_key}) capacity"
+                    ),
+                )
 
         return CapacitiesGetterResult(
             capacities=frozendict(new_capacities),
@@ -2070,12 +2133,12 @@ class RedisBackend(RateLimiterBackend):
 
             # Check for overuse and log a warning
             if refund_amount < 0:
-                warnings.warn(
+                message = (
                     f"Actual usage ({actual_amount}) for {metric} exceeds "
-                    f"reserved usage ({reserved_amount}). Applying negative refund.",
-                    RuntimeWarning,
-                    stacklevel=2,
+                    f"reserved usage ({reserved_amount}). Applying negative refund."
                 )
+                warnings.warn(message, RuntimeWarning, stacklevel=2)
+                _refund_logger.warning(message)
 
             # Include both positive and negative refunds
             refund_usage_[metric] = refund_amount
@@ -2244,6 +2307,7 @@ class RedisBackend(RateLimiterBackend):
             results[RedisBucket.PIPELINE_LAST_CHECKED_OFFSET],
             results[RedisBucket.PIPELINE_CAPACITY_OFFSET],
             context=f"RedisBackend._snapshot_bucket_state({bucket.full_redis_key})",
+            current_time=current_time,
         )
         _validate_expire_result(
             results[2],
@@ -2533,4 +2597,13 @@ class RedisBackend(RateLimiterBackend):
                     model_family=self._limit_config.get_model_family(),
                     usage_metric=bucket.usage_metric,
                     per_seconds=bucket.per_seconds,
+                    missing_state_reason=(
+                        bucket._missing_consumption_data_reason  # noqa: SLF001
+                    ),
+                    missing_state_keys=(
+                        bucket._missing_consumption_data_missing_keys  # noqa: SLF001
+                    ),
+                    present_state_keys=(
+                        bucket._missing_consumption_data_present_keys  # noqa: SLF001
+                    ),
                 )

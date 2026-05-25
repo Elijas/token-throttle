@@ -39,6 +39,9 @@ __all__ = ["CalculatedCapacity", "RedisBucket"]
 _logger = logging.getLogger(__name__)
 _MAX_REDIS_GET_VALUE_BYTES = 16 * 1024
 _MAX_REDIS_DIAGNOSTIC_BYTES = 96
+_LAST_CHECKED_STATE_KEY = "last_checked"
+_CAPACITY_STATE_KEY = "capacity"
+_BUCKET_STATE_KEY_COUNT = 2
 
 
 class RedisPipelineResultError(RuntimeError):
@@ -189,14 +192,43 @@ def _normalize_bucket_state_pair(
     capacity: object,
     *,
     context: str,
+    current_time: float | None = None,
 ) -> tuple[bytes | str | None, bytes | str | None]:
     last_checked = _validate_bucket_state_result(
         last_checked, context=f"{context} last_checked"
     )
     capacity = _validate_bucket_state_result(capacity, context=f"{context} capacity")
-    if last_checked is None or capacity is None:
+    missing_keys = _bucket_state_missing_keys(last_checked, capacity)
+    if len(missing_keys) == _BUCKET_STATE_KEY_COUNT:
         return None, None
+    if len(missing_keys) == 1:
+        partial_state_time = time.time() if current_time is None else current_time
+        return str(partial_state_time), b"0.0"
     return last_checked, capacity
+
+
+def _bucket_state_missing_keys(
+    last_checked: object,
+    capacity: object,
+) -> tuple[str, ...]:
+    missing_keys: list[str] = []
+    if last_checked is None:
+        missing_keys.append(_LAST_CHECKED_STATE_KEY)
+    if capacity is None:
+        missing_keys.append(_CAPACITY_STATE_KEY)
+    return tuple(missing_keys)
+
+
+def _bucket_state_present_keys(
+    last_checked: object,
+    capacity: object,
+) -> tuple[str, ...]:
+    present_keys: list[str] = []
+    if last_checked is not None:
+        present_keys.append(_LAST_CHECKED_STATE_KEY)
+    if capacity is not None:
+        present_keys.append(_CAPACITY_STATE_KEY)
+    return tuple(present_keys)
 
 
 class MaxCapacityOverrideParseError(ValueError):
@@ -295,6 +327,9 @@ class RedisBucket:
             self.key_prefix,
             "schema_version",
         )
+        self._missing_consumption_data_reason: str | None = None
+        self._missing_consumption_data_missing_keys: tuple[str, ...] = ()
+        self._missing_consumption_data_present_keys: tuple[str, ...] = ()
 
     @property
     def configured_max_capacity(self) -> float:
@@ -530,6 +565,17 @@ class RedisBucket:
         self._max_capacity_cache_time = time.time()
         return new_value is not None
 
+    def _set_missing_consumption_data_context(
+        self,
+        *,
+        reason: str | None,
+        missing_keys: tuple[str, ...],
+        present_keys: tuple[str, ...],
+    ) -> None:
+        self._missing_consumption_data_reason = reason
+        self._missing_consumption_data_missing_keys = missing_keys
+        self._missing_consumption_data_present_keys = present_keys
+
     async def set_max_capacity(self, value: float) -> None:
         """
         Persist a runtime max-capacity override in Redis.
@@ -655,6 +701,7 @@ class RedisBucket:
                 results[self.PIPELINE_LAST_CHECKED_OFFSET],
                 results[self.PIPELINE_CAPACITY_OFFSET],
                 context=f"RedisBucket.get_capacity({self.full_redis_key})",
+                current_time=current_time,
             )
             _validate_expire_result(
                 results[2],

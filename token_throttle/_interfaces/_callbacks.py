@@ -298,7 +298,7 @@ def _log_late_callback_exception(exc: BaseException) -> None:
 
 
 def _invoke_sync_callback_checked(callback, **kwargs) -> None:
-    result = callback(**kwargs)
+    result = callback(**_accepted_callback_kwargs(callback, kwargs))
     if inspect.isawaitable(result):
         close_awaitable_if_possible(result)
         raise TypeError(
@@ -312,6 +312,7 @@ async def _invoke_async_callback_with_timeout(
     callback_timeout: float | None,
     **kwargs,
 ) -> None:
+    kwargs = _accepted_callback_kwargs(callback, kwargs)
     if callback_timeout is None:
         await callback(**kwargs)
         return
@@ -326,6 +327,7 @@ def _invoke_sync_callback_with_timeout(
     callback_timeout: float | None,
     **kwargs,
 ) -> None:
+    kwargs = _accepted_callback_kwargs(callback, kwargs)
     if callback_timeout is None:
         _invoke_sync_callback_checked(callback, **kwargs)
         return
@@ -405,6 +407,23 @@ def _exception_group_contains_critical(
     return critical_part is not None
 
 
+def _accepted_callback_kwargs(callback, kwargs: dict[str, object]) -> dict[str, object]:
+    """Keep optional callback context additive for exact-signature callbacks."""
+    try:
+        sig = inspect.signature(callback)
+    except (TypeError, ValueError):
+        return kwargs
+    if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
+        return kwargs
+    accepted = {
+        name
+        for name, p in sig.parameters.items()
+        if p.kind
+        in (inspect.Parameter.KEYWORD_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+    }
+    return {name: value for name, value in kwargs.items() if name in accepted}
+
+
 async def safe_invoke_async_callback(
     callback,
     *,
@@ -413,7 +432,7 @@ async def safe_invoke_async_callback(
     **kwargs,
 ) -> None:
     try:
-        await callback(**kwargs)
+        await callback(**_accepted_callback_kwargs(callback, kwargs))
     except critical:
         raise
     except BaseException as exc:
@@ -433,7 +452,9 @@ def safe_invoke_sync_callback(
     **kwargs,
 ) -> None:
     try:
-        _invoke_sync_callback_checked(callback, **kwargs)
+        _invoke_sync_callback_checked(
+            callback, **_accepted_callback_kwargs(callback, kwargs)
+        )
     except critical:
         raise
     except BaseException as exc:
@@ -595,7 +616,7 @@ class OnMissingConsumptionDataCallback(Protocol):
         usage_metric: str,
         per_seconds: int,
     ) -> None:
-        """Called when no previous consumption data is detected, assuming full quota"""
+        """Called when bucket consumption data is missing or partially missing."""
 
 
 @runtime_checkable
@@ -763,7 +784,7 @@ class SyncOnMissingConsumptionDataCallback(Protocol):
         usage_metric: str,
         per_seconds: int,
     ) -> None:
-        """Called when sync bucket state is first initialized at full quota."""
+        """Called when sync bucket consumption data is missing or partially missing."""
 
 
 @runtime_checkable
@@ -965,11 +986,14 @@ def create_logging_callbacks(
             postrefund_capacities=postrefund_capacities,
         )
 
-    async def on_missing_consumption_data(
+    async def on_missing_consumption_data(  # noqa: PLR0913
         *,
         model_family: str,
         usage_metric: str,
         per_seconds: int,
+        missing_state_reason: str | None = None,
+        missing_state_keys: tuple[str, ...] | None = None,
+        present_state_keys: tuple[str, ...] | None = None,
     ) -> None:
         assert missing_consumption_data_level is not None  # noqa: S101
         _log(
@@ -978,6 +1002,9 @@ def create_logging_callbacks(
             model_family=model_family,
             usage_metric=usage_metric,
             per_seconds=per_seconds,
+            missing_state_reason=missing_state_reason,
+            missing_state_keys=missing_state_keys,
+            present_state_keys=present_state_keys,
         )
 
     return RateLimiterCallbacks(
@@ -1098,11 +1125,14 @@ def create_sync_logging_callbacks(
             postrefund_capacities=postrefund_capacities,
         )
 
-    def on_missing_consumption_data(
+    def on_missing_consumption_data(  # noqa: PLR0913
         *,
         model_family: str,
         usage_metric: str,
         per_seconds: int,
+        missing_state_reason: str | None = None,
+        missing_state_keys: tuple[str, ...] | None = None,
+        present_state_keys: tuple[str, ...] | None = None,
     ) -> None:
         assert missing_consumption_data_level is not None  # noqa: S101
         _log(
@@ -1111,6 +1141,9 @@ def create_sync_logging_callbacks(
             model_family=model_family,
             usage_metric=usage_metric,
             per_seconds=per_seconds,
+            missing_state_reason=missing_state_reason,
+            missing_state_keys=missing_state_keys,
+            present_state_keys=present_state_keys,
         )
 
     return SyncRateLimiterCallbacks(
@@ -1250,11 +1283,14 @@ def create_loguru_callbacks(
             postrefund_capacities=postrefund_capacities,
         )
 
-    async def on_missing_consumption_data(
+    async def on_missing_consumption_data(  # noqa: PLR0913
         *,
         model_family: str,
         usage_metric: str,
         per_seconds: int,
+        missing_state_reason: str | None = None,
+        missing_state_keys: tuple[str, ...] | None = None,
+        present_state_keys: tuple[str, ...] | None = None,
     ) -> None:
         logger = _get_loguru_logger()
         logger.log(
@@ -1263,6 +1299,9 @@ def create_loguru_callbacks(
             model_family=model_family,
             usage_metric=usage_metric,
             per_seconds=per_seconds,
+            missing_state_reason=missing_state_reason,
+            missing_state_keys=missing_state_keys,
+            present_state_keys=present_state_keys,
         )
 
     return RateLimiterCallbacks(
@@ -1377,11 +1416,14 @@ def create_sync_loguru_callbacks(
             postrefund_capacities=postrefund_capacities,
         )
 
-    def on_missing_consumption_data(
+    def on_missing_consumption_data(  # noqa: PLR0913
         *,
         model_family: str,
         usage_metric: str,
         per_seconds: int,
+        missing_state_reason: str | None = None,
+        missing_state_keys: tuple[str, ...] | None = None,
+        present_state_keys: tuple[str, ...] | None = None,
     ) -> None:
         logger = _get_loguru_logger()
         logger.log(
@@ -1390,6 +1432,9 @@ def create_sync_loguru_callbacks(
             model_family=model_family,
             usage_metric=usage_metric,
             per_seconds=per_seconds,
+            missing_state_reason=missing_state_reason,
+            missing_state_keys=missing_state_keys,
+            present_state_keys=present_state_keys,
         )
 
     return SyncRateLimiterCallbacks(
