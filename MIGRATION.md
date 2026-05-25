@@ -1,12 +1,240 @@
 # Migration Guide
 
+## Migrating from v7.x to v8.0.0
+
+### What changed
+
+v8.0.0 is the greenfield hardening release for the production-readiness sweep.
+It closes Redis refund authority gaps, removes implicit loguru routing, updates
+dependency floors, and changes one Redis failure-mode default to fail safe.
+
+- **Strict limiter binding for refunds (PD-1):** Redis refunds now require the
+  `CapacityReservation.limiter_instance_id` to match the limiter instance that
+  is processing the refund. A reservation issued by one limiter instance is no
+  longer refundable through another limiter even when both share the same Redis
+  `key_prefix`.
+- **Partial Redis bucket state is treated as drained (PD-2):** if Redis returns
+  only one half of a bucket state pair, token-throttle must not infer fresh full
+  capacity. It fires the missing-consumption callback and treats the bucket as
+  unavailable until refill/state repair rather than silently overgranting.
+- **loguru auto-routing removed (PD-4):** `create_logging_callbacks()` and
+  `create_sync_logging_callbacks()` are stdlib logging factories. loguru is no
+  longer selected merely because it is importable.
+- **Dependency floors move up:** v8 requires `pydantic>=2.12.0` because runtime
+  validation relies on APIs added after 2.11, and the OpenAI tokenizer extra
+  requires `tiktoken>=0.10.0` for current model encodings.
+- **Python 3.14 classifier status:** KNOWN UNKNOWN: W6's
+  `/tmp/tt-w6-py314/migration-notes-py314.md` is not present in this worktree,
+  so this section cannot state the final v8 classifier/support result yet.
+- **PD-1/PD-4 implementation notes:** KNOWN UNKNOWN: W2's
+  `/tmp/tt-w2-api/migration-notes-PD1.md` and
+  `/tmp/tt-w2-api/migration-notes-PD4.md` are not present in this worktree, so
+  exact exception messages and final replacement APIs must be reconciled during
+  the merge rebase.
+
+Before v8, this pattern could appear to work when two Redis-backed limiters
+shared a prefix:
+
+```python
+reservation = await limiter_a.acquire_capacity(
+    {"requests": 1, "tokens": 1000},
+    model="gpt-4o",
+)
+await limiter_b.refund_capacity({"requests": 1, "tokens": 650}, reservation)
+```
+
+In v8, refund through the issuing limiter lifetime:
+
+```python
+reservation = await limiter.acquire_capacity(
+    {"requests": 1, "tokens": 1000},
+    model="gpt-4o",
+)
+try:
+    response = await call_provider()
+finally:
+    await limiter.refund_capacity({"requests": 1, "tokens": 650}, reservation)
+```
+
+Before v8, logging callback routing could change when `loguru` happened to be
+installed:
+
+```python
+from token_throttle import create_logging_callbacks
+
+callbacks = create_logging_callbacks()  # v7: loguru if importable, else stdlib
+```
+
+In v8, configure stdlib logging for `token_throttle`, or use an explicit
+application-owned loguru adapter if your service standardizes on loguru:
+
+```python
+import logging
+
+from token_throttle import create_logging_callbacks
+
+logging.getLogger("token_throttle").setLevel(logging.INFO)
+callbacks = create_logging_callbacks(capacity_refunded="INFO")
+```
+
+### What you must do
+
+Drain or bound in-flight reservations before upgrading Redis-backed fleets.
+Do not roll v7 and v8 workers together on the same Redis prefix while old
+reservations are still refundable; v7 workers may have issued reservations that
+v8 will reject when presented through a different limiter instance.
+
+Audit code that serialized, queued, or handed `CapacityReservation` objects to
+another process for refund. Replace it with a request lifecycle where the same
+limiter instance that acquired capacity also performs the refund, or drain the
+queue before moving to v8.
+
+Configure stdlib logging handlers for the `token_throttle` logger before
+deploying if you previously relied on automatic loguru routing. If you used
+loguru-specific sinks, attach a small application callback that sends the
+structured callback payloads to loguru explicitly.
+
+Update deployment constraints to include `pydantic>=2.12.0` and, when using the
+OpenAI helper extra, `tiktoken>=0.10.0`. Do not rely on the v7 lower bounds.
+
+For Redis deployments with eviction enabled, monitor
+`on_missing_consumption_data` callbacks. After v8, partial bucket-state loss
+causes temporary undergranting instead of silent overgranting; investigate Redis
+memory pressure, eviction policy, TTL settings, and persistence before raising
+traffic.
+
+## Migrating from v6.x to v7.0.0
+
+### What changed
+
+v7.0.0 tightened the severe-exception contract for custom backend methods.
+Backend methods that raise lifecycle-critical exceptions now propagate those
+exceptions raw to callers. This applies to async and sync capacity wait,
+consume, refund, bucket-specific refund, max-capacity update, and configured
+max-capacity hooks.
+
+Interrupted-acquire cleanup follows the same rule. If capacity was committed
+but delivery was interrupted, token-throttle attempts a cleanup refund. Ordinary
+`Exception` failures still surface as `AcquireRefundFailedError`, but severe
+exceptions such as cancellation, process-exit signals, `MemoryError`, and
+`RecursionError` escape raw instead of being wrapped.
+
+Before v7, some cleanup failures could be recovered only through the ordinary
+envelope:
+
+```python
+from token_throttle import AcquireRefundFailedError
+
+try:
+    reservation = await limiter.acquire_capacity({"tokens": 1000}, model="demo")
+except AcquireRefundFailedError as exc:
+    recover_or_alert(exc.reservation, exc.refund_error)
+```
+
+In v7, keep that handler for ordinary cleanup failures, but allow severe
+exceptions to propagate to the runtime or supervisor:
+
+```python
+from token_throttle import AcquireRefundFailedError
+
+try:
+    reservation = await limiter.acquire_capacity({"tokens": 1000}, model="demo")
+except AcquireRefundFailedError as exc:
+    recover_or_alert(exc.reservation, exc.refund_error)
+except (KeyboardInterrupt, SystemExit, MemoryError, RecursionError):
+    raise
+```
+
+### What you must do
+
+If you maintain a custom backend, update tests so every backend method either
+completes normally, raises documented ordinary exceptions, or lets lifecycle-
+critical exceptions escape raw. Do not wrap `BaseException` broadly, and do not
+convert `MemoryError`, `RecursionError`, `KeyboardInterrupt`, `SystemExit`,
+`GeneratorExit`, `asyncio.CancelledError`, or
+`concurrent.futures.CancelledError` into `AcquireRefundFailedError`.
+
+Run `conformance_test_for(...)`, `run_conformance_test_for(...)`, or
+`sync_conformance_test_for(...)` from `token_throttle` after updating the
+backend. Add backend-specific fault-injection tests for severe exceptions
+because the public helper does not inject every severe exception into every
+backend method.
+
+## Migrating from v5.x to v6.0.0
+
+### What changed
+
+v6.0.0 changed callback failure handling for severe process-health exceptions.
+`MemoryError` and `RecursionError` now propagate from user callbacks instead of
+being treated as ordinary callback failures with a warning. This matches the
+existing lifecycle-critical handling for cancellation, interpreter shutdown,
+and process-exit signals.
+
+Before v6, callback failures in this category could be suppressed by the
+best-effort callback wrapper:
+
+```python
+async def on_capacity_refunded(**kwargs) -> None:
+    raise MemoryError("simulated callback failure")
+
+# v5 could warn and continue after the callback failure.
+```
+
+In v6, treat these exceptions as fatal to the current operation:
+
+```python
+async def on_capacity_refunded(**kwargs) -> None:
+    raise MemoryError("simulated callback failure")
+
+try:
+    await limiter.refund_capacity({"tokens": 10}, reservation)
+except (MemoryError, RecursionError):
+    raise
+```
+
+### What you must do
+
+Audit callback code for broad `except Exception` or `except BaseException`
+handlers that hide out-of-memory or runaway-recursion failures. Let
+`MemoryError` and `RecursionError` propagate, and move non-critical telemetry
+errors behind ordinary `Exception` handling inside your callback.
+
+If your tests asserted that callback failures are always warning-only, split
+them into ordinary exception tests and severe exception tests. Ordinary
+`Exception` subclasses remain best-effort; `MemoryError` and `RecursionError`
+now escape.
+
 ## Migrating from v4.x to v5.0.0
+
+### What changed
 
 Custom backend interfaces are now structural `Protocol` classes. Backends that
 subclass `RateLimiterBackend`, `SyncRateLimiterBackend`, or the builder
 interfaces can keep inheriting the conservative default hooks, but custom
 backends that rely on structural typing must implement the full protocol
 surface, including cleanup hooks and optional authority hooks.
+
+Before v5, custom backends commonly depended on nominal inheritance and a
+smaller checked surface:
+
+```python
+from token_throttle import RateLimiterBackend
+
+
+class MyBackend(RateLimiterBackend):
+    ...
+```
+
+In v5, structural implementations are accepted, but the full protocol must be
+present and should be verified by the conformance helper:
+
+```python
+from token_throttle import run_conformance_test_for
+
+run_conformance_test_for(my_async_backend_builder)
+```
+
+### What you must do
 
 Run `conformance_test_for(...)` or `sync_conformance_test_for(...)` against
 third-party backend builders before upgrading. See
