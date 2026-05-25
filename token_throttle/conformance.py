@@ -511,8 +511,8 @@ async def _materialize_async_callable(
     except asyncio.CancelledError as exc:
         if _task_is_being_cancelled(step.cancelling_at_entry):
             abandoned = True
-            await _cancel_and_drain_abandoned_future(shielded)
-            await _cancel_and_drain_abandoned_future(async_future)
+            _cancel_and_consume_abandoned_future(shielded)
+            _cancel_and_consume_abandoned_future(async_future)
             future.cancel()
             raise
         if _matches_allowed_exception(exc, step.allowed_exceptions):
