@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import asyncio.tasks as _asyncio_tasks
 import concurrent.futures
 import contextlib
 import contextvars
@@ -430,7 +431,14 @@ def _consume_abandoned_task_result(task: asyncio.Future[object]) -> None:
         task.result()
 
 
+def _remove_asyncio_shield_exception_logger(task: asyncio.Future[object]) -> None:
+    shield_logger = getattr(_asyncio_tasks, "_log_on_exception", None)
+    if shield_logger is not None:
+        task.remove_done_callback(shield_logger)
+
+
 def _cancel_and_consume_abandoned_future(task: asyncio.Future[object]) -> None:
+    _remove_asyncio_shield_exception_logger(task)
     task.add_done_callback(_consume_abandoned_task_result)
     task.cancel()
 
