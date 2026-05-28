@@ -1,7 +1,8 @@
-"""End-to-end tests against the real OpenAI API.
+"""Manual OpenAI coverage with offline synthetic cases and optional live calls.
 
-Requires OPENAI_API_KEY (env var or tests/manual/.env file).
-NOT run in CI/CD — see tests/manual/README.md.
+CI collects this module as part of the all-tests coverage gate. Synthetic tests
+run without network access; live OpenAI calls require OPENAI_API_KEY (env var or
+tests/manual/.env file) and are skipped when it is absent.
 """
 
 import os

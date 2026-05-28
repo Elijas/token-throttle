@@ -1,6 +1,8 @@
 # Manual Tests
 
-Tests in this directory require real API keys and are **not** run in CI/CD.
+CI collects this directory as part of the all-tests coverage gate. The
+synthetic/offline tests run without network access; live OpenAI tests are
+skipped unless `OPENAI_API_KEY` is set.
 
 ## Setup
 
