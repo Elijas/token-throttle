@@ -508,6 +508,7 @@ async def _materialize_async_callable(
         _cancel_and_consume_abandoned_future(async_future)
         future.cancel()
         raise BackendConformanceError(message) from exc
+    # ast-guard: skip — step cancellation is normalized; executor cleanup is in finally
     except asyncio.CancelledError as exc:
         if _task_is_being_cancelled(step.cancelling_at_entry):
             abandoned = True
@@ -561,6 +562,7 @@ async def _await_async_step_task(
 
     try:
         done, _pending = await asyncio.wait({task}, timeout=remaining)
+    # ast-guard: skip — caller cancellation drains the abandoned step task
     except asyncio.CancelledError as exc:
         if _task_is_being_cancelled(step.cancelling_at_entry):
             await _cancel_and_drain_abandoned_future(task)
@@ -577,6 +579,7 @@ async def _await_async_step_task(
 
     try:
         return task.result()
+    # ast-guard: skip — task.result() re-raises step cancellation for normalization
     except asyncio.CancelledError as exc:
         if _task_is_being_cancelled(step.cancelling_at_entry):
             raise
@@ -863,6 +866,7 @@ async def _cleanup_async_limiter(
             limiter.aclose(),
             timeout=_timing().operation_deadline_seconds,
         )
+    # ast-guard: skip — limiter.aclose() cancellation must propagate
     except asyncio.CancelledError:
         raise
     except (KeyboardInterrupt, SystemExit):
@@ -885,6 +889,7 @@ def _cleanup_sync_limiter(
             deadline=_timing().operation_deadline_seconds,
             allowed_exceptions=(asyncio.CancelledError,),
         )
+    # ast-guard: skip — sync limiter close cancellation must propagate
     except asyncio.CancelledError:
         raise
     except (KeyboardInterrupt, SystemExit):
@@ -1584,6 +1589,7 @@ async def _construct_async_public_limiter(
     except BaseException:
         try:
             await _cleanup_async_builder(builder)
+        # ast-guard: skip — builder cleanup cancellation must propagate
         except asyncio.CancelledError:
             raise
         except (KeyboardInterrupt, SystemExit):
@@ -1613,6 +1619,7 @@ def _construct_sync_public_limiter(
     except BaseException:
         try:
             _cleanup_sync_builder(builder)
+        # ast-guard: skip — builder cleanup cancellation must propagate
         except asyncio.CancelledError:
             raise
         except (KeyboardInterrupt, SystemExit):
@@ -1650,6 +1657,7 @@ async def _cleanup_pending_async_public_refunds(
                 expect_awaitable=True,
             )
             _discard_pending_public_refund(reservations, reservation)
+        # ast-guard: skip — public reservation refund cancellation must propagate
         except asyncio.CancelledError:
             raise
         except (KeyboardInterrupt, SystemExit):
@@ -1685,6 +1693,7 @@ def _cleanup_pending_sync_public_refunds(
                 deadline=_timing().operation_deadline_seconds,
             )
             _discard_pending_public_refund(reservations, reservation)
+        # ast-guard: skip — public reservation refund cancellation must propagate
         except asyncio.CancelledError:
             raise
         except (KeyboardInterrupt, SystemExit):
@@ -2866,6 +2875,7 @@ async def conformance_test_for(
     finally:
         try:
             await _cleanup_async_builder(backend_builder)
+        # ast-guard: skip — builder cleanup cancellation must propagate
         except asyncio.CancelledError:
             raise
         except (KeyboardInterrupt, SystemExit):

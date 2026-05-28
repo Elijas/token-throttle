@@ -22,7 +22,11 @@ from __future__ import annotations
 import ast
 import pathlib
 import re
+import sys
+import textwrap
 from dataclasses import dataclass
+
+import pytest
 
 import token_throttle
 
@@ -38,17 +42,6 @@ REDIS_BACKEND_FILE = PRODUCTION_ROOT / "_limiter_backends" / "_redis" / "_backen
 REDIS_SYNC_BACKEND_FILE = (
     PRODUCTION_ROOT / "_limiter_backends" / "_redis" / "_sync_backend.py"
 )
-CANCELLATION_DISCOVERY_FILES = (
-    RATE_LIMITER_FILE,
-    SYNC_RATE_LIMITER_FILE,
-    MEMORY_BACKEND_FILE,
-    MEMORY_SYNC_BACKEND_FILE,
-    REDIS_BACKEND_FILE,
-    REDIS_SYNC_BACKEND_FILE,
-)
-_DISCOVERY_FILE_ORDER = {
-    path: index for index, path in enumerate(CANCELLATION_DISCOVERY_FILES)
-}
 AST_GUARD_SKIP_MARKER = "ast-guard: skip"
 CANCELLED_ERROR_NAMES = {
     "asyncio.CancelledError",
@@ -261,9 +254,16 @@ def _relative_production_path(path: pathlib.Path) -> str:
     return path.relative_to(PRODUCTION_ROOT).as_posix()
 
 
+def _iter_production_python_files() -> list[pathlib.Path]:
+    return sorted(
+        (p for p in PRODUCTION_ROOT.rglob("*.py") if "__pycache__" not in p.parts),
+        key=_relative_production_path,
+    )
+
+
 def _discover_cancellation_composition_details() -> list[_CancellationSiteDetail]:
     details: list[_CancellationSiteDetail] = []
-    for path in CANCELLATION_DISCOVERY_FILES:
+    for path in _iter_production_python_files():
         text = path.read_text(encoding="utf-8")
         lines = text.splitlines()
         tree = ast.parse(text, filename=str(path))
@@ -294,7 +294,7 @@ def _discover_cancellation_composition_details() -> list[_CancellationSiteDetail
     return sorted(
         details,
         key=lambda detail: (
-            _DISCOVERY_FILE_ORDER[detail.path],
+            detail.site.relative_path,
             detail.site.except_lineno,
             detail.site.function_name,
         ),
@@ -354,10 +354,6 @@ def _exception_handlers_before_base_exception(
         if _handler_catches_exception(handler):
             handlers.append(handler)
     return []
-
-
-def _iter_production_python_files() -> list[pathlib.Path]:
-    return [p for p in PRODUCTION_ROOT.rglob("*.py") if "__pycache__" not in p.parts]
 
 
 # ---------------------------------------------------------------------------
@@ -494,8 +490,8 @@ def test_async_outer_cleanup_sites_catch_base_exception() -> None:
     """Async cleanup/reconciliation sites must not lag the critical taxonomy.
 
     Discovery finds every non-opted-out ``except asyncio.CancelledError`` /
-    ``except concurrent.futures.CancelledError`` site in the known limiter and
-    backend modules. Registration only supplies the cleanup call each
+    ``except concurrent.futures.CancelledError`` site in the production
+    package. Registration only supplies the cleanup call each
     discovered load-bearing site must preserve under ``BaseException``.
     """
     discovered_sites = _discover_cancellation_composition_sites()
@@ -571,9 +567,9 @@ def test_async_cleanup_exception_handlers_preserve_critical_reachability() -> No
 def test_cancellation_composition_site_discovery_matches_snapshot() -> None:
     """Make the auto-discovered cancellation-composition surface reviewable."""
     expected = [
+        "_limiter_backends/_redis/_backend.py:_check_and_consume_capacity:1999",
         "_rate_limiter.py:_acquire_capacity:1480",
         "_rate_limiter.py:_set_max_capacity_transactional:2032",
-        "_limiter_backends/_redis/_backend.py:_check_and_consume_capacity:1999",
     ]
     actual = [site.label() for site in _discover_cancellation_composition_sites()]
     assert actual == expected, (
@@ -582,3 +578,37 @@ def test_cancellation_composition_site_discovery_matches_snapshot() -> None:
         f"narrower, add `# {AST_GUARD_SKIP_MARKER} — <reason>` on/immediately "
         f"above the except line. Actual discovery: {actual}"
     )
+
+
+def test_cancellation_assertions_scan_new_production_files(
+    tmp_path: pathlib.Path,
+    monkeypatch,
+) -> None:
+    """A new production file must not be hidden by a fixed discovery tuple."""
+    production_root = tmp_path / "token_throttle"
+    production_root.mkdir()
+    (production_root / "new_backend.py").write_text(
+        textwrap.dedent(
+            """\
+            import asyncio
+
+            async def cleanup_cell():
+                try:
+                    await do_work()
+                except asyncio.CancelledError:
+                    await rollback()
+                    raise
+            """
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(sys.modules[__name__], "PRODUCTION_ROOT", production_root)
+
+    assert [site.label() for site in _discover_cancellation_composition_sites()] == [
+        "new_backend.py:cleanup_cell:6"
+    ]
+    with pytest.raises(
+        AssertionError,
+        match=re.escape("new_backend.py:cleanup_cell:6"),
+    ):
+        test_async_outer_cleanup_sites_catch_base_exception()
