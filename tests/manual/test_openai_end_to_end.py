@@ -9,10 +9,6 @@ from pathlib import Path
 
 import pytest
 from frozendict import frozendict
-from openai.types import CompletionUsage
-from openai.types.chat import ChatCompletion
-from openai.types.chat.chat_completion import Choice
-from openai.types.chat.chat_completion_message import ChatCompletionMessage
 
 # Load .env from this directory if present
 _env_file = Path(__file__).parent / ".env"
@@ -48,21 +44,37 @@ def _make_limiter() -> RateLimiter:
     )
 
 
-def _make_synthetic_response(total_tokens: int = 15) -> ChatCompletion:
+def _openai_chat_types():
+    pytest.importorskip("openai", reason="openai package not installed")
+
+    from openai.types import CompletionUsage  # noqa: PLC0415
+    from openai.types.chat import ChatCompletion  # noqa: PLC0415
+    from openai.types.chat.chat_completion import Choice  # noqa: PLC0415
+    from openai.types.chat.chat_completion_message import (  # noqa: PLC0415
+        ChatCompletionMessage,
+    )
+
+    return CompletionUsage, ChatCompletion, Choice, ChatCompletionMessage
+
+
+def _make_synthetic_response(total_tokens: int = 15):
     """Build a ChatCompletion identical in type to what the SDK returns."""
-    return ChatCompletion(
+    completion_usage_cls, chat_completion_cls, choice_cls, message_cls = (
+        _openai_chat_types()
+    )
+    return chat_completion_cls(
         id="chatcmpl-synthetic",
         object="chat.completion",
         created=1234567890,
         model="gpt-5-nano",
         choices=[
-            Choice(
+            choice_cls(
                 index=0,
-                message=ChatCompletionMessage(role="assistant", content="hello"),
+                message=message_cls(role="assistant", content="hello"),
                 finish_reason="stop",
             )
         ],
-        usage=CompletionUsage(
+        usage=completion_usage_cls(
             prompt_tokens=10,
             completion_tokens=total_tokens - 10,
             total_tokens=total_tokens,
@@ -78,6 +90,7 @@ def _make_synthetic_response(total_tokens: int = 15) -> ChatCompletion:
 @pytest.mark.asyncio
 async def test_refund_from_response_synthetic():
     """Pass a real ChatCompletion object (constructed locally) to refund."""
+    completion_usage_cls, *_ = _openai_chat_types()
     limiter = _make_limiter()
     reservation = await limiter.acquire_capacity(
         frozendict({"requests": 1, "tokens": 50}),
@@ -86,7 +99,7 @@ async def test_refund_from_response_synthetic():
 
     response = _make_synthetic_response(total_tokens=15)
 
-    assert isinstance(response.usage, CompletionUsage)
+    assert isinstance(response.usage, completion_usage_cls)
     assert not isinstance(response.usage, dict)
 
     await limiter.refund_capacity_from_response(reservation, response)
@@ -126,6 +139,8 @@ _needs_api_key = pytest.mark.skipif(
 @pytest.mark.asyncio
 async def test_live_manual_acquire_and_refund():
     """The 'any provider' README pattern: acquire_capacity + refund_capacity."""
+    pytest.importorskip("openai", reason="openai package not installed")
+
     from openai import AsyncOpenAI  # noqa: PLC0415
 
     client = AsyncOpenAI()
@@ -158,6 +173,8 @@ async def test_live_manual_acquire_and_refund():
 @pytest.mark.asyncio
 async def test_live_refund_capacity_from_response():
     """The OpenAI quickstart README pattern: response object passed directly."""
+    pytest.importorskip("openai", reason="openai package not installed")
+
     from openai import AsyncOpenAI  # noqa: PLC0415
 
     client = AsyncOpenAI()
