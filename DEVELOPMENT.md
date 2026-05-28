@@ -286,7 +286,7 @@ with in-flight reservations; Redis bucket state uses its own inactivity TTL.
 
 ### Redis `max_capacity_override` self-heals on config mismatch
 
-When `_deserialize_max_capacity_override` reads a stored override from Redis, it compares the `configured_max_capacity` field in the JSON payload against the current process's `_max_capacity_default` (from `Quota.limit`). If they differ — e.g. after a deployment changes the static quota — the override is silently discarded (returns `None`), causing the bucket to fall back to the new static limit.
+When `_deserialize_max_capacity_override` reads a stored override from Redis, it compares the `configured_max_capacity` field in the JSON payload against the current process's `_max_capacity_default` (from `Quota.limit`). If they differ — e.g. after a deployment changes the static quota — the bucket emits an operator warning, ignores the stale override (returns `None`), and falls back to the new static limit.
 
 This is intentional self-healing: an override created under a previous quota configuration should not pin the new deployment to a stale limit. The override was set relative to the old config; applying it under a different config would produce an unexpected effective limit. Discarding it lets the new static config take effect cleanly, and operators can re-apply an override if needed.
 
