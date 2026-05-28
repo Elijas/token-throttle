@@ -190,11 +190,37 @@ is the internal config-rebuild path and is not a public `RateLimiter` method.
 
 ### Reservation lifecycle
 
-`CapacityReservation` is a refund token for the backend that issued it. Reservations require `limiter_instance_id`, a per-`RateLimiter` / `SyncRateLimiter` UUID generated at construction time, so v1.4.x legacy objects remain distinguishable. Redis refund authority comes from the durable acquire marker written atomically with bucket consumption. Memory refund authority comes from the in-process acquire table.
+`CapacityReservation` is refund state for the limiter/backend workflow that
+issued it. Reservations require `limiter_instance_id`, a per-`RateLimiter` /
+`SyncRateLimiter` UUID generated at construction time, so v1.4.x legacy objects
+remain distinguishable and public refunds stay bound to the issuing limiter
+instance/lifetime. Redis refund authority also requires the durable acquire
+marker written atomically with bucket consumption. Memory refund authority comes
+from the issuing limiter's in-process acquire table.
 
-This is a v2.0.0 contract change. Reservations serialized by v1.4.x through pickle, JSON, job queues, or caches do not have `limiter_instance_id`; those are rejected. Drain in-flight reservations before upgrading and do not run mixed v1.4.x/v2.0.0 fleets. New serialized reservations must preserve the field. Starting in v3.0.0, Redis-backed cross-process refunds are allowed when the refunding process uses the same Redis deployment and key prefix, because the backend verifies and consumes the acquire marker before crediting capacity.
+This is a v2.0.0 contract change. Reservations serialized by v1.4.x through
+pickle, JSON, job queues, or caches do not have `limiter_instance_id`; those are
+rejected. Drain in-flight reservations before upgrading and do not run mixed
+v1.4.x/v2.0.0 fleets. New serialized reservations must preserve the field when
+kept inside a trusted same-limiter workflow. Starting in v8.0.0, Redis-backed
+public refunds are not portable across freshly constructed limiters or
+processes; send the refund back through the issuing limiter lifetime, or
+centralize acquisition and refund around a shared limiter object.
 
-Memory reservations have no TTL by default. Redis reservations always have a finite lifetime: either the caller's `max_reservation_lifetime_seconds` or the backend-derived default from Redis TTLs. A reservation remains eligible until it is refunded, rejected because the model now routes differently, rejected because its lifetime has elapsed, rejected because its acquire marker is missing, or the limiter is closed. Redis backends write durable acquire markers and refund dedup keys, so an in-flight reservation can be refunded by another process sharing the same Redis deployment and key prefix while the marker exists. Memory backends reject cold-restart and cross-process cases because they cannot prove whether capacity was acquired or already credited. `close()` / `aclose()` mark the limiter closed, log the number of reservations still in flight, and block subsequent acquire/refund operations.
+Memory reservations have no TTL by default. Redis reservations always have a
+finite lifetime: either the caller's `max_reservation_lifetime_seconds` or the
+backend-derived default from Redis TTLs. On the issuing limiter lifetime, a
+reservation remains eligible until it is refunded, rejected because the model
+now routes differently, rejected because its lifetime has elapsed, rejected
+because its acquire marker is missing, or the limiter is closed. Redis backends
+write durable acquire markers and refund dedup keys, but those keys are backend
+proof, not standalone portable authority; public refunds must also pass the
+reservation's `limiter_instance_id` binding and the issuing limiter's live
+snapshot checks before capacity is credited. Memory backends reject
+cold-restart and cross-process cases because they cannot prove whether capacity
+was acquired or already credited. `close()` / `aclose()` mark the limiter
+closed, log the number of reservations still in flight, and block subsequent
+acquire/refund operations.
 
 Callable config changes are checked at refund time for held limited reservations. A limited-to-unlimited flip raises instead of crediting an obsolete cached backend, and a `model_family` reroute raises instead of crediting the old family backend. Metric-set changes still project refunds onto surviving bucket ids; if the projection is empty, the refund id is committed to local dedup and, for Redis backends, durable Redis dedup before returning so queue retries cannot double-credit after a rebuild.
 
@@ -286,7 +312,7 @@ with in-flight reservations; Redis bucket state uses its own inactivity TTL.
 
 ### Redis `max_capacity_override` self-heals on config mismatch
 
-When `_deserialize_max_capacity_override` reads a stored override from Redis, it compares the `configured_max_capacity` field in the JSON payload against the current process's `_max_capacity_default` (from `Quota.limit`). If they differ — e.g. after a deployment changes the static quota — the override is silently discarded (returns `None`), causing the bucket to fall back to the new static limit.
+When `_deserialize_max_capacity_override` reads a stored override from Redis, it compares the `configured_max_capacity` field in the JSON payload against the current process's `_max_capacity_default` (from `Quota.limit`). If they differ — e.g. after a deployment changes the static quota — the bucket emits an operator warning, ignores the stale override (returns `None`), and falls back to the new static limit.
 
 This is intentional self-healing: an override created under a previous quota configuration should not pin the new deployment to a stale limit. The override was set relative to the old config; applying it under a different config would produce an unexpected effective limit. Discarding it lets the new static config take effect cleanly, and operators can re-apply an override if needed.
 
