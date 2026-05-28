@@ -545,14 +545,13 @@ Recommended dry-run workflow:
 
 ### 7a. Future reservation fields
 
-`CapacityReservation` uses Pydantic with `populate_by_name=True` and ignores
-unknown fields on load. New fields added in future versions always have a
-default value so that older-version pickles load without error (the field will
-be `None` or a safe default). However, do not assume old readers will
-*enforce* new security-sensitive fields. If a future field carries an
-authorization signal, older processes that ignore it can still bypass that
-signal. The only safe upgrade path for security-sensitive field additions is to
-drain in-flight reservations before exposing old processes to new ones.
+`CapacityReservation` uses strict Pydantic DTO validation. Unknown fields are
+not ignored on load; they raise `ValidationError`. Forward compatibility is
+limited to fields already known to the installed version and defined with a
+safe default. If a future field carries an authorization signal, older
+processes will not understand or enforce it. The only safe upgrade path for
+security-sensitive field additions is to drain in-flight reservations before
+exposing old processes to new ones.
 
 ### 7b. Redis key format and Lua compatibility
 

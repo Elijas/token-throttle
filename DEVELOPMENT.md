@@ -81,16 +81,15 @@ Use `RuntimeError` for broken internal invariants that users cannot correct by
 changing their request arguments. Reserve `TypeError` for places where the code
 is intentionally matching Python's own call-signature convention.
 
-### `loguru` is optional — stdlib logging is the default
+### Logging uses stdlib only
 
-`loguru` is listed under `[project.optional-dependencies]` (`token-throttle[loguru]`), not in runtime deps. The logging layer auto-detects it:
+`create_logging_callbacks` and `create_sync_logging_callbacks` emit through
+stdlib `logging.getLogger("token_throttle")`. There is no `loguru` optional
+extra or loguru-specific callback factory in v8.
 
-- `_callbacks._log()` uses loguru if installed, otherwise stdlib `logging.getLogger("token_throttle")`.
-- `create_logging_callbacks` / `create_sync_logging_callbacks` use this auto-detection (default for new code).
-- `create_loguru_callbacks` / `create_sync_loguru_callbacks` require loguru explicitly and raise `ImportError` if missing.
-- `_models.py` uses `warnings.warn()` for the empty-quota warning — no loguru dependency.
-- `_probe_loguru()` caches its result on first call. If loguru is not installed at import time, the `None` result is cached for the process lifetime. Installing loguru after the first probe will not be detected — restart the process to pick it up.
-- Private escape hatch for tests and unusual plugin loaders: `from token_throttle._interfaces._callbacks import _loguru_cache; _loguru_cache.clear()` forces the next logging call to probe again. This is intentionally not public API.
+`TRACE` and `SUCCESS` are accepted only as compatibility level-name aliases in
+`_STDLIB_LEVEL_MAP`; they map to stdlib `DEBUG` and `INFO`, respectively.
+`_models.py` uses `warnings.warn()` for the empty-quota warning.
 
 ### Reservation and serialization trust boundary
 
@@ -231,8 +230,8 @@ Because `last_checked` is reset to `now` before the new rate takes effect, the n
 `KeyError` immediately. This is intentional — `_log()` is a private function
 only called from the `create_*_callbacks()` factories, which only pass
 standard level strings (DEBUG, INFO, WARNING, ERROR, CRITICAL) plus the
-loguru extensions (TRACE, SUCCESS). Adding a `.get()` fallback would silently
-mask typos in level names.
+compatibility aliases (TRACE, SUCCESS). Adding a `.get()` fallback would
+silently mask typos in level names.
 
 ### Capacity matching loop and the postconsumption invariant
 

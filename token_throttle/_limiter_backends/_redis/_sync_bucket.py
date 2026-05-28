@@ -510,6 +510,15 @@ class SyncRedisBucket:
             self._max_capacity_default,
             rel_tol=1e-12,
         ):
+            _logger.warning(
+                "Ignoring Redis max_capacity override for bucket %s at key %s: "
+                "configured_max_capacity anchor %r does not match current "
+                "configured limit %r.",
+                self.full_redis_key,
+                self._max_capacity_key,
+                configured_limit,
+                self._max_capacity_default,
+            )
             return None
         return override_value
 
