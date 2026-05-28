@@ -241,8 +241,10 @@ class SyncRedisBucket:
     ``{key_prefix}:rate_limiting:bucket:{model_family}:{metric}:{per_seconds}:...``.
 
     Uses the same key format as the async RedisBucket, so sync and async
-    backends can share the same Redis override state. Static quota limits come
-    from the current ``PerModelConfig`` in each process.
+    backends can share the same Redis override state. Legacy Era 1
+    ``:max_capacity`` keys are logged and ignored; operators should re-set
+    runtime overrides after upgrade. Static quota limits come from the current
+    ``PerModelConfig`` in each process.
     """
 
     # Cache TTL for max_capacity reads (in seconds)
@@ -309,6 +311,9 @@ class SyncRedisBucket:
         self._lock_key = redis_key_with_suffix(self.full_redis_key, "lock")
         self._max_capacity_key = redis_key_with_suffix(
             self.full_redis_key, "max_capacity_override"
+        )
+        self._legacy_max_capacity_key = redis_key_with_suffix(
+            self.full_redis_key, "max_capacity"
         )
         self._schema_version_key = redis_namespace_key(
             self.key_prefix,
@@ -425,6 +430,7 @@ class SyncRedisBucket:
         era: str,
         reason: str,
         *,
+        key: str | None = None,
         raw_value: object,
     ) -> None:
         _logger.warning(
@@ -432,11 +438,20 @@ class SyncRedisBucket:
             "%s format detected (%s, raw=%r). Re-set the override after upgrade "
             "to write the current anchored format.",
             self.full_redis_key,
-            self._max_capacity_key,
+            key if key is not None else self._max_capacity_key,
             era,
             reason,
             _safe_redis_value_repr(raw_value),
         )
+
+    def handle_legacy_max_capacity_key(self, raw_value: object) -> None:
+        if raw_value is not None:
+            self._handle_legacy_override(
+                "Era 1",
+                "old :max_capacity key path",
+                key=self._legacy_max_capacity_key,
+                raw_value=raw_value,
+            )
 
     def _deserialize_max_capacity_override(self, raw_value: object) -> float | None:
         if raw_value is None:
