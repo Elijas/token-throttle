@@ -9,6 +9,7 @@ pytest.importorskip("redis", reason="redis package not installed")
 
 from token_throttle._interfaces._interfaces import PerModelConfig
 from token_throttle._interfaces._models import Quota, UsageQuotas
+from token_throttle._limiter_backends._redis._sync_backend import SyncRedisBackend
 from token_throttle._limiter_backends._redis._sync_bucket import (
     MaxCapacityOverrideParseError,
     SyncRedisBucket,
@@ -16,7 +17,20 @@ from token_throttle._limiter_backends._redis._sync_bucket import (
 
 
 @pytest.fixture
-def mock_redis():
+def quota() -> Quota:
+    return Quota(metric="requests", limit=20, per_seconds=1)
+
+
+@pytest.fixture
+def limit_config(quota: Quota) -> PerModelConfig:
+    return PerModelConfig(
+        model_family="test/model",
+        quotas=UsageQuotas([quota]),
+    )
+
+
+@pytest.fixture
+def mock_redis() -> MagicMock:
     mock = MagicMock()
     mock.get.return_value = None
     mock.set.return_value = True
@@ -25,12 +39,11 @@ def mock_redis():
 
 
 @pytest.fixture
-def bucket(mock_redis):
-    quota = Quota(metric="requests", limit=20, per_seconds=1)
-    limit_config = PerModelConfig(
-        model_family="test/model",
-        quotas=UsageQuotas([quota]),
-    )
+def bucket(
+    quota: Quota,
+    limit_config: PerModelConfig,
+    mock_redis: MagicMock,
+) -> SyncRedisBucket:
     return SyncRedisBucket(
         quota=quota,
         limit_config=limit_config,
@@ -45,10 +58,8 @@ def test_set_max_capacity_rejects_boolean(bucket):
 
 
 def test_get_max_capacity_ignores_legacy_max_capacity_key(bucket, mock_redis):
-    legacy_key = f"{bucket.full_redis_key}:max_capacity"
-
     def get_side_effect(key: str):
-        if key == legacy_key:
+        if key == bucket._legacy_max_capacity_key:
             return b"5.0"
         if key == bucket._max_capacity_key:
             return None
@@ -58,6 +69,31 @@ def test_get_max_capacity_ignores_legacy_max_capacity_key(bucket, mock_redis):
 
     assert bucket.get_max_capacity() == 20.0
     mock_redis.get.assert_called_once_with(bucket._max_capacity_key)
+
+
+def test_backend_probe_warns_on_era1_legacy_key(
+    bucket: SyncRedisBucket,
+    limit_config: PerModelConfig,
+    mock_redis: MagicMock,
+    caplog: pytest.LogCaptureFixture,
+):
+    backend = SyncRedisBackend([bucket], mock_redis, limit_config, key_prefix="test")
+    mock_redis.get.return_value = b"85.0"
+
+    with caplog.at_level("WARNING"):
+        backend._probe_legacy_override_keys_once()
+
+    mock_redis.get.assert_called_once_with(bucket._legacy_max_capacity_key)
+    assert "Era 1" in caplog.text
+    assert "old :max_capacity key path" in caplog.text
+
+    caplog.clear()
+    mock_redis.get.reset_mock()
+
+    backend._probe_legacy_override_keys_once()
+
+    mock_redis.get.assert_not_called()
+    assert "Era 1" not in caplog.text
 
 
 def test_set_max_capacity_writes_baseline_metadata(bucket, mock_redis):
