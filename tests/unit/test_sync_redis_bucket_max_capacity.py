@@ -114,18 +114,24 @@ def test_set_max_capacity_writes_baseline_metadata(bucket, mock_redis):
     }
 
 
-def test_update_max_capacity_from_result_ignores_stale_metadata(bucket):
-    bucket.update_max_capacity_from_result(
-        json.dumps(
-            {
-                "configured_max_capacity": 10.0,
-                "override_max_capacity": 5.0,
-            }
-        ).encode()
-    )
+def test_update_max_capacity_from_result_warns_on_stale_metadata(
+    bucket,
+    caplog: pytest.LogCaptureFixture,
+):
+    payload = json.dumps(
+        {
+            "configured_max_capacity": 10.0,
+            "override_max_capacity": 5.0,
+        }
+    ).encode()
+
+    with caplog.at_level("WARNING"):
+        bucket.update_max_capacity_from_result(payload)
 
     assert bucket._max_capacity_cached is None
     assert bucket.max_capacity == 20.0
+    assert "configured_max_capacity anchor 10.0" in caplog.text
+    assert "does not match current configured limit 20.0" in caplog.text
 
 
 def test_bare_numeric_string_rejected(bucket):
