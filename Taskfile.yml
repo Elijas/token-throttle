@@ -54,72 +54,16 @@ tasks:
       - uv sync --upgrade
     aliases: [ud]
   ##############################
-  ### PUBLISH
+  ### RELEASE DISPATCH
   ##############################
-  ensure-clean-working-tree: # Ensure no changes in the working tree or index, abort if any.
-    silent: true
-    internal: true
-    cmds:
-      - if git diff --exit-code > /dev/null 2>&1 && git diff --cached --exit-code > /dev/null 2>&1; then :; else echo "Changes detected in the working tree or index. Please commit or stash them before proceeding."; exit 1; fi
-
-  bump:internal:
-    internal: true
-    cmds:
-      - echo "bumping {{.type}} version"
-      - uv run devtools/bump_readme_version.py `bump-my-version show --increment {{.type}} new_version`
-      - git add README.md
-      - uv run bump-my-version bump {{.type}}
-    desc: Bump version in README.md and pyproject.toml (internal)
-
-  bump:patch:
-    cmds:
-      - task: bump:internal
-        vars:
-          type: patch
-    desc: Bump patch version [Usage] bp
-    aliases: [bp]
-
-  bump:minor:
-    cmds:
-      - task: bump:internal
-        vars:
-          type: minor
-    desc: Bump minor version [Usage] bm
-    aliases: [bm]
-
-  publish:internal:
-    internal: true
-    cmds:
-      # Check git state
-      - task: ensure-clean-working-tree
-      - git pull
-      # Check code state
-      - uv run pytest -q
-      - task lint
-      # Bump version
-      - task: bump:internal
-        vars:
-          type: '{{.type}}'
-      # Upload to PyPI
-      - rm -rf dist
-      - uv build
-      - uv publish
-      # Upload to Github, uploading to Github after PyPI allows for the shields.io badge to be cached to the accurate pypi version
-      - git push
-    desc: Base publish task (internal)
-
   publish:patch:
     cmds:
-      - task: publish:internal
-        vars:
-          type: patch
-    desc: Publish patch version update [Usage] pp
+      - gh workflow run release.yml --ref main -f bump=patch
+    desc: Dispatch the remote GitHub Actions patch release workflow [Usage] pp
     aliases: [pp]
 
   publish:minor:
     cmds:
-      - task: publish:internal
-        vars:
-          type: minor
-    desc: Publish minor version update [Usage] pm
+      - gh workflow run release.yml --ref main -f bump=minor
+    desc: Dispatch the remote GitHub Actions minor release workflow [Usage] pm
     aliases: [pm]
