@@ -560,6 +560,12 @@ def _raise_backend_external_error(exc: Exception) -> None:
     raise exc
 
 
+def _value_error_wraps_usage_counter_key_error(exc: ValueError) -> bool:
+    return isinstance(exc.__cause__, KeyError) and str(exc).startswith(
+        "usage_counter raised: KeyError"
+    )
+
+
 def _resolve_usage_counter_result_for_model(
     usage_counter,
     *,
@@ -576,8 +582,8 @@ def _resolve_usage_counter_result_for_model(
             "pass an explicit get_encoding_func."
         ) from exc
     except ValueError as exc:
-        if isinstance(exc.__cause__, KeyError):
-            raise ValueError(  # noqa: TRY004 - preserving public ValueError contract
+        if _value_error_wraps_usage_counter_key_error(exc):
+            raise ValueError(
                 "Rate limiter usage_counter failed with KeyError while counting "
                 f"request usage for model {model_name!r}. If this is "
                 "OpenAIUsageCounter, token-throttle could not determine the "
