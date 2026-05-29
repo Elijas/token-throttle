@@ -86,14 +86,14 @@ async def test_partial_none_bucket_state_is_normalized_to_drained_capacity(
     pipeline = AsyncPipeline(result=[b"1000.0", None, False, False, None])
     seen: list[tuple[object, object]] = []
 
-    def capture_calculate_capacity(
-        last_checked: object, capacity: object, current_time: float
-    ):
-        seen.append((last_checked, capacity))
-        return original_calculate_capacity(last_checked, capacity, current_time)
+    def capture_calculate_capacity(**kwargs: object):
+        seen.append((kwargs["last_checked"], kwargs["outdated_capacity"]))
+        return original_calculate_capacity(**kwargs)
 
-    original_calculate_capacity = bucket.calculate_capacity
-    monkeypatch.setattr(bucket, "calculate_capacity", capture_calculate_capacity)
+    original_calculate_capacity = redis_backend_module.calculate_capacity
+    monkeypatch.setattr(
+        redis_backend_module, "calculate_capacity", capture_calculate_capacity
+    )
 
     result = await backend._get_capacities_unsafe(
         pipeline=pipeline,
