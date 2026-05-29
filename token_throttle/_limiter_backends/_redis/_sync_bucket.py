@@ -352,25 +352,14 @@ class SyncRedisBucket:
         Lock-held rate-change snapshots use this so another worker's recent
         override cannot be hidden by this process's 1-second convenience cache.
         """
-        stored_value = self._redis.get(self._max_capacity_key)
-        override_value = self._deserialize_max_capacity_override(stored_value)
-        if override_value is not None:
-            self._redis.expire(self._max_capacity_key, self._override_ttl_seconds)
-        self._set_cached_max_capacity_override(override_value)
-        self._max_capacity_cache_time = time.time()
+        override_value = self._read_max_capacity_override_from_redis()
+        self._refresh_max_capacity_override_ttl(override_value)
+        self._apply_parsed_max_capacity_override(override_value)
         return self.max_capacity
 
     def get_max_capacity(self) -> float:
         """Fetch the runtime override from Redis (if cache is stale) and return the effective max capacity."""
-        # time.time() is intentional: this TTL guards a per-process cache,
-        # not shared state, so local wall-clock is the correct reference.
-        current_time = time.time()
-        cache_age = current_time - self._max_capacity_cache_time
-
-        # Return cached override if fresh
-        if (
-            self._max_capacity_cached is not None or self._max_capacity_cache_populated
-        ) and cache_age < self.MAX_CAPACITY_CACHE_TTL:
+        if self._max_capacity_cache_is_fresh():
             return self.max_capacity
 
         return self.refresh_max_capacity_from_redis()
@@ -382,6 +371,34 @@ class SyncRedisBucket:
         self._max_capacity_cache_populated = True
         effective_limit = self.max_capacity
         self._rate_per_sec = _calculate_rate_per_sec(effective_limit, self.per_seconds)
+
+    def _max_capacity_cache_is_fresh(self) -> bool:
+        # time.time() is intentional: this TTL guards a per-process cache,
+        # not shared state, so local wall-clock is the correct reference.
+        cache_age = time.time() - self._max_capacity_cache_time
+        return (
+            self._max_capacity_cached is not None or self._max_capacity_cache_populated
+        ) and cache_age < self.MAX_CAPACITY_CACHE_TTL
+
+    def _effective_max_capacity_for_override(
+        self, override_value: float | None
+    ) -> float:
+        if override_value is None:
+            return self.configured_max_capacity
+        return override_value
+
+    def _read_max_capacity_override_from_redis(self) -> float | None:
+        stored_value = self._redis.get(self._max_capacity_key)
+        return self._deserialize_max_capacity_override(stored_value)
+
+    def _refresh_max_capacity_override_ttl(self, override_value: float | None) -> None:
+        if override_value is None:
+            return
+        self._redis.expire(self._max_capacity_key, self._override_ttl_seconds)
+
+    def _apply_parsed_max_capacity_override(self, override_value: float | None) -> None:
+        self._set_cached_max_capacity_override(override_value)
+        self._max_capacity_cache_time = time.time()
 
     @staticmethod
     def _parse_positive_finite_value(raw_value: object) -> float | None:
@@ -525,8 +542,7 @@ class SyncRedisBucket:
     def update_max_capacity_from_result(self, raw_value: object) -> bool:
         """Update the runtime-override cache from a pre-fetched pipeline result."""
         new_value = self._deserialize_max_capacity_override(raw_value)
-        self._set_cached_max_capacity_override(new_value)
-        self._max_capacity_cache_time = time.time()
+        self._apply_parsed_max_capacity_override(new_value)
         return new_value is not None
 
     def _set_missing_consumption_data_context(
@@ -640,8 +656,17 @@ class SyncRedisBucket:
         pipeline.expire(self._capacity_key, self._bucket_ttl_seconds)
 
         if own_pipeline:
-            # Refresh max_capacity cache before calculating
-            self.get_max_capacity()
+            update_max_capacity_cache = not self._max_capacity_cache_is_fresh()
+            max_capacity_override = (
+                self._read_max_capacity_override_from_redis()
+                if update_max_capacity_cache
+                else self._max_capacity_cached
+            )
+            effective_max_capacity = (
+                self._effective_max_capacity_for_override(max_capacity_override)
+                if update_max_capacity_cache
+                else self.max_capacity
+            )
             try:
                 results = pipeline.execute()
             except redis.exceptions.ResponseError as exc:
@@ -667,7 +692,19 @@ class SyncRedisBucket:
                 context=f"SyncRedisBucket.get_capacity({self.full_redis_key}) "
                 "capacity TTL",
             )
-            return self.calculate_capacity(last_checked, capacity, current_time)
+            result = calculate_capacity(
+                last_checked=last_checked,
+                outdated_capacity=capacity,
+                current_time=current_time,
+                max_capacity=effective_max_capacity,
+                rate_per_sec=effective_max_capacity / self.per_seconds,
+                bucket_id=self.full_redis_key,
+            )
+            result = _revalidate_dto(result)
+            if update_max_capacity_cache:
+                self._refresh_max_capacity_override_ttl(max_capacity_override)
+                self._apply_parsed_max_capacity_override(max_capacity_override)
+            return result
         return None
 
     def set_capacity(

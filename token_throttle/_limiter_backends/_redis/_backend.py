@@ -1380,39 +1380,12 @@ class RedisBackend(RateLimiterBackend):
         partial_state_buckets: list[RedisBucket] = []
         for parsed_result in parsed_bucket_results:
             bucket = parsed_result.bucket
-            bucket._set_cached_max_capacity_override(  # noqa: SLF001
-                parsed_result.max_capacity_override
-            )
-            bucket._max_capacity_cache_time = time.time()  # noqa: SLF001
-            if parsed_result.max_capacity_override is not None:
-                expire_result = self._redis.expire(
-                    bucket._max_capacity_key,  # noqa: SLF001
-                    bucket._override_ttl_seconds,  # noqa: SLF001
-                )
-                if inspect.isawaitable(expire_result):
-                    await expire_result
             result = parsed_result.calculated_capacity
             if len(parsed_result.missing_keys) == 1:
-                bucket._set_missing_consumption_data_context(  # noqa: SLF001
-                    reason="partial_state_drained",
-                    missing_keys=parsed_result.missing_keys,
-                    present_keys=parsed_result.present_keys,
-                )
                 partial_state_buckets.append(bucket)
                 fresh_start_buckets.append(bucket)
             elif result.is_fresh_start:
-                bucket._set_missing_consumption_data_context(  # noqa: SLF001
-                    reason="fresh_start",
-                    missing_keys=parsed_result.missing_keys,
-                    present_keys=parsed_result.present_keys,
-                )
                 fresh_start_buckets.append(bucket)
-            else:
-                bucket._set_missing_consumption_data_context(  # noqa: SLF001
-                    reason=None,
-                    missing_keys=(),
-                    present_keys=parsed_result.present_keys,
-                )
             new_capacities[(bucket.usage_metric, int(bucket.per_seconds))] = (
                 result.amount
             )
@@ -1451,6 +1424,36 @@ class RedisBackend(RateLimiterBackend):
                         "RedisBackend._get_capacities_unsafe partial-state repair"
                         f"({bucket.full_redis_key}) capacity"
                     ),
+                )
+
+        for parsed_result in parsed_bucket_results:
+            await parsed_result.bucket._refresh_max_capacity_override_ttl(  # noqa: SLF001
+                parsed_result.max_capacity_override
+            )
+
+        for parsed_result in parsed_bucket_results:
+            bucket = parsed_result.bucket
+            bucket._apply_parsed_max_capacity_override(  # noqa: SLF001
+                parsed_result.max_capacity_override
+            )
+            result = parsed_result.calculated_capacity
+            if len(parsed_result.missing_keys) == 1:
+                bucket._set_missing_consumption_data_context(  # noqa: SLF001
+                    reason="partial_state_drained",
+                    missing_keys=parsed_result.missing_keys,
+                    present_keys=parsed_result.present_keys,
+                )
+            elif result.is_fresh_start:
+                bucket._set_missing_consumption_data_context(  # noqa: SLF001
+                    reason="fresh_start",
+                    missing_keys=parsed_result.missing_keys,
+                    present_keys=parsed_result.present_keys,
+                )
+            else:
+                bucket._set_missing_consumption_data_context(  # noqa: SLF001
+                    reason=None,
+                    missing_keys=(),
+                    present_keys=parsed_result.present_keys,
                 )
 
         return CapacitiesGetterResult(
@@ -2808,17 +2811,49 @@ class RedisBackend(RateLimiterBackend):
         ``min(max_capacity, …)`` and a later cap raise can re-expose the
         hidden overflow.
         """
-        # Force-refresh the override cache so ``bucket._rate_per_sec`` reflects
-        # the current effective rate in Redis before we snapshot under it.
-        refresh_max_capacity = getattr(
-            bucket,
-            "refresh_max_capacity_from_redis",
-            None,
+        supports_pending_override = all(
+            hasattr(bucket, attr)
+            for attr in (
+                "_read_max_capacity_override_from_redis",
+                "_refresh_max_capacity_override_ttl",
+                "_apply_parsed_max_capacity_override",
+            )
         )
-        if callable(refresh_max_capacity):
-            await refresh_max_capacity()
-        else:  # test fakes and compatible custom bucket shims
-            await bucket.get_max_capacity()
+        if supports_pending_override:
+            max_capacity_override = (
+                await bucket._read_max_capacity_override_from_redis()  # noqa: SLF001
+            )
+            effective_rate_per_sec = (
+                bucket._effective_max_capacity_for_override(  # noqa: SLF001
+                    max_capacity_override
+                )
+                / bucket.per_seconds
+            )
+        else:
+            refresh_max_capacity = getattr(
+                bucket,
+                "refresh_max_capacity_from_redis",
+                None,
+            )
+            if callable(refresh_max_capacity):
+                await refresh_max_capacity()
+            else:  # test fakes and compatible custom bucket shims
+                await bucket.get_max_capacity()
+            max_capacity_override = None
+            effective_rate_per_sec = bucket._rate_per_sec  # noqa: SLF001
+
+        async def refresh_pending_override_ttl() -> None:
+            if supports_pending_override:
+                await bucket._refresh_max_capacity_override_ttl(  # noqa: SLF001
+                    max_capacity_override
+                )
+
+        def apply_pending_override_cache() -> None:
+            if supports_pending_override:
+                bucket._apply_parsed_max_capacity_override(  # noqa: SLF001
+                    max_capacity_override
+                )
+
         current_time = await async_server_time(self._redis)
         pipeline = self._redis.pipeline()
         pipeline.get(bucket._last_checked_key)  # noqa: SLF001
@@ -2851,6 +2886,8 @@ class RedisBackend(RateLimiterBackend):
             "capacity TTL",
         )
         if last_checked_raw is None or stored_raw is None:
+            await refresh_pending_override_ttl()
+            apply_pending_override_cache()
             # Partial state (one None) is treated the same as full absence:
             # the bucket will start fresh on the next acquire. This is the
             # correct fallback — anchoring with incomplete data would produce
@@ -2867,6 +2904,8 @@ class RedisBackend(RateLimiterBackend):
             last_checked = float(last_checked_raw)
             stored = float(stored_raw)
         except (TypeError, ValueError) as parse_error:
+            await refresh_pending_override_ttl()
+            apply_pending_override_cache()
             _logger.warning(
                 "Stale Redis bucket state at %r: %r; "
                 "snapshot skipped due to unparseable Redis state "
@@ -2878,6 +2917,8 @@ class RedisBackend(RateLimiterBackend):
             )
             return  # unparseable state — leave as-is; a later write will overwrite.
         if not (math.isfinite(last_checked) and math.isfinite(stored)):
+            await refresh_pending_override_ttl()
+            apply_pending_override_cache()
             _logger.warning(
                 "Bucket %s: snapshot skipped due to non-finite Redis state "
                 "(last_checked=%s, capacity=%s).",
@@ -2889,12 +2930,14 @@ class RedisBackend(RateLimiterBackend):
         time_passed = current_time - last_checked
         if time_passed < 0:
             time_passed = 0.0  # clock skew — same clamp as calculate_capacity.
-        anchored = stored + time_passed * bucket._rate_per_sec  # noqa: SLF001
+        await refresh_pending_override_ttl()
+        anchored = stored + time_passed * effective_rate_per_sec
         await bucket.set_capacity(
             anchored,
             current_time=current_time,
             allow_negative=True,
         )
+        apply_pending_override_cache()
 
     async def set_max_capacity(
         self,
