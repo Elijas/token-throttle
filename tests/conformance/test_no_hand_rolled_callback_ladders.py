@@ -49,6 +49,7 @@ CANCELLED_ERROR_NAMES = {
 }
 CRITICAL_EXCEPTION_LITERAL_NAMES = {
     "asyncio.CancelledError",
+    "concurrent.futures.CancelledError",
     "KeyboardInterrupt",
     "SystemExit",
     "GeneratorExit",
@@ -75,6 +76,9 @@ class _DiscoveredCancellationSite:
 
     def label(self) -> str:
         return f"{self.relative_path}:{self.function_name}:{self.except_lineno}"
+
+    def key(self) -> tuple[str, str]:
+        return (self.relative_path, self.function_name)
 
 
 @dataclass(frozen=True)
@@ -135,15 +139,46 @@ REGISTERED_CANCELLATION_CLEANUP_SITES = (
     ),
 )
 
-# Keep the older BaseException cleanup coverage for the async memory backend.
-# It is already fixed with a BaseException handler, so it is not discovered by
-# the CancelledError-specific AST pass above.
 ADDITIONAL_BASE_EXCEPTION_CLEANUP_SITES = (
+    # Async memory backend coverage predates the CancelledError-specific AST
+    # pass and remains load-bearing even though discovery does not find it.
     _CleanupSite(
         "_limiter_backends/_memory/_backend.py",
         "await_for_capacity",
         "_refund_cancelled_consumption",
     ),
+    # Sync siblings use BaseException for interrupt-safe cleanup, not
+    # CancelledError, so they are covered explicitly here.
+    _CleanupSite(
+        "_sync_rate_limiter.py",
+        "_acquire_capacity",
+        "_rollback_pending_acquire",
+    ),
+    _CleanupSite(
+        "_sync_rate_limiter.py",
+        "_set_max_capacity_transactional",
+        "_reconcile_runtime_max_capacity_after_failed_set",
+    ),
+    _CleanupSite(
+        "_limiter_backends/_memory/_sync_backend.py",
+        "wait_for_capacity",
+        "_refund_cancelled_consumption",
+    ),
+    _CleanupSite(
+        "_limiter_backends/_redis/_sync_backend.py",
+        "_check_and_consume_capacity",
+        "_refund_cancelled_consumption",
+    ),
+    _CleanupSite(
+        "_limiter_backends/_redis/_sync_backend.py",
+        "wait_for_capacity",
+        "_refund_cancelled_consumption",
+    ),
+)
+
+REGISTERED_BASE_EXCEPTION_CLEANUP_SITES = (
+    *REGISTERED_CANCELLATION_CLEANUP_SITES,
+    *ADDITIONAL_BASE_EXCEPTION_CLEANUP_SITES,
 )
 
 
@@ -168,6 +203,29 @@ def _exception_type_names(node: ast.AST | None) -> tuple[str, ...]:
         return tuple(names)
     name = _attribute_name(node)
     return () if name is None else (name,)
+
+
+def _literal_names_in_assignment(path: pathlib.Path, assignment_name: str) -> set[str]:
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign | ast.AnnAssign):
+            continue
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        if not any(
+            isinstance(target, ast.Name) and target.id == assignment_name
+            for target in targets
+        ):
+            continue
+        value = node.value
+        if not isinstance(value, ast.Tuple):
+            return set()
+        names: set[str] = set()
+        for element in value.elts:
+            if isinstance(element, ast.Starred):
+                continue
+            names.update(_exception_type_names(element))
+        return names
+    raise AssertionError(f"{assignment_name} not found in {path}")
 
 
 def _handler_catches_base_exception(handler: ast.ExceptHandler) -> bool:
@@ -398,6 +456,19 @@ def test_no_hand_rolled_group_contains_critical_helper() -> None:
     )
 
 
+def test_critical_exception_literal_names_match_lifecycle_tuple() -> None:
+    source_names = _literal_names_in_assignment(
+        CALLBACKS_FILE,
+        "LIFECYCLE_CALLBACK_CRITICAL_EXCEPTIONS",
+    )
+    assert source_names == CRITICAL_EXCEPTION_LITERAL_NAMES, (
+        "Critical-exception literal ladder detection must stay aligned with "
+        "LIFECYCLE_CALLBACK_CRITICAL_EXCEPTIONS. Detector names: "
+        f"{sorted(CRITICAL_EXCEPTION_LITERAL_NAMES)}; source tuple names: "
+        f"{sorted(source_names)}"
+    )
+
+
 def test_no_hand_rolled_critical_exception_literal_ladder() -> None:
     """Detect literal critical-exception ladders in except-clause syntax.
 
@@ -486,13 +557,15 @@ def test_no_hand_rolled_forget_in_flight_on_base_exception() -> None:
     )
 
 
-def test_async_outer_cleanup_sites_catch_base_exception() -> None:
-    """Async cleanup/reconciliation sites must not lag the critical taxonomy.
+def test_registered_cleanup_sites_catch_base_exception() -> None:
+    """Cleanup/reconciliation sites must not lag the critical taxonomy.
 
     Discovery finds every non-opted-out ``except asyncio.CancelledError`` /
     ``except concurrent.futures.CancelledError`` site in the production
     package. Registration only supplies the cleanup call each
-    discovered load-bearing site must preserve under ``BaseException``.
+    discovered load-bearing async site must preserve under ``BaseException``.
+    Sync sibling sites are registered explicitly because they use
+    interrupt-safe ``except BaseException`` cleanup directly.
     """
     discovered_sites = _discover_cancellation_composition_sites()
     registered_keys = {site.key() for site in REGISTERED_CANCELLATION_CLEANUP_SITES}
@@ -511,10 +584,7 @@ def test_async_outer_cleanup_sites_catch_base_exception() -> None:
 
     offenders = [
         (site.relative_path, site.function_name, site.cleanup_call)
-        for site in (
-            *REGISTERED_CANCELLATION_CLEANUP_SITES,
-            *ADDITIONAL_BASE_EXCEPTION_CLEANUP_SITES,
-        )
+        for site in REGISTERED_BASE_EXCEPTION_CLEANUP_SITES
         if not _function_has_base_exception_cleanup(
             site.path,
             site.function_name,
@@ -522,7 +592,7 @@ def test_async_outer_cleanup_sites_catch_base_exception() -> None:
         )
     ]
     assert not offenders, (
-        "Async cleanup/reconciliation sites must catch BaseException so "
+        "Cleanup/reconciliation sites must catch BaseException so "
         "KeyboardInterrupt/SystemExit/GeneratorExit/MemoryError/RecursionError "
         f"and callback critical exceptions cannot bypass cleanup. Offenders: "
         f"{offenders}"
@@ -567,16 +637,19 @@ def test_async_cleanup_exception_handlers_preserve_critical_reachability() -> No
 def test_cancellation_composition_site_discovery_matches_snapshot() -> None:
     """Make the auto-discovered cancellation-composition surface reviewable."""
     expected = [
-        "_limiter_backends/_redis/_backend.py:_check_and_consume_capacity:2039",
-        "_rate_limiter.py:_acquire_capacity:1498",
-        "_rate_limiter.py:_set_max_capacity_transactional:2050",
+        ("_limiter_backends/_redis/_backend.py", "_check_and_consume_capacity"),
+        ("_rate_limiter.py", "_acquire_capacity"),
+        ("_rate_limiter.py", "_set_max_capacity_transactional"),
     ]
-    actual = [site.label() for site in _discover_cancellation_composition_sites()]
+    actual_sites = _discover_cancellation_composition_sites()
+    actual = [site.key() for site in actual_sites]
     assert actual == expected, (
         "Cancellation-composition discovery changed. If a new site is "
         "load-bearing, register its cleanup_call; if it is intentionally "
         f"narrower, add `# {AST_GUARD_SKIP_MARKER} — <reason>` on/immediately "
-        f"above the except line. Actual discovery: {actual}"
+        "above the except line. Expected semantic keys: "
+        f"{expected}. Actual semantic keys: {actual}. Actual discovery labels: "
+        f"{[site.label() for site in actual_sites]}"
     )
 
 
@@ -611,4 +684,4 @@ def test_cancellation_assertions_scan_new_production_files(
         AssertionError,
         match=re.escape("new_backend.py:cleanup_cell:6"),
     ):
-        test_async_outer_cleanup_sites_catch_base_exception()
+        test_registered_cleanup_sites_catch_base_exception()
