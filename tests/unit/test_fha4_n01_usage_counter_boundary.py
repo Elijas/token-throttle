@@ -7,6 +7,7 @@ from collections.abc import Iterator, Mapping
 
 import pytest
 
+from token_throttle._factories._openai._token_counter import OpenAIUsageCounter
 from token_throttle._interfaces._interfaces import PerModelConfig
 from token_throttle._interfaces._models import Quota, UsageQuotas, frozen_usage
 from token_throttle._limiter_backends._memory._backend import MemoryBackendBuilder
@@ -95,6 +96,53 @@ class _DuplicateItems(Mapping[str, int]):
 class _ExplodingFloat(float):
     def __float__(self):
         raise RuntimeError("float boom")
+
+
+class _FakeEncoding:
+    def encode(self, text: str) -> list[int]:
+        return list(range(len(text)))
+
+
+async def test_async_exact_openai_counter_uses_internal_async_fast_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sync_calls = 0
+    async_calls = 0
+
+    def fake_sync_call(self, model: str, **request):
+        nonlocal sync_calls
+        sync_calls += 1
+        return {"requests": 99}
+
+    async def fake_async_call(self, model: str, **request):
+        nonlocal async_calls
+        async_calls += 1
+        return {"requests": 1}
+
+    monkeypatch.setattr(OpenAIUsageCounter, "__call__", fake_sync_call)
+    monkeypatch.setattr(OpenAIUsageCounter, "count_request_async", fake_async_call)
+    counter = OpenAIUsageCounter(get_encoding_func=lambda _model: _FakeEncoding())
+    limiter = RateLimiter(
+        _config(counter),
+        backend=MemoryBackendBuilder(),
+    )
+
+    try:
+        with warnings.catch_warnings(record=True) as warning_record:
+            warnings.simplefilter("always")
+            reservation = await limiter.acquire_capacity_for_request(
+                model="gpt",
+                input="hi",
+            )
+    finally:
+        await limiter.aclose()
+
+    assert reservation.usage == {"requests": 1.0}
+    assert sync_calls == 0
+    assert async_calls == 1
+    assert not any(
+        "asyncio event loop" in str(warning.message) for warning in warning_record
+    )
 
 
 def test_sync_custom_count_request_async_uses_sync_signature_resolver() -> None:

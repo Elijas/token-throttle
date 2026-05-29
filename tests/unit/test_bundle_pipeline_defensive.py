@@ -157,6 +157,7 @@ async def test_snapshot_bucket_state_logs_hostile_data(
         return 1234.0
 
     redis_client = MagicMock()
+    redis_client.get = AsyncMock(return_value=None)
     redis_client.pipeline.return_value = AsyncPipeline(
         result=[b"abc", b"1.0", True, True]
     )

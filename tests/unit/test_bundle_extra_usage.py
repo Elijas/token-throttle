@@ -7,16 +7,12 @@ from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from frozendict import frozendict
 
 from token_throttle._interfaces._interfaces import PerModelConfig
 from token_throttle._interfaces._models import Quota, UsageQuotas, frozen_usage
 from token_throttle._rate_limiter import RateLimiter
 from token_throttle._sync_rate_limiter import SyncRateLimiter
-from token_throttle._validation import (
-    merge_extra_usage,
-    validate_extra_usage,
-)
+from token_throttle._validation import validate_extra_usage
 
 
 def _limited_config(*, usage_counter=None) -> PerModelConfig:
@@ -106,13 +102,9 @@ def test_validate_extra_usage_rejects_duplicate_mapping_keys():
         validate_extra_usage(_DuplicateKeyMapping())
 
 
-def test_validate_extra_usage_materializes_items_lying_mapping_once():
-    usage = merge_extra_usage(
-        frozendict({"tokens": 100.0}),
-        validate_extra_usage(_DuplicateItemsMapping()),
-    )
-
-    assert usage == frozendict({"tokens": 101.0})
+def test_validate_extra_usage_rejects_duplicate_mapping_items():
+    with pytest.raises(ValueError, match="duplicate metric keys"):
+        validate_extra_usage(_DuplicateItemsMapping())
 
 
 def test_extra_usage_unknown_key_message_names_extra_usage_key():
