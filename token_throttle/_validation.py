@@ -269,6 +269,23 @@ def validate_backend_usage(
     )
 
 
+def validate_usage_values_non_negative(
+    usage: FrozenUsage,
+    *,
+    value_label: str = "Usage value",
+) -> None:
+    """
+    Validate usage values without requiring a configured quota key set.
+
+    Unlimited configs discard usage before reserving backend capacity, but the
+    public APIs still validate finite, non-negative usage for drop-in parity
+    with limited configs.
+    """
+    for metric, amount in usage.items():
+        if amount < 0:
+            raise ValueError(f"{value_label} for {metric} must be non-negative")
+
+
 def validate_backend_refund_usage_for_bucket_ids(
     reserved_usage: Usage,
     actual_usage: Usage,
@@ -470,20 +487,50 @@ def validate_extra_usage(
         raise ValueError(
             f"extra_usage must yield hashable keys (got {type(exc).__name__}: {exc})"
         ) from exc
-    try:
-        materialized = dict(extra_usage)
-    except Exception as exc:
-        raise ValueError(
-            "extra_usage must yield consistent key/value pairs "
-            f"(got {type(exc).__name__}: {exc})"
-        ) from exc
-    for metric, raw_amount in materialized.items():
+    converted: dict[str, float] = {}
+    seen_metrics: set[str] = set()
+    for metric, raw_amount in _materialize_extra_usage_items(extra_usage):
         normalized_metric = _validate_key_segment(metric, field_name="metric")
+        if normalized_metric in seen_metrics:
+            raise ValueError("extra_usage must not contain duplicate metric keys")
+        seen_metrics.add(normalized_metric)
         amount = _coerce_extra_usage_value(normalized_metric, raw_amount)
         if amount < 0:
             raise ValueError(
                 f"extra_usage value for {normalized_metric} must be non-negative"
             )
+        converted[normalized_metric] = amount
+    return converted
+
+
+def _materialize_extra_usage_items(
+    extra_usage: Mapping[object, object],
+) -> list[tuple[object, object]]:
+    try:
+        raw_items = extra_usage.items()
+    except Exception as exc:
+        raise ValueError(
+            "extra_usage must yield consistent key/value pairs "
+            f"(got {type(exc).__name__}: {exc})"
+        ) from exc
+
+    materialized: list[tuple[object, object]] = []
+    try:
+        for raw_item in raw_items:
+            try:
+                metric, amount = raw_item
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"extra_usage must yield metric/value pairs (got {raw_item!r})"
+                ) from exc
+            materialized.append((metric, amount))
+    except ValueError:
+        raise
+    except Exception as exc:
+        raise ValueError(
+            "extra_usage must yield consistent key/value pairs "
+            f"(got {type(exc).__name__}: {exc})"
+        ) from exc
     return materialized
 
 
