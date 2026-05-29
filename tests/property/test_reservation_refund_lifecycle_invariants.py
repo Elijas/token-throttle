@@ -1,42 +1,37 @@
-"""
-H1 reservation-lifecycle invariant tests (property / interleaving / taxonomy).
+"""Property / interleaving / taxonomy tests for the reservation refund-on-raise
+state machine.
 
-Candidate hardening tests for the ``_refund_or_forget_reservation_on_raise``
-context managers on ``RateLimiter`` and ``SyncRateLimiter`` and the refund
-state machine they delegate to (``_refund_capacity`` per-reservation lock +
-tri-state dedup).
+These exercise the ``_refund_or_forget_reservation_on_raise`` context managers
+on ``RateLimiter`` and ``SyncRateLimiter`` and the refund state machine they
+delegate to (``_refund_capacity``: a per-reservation lock plus a tri-state
+``pending`` / ``failed`` / ``committed`` dedup map).
 
-These pin invariants that existing tests only *bracket*:
+They pin invariants that existing tests only *bracket*:
 
-* ``tests/unit/test_reservation_cleanup_on_raise.py`` exercises the ctx
+* ``tests/unit/test_reservation_cleanup_on_raise.py`` exercises the context
   manager's branch *dispatch* but mocks ``_forget_in_flight_reservation`` and
   the refund helpers, so real capacity accounting, idempotency and the full
   ``BaseException`` taxonomy are never run; only ``CancelledError`` /
   ``RuntimeError`` are injected.
-* ``tests/unit/test_r3_audit_fixes.py`` and
+* ``tests/unit/test_r3_audit_fixes.py`` (F02.R3.01) and
   ``tests/unit/test_bundle_perf_refund_guard_narrow.py`` cover concurrent
   same-reservation refunds, but only at a fixed N=2 and assert a *mock*
-  ``call_count``/``await_count`` rather than the final credited capacity.
+  ``call_count`` / ``await_count`` rather than the final credited capacity.
 
 Net-new coverage here:
 
-1. Refund idempotency under *fuzzed* sequential repetition (real accounting).
-2. No double-credit under *fuzzed* N-actor concurrency (real accounting) —
-   the hot-spot #3 / F02.R3.01 TOCTOU double-credit regression guard,
-   generalized past N=2 and asserting the credited capacity, not a call count.
-3. Exception taxonomy during cleanup (Archetype D): every member of
-   ``LIFECYCLE_CALLBACK_CRITICAL_EXCEPTIONS`` injected at the real ctx-manager
-   body via a lifecycle callback, on both the refund and forget branches.
+1. Refund idempotency under fuzzed sequential repetition (real accounting).
+2. No double-credit under fuzzed N-actor concurrency (real accounting) — the
+   F02.R3.01 concurrent-duplicate-refund TOCTOU guard, generalized past N=2 and
+   asserting the credited capacity rather than a call count.
+3. Exception taxonomy during cleanup: every member of
+   ``LIFECYCLE_CALLBACK_CRITICAL_EXCEPTIONS`` injected at the real
+   context-manager body via a lifecycle callback, on both the refund and forget
+   branches.
 4. Refund-vs-forget branch mutual exclusivity (real cleanup, not mocked).
 
-All tests are memory-backend only and require no Redis. Sync and async
-siblings assert identical outcomes (hot-spot #5 / Archetype B parity).
-
-Doctrinal references:
-- tb260430 03-bug-archetype-catalog.md: Archetype A (TOCTOU), B (parity),
-  D (cancellation taxonomy), H (test gaps for new code).
-- tb260430 02-hot-spots.md: #2 invoke_callback_safe ladder, #3 refund dedup,
-  #5 sync<->async parity.
+All tests use the in-memory backend and require no Redis. Each invariant has
+sync and async siblings asserting identical outcomes.
 """
 
 from __future__ import annotations
@@ -101,13 +96,14 @@ def _config() -> PerModelConfig:
     )
 
 
-def _capacity(backend) -> float:
+def _get_capacity(backend) -> float:
+    """Read current capacity from the first memory bucket."""
     return backend._buckets[0].get_capacity(time.time()).amount
 
 
 # Distinct critical exception classes (the tuple may list CancelledError twice
-# via asyncio / concurrent.futures aliases). Parametrizing off the library
-# tuple keeps the test honest if a member is ever added/removed (Archetype H).
+# via the asyncio / concurrent.futures aliases). Parametrizing off the library
+# tuple keeps the test honest if a member is ever added or removed.
 _CRITICAL_CLASSES = list(dict.fromkeys(LIFECYCLE_CALLBACK_CRITICAL_EXCEPTIONS))
 _CRITICAL_IDS = [cls.__name__ for cls in _CRITICAL_CLASSES]
 
@@ -137,7 +133,7 @@ def test_async_refund_idempotent_under_sequential_repetition(repeats: int) -> No
             try:
                 await limiter.refund_capacity({METRIC: REFUND_ACTUAL}, reservation)
                 outcomes.append(None)
-            except BaseException as exc:  # exception classified below
+            except BaseException as exc:  # classified below
                 outcomes.append(exc)
 
         successes = [o for o in outcomes if o is None]
@@ -150,7 +146,7 @@ def test_async_refund_idempotent_under_sequential_repetition(repeats: int) -> No
         assert others == [], f"unexpected exceptions: {others}"
         assert len(successes) == 1
         assert len(dups) == repeats - 1
-        assert _capacity(backend) == pytest.approx(
+        assert _get_capacity(backend) == pytest.approx(
             AFTER_SINGLE_REFUND_CAP, abs=REFILL_TOLERANCE
         )
         assert limiter._refunded_reservation_ids[reservation.reservation_id] == (
@@ -175,7 +171,7 @@ def test_sync_refund_idempotent_under_sequential_repetition(repeats: int) -> Non
         try:
             limiter.refund_capacity({METRIC: REFUND_ACTUAL}, reservation)
             outcomes.append(None)
-        except BaseException as exc:  # exception classified below
+        except BaseException as exc:  # classified below
             outcomes.append(exc)
 
     successes = [o for o in outcomes if o is None]
@@ -186,7 +182,7 @@ def test_sync_refund_idempotent_under_sequential_repetition(repeats: int) -> Non
     assert others == [], f"unexpected exceptions: {others}"
     assert len(successes) == 1
     assert len(dups) == repeats - 1
-    assert _capacity(backend) == pytest.approx(
+    assert _get_capacity(backend) == pytest.approx(
         AFTER_SINGLE_REFUND_CAP, abs=REFILL_TOLERANCE
     )
     assert limiter._refunded_reservation_ids[reservation.reservation_id] == "committed"
@@ -195,8 +191,11 @@ def test_sync_refund_idempotent_under_sequential_repetition(repeats: int) -> Non
 
 
 # ---------------------------------------------------------------------------
-# Group B: no double-credit under fuzzed N-actor concurrency
-# (hot-spot #3 / F02.R3.01 TOCTOU regression guard, real accounting)
+# Group B: no double-credit under fuzzed N-actor concurrency.
+#
+# Generalizes the N=2 concurrent-duplicate-refund TOCTOU guard (F02.R3.01 in
+# tests/unit/test_r3_audit_fixes.py) to fuzzed N, asserting the final credited
+# capacity rather than a mock call count.
 # ---------------------------------------------------------------------------
 
 
@@ -244,7 +243,7 @@ def test_async_concurrent_same_reservation_credits_once(
         assert others == [], f"unexpected exceptions: {others}"
         assert len(successes) == 1
         assert len(dups) == n_actors - 1
-        assert _capacity(backend) == pytest.approx(
+        assert _get_capacity(backend) == pytest.approx(
             AFTER_SINGLE_REFUND_CAP, abs=REFILL_TOLERANCE
         ), "double-credit: capacity exceeds single-refund outcome"
         assert limiter._refund_locks == {}
@@ -280,7 +279,7 @@ def test_sync_concurrent_same_reservation_credits_once(
             limiter.refund_capacity({METRIC: REFUND_ACTUAL}, reservation)
             with results_lock:
                 results.append(None)
-        except BaseException as exc:  # exception classified below
+        except BaseException as exc:  # classified below
             with results_lock:
                 results.append(exc)
 
@@ -295,20 +294,20 @@ def test_sync_concurrent_same_reservation_credits_once(
     assert others == [], f"unexpected exceptions: {others}"
     assert len(successes) == 1
     assert len(dups) == n_actors - 1
-    assert _capacity(backend) == pytest.approx(
+    assert _get_capacity(backend) == pytest.approx(
         AFTER_SINGLE_REFUND_CAP, abs=REFILL_TOLERANCE
     ), "double-credit: capacity exceeds single-refund outcome"
     assert limiter._refund_locks == {}
 
 
 # ---------------------------------------------------------------------------
-# Group C: exception taxonomy during ctx-manager cleanup (Archetype D)
+# Group C: exception taxonomy during context-manager cleanup.
 #
 # A lifecycle callback that raises on ``capacity_consumed`` is the real
 # (non-mocked) trigger for ``_refund_or_forget_reservation_on_raise``. Only
-# critical exceptions propagate out of the callback (safe_invoke_* swallows
+# critical exceptions propagate out of the callback (``safe_invoke_*`` swallows
 # ordinary ones), so the taxonomy under test is exactly
-# LIFECYCLE_CALLBACK_CRITICAL_EXCEPTIONS.
+# ``LIFECYCLE_CALLBACK_CRITICAL_EXCEPTIONS``.
 # ---------------------------------------------------------------------------
 
 
@@ -357,13 +356,13 @@ async def test_async_refund_branch_propagates_critical_and_refunds(exc_type) -> 
     )
     primer = await limiter.acquire_capacity({METRIC: 0}, MODEL)
     backend = limiter._model_family_to_backend[MODEL_FAMILY]
-    before = _capacity(backend)
+    before = _get_capacity(backend)
 
     cb.armed = True
     with pytest.raises(exc_type):
         await limiter.acquire_capacity({METRIC: ACQUIRE}, MODEL)
 
-    assert _capacity(backend) == pytest.approx(before, abs=REFILL_TOLERANCE)
+    assert _get_capacity(backend) == pytest.approx(before, abs=REFILL_TOLERANCE)
     extra_in_flight = limiter._in_flight_reservation_ids - {primer.reservation_id}
     assert extra_in_flight == set()
     assert cb.refund_events == 1
@@ -384,13 +383,15 @@ async def test_async_forget_branch_propagates_critical_and_keeps_consumed(
     )
     primer = await limiter.acquire_capacity({METRIC: 0}, MODEL)
     backend = limiter._model_family_to_backend[MODEL_FAMILY]
-    before = _capacity(backend)
+    before = _get_capacity(backend)
 
     cb.armed = True
     with pytest.raises(exc_type):
         await limiter.record_usage({METRIC: ACQUIRE}, MODEL)
 
-    assert _capacity(backend) == pytest.approx(before - ACQUIRE, abs=REFILL_TOLERANCE)
+    assert _get_capacity(backend) == pytest.approx(
+        before - ACQUIRE, abs=REFILL_TOLERANCE
+    )
     extra_in_flight = limiter._in_flight_reservation_ids - {primer.reservation_id}
     assert extra_in_flight == set()
     assert cb.refund_events == 0
@@ -406,13 +407,13 @@ def test_sync_refund_branch_propagates_critical_and_refunds(exc_type) -> None:
     )
     primer = limiter.acquire_capacity({METRIC: 0}, MODEL)
     backend = limiter._model_family_to_backend[MODEL_FAMILY]
-    before = _capacity(backend)
+    before = _get_capacity(backend)
 
     cb.armed = True
     with pytest.raises(exc_type):
         limiter.acquire_capacity({METRIC: ACQUIRE}, MODEL)
 
-    assert _capacity(backend) == pytest.approx(before, abs=REFILL_TOLERANCE)
+    assert _get_capacity(backend) == pytest.approx(before, abs=REFILL_TOLERANCE)
     extra_in_flight = limiter._in_flight_reservation_ids - {primer.reservation_id}
     assert extra_in_flight == set()
     assert cb.refund_events == 1
@@ -428,13 +429,15 @@ def test_sync_forget_branch_propagates_critical_and_keeps_consumed(exc_type) -> 
     )
     primer = limiter.acquire_capacity({METRIC: 0}, MODEL)
     backend = limiter._model_family_to_backend[MODEL_FAMILY]
-    before = _capacity(backend)
+    before = _get_capacity(backend)
 
     cb.armed = True
     with pytest.raises(exc_type):
         limiter.record_usage({METRIC: ACQUIRE}, MODEL)
 
-    assert _capacity(backend) == pytest.approx(before - ACQUIRE, abs=REFILL_TOLERANCE)
+    assert _get_capacity(backend) == pytest.approx(
+        before - ACQUIRE, abs=REFILL_TOLERANCE
+    )
     extra_in_flight = limiter._in_flight_reservation_ids - {primer.reservation_id}
     assert extra_in_flight == set()
     assert cb.refund_events == 0
@@ -459,11 +462,11 @@ async def test_async_refund_and_forget_branches_are_mutually_exclusive() -> None
     )
     await refund_limiter.acquire_capacity({METRIC: 0}, MODEL)
     refund_backend = refund_limiter._model_family_to_backend[MODEL_FAMILY]
-    refund_before = _capacity(refund_backend)
+    refund_before = _get_capacity(refund_backend)
     refund_cb.armed = True
     with pytest.raises(asyncio.CancelledError):
         await refund_limiter.acquire_capacity({METRIC: ACQUIRE}, MODEL)
-    refund_after = _capacity(refund_backend)
+    refund_after = _get_capacity(refund_backend)
 
     # Forget branch.
     forget_cb = _AsyncRaisingCallbacks(asyncio.CancelledError)
@@ -472,11 +475,11 @@ async def test_async_refund_and_forget_branches_are_mutually_exclusive() -> None
     )
     await forget_limiter.acquire_capacity({METRIC: 0}, MODEL)
     forget_backend = forget_limiter._model_family_to_backend[MODEL_FAMILY]
-    forget_before = _capacity(forget_backend)
+    forget_before = _get_capacity(forget_backend)
     forget_cb.armed = True
     with pytest.raises(asyncio.CancelledError):
         await forget_limiter.record_usage({METRIC: ACQUIRE}, MODEL)
-    forget_after = _capacity(forget_backend)
+    forget_after = _get_capacity(forget_backend)
 
     # Mutually exclusive: refund restored capacity AND fired a refund event;
     # forget left capacity consumed AND fired no refund event.
@@ -508,6 +511,32 @@ async def test_async_unlimited_reservation_forgets_without_crediting() -> None:
     raised["armed"] = True
     with pytest.raises(asyncio.CancelledError):
         await limiter.acquire_capacity({}, MODEL)
+
+    assert limiter._in_flight_reservation_ids == set()
+    assert limiter._refund_locks == {}
+
+
+def test_sync_unlimited_reservation_forgets_without_crediting() -> None:
+    """Sync sibling: an unlimited reservation interrupted in the ctx body is
+    forgotten with no backend credit (parity with the async unlimited case).
+    """
+    raised = {"armed": False}
+
+    def on_event(event) -> None:
+        if event.event_type == "capacity_consumed" and raised["armed"]:
+            raise asyncio.CancelledError("injected")
+
+    unlimited_cfg = PerModelConfig(
+        quotas=UsageQuotas.unlimited(), model_family=MODEL_FAMILY
+    )
+    limiter = SyncRateLimiter(
+        unlimited_cfg,
+        backend=SyncMemoryBackendBuilder(),
+        callbacks=SyncRateLimiterCallbacks(on_lifecycle_event=on_event),
+    )
+    raised["armed"] = True
+    with pytest.raises(asyncio.CancelledError):
+        limiter.acquire_capacity({}, MODEL)
 
     assert limiter._in_flight_reservation_ids == set()
     assert limiter._refund_locks == {}
