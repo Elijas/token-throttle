@@ -102,6 +102,26 @@ class _CleanupSite:
     def key(self) -> tuple[str, str]:
         return (self.relative_path, self.function_name)
 
+    def cleanup_key(self) -> tuple[str, str, str]:
+        return (self.relative_path, self.function_name, self.cleanup_call)
+
+
+@dataclass(frozen=True, order=True)
+class _DiscoveredBaseExceptionCleanupSite:
+    relative_path: str
+    function_name: str
+    cleanup_call: str
+    except_lineno: int
+
+    def label(self) -> str:
+        return (
+            f"{self.relative_path}:{self.function_name}:"
+            f"{self.except_lineno}:{self.cleanup_call}"
+        )
+
+    def cleanup_key(self) -> tuple[str, str, str]:
+        return (self.relative_path, self.function_name, self.cleanup_call)
+
 
 # Registered sites are an explicit acknowledgement that the discovered
 # cancellation-composition function is load-bearing and needs BaseException
@@ -363,6 +383,41 @@ def _discover_cancellation_composition_sites() -> list[_DiscoveredCancellationSi
     return [detail.site for detail in _discover_cancellation_composition_details()]
 
 
+def _discover_base_exception_cleanup_sites() -> list[
+    _DiscoveredBaseExceptionCleanupSite
+]:
+    cleanup_calls = {
+        site.cleanup_call for site in REGISTERED_BASE_EXCEPTION_CLEANUP_SITES
+    }
+    discovered: set[_DiscoveredBaseExceptionCleanupSite] = set()
+    for path in _iter_production_python_files():
+        text = path.read_text(encoding="utf-8")
+        lines = text.splitlines()
+        tree = ast.parse(text, filename=str(path))
+        parents = _parent_map(tree)
+        for handler in ast.walk(tree):
+            if not isinstance(handler, ast.ExceptHandler):
+                continue
+            if not _handler_catches_base_exception(handler):
+                continue
+            if _has_ast_guard_skip_marker(lines, handler.lineno):
+                continue
+            function_node = _enclosing_function(handler, parents)
+            if function_node is None:
+                continue
+            for cleanup_call in cleanup_calls:
+                if _handler_body_calls(handler, cleanup_call):
+                    discovered.add(
+                        _DiscoveredBaseExceptionCleanupSite(
+                            _relative_production_path(path),
+                            function_node.name,
+                            cleanup_call,
+                            handler.lineno,
+                        )
+                    )
+    return sorted(discovered)
+
+
 def _handler_references_critical_tuple(handler: ast.ExceptHandler) -> bool:
     for node in ast.walk(ast.Module(body=handler.body, type_ignores=[])):
         if isinstance(node, ast.Name) and node.id in CRITICAL_EXCEPTION_TUPLE_NAMES:
@@ -582,6 +637,24 @@ def test_registered_cleanup_sites_catch_base_exception() -> None:
         f"{[site.label() for site in discovered_sites]}"
     )
 
+    discovered_base_exception_sites = _discover_base_exception_cleanup_sites()
+    registered_cleanup_keys = {
+        site.cleanup_key() for site in REGISTERED_BASE_EXCEPTION_CLEANUP_SITES
+    }
+    unregistered_base_exception_sites = [
+        site.label()
+        for site in discovered_base_exception_sites
+        if site.cleanup_key() not in registered_cleanup_keys
+    ]
+    assert not unregistered_base_exception_sites, (
+        "BaseException cleanup/reconciliation handlers that call known cleanup "
+        "functions must be registered, or explicitly opted out with "
+        f"`# {AST_GUARD_SKIP_MARKER} — <reason>` on/immediately above the "
+        "except line. Unregistered sites: "
+        f"{unregistered_base_exception_sites}. Full discovery: "
+        f"{[site.label() for site in discovered_base_exception_sites]}"
+    )
+
     offenders = [
         (site.relative_path, site.function_name, site.cleanup_call)
         for site in REGISTERED_BASE_EXCEPTION_CLEANUP_SITES
@@ -683,5 +756,39 @@ def test_cancellation_assertions_scan_new_production_files(
     with pytest.raises(
         AssertionError,
         match=re.escape("new_backend.py:cleanup_cell:6"),
+    ):
+        test_registered_cleanup_sites_catch_base_exception()
+
+
+def test_base_exception_cleanup_assertions_scan_new_production_files(
+    tmp_path: pathlib.Path,
+    monkeypatch,
+) -> None:
+    """A new BaseException cleanup sibling must not hide behind the registry."""
+    production_root = tmp_path / "token_throttle"
+    production_root.mkdir()
+    (production_root / "new_sync_backend.py").write_text(
+        textwrap.dedent(
+            """\
+            def cleanup_cell():
+                try:
+                    do_work()
+                except BaseException:
+                    _refund_cancelled_consumption()
+                    raise
+            """
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(sys.modules[__name__], "PRODUCTION_ROOT", production_root)
+
+    assert [site.label() for site in _discover_base_exception_cleanup_sites()] == [
+        "new_sync_backend.py:cleanup_cell:4:_refund_cancelled_consumption"
+    ]
+    with pytest.raises(
+        AssertionError,
+        match=re.escape(
+            "new_sync_backend.py:cleanup_cell:4:_refund_cancelled_consumption"
+        ),
     ):
         test_registered_cleanup_sites_catch_base_exception()
