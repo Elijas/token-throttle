@@ -85,6 +85,7 @@ from token_throttle._validation import (
     validate_per_seconds,
     validate_refund_usage,
     validate_timeout,
+    validate_usage_values_non_negative,
 )
 
 _logger = logging.getLogger("token_throttle")
@@ -1325,6 +1326,7 @@ class RateLimiter(BaseRateLimiter):
         limit_config = self._config_getter(model)
         self._validated_model_family(model, limit_config)
         if limit_config.is_unlimited:
+            validate_usage_values_non_negative(usage)
             return await self._unlimited_reservation(model, limit_config)
         self._validate_shared_model_family_config(
             model,
@@ -1402,6 +1404,7 @@ class RateLimiter(BaseRateLimiter):
                     warn_if_sync_counter_blocks_event_loop=True,
                     **kwargs,
                 )
+                validate_usage_values_non_negative(usage)
             merge_extra_usage_unrestricted(usage, validated_extra_usage)
             return await self._unlimited_reservation(model, limit_config)
         if limit_config.usage_counter is None:
