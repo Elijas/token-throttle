@@ -130,6 +130,41 @@ DEFAULT_LOCK_BLOCKING_THREAD_SLEEP_SECONDS = 0.05
 _MIN_PRODUCTION_REDIS_POOL_CONNECTIONS = 10
 _MISSING = object()
 _ACQUIRE_MARKER_SET_SCRIPT = """
+local function is_error(result)
+    return type(result) == 'table' and result['err'] ~= nil
+end
+local function snapshot_key(key)
+    return {key, redis.call('GET', key), redis.call('PTTL', key)}
+end
+local function restore_key(snapshot)
+    if not snapshot[2] then
+        return redis.pcall('DEL', snapshot[1])
+    end
+    if snapshot[3] > 0 then
+        return redis.pcall('SET', snapshot[1], snapshot[2], 'PX', snapshot[3])
+    end
+    if snapshot[3] == -1 then
+        return redis.pcall('SET', snapshot[1], snapshot[2])
+    end
+    return redis.pcall('DEL', snapshot[1])
+end
+local function rollback(snapshots)
+    local first_error = nil
+    for index = #snapshots, 1, -1 do
+        local restored = restore_key(snapshots[index])
+        if is_error(restored) and not first_error then
+            first_error = restored
+        end
+    end
+    return first_error
+end
+local function rollback_then_error(snapshots, err)
+    local rollback_error = rollback(snapshots)
+    if rollback_error then
+        return rollback_error
+    end
+    return err
+end
 local existing = redis.call('GET', KEYS[1])
 if existing then
     if existing == ARGV[2] then
@@ -137,14 +172,35 @@ if existing then
     end
     return 'duplicate_acquire'
 end
+local snapshots = {}
+for key_index = 2, #KEYS do
+    snapshots[#snapshots + 1] = snapshot_key(KEYS[key_index])
+end
 local arg_index = 3
 for key_index = 2, #KEYS, 2 do
-    redis.call('SET', KEYS[key_index], ARGV[arg_index], 'EX', ARGV[arg_index + 2])
-    redis.call('SET', KEYS[key_index + 1], ARGV[arg_index + 1], 'EX', ARGV[arg_index + 2])
+    local last_checked_set = redis.pcall(
+        'SET', KEYS[key_index], ARGV[arg_index], 'EX', ARGV[arg_index + 2]
+    )
+    if is_error(last_checked_set) then
+        return rollback_then_error(snapshots, last_checked_set)
+    end
+    local capacity_set = redis.pcall(
+        'SET', KEYS[key_index + 1], ARGV[arg_index + 1], 'EX', ARGV[arg_index + 2]
+    )
+    if is_error(capacity_set) then
+        return rollback_then_error(snapshots, capacity_set)
+    end
     arg_index = arg_index + 3
 end
-local claimed = redis.call('SET', KEYS[1], ARGV[2], 'PX', ARGV[1], 'NX')
+local claimed = redis.pcall('SET', KEYS[1], ARGV[2], 'PX', ARGV[1], 'NX')
+if is_error(claimed) then
+    return rollback_then_error(snapshots, claimed)
+end
 if not claimed then
+    local rollback_error = rollback(snapshots)
+    if rollback_error then
+        return rollback_error
+    end
     existing = redis.call('GET', KEYS[1])
     if existing == ARGV[2] then
         return 'ok'
@@ -154,6 +210,41 @@ end
 return 'ok'
 """
 _REFUND_WITH_MARKER_SCRIPT = """
+local function is_error(result)
+    return type(result) == 'table' and result['err'] ~= nil
+end
+local function snapshot_key(key)
+    return {key, redis.call('GET', key), redis.call('PTTL', key)}
+end
+local function restore_key(snapshot)
+    if not snapshot[2] then
+        return redis.pcall('DEL', snapshot[1])
+    end
+    if snapshot[3] > 0 then
+        return redis.pcall('SET', snapshot[1], snapshot[2], 'PX', snapshot[3])
+    end
+    if snapshot[3] == -1 then
+        return redis.pcall('SET', snapshot[1], snapshot[2])
+    end
+    return redis.pcall('DEL', snapshot[1])
+end
+local function rollback(snapshots)
+    local first_error = nil
+    for index = #snapshots, 1, -1 do
+        local restored = restore_key(snapshots[index])
+        if is_error(restored) and not first_error then
+            first_error = restored
+        end
+    end
+    return first_error
+end
+local function rollback_then_error(snapshots, err)
+    local rollback_error = rollback(snapshots)
+    if rollback_error then
+        return rollback_error
+    end
+    return err
+end
 local marker = redis.call('GET', KEYS[1])
 if not marker then
     if redis.call('EXISTS', KEYS[2]) == 1 then
@@ -164,17 +255,44 @@ end
 if marker ~= ARGV[1] then
     return 'marker_mismatch'
 end
-local claimed = redis.call('SET', KEYS[2], '1', 'EX', ARGV[2], 'NX')
-if not claimed then
-    return 'duplicate_refund'
+if redis.call('EXISTS', KEYS[2]) == 1 then
+    return 'incoherent_refund'
+end
+local snapshots = {snapshot_key(KEYS[1]), snapshot_key(KEYS[2])}
+for key_index = 3, #KEYS do
+    snapshots[#snapshots + 1] = snapshot_key(KEYS[key_index])
 end
 local arg_index = 3
 for key_index = 3, #KEYS, 2 do
-    redis.call('SET', KEYS[key_index], ARGV[arg_index], 'EX', ARGV[arg_index + 2])
-    redis.call('SET', KEYS[key_index + 1], ARGV[arg_index + 1], 'EX', ARGV[arg_index + 2])
+    local last_checked_set = redis.pcall(
+        'SET', KEYS[key_index], ARGV[arg_index], 'EX', ARGV[arg_index + 2]
+    )
+    if is_error(last_checked_set) then
+        return rollback_then_error(snapshots, last_checked_set)
+    end
+    local capacity_set = redis.pcall(
+        'SET', KEYS[key_index + 1], ARGV[arg_index + 1], 'EX', ARGV[arg_index + 2]
+    )
+    if is_error(capacity_set) then
+        return rollback_then_error(snapshots, capacity_set)
+    end
     arg_index = arg_index + 3
 end
-redis.call('DEL', KEYS[1])
+local marker_deleted = redis.pcall('DEL', KEYS[1])
+if is_error(marker_deleted) then
+    return rollback_then_error(snapshots, marker_deleted)
+end
+local claimed = redis.pcall('SET', KEYS[2], '1', 'EX', ARGV[2], 'NX')
+if is_error(claimed) then
+    return rollback_then_error(snapshots, claimed)
+end
+if not claimed then
+    local rollback_error = rollback(snapshots)
+    if rollback_error then
+        return rollback_error
+    end
+    return 'incoherent_refund'
+end
 return 'ok'
 """
 _MAX_REDIS_SCRIPT_STATUS_CHARS = 64
@@ -307,6 +425,15 @@ def _redis_value_matches(value: object, expected: str) -> bool:
         except UnicodeDecodeError:
             return False
     return value == expected
+
+
+def _redis_float_matches(value: object, expected: float) -> bool:
+    if isinstance(value, bool) or not isinstance(value, (bytes, str, int, float)):
+        return False
+    try:
+        return math.isclose(float(value), expected, rel_tol=0.0, abs_tol=1e-9)
+    except ValueError:
+        return False
 
 
 def _warn_if_small_redis_pool(redis_client: object, *, stacklevel: int = 3) -> None:
@@ -951,6 +1078,66 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         )
         return exists
 
+    def _bucket_capacity_state_matches(
+        self,
+        expected_capacities: Capacities,
+        buckets: tuple[SyncRedisBucket, ...] | list[SyncRedisBucket],
+    ) -> bool:
+        for (usage_metric, per_seconds), amount in expected_capacities.items():
+            bucket = self._find_bucket(buckets, usage_metric, per_seconds)
+            if bucket is None:
+                return False
+            try:
+                capacity = self._redis.get(bucket._capacity_key)  # noqa: SLF001
+            except redis.exceptions.RedisError:
+                return False
+            if not _redis_float_matches(capacity, float(amount)):
+                return False
+        return True
+
+    def _acquire_marker_commit_matches(
+        self,
+        acquired_marker_key: str,
+        acquired_marker_value: str,
+        expected_capacities: Capacities,
+        buckets: tuple[SyncRedisBucket, ...] | list[SyncRedisBucket],
+        *,
+        reservation_id: str | None = None,
+    ) -> bool:
+        if not self._acquire_marker_matches(
+            acquired_marker_key,
+            acquired_marker_value,
+            reservation_id=reservation_id,
+        ):
+            return False
+        return self._bucket_capacity_state_matches(expected_capacities, buckets)
+
+    def _refund_terminal_state_matches(
+        self,
+        *,
+        acquired_marker_key: str,
+        refund_dedup_key: str,
+        expected_capacities: Capacities,
+        buckets: tuple[SyncRedisBucket, ...] | list[SyncRedisBucket],
+        reservation_id: str | None = None,
+    ) -> bool:
+        try:
+            tombstone_exists = bool(self._redis.exists(refund_dedup_key))
+            marker = self._redis.get(acquired_marker_key)
+        except redis.exceptions.RedisError:
+            return False
+        terminal = tombstone_exists and marker is None
+        _debug_event(
+            _refund_logger,
+            "redis_refund_terminal_get",
+            reservation_id=reservation_id,
+            bucket_id=None,
+            terminal=terminal,
+        )
+        if not terminal:
+            return False
+        return self._bucket_capacity_state_matches(expected_capacities, buckets)
+
     def _snapshot_buckets(self) -> tuple[SyncRedisBucket, ...]:
         return tuple(self.sorted_buckets)
 
@@ -1418,9 +1605,11 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                     *args,
                 )
             except redis.exceptions.RedisError:
-                if self._acquire_marker_matches(
+                if self._acquire_marker_commit_matches(
                     acquired_marker_key,
                     acquired_marker_value,
+                    frozendict(new_capacities),
+                    target_buckets,
                     reservation_id=reservation_id,
                 ):
                     return True
@@ -1590,8 +1779,11 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                 *args,
             )
         except redis.exceptions.RedisError:
-            if self._refund_tombstone_exists(
-                refund_dedup_key,
+            if self._refund_terminal_state_matches(
+                acquired_marker_key=acquired_marker_key,
+                refund_dedup_key=refund_dedup_key,
+                expected_capacities=frozendict(new_capacities),
+                buckets=buckets,
                 reservation_id=reservation_id,
             ):
                 return
@@ -1621,6 +1813,10 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                 "reservation was never acquired by this backend",
                 reservation_id=reservation_id,
                 model_family=reservation_model_family,
+            )
+        if status == "incoherent_refund":
+            raise RedisScriptResultError(
+                "Redis refund marker script found an incoherent marker/tombstone state"
             )
         raise RedisScriptResultError(
             "Redis refund marker script returned unknown status "

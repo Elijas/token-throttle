@@ -17,6 +17,11 @@ async def redis_client(redis_url: str):
 
     client = redis.from_url(redis_url)
     try:
+        await client.ping()
+    except redis.exceptions.RedisError as exc:
+        await client.aclose()
+        pytest.skip(f"Redis unavailable at {redis_url}: {exc}")
+    try:
         await client.flushdb()
         yield client
     finally:
@@ -45,6 +50,11 @@ def sync_redis_client(redis_url: str):
     sync_redis = pytest.importorskip("redis", reason="redis package not installed")
 
     client = sync_redis.from_url(redis_url)
+    try:
+        client.ping()
+    except sync_redis.exceptions.RedisError as exc:
+        client.close()
+        pytest.skip(f"Redis unavailable at {redis_url}: {exc}")
     try:
         client.flushdb()
         yield client
