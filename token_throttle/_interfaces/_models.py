@@ -394,9 +394,44 @@ def _coerce_usage_value(
         raise ValueError(
             f"{label} for {metric} must be finite (got {amount!r})"
         ) from exc
+    except Exception as exc:
+        raise ValueError(
+            f"{label} for {metric} must be finite (got {amount!r})"
+        ) from exc
     if not math.isfinite(value):
         raise ValueError(f"{label} for {metric} must be finite (got {amount!r})")
     return value
+
+
+def _materialize_usage_items(
+    usage: Mapping[object, object],
+) -> list[tuple[object, object]]:
+    try:
+        raw_items = usage.items()
+    except Exception as exc:
+        raise ValueError(
+            "usage must yield consistent metric/value pairs "
+            f"(got {type(exc).__name__}: {exc})"
+        ) from exc
+
+    materialized: list[tuple[object, object]] = []
+    try:
+        for raw_item in raw_items:
+            try:
+                metric, amount = raw_item
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"usage must yield metric/value pairs (got {raw_item!r})"
+                ) from exc
+            materialized.append((metric, amount))
+    except ValueError:
+        raise
+    except Exception as exc:
+        raise ValueError(
+            "usage must yield consistent metric/value pairs "
+            f"(got {type(exc).__name__}: {exc})"
+        ) from exc
+    return materialized
 
 
 def frozen_usage(usage: object) -> FrozenUsage:
@@ -406,12 +441,16 @@ def frozen_usage(usage: object) -> FrozenUsage:
             f"usage must be a mapping (got {type(usage).__name__})"
         )
     converted: dict[MetricName, float] = {}
-    for metric, amount in usage.items():
+    seen_metrics: set[str] = set()
+    for metric, amount in _materialize_usage_items(usage):
         if not isinstance(metric, str) or not metric:
             raise ValueError(
                 f"Usage metric key must be a non-empty string (got {metric!r})"
             )
         normalized_metric = _validate_key_segment(metric, field_name="metric")
+        if normalized_metric in seen_metrics:
+            raise ValueError("usage must not contain duplicate metric keys")
+        seen_metrics.add(normalized_metric)
         converted[normalized_metric] = _coerce_usage_value(normalized_metric, amount)
     return frozendict(converted)
 

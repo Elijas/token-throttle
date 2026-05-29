@@ -30,6 +30,7 @@ from token_throttle._exceptions import (
     UnknownReservationError,
     _unknown_reservation_should_forget_in_flight,
 )
+from token_throttle._factories._openai._token_counter import OpenAIUsageCounter
 from token_throttle._interfaces._callable_utils import is_async_callable
 from token_throttle._interfaces._callbacks import (
     LIFECYCLE_CALLBACK_CRITICAL_EXCEPTIONS,
@@ -559,6 +560,16 @@ def _raise_backend_external_error(exc: Exception) -> None:
     raise exc
 
 
+def _value_error_wraps_usage_counter_key_error(exc: ValueError) -> bool:
+    return isinstance(exc.__cause__, KeyError) and str(exc).startswith(
+        "usage_counter raised: KeyError"
+    )
+
+
+def _uses_internal_async_usage_counter(usage_counter) -> bool:
+    return type(usage_counter) is OpenAIUsageCounter
+
+
 def _resolve_usage_counter_result_for_model(
     usage_counter,
     *,
@@ -580,8 +591,8 @@ def _resolve_usage_counter_result_for_model(
             "pass an explicit get_encoding_func."
         ) from exc
     except ValueError as exc:
-        if isinstance(exc.__cause__, KeyError):
-            raise ValueError(  # noqa: TRY004 - preserving public ValueError contract
+        if _value_error_wraps_usage_counter_key_error(exc):
+            raise ValueError(
                 "Rate limiter usage_counter failed with KeyError while counting "
                 f"request usage for model {model_name!r}. If this is "
                 "OpenAIUsageCounter, token-throttle could not determine the "
@@ -597,10 +608,14 @@ async def _resolve_usage_counter_result_for_model_async(
     warn_if_sync_counter_blocks_event_loop: bool = False,
     **kwargs,
 ) -> FrozenUsage:
-    async_counter = getattr(usage_counter, "count_request_async", None)
-    if callable(async_counter):
+    if _uses_internal_async_usage_counter(usage_counter):
         try:
-            result = await async_counter(**kwargs)
+            try:
+                result = await usage_counter.count_request_async(**kwargs)
+            except Exception as exc:
+                raise ValueError(
+                    f"usage_counter raised: {type(exc).__name__}: {exc}"
+                ) from exc
             return frozen_usage(result)
         except KeyError as exc:
             raise ValueError(
@@ -610,8 +625,8 @@ async def _resolve_usage_counter_result_for_model_async(
                 "tokenizer for that model; pass an explicit get_encoding_func."
             ) from exc
         except ValueError as exc:
-            if isinstance(exc.__cause__, KeyError):
-                raise ValueError(  # noqa: TRY004 - preserving public ValueError contract
+            if _value_error_wraps_usage_counter_key_error(exc):
+                raise ValueError(
                     "Rate limiter usage_counter failed with KeyError while counting "
                     f"request usage for model {model_name!r}. If this is "
                     "OpenAIUsageCounter, token-throttle could not determine the "
