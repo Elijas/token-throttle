@@ -29,7 +29,7 @@ includes Redis, OpenAI, and tokenizer integration modules.
 
 ## CI structure
 
-CI runs six jobs (see `.github/workflows/ci.yml`):
+CI runs nine jobs (see `.github/workflows/ci.yml`):
 
 | Job | What it does | Extras installed |
 |-----|-------------|-----------------|
@@ -39,6 +39,8 @@ CI runs six jobs (see `.github/workflows/ci.yml`):
 | `test-unit-full` | Unit tests with all optional deps on Linux / Python 3.12, 3.13, 3.14 | all extras + dev |
 | `test-unit-platform` | Unit tests with all optional deps on macOS and Windows / Python 3.13 | all extras + dev |
 | `test-integration` | Integration tests against Redis on Linux / Python 3.12, 3.13, 3.14 | all extras + dev |
+| `test-min-deps` | Unit tests with lowest direct dependency resolution on Linux / Python 3.12 | dev only |
+| `conformance` | AST and structural conformance guards on Linux / Python 3.12 | all extras + dev |
 | `coverage` | Full suite + Codecov upload on Linux / Python 3.13 | all extras + dev |
 
 Supported Python matrix: Python 3.12, 3.13, and 3.14, matching
@@ -341,7 +343,7 @@ pool = aioredis.BlockingConnectionPool.from_url(
 )
 client = aioredis.Redis(connection_pool=pool)
 backend = RedisBackendBuilder(client, key_prefix="test")
-limiter = RateLimiter(get_config, backend=backend)
+# Pass `backend` to RateLimiter(..., backend=backend) with your app's config.
 ```
 
 Redis lock polling is also configurable. `lock_sleep_seconds` controls the redis-py lock polling interval and defaults to `0.05` seconds instead of redis-py's `0.1` second default. `lock_blocking_timeout_seconds` defaults to `5.0` seconds and bounds a Redis lock acquisition even when the caller waits for rate-limit capacity without an overall timeout. The sync Redis builder also accepts `lock_blocking_thread_sleep_seconds` for redis-py's sync `Lock.acquire(sleep=...)` override.
