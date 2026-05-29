@@ -134,6 +134,10 @@ def test_sync_acquire_retry_same_reservation_id_does_not_double_consume() -> Non
 
 
 async def test_async_refund_tombstone_replay_skips_capacity_write() -> None:
+    from token_throttle._limiter_backends._redis._backend import (  # noqa: PLC0415
+        RedisScriptResultError,
+    )
+
     redis_client = _AsyncRedis()
     backend = _AsyncRedisBuilder(redis_client).build(_config())
     await backend.await_for_capacity(
@@ -144,7 +148,7 @@ async def test_async_refund_tombstone_replay_skips_capacity_write() -> None:
     tombstone_key = redis_refund_dedup_key(PREFIX, "replay-rid")
     redis_client.store[tombstone_key] = "1"
 
-    with pytest.raises(DuplicateRefundError):
+    with pytest.raises(RedisScriptResultError, match="incoherent"):
         await backend.refund_capacity_for_buckets(
             {"tokens": 30},
             {"tokens": 0},
@@ -159,6 +163,10 @@ async def test_async_refund_tombstone_replay_skips_capacity_write() -> None:
 
 
 def test_sync_refund_tombstone_replay_skips_capacity_write() -> None:
+    from token_throttle._limiter_backends._redis._sync_backend import (  # noqa: PLC0415
+        RedisScriptResultError,
+    )
+
     redis_client = _SyncRedis()
     backend = _SyncRedisBuilder(redis_client).build(_config())
     backend.wait_for_capacity(
@@ -169,7 +177,7 @@ def test_sync_refund_tombstone_replay_skips_capacity_write() -> None:
     tombstone_key = redis_refund_dedup_key(PREFIX, "replay-rid")
     redis_client.store[tombstone_key] = "1"
 
-    with pytest.raises(DuplicateRefundError):
+    with pytest.raises(RedisScriptResultError, match="incoherent"):
         backend.refund_capacity_for_buckets(
             {"tokens": 30},
             {"tokens": 0},
