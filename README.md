@@ -19,9 +19,9 @@ Works with any LLM provider and any client library — token-throttle limits the
 Public constants and type aliases are documented in [docs/api.md](docs/api.md).
 
 ```bash
-pip install "token-throttle[redis,tiktoken]>=8.0.4,<8.1.0"   # OpenAI + Redis (recommended)
-pip install "token-throttle[redis]>=8.0.4,<8.1.0"            # Any provider + Redis
-pip install "token-throttle>=8.0.4,<8.1.0"                   # Any provider + in-memory
+pip install "token-throttle[redis,tiktoken]>=8.0.5,<8.1.0"   # OpenAI + Redis (recommended)
+pip install "token-throttle[redis]>=8.0.5,<8.1.0"            # Any provider + Redis
+pip install "token-throttle>=8.0.5,<8.1.0"                   # Any provider + in-memory
 ```
 
 ## Quickstart
