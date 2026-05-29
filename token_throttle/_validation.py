@@ -108,8 +108,18 @@ def extract_usage_from_response(response: object) -> object:
                 "response must include usage data — pass actual usage via "
                 "refund_capacity() instead."
             ) from None
+        except Exception as exc:
+            raise ValueError(
+                "response usage could not be read from mapping "
+                f"(got {type(exc).__name__}: {exc})"
+            ) from exc
     else:
-        usage = getattr(response, "usage", None)
+        try:
+            usage = getattr(response, "usage", None)
+        except Exception as exc:
+            raise ValueError(
+                f"response usage could not be read (got {type(exc).__name__}: {exc})"
+            ) from exc
         if usage is None:
             if hasattr(response, "usage"):
                 raise ValueError(
@@ -163,9 +173,19 @@ def extract_total_tokens(usage: object) -> float:
         raise ValueError(  # noqa: TRY004 - public validators raise ValueError.
             f"total_tokens must be an int or float (got {type(total_tokens).__name__})"
         )
+    # Numeric coercion mirrors request-side _coerce_usage_value (_models.py);
+    # keep the two exception ladders in sync so the paths cannot drift again.
     try:
         value = float(total_tokens)
+    except OverflowError as exc:
+        raise ValueError(
+            f"total_tokens too large to fit in IEEE 754 double (got {total_tokens!r})"
+        ) from exc
     except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"total_tokens must be a finite non-negative number (got {total_tokens!r})"
+        ) from exc
+    except Exception as exc:
         raise ValueError(
             f"total_tokens must be a finite non-negative number (got {total_tokens!r})"
         ) from exc

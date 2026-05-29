@@ -948,6 +948,41 @@ class TestExtractTotalTokensValidation:
         )
         mock_backend.refund_capacity_for_buckets.assert_awaited_once()
 
+    async def test_huge_int_total_tokens_raises_value_error_not_overflow(self):
+        """A plain huge int must become ValueError, not a leaked OverflowError."""
+        builder, mock_backend = make_mock_backend_builder()
+        limiter = RateLimiter(make_limited_config(), backend=builder)
+        reservation = await limiter.acquire_capacity(
+            {"tokens": 100, "requests": 1}, model="gpt-4"
+        )
+        with pytest.raises(
+            ValueError, match="too large to fit in IEEE 754 double"
+        ) as exc_info:
+            await limiter.refund_capacity_from_response(
+                reservation, usage={"total_tokens": 10**400}
+            )
+        assert isinstance(exc_info.value.__cause__, OverflowError)
+        mock_backend.refund_capacity_for_buckets.assert_not_awaited()
+
+    async def test_hostile_float_total_tokens_raises_value_error_not_raw(self):
+        """A hostile __float__ must become ValueError (cause preserved), not raw."""
+        builder, mock_backend = make_mock_backend_builder()
+        limiter = RateLimiter(make_limited_config(), backend=builder)
+        reservation = await limiter.acquire_capacity(
+            {"tokens": 100, "requests": 1}, model="gpt-4"
+        )
+
+        class _FloatBomb(float):
+            def __float__(self) -> float:
+                raise RuntimeError("float bomb")
+
+        with pytest.raises(ValueError, match="total_tokens") as exc_info:
+            await limiter.refund_capacity_from_response(
+                reservation, usage={"total_tokens": _FloatBomb(1.0)}
+            )
+        assert isinstance(exc_info.value.__cause__, RuntimeError)
+        mock_backend.refund_capacity_for_buckets.assert_not_awaited()
+
 
 class TestModelNameTypeValidation:
     """model parameter must be a string — non-strings should raise ValueError."""
