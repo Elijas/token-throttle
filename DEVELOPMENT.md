@@ -272,12 +272,14 @@ The O(n×m) cost is irrelevant in practice — n (buckets) and m (usage metrics)
 Redis `_get_capacities_unsafe` batches pipeline commands in a fixed layout:
 each bucket enqueues `GET last_checked`, `GET capacity`, then `EXPIRE` for
 both bucket-state keys to refresh the mandatory bucket TTL. The backend then
-queues `GET max_capacity_override` plus `EXPIRE max_capacity_override` for each
-bucket. `_PIPELINE_CMDS_PER_BUCKET`, `_PIPELINE_CMDS_PER_OVERRIDE`, and result
-count assertions enforce this layout. If `get_capacity()` or the pipeline
-structure changes, the assertion catches the mismatch immediately rather than
-silently reading wrong values. The `{key_prefix}:rate_limiting:schema_version`
-key is intentionally exempt from TTL because it is a long-lived registry.
+queues one `GET max_capacity_override` for each bucket. Valid override payloads
+refresh `max_capacity_override` TTL after they are parsed, so corrupt or legacy
+payloads are not kept alive by the read path. `_PIPELINE_CMDS_PER_BUCKET`,
+`_PIPELINE_CMDS_PER_OVERRIDE`, and result count assertions enforce this layout.
+If `get_capacity()` or the pipeline structure changes, the assertion catches the
+mismatch immediately rather than silently reading wrong values. The
+`{key_prefix}:rate_limiting:schema_version` key is intentionally exempt from TTL
+because it is a long-lived registry.
 
 ### Over-limit validation lives in the backend, not `validate_acquire_usage`
 

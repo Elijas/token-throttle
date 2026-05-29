@@ -28,7 +28,10 @@ are filtered out before the counter is called.
 
 Runtime contract: the callable may return any mapping of metric name to finite
 non-negative ``int`` or ``float`` values. The limiter validates and freezes the
-mapping before using it.
+mapping before using it. Custom counters are trusted application code; request
+objects are passed by reference, including nested containers, so counters should
+avoid mutating them and should normally return a plain ``dict`` or other
+well-behaved mapping.
 """
 UsageCounter = Annotated[Callable[..., Mapping[str, int | float]], _USAGE_COUNTER_DOC]
 if not TYPE_CHECKING:
@@ -63,10 +66,13 @@ class PerModelConfig(StrictDTO):
             "fixed-signature counters are deprecated because unmatched request "
             "fields are filtered before invocation. The callable must not be "
             "async, must not be an async generator, and must return a usage "
-            "mapping. Async RateLimiter invokes the counter inline on the event "
-            "loop, so expensive CPU work, blocking I/O, or sleep calls block "
-            "concurrent rate-limited work unless the caller wraps the counter "
-            "explicitly, for example with asyncio.to_thread."
+            "mapping, preferably a plain dict. Custom counters are trusted "
+            "application code and receive request objects by reference, so they "
+            "should avoid mutating nested request payloads. Async RateLimiter "
+            "invokes custom counters inline on the event loop, so expensive CPU "
+            "work, blocking I/O, or sleep calls block concurrent rate-limited "
+            "work unless the caller wraps the counter explicitly, for example "
+            "with asyncio.to_thread."
         ),
     )
 

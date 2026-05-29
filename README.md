@@ -315,7 +315,10 @@ inputs are still unsupported; pass usage manually for those.
 Custom `usage_counter` callables receive the same kwargs you pass to
 `acquire_capacity_for_request()`. They can accept `**request` for the whole
 payload or only the named request fields they use; fixed-signature counters do
-not need to accept unrelated kwargs like `model`.
+not need to accept unrelated kwargs like `model`. Custom counters are trusted
+application code: nested request objects are passed by reference, so counters
+should avoid mutating them. Return a plain `dict` or another well-behaved
+mapping of metric names to finite numeric values.
 
 ### Backends
 
