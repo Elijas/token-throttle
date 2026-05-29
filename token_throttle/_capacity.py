@@ -103,8 +103,8 @@ def _calculate_rate_per_sec(max_capacity: float, per_seconds: int) -> float:
 
 
 def calculate_capacity(  # noqa: PLR0913
-    last_checked: float | None,
-    outdated_capacity: float | None,
+    last_checked: float | str | bytes | None,
+    outdated_capacity: float | str | bytes | None,
     current_time: float,
     max_capacity: float,
     rate_per_sec: float,
@@ -151,11 +151,13 @@ def calculate_capacity(  # noqa: PLR0913
         outdated_capacity = float(outdated_capacity)
     except (TypeError, ValueError, OverflowError) as e:
         raise ValueError(
-            f"Invalid last_checked or capacity values: last_checked={raw_last_checked}, capacity={raw_outdated_capacity}",
+            "Invalid last_checked or capacity values: "
+            f"last_checked={raw_last_checked!r}, capacity={raw_outdated_capacity!r}",
         ) from e
     if not (math.isfinite(last_checked) and math.isfinite(outdated_capacity)):
         raise ValueError(
-            f"Invalid last_checked or capacity values: last_checked={raw_last_checked}, capacity={raw_outdated_capacity}",
+            "Invalid last_checked or capacity values: "
+            f"last_checked={raw_last_checked!r}, capacity={raw_outdated_capacity!r}",
         )
 
     time_passed = current_time - last_checked

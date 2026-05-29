@@ -567,9 +567,9 @@ def test_async_cleanup_exception_handlers_preserve_critical_reachability() -> No
 def test_cancellation_composition_site_discovery_matches_snapshot() -> None:
     """Make the auto-discovered cancellation-composition surface reviewable."""
     expected = [
-        "_limiter_backends/_redis/_backend.py:_check_and_consume_capacity:1999",
-        "_rate_limiter.py:_acquire_capacity:1480",
-        "_rate_limiter.py:_set_max_capacity_transactional:2032",
+        "_limiter_backends/_redis/_backend.py:_check_and_consume_capacity:2036",
+        "_rate_limiter.py:_acquire_capacity:1495",
+        "_rate_limiter.py:_set_max_capacity_transactional:2047",
     ]
     actual = [site.label() for site in _discover_cancellation_composition_sites()]
     assert actual == expected, (
