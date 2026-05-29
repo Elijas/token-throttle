@@ -15,10 +15,7 @@ at all within the lock scope. A more granular dataflow check is deferred.
 import ast
 import pathlib
 
-_REDIS_BACKEND_FILES = [
-    "token_throttle/_limiter_backends/_redis/_backend.py",
-    "token_throttle/_limiter_backends/_redis/_sync_backend.py",
-]
+_REDIS_PACKAGE = pathlib.Path("token_throttle/_limiter_backends/_redis")
 
 
 def _body_contains_extend_locks(body: list[ast.stmt]) -> bool:
@@ -27,6 +24,44 @@ def _body_contains_extend_locks(body: list[ast.stmt]) -> bool:
             if isinstance(sub, ast.Attribute) and sub.attr == "_extend_locks":
                 return True
     return False
+
+
+def _is_self_lock_call(node: ast.AST) -> bool:
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "_lock"
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "self"
+    )
+
+
+def _lock_call_from_context_expr(node: ast.AST) -> ast.Call | None:
+    if _is_self_lock_call(node):
+        return node  # sync pattern: self._lock(...)
+    if isinstance(node, ast.Await) and _is_self_lock_call(node.value):
+        return node.value  # async pattern: await self._lock(...)
+    return None
+
+
+def _has_lock_context(source: str, filepath: str) -> bool:
+    tree = ast.parse(source, filename=filepath)
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.AsyncWith, ast.With)):
+            continue
+        if any(_lock_call_from_context_expr(item.context_expr) for item in node.items):
+            return True
+    return False
+
+
+def _redis_files_with_lock_contexts(repo_root: pathlib.Path) -> list[str]:
+    redis_root = repo_root / _REDIS_PACKAGE
+    files: list[str] = []
+    for path in sorted(redis_root.rglob("*.py")):
+        relative_path = path.relative_to(repo_root).as_posix()
+        if _has_lock_context(path.read_text(encoding="utf-8"), relative_path):
+            files.append(relative_path)
+    return files
 
 
 def _find_lock_contexts_without_extend(source: str, filepath: str) -> list[str]:
@@ -44,22 +79,7 @@ def _find_lock_contexts_without_extend(source: str, filepath: str) -> list[str]:
         for item in items:
             ctx = item.context_expr
 
-            # async pattern: await self._lock(...)
-            is_async_lock = (
-                isinstance(ctx, ast.Await)
-                and isinstance(ctx.value, ast.Call)
-                and isinstance(ctx.value.func, ast.Attribute)
-                and ctx.value.func.attr == "_lock"
-            )
-
-            # sync pattern: self._lock(...)
-            is_sync_lock = (
-                isinstance(ctx, ast.Call)
-                and isinstance(ctx.func, ast.Attribute)
-                and ctx.func.attr == "_lock"
-            )
-
-            if not (is_async_lock or is_sync_lock):
+            if _lock_call_from_context_expr(ctx) is None:
                 continue
 
             if not _body_contains_extend_locks(node.body):
@@ -73,9 +93,11 @@ def _find_lock_contexts_without_extend(source: str, filepath: str) -> list[str]:
 
 def test_every_redis_lock_context_has_extend_locks() -> None:
     repo_root = pathlib.Path(__file__).parent.parent.parent
+    redis_backend_files = _redis_files_with_lock_contexts(repo_root)
+    assert redis_backend_files, "No Redis files with self._lock contexts discovered"
 
     all_violations: list[str] = []
-    for relative_path in _REDIS_BACKEND_FILES:
+    for relative_path in redis_backend_files:
         path = repo_root / relative_path
         source = path.read_text(encoding="utf-8")
         all_violations.extend(_find_lock_contexts_without_extend(source, relative_path))
