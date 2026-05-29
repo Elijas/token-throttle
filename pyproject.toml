@@ -238,9 +238,6 @@ target-version = "py312"
     "TC001",     # Pydantic models need these imports at runtime
     "ASYNC109",  # timeout is part of the public API, not an asyncio.timeout() replacement
 ]
-"token_throttle/_interfaces/_callbacks.py" = [
-    "PLC0415", # Intentional lazy import of optional logging backend
-]
 "token_throttle/_factories/_openai/_token_counter.py" = [
     "PLC0415", # Intentional lazy import of optional dep (tiktoken)
 ]
