@@ -294,9 +294,8 @@ class _AsyncRedis:
             )
         if marker != argv[0]:
             return "marker_mismatch"
-        claimed = await self.set(dedup_key, "1", ex=int(argv[1]), nx=True)
-        if not claimed:
-            return "duplicate_refund"
+        if await self.exists(dedup_key):
+            return "incoherent_refund"
         arg_index = 2
         for key_index in range(2, len(keys), 2):
             await self.set(
@@ -309,6 +308,9 @@ class _AsyncRedis:
             )
             arg_index += 3
         await self.delete(marker_key)
+        claimed = await self.set(dedup_key, "1", ex=int(argv[1]), nx=True)
+        if not claimed:
+            return "incoherent_refund"
         return "ok"
 
     def pipeline(self) -> _AsyncPipeline:
@@ -383,9 +385,8 @@ class _SyncRedis:
             )
         if marker != argv[0]:
             return "marker_mismatch"
-        claimed = self.set(dedup_key, "1", ex=int(argv[1]), nx=True)
-        if not claimed:
-            return "duplicate_refund"
+        if self.exists(dedup_key):
+            return "incoherent_refund"
         arg_index = 2
         for key_index in range(2, len(keys), 2):
             self.set(keys[key_index], argv[arg_index], ex=int(argv[arg_index + 2]))
@@ -396,6 +397,9 @@ class _SyncRedis:
             )
             arg_index += 3
         self.delete(marker_key)
+        claimed = self.set(dedup_key, "1", ex=int(argv[1]), nx=True)
+        if not claimed:
+            return "incoherent_refund"
         return "ok"
 
     def pipeline(self) -> _SyncPipeline:

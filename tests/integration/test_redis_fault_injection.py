@@ -34,7 +34,16 @@ from token_throttle._limiter_backends._redis._backend import (
     RedisBackend,
     RedisBackendBuilder,
 )
+from token_throttle._limiter_backends._redis._keys import (
+    redis_acquired_marker_key,
+    redis_refund_dedup_key,
+)
 from token_throttle._limiter_backends._redis._server_time import async_server_time
+from token_throttle._limiter_backends._redis._sync_backend import (
+    SyncRedisBackendBuilder,
+)
+from token_throttle._rate_limiter import RateLimiter
+from token_throttle._sync_rate_limiter import SyncRateLimiter
 
 
 def _make_config(
@@ -52,6 +61,18 @@ def _make_config(
     )
 
 
+def _make_two_bucket_config(*, model_family: str | None = None) -> PerModelConfig:
+    return PerModelConfig(
+        model_family=model_family or f"fi-{secrets.token_hex(4)}",
+        quotas=UsageQuotas(
+            [
+                Quota(metric="requests", limit=100, per_seconds=60),
+                Quota(metric="tokens", limit=100, per_seconds=3600),
+            ]
+        ),
+    )
+
+
 async def _get_redis_capacity(backend: RedisBackend) -> float:
     """Read current capacity from Redis (authoritative source)."""
     pipeline = backend._redis.pipeline()
@@ -60,6 +81,250 @@ async def _get_redis_capacity(backend: RedisBackend) -> float:
         pipeline=pipeline, current_time=current_time
     )
     return next(iter(result.capacities.values()))
+
+
+async def _async_capacity(redis_client, key: str) -> float | None:
+    value = await redis_client.get(key)
+    return None if value is None else float(value)
+
+
+def _sync_capacity(sync_redis_client, key: str) -> float | None:
+    value = sync_redis_client.get(key)
+    return None if value is None else float(value)
+
+
+# ---------------------------------------------------------------------------
+# 0. Redis Lua authority ordering
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.redis
+async def test_acquire_lua_rolls_back_bucket_writes_when_later_set_fails(
+    redis_client,
+):
+    prefix = "fha8-n02-acquire"
+    config = _make_two_bucket_config()
+    limiter = RateLimiter(
+        config,
+        backend=RedisBackendBuilder(redis_client, key_prefix=prefix),
+    )
+    backend = await limiter._get_backend(config)
+    good_bucket, bad_bucket = backend.sorted_buckets[:2]
+    original_bad_ttl = bad_bucket._bucket_ttl_seconds
+    bad_bucket._bucket_ttl_seconds = 0
+
+    with pytest.raises(RuntimeError, match="Redis error"):
+        await limiter.acquire_capacity(
+            {"requests": 30.0, "tokens": 30.0},
+            "lua-authority",
+            timeout=0,
+        )
+
+    assert not limiter._pending_acquire_reservations
+    assert not limiter._in_flight_reservation_ids
+    assert await redis_client.keys(f"{prefix}:rate_limiting:acquired:*") == []
+    assert await _async_capacity(redis_client, good_bucket._capacity_key) is None
+    assert await _async_capacity(redis_client, good_bucket._last_checked_key) is None
+    assert await _async_capacity(redis_client, bad_bucket._capacity_key) is None
+    assert await _async_capacity(redis_client, bad_bucket._last_checked_key) is None
+
+    bad_bucket._bucket_ttl_seconds = original_bad_ttl
+    reservation = await limiter.acquire_capacity(
+        {"requests": 30.0, "tokens": 30.0},
+        "lua-authority",
+        timeout=0,
+    )
+
+    assert (
+        await redis_client.exists(
+            redis_acquired_marker_key(prefix, reservation.reservation_id)
+        )
+        == 1
+    )
+    for bucket in backend.sorted_buckets:
+        assert await _async_capacity(
+            redis_client, bucket._capacity_key
+        ) == pytest.approx(
+            70.0,
+            abs=1.0,
+        )
+
+
+@pytest.mark.redis
+def test_sync_acquire_lua_rolls_back_bucket_writes_when_later_set_fails(
+    sync_redis_client,
+):
+    prefix = "fha8-n02-sync-acquire"
+    config = _make_two_bucket_config()
+    limiter = SyncRateLimiter(
+        config,
+        backend=SyncRedisBackendBuilder(sync_redis_client, key_prefix=prefix),
+    )
+    backend = limiter._get_backend(config)
+    good_bucket, bad_bucket = backend.sorted_buckets[:2]
+    original_bad_ttl = bad_bucket._bucket_ttl_seconds
+    bad_bucket._bucket_ttl_seconds = 0
+
+    with pytest.raises(RuntimeError, match="Redis error"):
+        limiter.acquire_capacity(
+            {"requests": 30.0, "tokens": 30.0},
+            "lua-authority",
+            timeout=0,
+        )
+
+    assert not limiter._pending_acquire_reservations
+    assert not limiter._in_flight_reservation_ids
+    assert sync_redis_client.keys(f"{prefix}:rate_limiting:acquired:*") == []
+    assert _sync_capacity(sync_redis_client, good_bucket._capacity_key) is None
+    assert _sync_capacity(sync_redis_client, good_bucket._last_checked_key) is None
+    assert _sync_capacity(sync_redis_client, bad_bucket._capacity_key) is None
+    assert _sync_capacity(sync_redis_client, bad_bucket._last_checked_key) is None
+
+    bad_bucket._bucket_ttl_seconds = original_bad_ttl
+    reservation = limiter.acquire_capacity(
+        {"requests": 30.0, "tokens": 30.0},
+        "lua-authority",
+        timeout=0,
+    )
+
+    assert (
+        sync_redis_client.exists(
+            redis_acquired_marker_key(prefix, reservation.reservation_id)
+        )
+        == 1
+    )
+    for bucket in backend.sorted_buckets:
+        assert _sync_capacity(sync_redis_client, bucket._capacity_key) == pytest.approx(
+            70.0,
+            abs=1.0,
+        )
+
+
+@pytest.mark.redis
+async def test_refund_lua_rolls_back_and_keeps_local_refund_retryable(
+    redis_client,
+):
+    prefix = "fha8-n02-refund"
+    config = _make_two_bucket_config()
+    limiter = RateLimiter(
+        config,
+        backend=RedisBackendBuilder(redis_client, key_prefix=prefix),
+    )
+    backend = await limiter._get_backend(config)
+    reservation = await limiter.acquire_capacity(
+        {"requests": 30.0, "tokens": 30.0},
+        "lua-authority",
+        timeout=0,
+    )
+    marker_key = redis_acquired_marker_key(prefix, reservation.reservation_id)
+    tombstone_key = redis_refund_dedup_key(prefix, reservation.reservation_id)
+    good_bucket, bad_bucket = backend.sorted_buckets[:2]
+    original_bad_ttl = bad_bucket._bucket_ttl_seconds
+    original_extend_locks = backend._extend_locks
+
+    async def poison_ttl_after_refund_read(stack, **kwargs):
+        await original_extend_locks(stack, **kwargs)
+        if len(stack.locks) == len(backend.sorted_buckets):
+            bad_bucket._bucket_ttl_seconds = 0
+
+    backend._extend_locks = poison_ttl_after_refund_read
+
+    with pytest.raises(RuntimeError, match="Redis error"):
+        await limiter.refund_capacity(
+            {"requests": 10.0, "tokens": 10.0},
+            reservation,
+        )
+
+    assert limiter._refunded_reservation_ids[reservation.reservation_id] == "failed"
+    assert await redis_client.exists(marker_key) == 1
+    assert await redis_client.exists(tombstone_key) == 0
+    assert await _async_capacity(
+        redis_client, good_bucket._capacity_key
+    ) == pytest.approx(
+        70.0,
+        abs=1.0,
+    )
+    assert await _async_capacity(
+        redis_client, bad_bucket._capacity_key
+    ) == pytest.approx(
+        70.0,
+        abs=1.0,
+    )
+
+    backend._extend_locks = original_extend_locks
+    bad_bucket._bucket_ttl_seconds = original_bad_ttl
+    await limiter.refund_capacity({"requests": 10.0, "tokens": 10.0}, reservation)
+
+    assert limiter._refunded_reservation_ids[reservation.reservation_id] == "committed"
+    assert await redis_client.exists(marker_key) == 0
+    assert await redis_client.exists(tombstone_key) == 1
+    for bucket in backend.sorted_buckets:
+        assert await _async_capacity(
+            redis_client, bucket._capacity_key
+        ) == pytest.approx(
+            90.0,
+            abs=1.0,
+        )
+
+
+@pytest.mark.redis
+def test_sync_refund_lua_rolls_back_and_keeps_local_refund_retryable(
+    sync_redis_client,
+):
+    prefix = "fha8-n02-sync-refund"
+    config = _make_two_bucket_config()
+    limiter = SyncRateLimiter(
+        config,
+        backend=SyncRedisBackendBuilder(sync_redis_client, key_prefix=prefix),
+    )
+    backend = limiter._get_backend(config)
+    reservation = limiter.acquire_capacity(
+        {"requests": 30.0, "tokens": 30.0},
+        "lua-authority",
+        timeout=0,
+    )
+    marker_key = redis_acquired_marker_key(prefix, reservation.reservation_id)
+    tombstone_key = redis_refund_dedup_key(prefix, reservation.reservation_id)
+    good_bucket, bad_bucket = backend.sorted_buckets[:2]
+    original_bad_ttl = bad_bucket._bucket_ttl_seconds
+    original_extend_locks = backend._extend_locks
+
+    def poison_ttl_after_refund_read(stack, **kwargs):
+        original_extend_locks(stack, **kwargs)
+        if len(stack.locks) == len(backend.sorted_buckets):
+            bad_bucket._bucket_ttl_seconds = 0
+
+    backend._extend_locks = poison_ttl_after_refund_read
+
+    with pytest.raises(RuntimeError, match="Redis error"):
+        limiter.refund_capacity({"requests": 10.0, "tokens": 10.0}, reservation)
+
+    assert limiter._refunded_reservation_ids[reservation.reservation_id] == "failed"
+    assert sync_redis_client.exists(marker_key) == 1
+    assert sync_redis_client.exists(tombstone_key) == 0
+    assert _sync_capacity(
+        sync_redis_client, good_bucket._capacity_key
+    ) == pytest.approx(
+        70.0,
+        abs=1.0,
+    )
+    assert _sync_capacity(sync_redis_client, bad_bucket._capacity_key) == pytest.approx(
+        70.0,
+        abs=1.0,
+    )
+
+    backend._extend_locks = original_extend_locks
+    bad_bucket._bucket_ttl_seconds = original_bad_ttl
+    limiter.refund_capacity({"requests": 10.0, "tokens": 10.0}, reservation)
+
+    assert limiter._refunded_reservation_ids[reservation.reservation_id] == "committed"
+    assert sync_redis_client.exists(marker_key) == 0
+    assert sync_redis_client.exists(tombstone_key) == 1
+    for bucket in backend.sorted_buckets:
+        assert _sync_capacity(sync_redis_client, bucket._capacity_key) == pytest.approx(
+            90.0,
+            abs=1.0,
+        )
 
 
 # ---------------------------------------------------------------------------

@@ -13,9 +13,19 @@ def redis_url(request: pytest.FixtureRequest) -> str:
 
 @pytest.fixture
 async def redis_client(redis_url: str):
-    redis = pytest.importorskip("redis.asyncio", reason="redis package not installed")
+    redis_async = pytest.importorskip(
+        "redis.asyncio", reason="redis package not installed"
+    )
+    redis_exceptions = pytest.importorskip(
+        "redis.exceptions", reason="redis package not installed"
+    )
 
-    client = redis.from_url(redis_url)
+    client = redis_async.from_url(redis_url)
+    try:
+        await client.ping()
+    except redis_exceptions.RedisError as exc:
+        await client.aclose()
+        pytest.skip(f"Redis unavailable at {redis_url}: {exc}")
     try:
         await client.flushdb()
         yield client
@@ -43,8 +53,16 @@ def backend_builder(request: pytest.FixtureRequest):
 @pytest.fixture
 def sync_redis_client(redis_url: str):
     sync_redis = pytest.importorskip("redis", reason="redis package not installed")
+    redis_exceptions = pytest.importorskip(
+        "redis.exceptions", reason="redis package not installed"
+    )
 
     client = sync_redis.from_url(redis_url)
+    try:
+        client.ping()
+    except redis_exceptions.RedisError as exc:
+        client.close()
+        pytest.skip(f"Redis unavailable at {redis_url}: {exc}")
     try:
         client.flushdb()
         yield client
