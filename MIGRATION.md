@@ -521,10 +521,10 @@ print(f"deleted {deleted} legacy bucket state keys")
 
 For `redis.asyncio.Redis`, use `async_cleanup_legacy_buckets(...)`. Both helpers
 are prefix-scoped: they scan only keys under
-`{key_prefix}:rate_limiting:*:last_checked` and
-`{key_prefix}:rate_limiting:*:capacity`, then delete only keys whose Redis
-`TTL` is `-1`. They do not touch acquire markers, refund-dedup keys, schema
-registry keys, max-capacity overrides, or keys for other prefixes.
+`{key_prefix}:rate_limiting:bucket:*`, then delete only `:last_checked` and
+`:capacity` keys whose Redis `TTL` is `-1`. They do not touch acquire markers,
+refund-dedup keys, schema registry keys, max-capacity overrides, or keys for
+other prefixes.
 
 The cleanup is idempotent. Re-running it after a successful live run should
 delete `0` keys because only no-expiry legacy bucket-state keys are eligible.
@@ -533,8 +533,10 @@ FIX-38.
 
 Recommended dry-run workflow:
 
-1. Run the same Redis `SCAN` patterns for the target `key_prefix` and count
-   candidate `:last_checked` / `:capacity` keys whose `TTL` is `-1`.
+1. Run the same Redis `SCAN` pattern for the target `key_prefix`, or use broad
+   inventory patterns such as `{key_prefix}:rate_limiting:*:last_checked` and
+   `{key_prefix}:rate_limiting:*:capacity`, and count candidate bucket-state
+   keys whose `TTL` is `-1`.
 2. Confirm the prefix is the intended deployment and that in-flight
    reservations have drained.
 3. Run `cleanup_legacy_buckets(...)` or `async_cleanup_legacy_buckets(...)`
@@ -559,7 +561,7 @@ The Redis bucket key format is stable across v1.4.1, v1.5.0, v2.0.0, and
 v3.0.0:
 
 ```
-{key_prefix}:rate_limiting:{model_family}:{metric}:{per_seconds}:{suffix}
+{key_prefix}:rate_limiting:bucket:{model_family}:{metric}:{per_seconds}:{suffix}
 ```
 
 v3.0.0 also uses acquire-marker keys:
