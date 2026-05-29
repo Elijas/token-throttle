@@ -1,4 +1,4 @@
-"""Execute README snippets that are documented as standalone examples."""
+"""Execute docs snippets that are documented as standalone examples."""
 
 from __future__ import annotations
 
@@ -11,11 +11,37 @@ import pytest
 
 _REPO_ROOT = Path(__file__).parent.parent.parent
 _README = _REPO_ROOT / "README.md"
-_EXPECTED_STDOUT_BY_HEADING = {
-    "### Memory quickstart (zero-service)": (
+_MIGRATION = _REPO_ROOT / "MIGRATION.md"
+_DEVELOPMENT = _REPO_ROOT / "DEVELOPMENT.md"
+_DOCS_WITH_STANDALONE_EXAMPLES = (_README, _MIGRATION, _DEVELOPMENT)
+_EXPECTED_MIGRATION_FRAGMENT_START_LINES = frozenset(
+    {
+        37,
+        47,
+        131,
+        143,
+        191,
+        237,
+        274,
+        409,
+        516,
+    }
+)
+_EXPECTED_NON_README_STANDALONE_LOCATIONS = {
+    ("MIGRATION.md", 61),
+    ("MIGRATION.md", 70),
+    ("MIGRATION.md", 182),
+    ("MIGRATION.md", 226),
+    ("DEVELOPMENT.md", 336),
+}
+_EXPLICIT_FRAGMENT_START_LINES_BY_DOCUMENT = {
+    "MIGRATION.md": _EXPECTED_MIGRATION_FRAGMENT_START_LINES,
+}
+_EXPECTED_STDOUT_BY_EXAMPLE = {
+    ("README.md", "### Memory quickstart (zero-service)"): (
         "reserved 1000 tokens, refunded 575 unused tokens"
     ),
-    "### Any provider (manual usage)": (
+    ("README.md", "### Any provider (manual usage)"): (
         "unused 20 input tokens and 2800 output tokens returned to the pool"
     ),
 }
@@ -23,10 +49,16 @@ _SUPPORTED_PYTHON_FENCE_TOKENS = {"python", "py"}
 
 
 @dataclass(frozen=True)
-class _ReadmePythonBlock:
+class _MarkdownPythonBlock:
+    document_name: str
     heading: str
     code: str
     start_line: int
+    classified_as_fragment: bool
+
+
+def _document_label(document_name: str) -> str:
+    return document_name.removesuffix(".md")
 
 
 def _heading_from_line(line: str) -> str | None:
@@ -51,7 +83,7 @@ def _is_fragment_python_block(code: str) -> bool:
     return False
 
 
-def _readme_fence_info(line: str) -> str | None:
+def _markdown_fence_info(line: str) -> str | None:
     stripped = line.strip()
     if not stripped.startswith("```") or stripped == "```":
         return None
@@ -62,23 +94,32 @@ def _is_unsupported_python_like_fence_token(token: str) -> bool:
     return token.startswith(("python", "py-", "py_")) or token in {"py3", "pycon"}
 
 
-def _is_python_fence_info(info: str) -> bool:
+def _is_python_fence_info(info: str, *, document_name: str) -> bool:
     first_token = info.split(maxsplit=1)[0].lower()
     if first_token in _SUPPORTED_PYTHON_FENCE_TOKENS:
         return True
     if _is_unsupported_python_like_fence_token(first_token):
         raise AssertionError(
-            "Unsupported README Python fence variant "
+            f"Unsupported {_document_label(document_name)} Python fence variant "
             f"`{info}`; use `python`, `python ...`, or `py` so examples "
             "are linted."
         )
     return False
 
 
-def _standalone_python_blocks(markdown: str) -> list[_ReadmePythonBlock]:
+def _explicit_fragment_start_lines(document_name: str) -> frozenset[int]:
+    return _EXPLICIT_FRAGMENT_START_LINES_BY_DOCUMENT.get(document_name, frozenset())
+
+
+def _python_blocks(
+    markdown: str,
+    *,
+    document_name: str = _README.name,
+) -> list[_MarkdownPythonBlock]:
     lines = markdown.splitlines()
-    blocks: list[_ReadmePythonBlock] = []
-    heading = "<README top>"
+    blocks: list[_MarkdownPythonBlock] = []
+    heading = f"<{_document_label(document_name)} top>"
+    explicit_fragment_start_lines = _explicit_fragment_start_lines(document_name)
     index = 0
     while index < len(lines):
         line = lines[index]
@@ -86,12 +127,15 @@ def _standalone_python_blocks(markdown: str) -> list[_ReadmePythonBlock]:
         if current_heading is not None:
             heading = current_heading
 
-        fence_info = _readme_fence_info(line)
+        fence_info = _markdown_fence_info(line)
         if fence_info is None:
             index += 1
             continue
 
-        is_python_fence = _is_python_fence_info(fence_info)
+        is_python_fence = _is_python_fence_info(
+            fence_info,
+            document_name=document_name,
+        )
         start_line = index + 2
         index += 1
         block_lines: list[str] = []
@@ -101,7 +145,7 @@ def _standalone_python_blocks(markdown: str) -> list[_ReadmePythonBlock]:
         if index >= len(lines):
             block_kind = "Python" if is_python_fence else "code"
             raise AssertionError(
-                f"Unterminated README {block_kind} block at line {start_line}"
+                f"Unterminated {_document_label(document_name)} {block_kind} block at line {start_line}"
             )
 
         if not is_python_fence:
@@ -109,21 +153,52 @@ def _standalone_python_blocks(markdown: str) -> list[_ReadmePythonBlock]:
             continue
 
         code = "\n".join(block_lines)
-        if not _is_fragment_python_block(code):
-            blocks.append(
-                _ReadmePythonBlock(
-                    heading=heading,
-                    code=code,
-                    start_line=start_line,
-                )
+        blocks.append(
+            _MarkdownPythonBlock(
+                document_name=document_name,
+                heading=heading,
+                code=code,
+                start_line=start_line,
+                classified_as_fragment=(
+                    _is_fragment_python_block(code)
+                    or start_line in explicit_fragment_start_lines
+                ),
             )
+        )
         index += 1
     return blocks
 
 
-def _run_readme_example(code: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(  # noqa: S603 - executes trusted snippets from this repo's README.
-        [sys.executable, "-c", code],
+def _standalone_python_blocks(
+    markdown: str,
+    *,
+    document_name: str = _README.name,
+) -> list[_MarkdownPythonBlock]:
+    return [
+        block
+        for block in _python_blocks(markdown, document_name=document_name)
+        if not block.classified_as_fragment
+    ]
+
+
+def _standalone_python_blocks_from_document(path: Path) -> list[_MarkdownPythonBlock]:
+    return _standalone_python_blocks(
+        path.read_text(encoding="utf-8"),
+        document_name=path.name,
+    )
+
+
+def _skip_if_optional_dependency_is_missing(example: _MarkdownPythonBlock) -> None:
+    if example.document_name == "DEVELOPMENT.md":
+        pytest.importorskip("redis")
+
+
+def _run_docs_example(
+    example: _MarkdownPythonBlock,
+) -> subprocess.CompletedProcess[str]:
+    _skip_if_optional_dependency_is_missing(example)
+    return subprocess.run(  # noqa: S603 - executes trusted snippets from this repo's docs.
+        [sys.executable, "-c", example.code],
         cwd=_REPO_ROOT,
         text=True,
         capture_output=True,
@@ -132,7 +207,17 @@ def _run_readme_example(code: str) -> subprocess.CompletedProcess[str]:
 
 
 _STANDALONE_README_EXAMPLES = _standalone_python_blocks(
-    _README.read_text(encoding="utf-8")
+    _README.read_text(encoding="utf-8"),
+    document_name=_README.name,
+)
+_STANDALONE_DOC_EXAMPLES = [
+    block
+    for path in _DOCS_WITH_STANDALONE_EXAMPLES
+    for block in _standalone_python_blocks_from_document(path)
+]
+_MIGRATION_PYTHON_BLOCKS = _python_blocks(
+    _MIGRATION.read_text(encoding="utf-8"),
+    document_name=_MIGRATION.name,
 )
 
 
@@ -230,18 +315,44 @@ print("near heading")
     blocks = _standalone_python_blocks(markdown)
 
     assert [block.heading for block in blocks] == [exact_heading, near_heading]
-    assert _EXPECTED_STDOUT_BY_HEADING.get(blocks[0].heading) is not None
-    assert _EXPECTED_STDOUT_BY_HEADING.get(blocks[1].heading) is None
+    assert (
+        _EXPECTED_STDOUT_BY_EXAMPLE.get((_README.name, blocks[0].heading)) is not None
+    )
+    assert _EXPECTED_STDOUT_BY_EXAMPLE.get((_README.name, blocks[1].heading)) is None
+
+
+def test_non_readme_standalone_python_examples_are_linted() -> None:
+    locations = {
+        (block.document_name, block.start_line)
+        for block in _STANDALONE_DOC_EXAMPLES
+        if block.document_name != _README.name
+    }
+
+    assert locations == _EXPECTED_NON_README_STANDALONE_LOCATIONS
+
+
+def test_migration_fragments_are_classified_intentionally() -> None:
+    locations = {
+        block.start_line
+        for block in _MIGRATION_PYTHON_BLOCKS
+        if block.classified_as_fragment
+    }
+
+    assert locations == _EXPECTED_MIGRATION_FRAGMENT_START_LINES
 
 
 @pytest.mark.parametrize(
     "example",
-    _STANDALONE_README_EXAMPLES,
-    ids=lambda example: f"{example.heading} line {example.start_line}",
+    _STANDALONE_DOC_EXAMPLES,
+    ids=lambda example: (
+        f"{example.document_name} {example.heading} line {example.start_line}"
+    ),
 )
-def test_readme_standalone_python_examples_run(example: _ReadmePythonBlock) -> None:
-    result = _run_readme_example(example.code)
+def test_standalone_python_examples_run(example: _MarkdownPythonBlock) -> None:
+    result = _run_docs_example(example)
 
-    expected_stdout = _EXPECTED_STDOUT_BY_HEADING.get(example.heading)
+    expected_stdout = _EXPECTED_STDOUT_BY_EXAMPLE.get(
+        (example.document_name, example.heading)
+    )
     if expected_stdout is not None:
         assert result.stdout.strip() == expected_stdout
