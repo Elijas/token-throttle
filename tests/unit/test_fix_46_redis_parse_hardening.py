@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -26,7 +27,12 @@ from token_throttle._limiter_backends._redis._bucket import (
     _normalize_bucket_state_pair,
 )
 from token_throttle._limiter_backends._redis._sync_backend import SyncRedisBackend
-from token_throttle._limiter_backends._redis._sync_bucket import SyncRedisBucket
+from token_throttle._limiter_backends._redis._sync_bucket import (
+    RedisPipelineResultError as SyncRedisPipelineResultError,
+)
+from token_throttle._limiter_backends._redis._sync_bucket import (
+    SyncRedisBucket,
+)
 
 
 def _config() -> PerModelConfig:
@@ -38,6 +44,18 @@ def _config() -> PerModelConfig:
 
 def _quota() -> Quota:
     return next(iter(_config().quotas))
+
+
+def _multi_config() -> PerModelConfig:
+    return PerModelConfig(
+        model_family="test/model",
+        quotas=UsageQuotas(
+            [
+                Quota(metric="alpha", limit=10, per_seconds=60),
+                Quota(metric="beta", limit=20, per_seconds=60),
+            ]
+        ),
+    )
 
 
 class _AsyncPipeline:
@@ -79,6 +97,44 @@ def _sync_backend_pair() -> tuple[SyncRedisBackend, SyncRedisBucket]:
     return SyncRedisBackend(
         [bucket], redis_client, _config(), key_prefix="test"
     ), bucket
+
+
+def _async_multi_backend() -> tuple[RedisBackend, tuple[RedisBucket, ...]]:
+    config = _multi_config()
+    redis_client = MagicMock()
+    redis_client.get = AsyncMock(return_value=None)
+    redis_client.expire = AsyncMock(return_value=True)
+    buckets = [
+        RedisBucket(quota, config, redis_client, key_prefix="test")
+        for quota in config.quotas
+    ]
+    backend = RedisBackend(buckets, redis_client, config, key_prefix="test")
+    return backend, tuple(backend.sorted_buckets)
+
+
+def _sync_multi_backend() -> tuple[SyncRedisBackend, tuple[SyncRedisBucket, ...]]:
+    config = _multi_config()
+    redis_client = MagicMock()
+    redis_client.get.return_value = None
+    redis_client.expire.return_value = True
+    buckets = [
+        SyncRedisBucket(quota, config, redis_client, key_prefix="test")
+        for quota in config.quotas
+    ]
+    backend = SyncRedisBackend(buckets, redis_client, config, key_prefix="test")
+    return backend, tuple(backend.sorted_buckets)
+
+
+def _override_payload(
+    bucket: RedisBucket | SyncRedisBucket,
+    value: float,
+) -> bytes:
+    return json.dumps(
+        {
+            "configured_max_capacity": bucket.configured_max_capacity,
+            "override_max_capacity": value,
+        }
+    ).encode()
 
 
 async def test_async_read_pipeline_rejects_embedded_expire_error() -> None:
@@ -123,6 +179,80 @@ async def test_async_get_slots_reject_non_redis_get_python_shapes() -> None:
 
     with pytest.raises(RedisPipelineResultError, match="unexpected Redis GET"):
         await backend._get_capacities_unsafe(pipeline=pipeline, current_time=1001.0)
+
+
+@pytest.mark.parametrize(
+    ("bad_capacity", "expected_error", "match"),
+    [
+        (123, RedisPipelineResultError, "unexpected Redis GET"),
+        (b"bad", ValueError, "Invalid last_checked"),
+    ],
+)
+async def test_async_multi_bucket_read_validates_all_slots_before_override_cache_update(
+    bad_capacity: object,
+    expected_error: type[Exception],
+    match: str,
+) -> None:
+    backend, buckets = _async_multi_backend()
+    first, _second = buckets
+    pipeline = _AsyncPipeline(
+        [
+            b"1000.0",
+            b"5.0",
+            True,
+            True,
+            b"1000.0",
+            bad_capacity,
+            True,
+            True,
+            _override_payload(first, 7.0),
+            None,
+        ]
+    )
+
+    with pytest.raises(expected_error, match=match):
+        await backend._get_capacities_unsafe(pipeline=pipeline, current_time=1001.0)
+
+    assert first.max_capacity == pytest.approx(first.configured_max_capacity)
+    assert first._max_capacity_cached is None
+    assert first._max_capacity_cache_populated is False
+
+
+@pytest.mark.parametrize(
+    ("bad_capacity", "expected_error", "match"),
+    [
+        (123, SyncRedisPipelineResultError, "unexpected Redis GET"),
+        (b"bad", ValueError, "Invalid last_checked"),
+    ],
+)
+def test_sync_multi_bucket_read_validates_all_slots_before_override_cache_update(
+    bad_capacity: object,
+    expected_error: type[Exception],
+    match: str,
+) -> None:
+    backend, buckets = _sync_multi_backend()
+    first, _second = buckets
+    pipeline = _SyncPipeline(
+        [
+            b"1000.0",
+            b"5.0",
+            True,
+            True,
+            b"1000.0",
+            bad_capacity,
+            True,
+            True,
+            _override_payload(first, 7.0),
+            None,
+        ]
+    )
+
+    with pytest.raises(expected_error, match=match):
+        backend._get_capacities_unsafe(pipeline=pipeline, current_time=1001.0)
+
+    assert first.max_capacity == pytest.approx(first.configured_max_capacity)
+    assert first._max_capacity_cached is None
+    assert first._max_capacity_cache_populated is False
 
 
 def test_bucket_state_pair_rejects_numeric_get_shape() -> None:

@@ -22,7 +22,7 @@ except ImportError as exc:
     ) from exc
 from frozendict import frozendict
 
-from token_throttle._capacity import calculate_capacity
+from token_throttle._capacity import CalculatedCapacity, calculate_capacity
 from token_throttle._diagnostic import (
     BackendBucketLimit,
     BackendIntrospectionDiagnostic,
@@ -105,6 +105,14 @@ _lock_logger = logging.getLogger("token_throttle.lock")
 class CapacitiesGetterResult(typing.NamedTuple):
     capacities: Capacities
     fresh_start_buckets: list[RedisBucket]
+
+
+class _ParsedCapacityReadResult(typing.NamedTuple):
+    bucket: RedisBucket
+    missing_keys: tuple[str, ...]
+    present_keys: tuple[str, ...]
+    max_capacity_override: float | None
+    calculated_capacity: CalculatedCapacity
 
 
 LOCK_TIMEOUT_SECONDS = 30
@@ -1307,8 +1315,7 @@ class RedisBackend(RateLimiterBackend):
         # between deployments, and the new version might have a different
         # Usage class.
         new_capacities: dict[tuple[str, int], float] = {}
-        fresh_start_buckets: list[RedisBucket] = []
-        partial_state_buckets: list[RedisBucket] = []
+        parsed_bucket_results: list[_ParsedCapacityReadResult] = []
         for i, bucket in enumerate(target_buckets):
             idx = i * _PIPELINE_CMDS_PER_BUCKET
             last_checked_raw = results[idx + RedisBucket.PIPELINE_LAST_CHECKED_OFFSET]
@@ -1342,39 +1349,69 @@ class RedisBackend(RateLimiterBackend):
                     f"({bucket.full_redis_key}) max_capacity_override"
                 ),
             )
-            if bucket.update_max_capacity_from_result(max_capacity_raw):
+            max_capacity_override = bucket._deserialize_max_capacity_override(  # noqa: SLF001
+                max_capacity_raw
+            )
+            effective_max_capacity = (
+                bucket.configured_max_capacity
+                if max_capacity_override is None
+                else max_capacity_override
+            )
+            calculated = calculate_capacity(
+                last_checked=last_checked,
+                outdated_capacity=capacity,
+                current_time=current_time,
+                max_capacity=effective_max_capacity,
+                rate_per_sec=effective_max_capacity / bucket.per_seconds,
+                bucket_id=bucket.full_redis_key,
+            )
+            calculated = _revalidate_dto(calculated)
+            parsed_bucket_results.append(
+                _ParsedCapacityReadResult(
+                    bucket=bucket,
+                    missing_keys=missing_keys,
+                    present_keys=present_keys,
+                    max_capacity_override=max_capacity_override,
+                    calculated_capacity=calculated,
+                )
+            )
+
+        fresh_start_buckets: list[RedisBucket] = []
+        partial_state_buckets: list[RedisBucket] = []
+        for parsed_result in parsed_bucket_results:
+            bucket = parsed_result.bucket
+            bucket._set_cached_max_capacity_override(  # noqa: SLF001
+                parsed_result.max_capacity_override
+            )
+            bucket._max_capacity_cache_time = time.time()  # noqa: SLF001
+            if parsed_result.max_capacity_override is not None:
                 expire_result = self._redis.expire(
                     bucket._max_capacity_key,  # noqa: SLF001
                     bucket._override_ttl_seconds,  # noqa: SLF001
                 )
                 if inspect.isawaitable(expire_result):
                     await expire_result
-            result = bucket.calculate_capacity(
-                last_checked,
-                capacity,
-                current_time,
-            )
-            result = _revalidate_dto(result)
-            if len(missing_keys) == 1:
+            result = parsed_result.calculated_capacity
+            if len(parsed_result.missing_keys) == 1:
                 bucket._set_missing_consumption_data_context(  # noqa: SLF001
                     reason="partial_state_drained",
-                    missing_keys=missing_keys,
-                    present_keys=present_keys,
+                    missing_keys=parsed_result.missing_keys,
+                    present_keys=parsed_result.present_keys,
                 )
                 partial_state_buckets.append(bucket)
                 fresh_start_buckets.append(bucket)
             elif result.is_fresh_start:
                 bucket._set_missing_consumption_data_context(  # noqa: SLF001
                     reason="fresh_start",
-                    missing_keys=missing_keys,
-                    present_keys=present_keys,
+                    missing_keys=parsed_result.missing_keys,
+                    present_keys=parsed_result.present_keys,
                 )
                 fresh_start_buckets.append(bucket)
             else:
                 bucket._set_missing_consumption_data_context(  # noqa: SLF001
                     reason=None,
                     missing_keys=(),
-                    present_keys=present_keys,
+                    present_keys=parsed_result.present_keys,
                 )
             new_capacities[(bucket.usage_metric, int(bucket.per_seconds))] = (
                 result.amount
