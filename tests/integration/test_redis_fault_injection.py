@@ -200,6 +200,122 @@ def test_sync_acquire_lua_rolls_back_bucket_writes_when_later_set_fails(
         )
 
 
+# H1-F1 regression: the acquire-rollback restore_key SET branch (restore a
+# pre-existing bucket to its prior value + TTL) had no coverage — the fresh-bucket
+# tests above only reach restore_key's DEL branch. Seed an acquire so the bucket
+# already exists, then fail a second acquire mid-script and assert SET-restore.
+
+
+@pytest.mark.redis
+async def test_acquire_lua_restores_preexisting_bucket_via_set_when_later_set_fails(
+    redis_client,
+):
+    prefix = "fha8-n02-acquire-set-restore"
+    config = _make_two_bucket_config()
+    limiter = RateLimiter(
+        config,
+        backend=RedisBackendBuilder(redis_client, key_prefix=prefix),
+    )
+    backend = await limiter._get_backend(config)
+    good_bucket, bad_bucket = backend.sorted_buckets[:2]
+
+    seed = await limiter.acquire_capacity(
+        {"requests": 10.0, "tokens": 10.0},
+        "lua-authority",
+        timeout=0,
+    )
+    seed_marker = redis_acquired_marker_key(prefix, seed.reservation_id)
+    good_value_before = await redis_client.get(good_bucket._capacity_key)
+    assert good_value_before is not None
+    assert await _async_capacity(
+        redis_client, good_bucket._capacity_key
+    ) == pytest.approx(90.0, abs=1.0)
+    assert await redis_client.pttl(good_bucket._capacity_key) > 0
+
+    original_bad_ttl = bad_bucket._bucket_ttl_seconds
+    bad_bucket._bucket_ttl_seconds = 0
+    try:
+        with pytest.raises(RuntimeError, match="Redis error"):
+            await limiter.acquire_capacity(
+                {"requests": 30.0, "tokens": 30.0},
+                "lua-authority",
+                timeout=0,
+            )
+    finally:
+        bad_bucket._bucket_ttl_seconds = original_bad_ttl
+
+    # Pre-existing good bucket restored byte-for-byte via SET ... PX, TTL intact.
+    assert await redis_client.get(good_bucket._capacity_key) == good_value_before
+    assert await redis_client.pttl(good_bucket._capacity_key) > 0
+    # The poisoned bucket's read-phase EXPIRE 0 drops its keys, so rollback finds
+    # them already absent and DELs — no partial capacity survives the failed acquire.
+    assert await _async_capacity(redis_client, bad_bucket._capacity_key) is None
+    assert await _async_capacity(redis_client, bad_bucket._last_checked_key) is None
+
+    # The failed acquire created no new marker; only the seed's marker survives.
+    assert await redis_client.exists(seed_marker) == 1
+    assert len(await redis_client.keys(f"{prefix}:rate_limiting:acquired:*")) == 1
+
+    # The victim left no local reservation; the seed stays legitimately in-flight.
+    assert not limiter._pending_acquire_reservations
+    assert limiter._in_flight_reservation_ids == {seed.reservation_id}
+
+
+@pytest.mark.redis
+def test_sync_acquire_lua_restores_preexisting_bucket_via_set_when_later_set_fails(
+    sync_redis_client,
+):
+    prefix = "fha8-n02-sync-acquire-set-restore"
+    config = _make_two_bucket_config()
+    limiter = SyncRateLimiter(
+        config,
+        backend=SyncRedisBackendBuilder(sync_redis_client, key_prefix=prefix),
+    )
+    backend = limiter._get_backend(config)
+    good_bucket, bad_bucket = backend.sorted_buckets[:2]
+
+    seed = limiter.acquire_capacity(
+        {"requests": 10.0, "tokens": 10.0},
+        "lua-authority",
+        timeout=0,
+    )
+    seed_marker = redis_acquired_marker_key(prefix, seed.reservation_id)
+    good_value_before = sync_redis_client.get(good_bucket._capacity_key)
+    assert good_value_before is not None
+    assert _sync_capacity(
+        sync_redis_client, good_bucket._capacity_key
+    ) == pytest.approx(90.0, abs=1.0)
+    assert sync_redis_client.pttl(good_bucket._capacity_key) > 0
+
+    original_bad_ttl = bad_bucket._bucket_ttl_seconds
+    bad_bucket._bucket_ttl_seconds = 0
+    try:
+        with pytest.raises(RuntimeError, match="Redis error"):
+            limiter.acquire_capacity(
+                {"requests": 30.0, "tokens": 30.0},
+                "lua-authority",
+                timeout=0,
+            )
+    finally:
+        bad_bucket._bucket_ttl_seconds = original_bad_ttl
+
+    # Pre-existing good bucket restored byte-for-byte via SET ... PX, TTL intact.
+    assert sync_redis_client.get(good_bucket._capacity_key) == good_value_before
+    assert sync_redis_client.pttl(good_bucket._capacity_key) > 0
+    # The poisoned bucket's read-phase EXPIRE 0 drops its keys, so rollback finds
+    # them already absent and DELs — no partial capacity survives the failed acquire.
+    assert _sync_capacity(sync_redis_client, bad_bucket._capacity_key) is None
+    assert _sync_capacity(sync_redis_client, bad_bucket._last_checked_key) is None
+
+    # The failed acquire created no new marker; only the seed's marker survives.
+    assert sync_redis_client.exists(seed_marker) == 1
+    assert len(sync_redis_client.keys(f"{prefix}:rate_limiting:acquired:*")) == 1
+
+    # The victim left no local reservation; the seed stays legitimately in-flight.
+    assert not limiter._pending_acquire_reservations
+    assert limiter._in_flight_reservation_ids == {seed.reservation_id}
+
+
 @pytest.mark.redis
 async def test_refund_lua_rolls_back_and_keeps_local_refund_retryable(
     redis_client,
