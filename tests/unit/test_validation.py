@@ -9,6 +9,7 @@ from token_throttle._interfaces._interfaces import PerModelConfig
 from token_throttle._interfaces._models import Quota, UsageQuotas
 from token_throttle._validation import (
     extract_total_tokens,
+    extract_usage_from_response,
     merge_extra_usage,
     resolve_config,
     validate_acquire_usage,
@@ -263,3 +264,76 @@ class TestNumpyBoolCoercionInValidation:
         usage = frozendict({"tokens": 100.0})
         with pytest.raises(ValueError, match="int or float"):
             merge_extra_usage(usage, {"tokens": FAKE_NP_TRUE})
+
+
+class _FloatBomb(float):
+    """A float subclass whose __float__ raises an ordinary (non-Value/Type) error."""
+
+    def __float__(self) -> float:
+        raise RuntimeError("float bomb")
+
+
+class _FloatKiller(float):
+    """A float subclass whose __float__ raises a BaseException (must propagate)."""
+
+    def __float__(self) -> float:
+        raise KeyboardInterrupt
+
+
+class TestExtractTotalTokensHostileNumeric:
+    """Huge ints / hostile __float__ must coerce to ValueError, not leak raw."""
+
+    def test_huge_int_raises_value_error_with_overflow_cause(self):
+        with pytest.raises(
+            ValueError, match="too large to fit in IEEE 754 double"
+        ) as exc_info:
+            extract_total_tokens({"total_tokens": 10**400})
+        assert isinstance(exc_info.value.__cause__, OverflowError)
+
+    def test_huge_negative_int_raises_value_error_with_overflow_cause(self):
+        with pytest.raises(
+            ValueError, match="too large to fit in IEEE 754 double"
+        ) as exc_info:
+            extract_total_tokens({"total_tokens": -(10**400)})
+        assert isinstance(exc_info.value.__cause__, OverflowError)
+
+    def test_hostile_float_raises_value_error_with_cause(self):
+        with pytest.raises(ValueError, match="total_tokens") as exc_info:
+            extract_total_tokens({"total_tokens": _FloatBomb(1.0)})
+        assert isinstance(exc_info.value.__cause__, RuntimeError)
+
+    def test_base_exception_from_float_propagates(self):
+        with pytest.raises(KeyboardInterrupt):
+            extract_total_tokens({"total_tokens": _FloatKiller(1.0)})
+
+
+class TestExtractUsageFromResponseHostileAccess:
+    """Hostile .usage property / __getitem__ must coerce to ValueError, not leak."""
+
+    def test_hostile_usage_property_raises_value_error_with_cause(self):
+        class UsagePropertyBomb:
+            @property
+            def usage(self) -> object:
+                raise RuntimeError("usage property bomb")
+
+        with pytest.raises(ValueError, match="could not be read") as exc_info:
+            extract_usage_from_response(UsagePropertyBomb())
+        assert isinstance(exc_info.value.__cause__, RuntimeError)
+
+    def test_hostile_mapping_getitem_raises_value_error_with_cause(self):
+        class HostileMapping(dict):
+            def __getitem__(self, key: object) -> object:
+                raise RuntimeError("getitem bomb")
+
+        with pytest.raises(ValueError, match="could not be read") as exc_info:
+            extract_usage_from_response(HostileMapping(usage=1))
+        assert isinstance(exc_info.value.__cause__, RuntimeError)
+
+    def test_base_exception_from_usage_property_propagates(self):
+        class UsagePropertyKiller:
+            @property
+            def usage(self) -> object:
+                raise KeyboardInterrupt
+
+        with pytest.raises(KeyboardInterrupt):
+            extract_usage_from_response(UsagePropertyKiller())
