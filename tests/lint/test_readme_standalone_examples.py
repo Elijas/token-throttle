@@ -25,7 +25,7 @@ class _ExpectedMigrationFragment:
 
 
 @dataclass(frozen=True)
-class _StdoutExampleIdentity:
+class _StandaloneExampleIdentity:
     document_name: str
     start_line: int
     heading: str
@@ -108,13 +108,40 @@ _EXPECTED_MIGRATION_REDIS_CLEANUP_SCAN_PATTERN = "`{key_prefix}:rate_limiting:bu
 _EXPECTED_MIGRATION_REDIS_BUCKET_KEY_SHAPE = (
     "{key_prefix}:rate_limiting:bucket:{model_family}:{metric}:{per_seconds}:{suffix}"
 )
-_EXPECTED_NON_README_STANDALONE_LOCATIONS = {
-    ("MIGRATION.md", 61),
-    ("MIGRATION.md", 70),
-    ("MIGRATION.md", 182),
-    ("MIGRATION.md", 226),
-    ("DEVELOPMENT.md", 336),
-}
+_EXPECTED_NON_README_STANDALONE_IDENTITIES = (
+    _StandaloneExampleIdentity(
+        document_name="MIGRATION.md",
+        start_line=61,
+        heading="### What changed",
+        first_non_empty_code_line=(
+            "from token_throttle import create_logging_callbacks"
+        ),
+    ),
+    _StandaloneExampleIdentity(
+        document_name="MIGRATION.md",
+        start_line=70,
+        heading="### What changed",
+        first_non_empty_code_line="import logging",
+    ),
+    _StandaloneExampleIdentity(
+        document_name="MIGRATION.md",
+        start_line=182,
+        heading="### What changed",
+        first_non_empty_code_line="async def on_capacity_refunded(**kwargs) -> None:",
+    ),
+    _StandaloneExampleIdentity(
+        document_name="MIGRATION.md",
+        start_line=226,
+        heading="### What changed",
+        first_non_empty_code_line="from token_throttle import RateLimiterBackend",
+    ),
+    _StandaloneExampleIdentity(
+        document_name="DEVELOPMENT.md",
+        start_line=336,
+        heading="### Redis connection pool sizing",
+        first_non_empty_code_line="import redis.asyncio as aioredis",
+    ),
+)
 _EXPLICIT_FRAGMENT_START_LINES_BY_DOCUMENT = {
     "MIGRATION.md": _EXPECTED_MIGRATION_FRAGMENT_START_LINES,
 }
@@ -177,8 +204,10 @@ def _first_non_empty_code_line(code: str) -> str:
     return ""
 
 
-def _stdout_example_identity(block: _MarkdownPythonBlock) -> _StdoutExampleIdentity:
-    return _StdoutExampleIdentity(
+def _standalone_example_identity(
+    block: _MarkdownPythonBlock,
+) -> _StandaloneExampleIdentity:
+    return _StandaloneExampleIdentity(
         document_name=block.document_name,
         start_line=block.start_line,
         heading=block.heading,
@@ -188,8 +217,8 @@ def _stdout_example_identity(block: _MarkdownPythonBlock) -> _StdoutExampleIdent
 
 def _expected_stdout_identity(
     expected: _ExpectedStdoutExample,
-) -> _StdoutExampleIdentity:
-    return _StdoutExampleIdentity(
+) -> _StandaloneExampleIdentity:
+    return _StandaloneExampleIdentity(
         document_name=expected.document_name,
         start_line=expected.start_line,
         heading=expected.heading,
@@ -197,8 +226,8 @@ def _expected_stdout_identity(
     )
 
 
-def _expected_stdout_by_identity() -> dict[_StdoutExampleIdentity, str]:
-    expected_stdout_by_identity: dict[_StdoutExampleIdentity, str] = {}
+def _expected_stdout_by_identity() -> dict[_StandaloneExampleIdentity, str]:
+    expected_stdout_by_identity: dict[_StandaloneExampleIdentity, str] = {}
     for expected in _EXPECTED_STDOUT_EXAMPLES:
         identity = _expected_stdout_identity(expected)
         assert identity not in expected_stdout_by_identity
@@ -441,7 +470,7 @@ print("not linted")
         _standalone_python_blocks(markdown)
 
 
-def test_stdout_example_identity_distinguishes_heading_line_and_code_drift() -> None:
+def test_standalone_example_identity_catches_drift() -> None:
     expected = _EXPECTED_STDOUT_EXAMPLES[0]
     matching_block = _MarkdownPythonBlock(
         document_name=expected.document_name,
@@ -452,9 +481,9 @@ def test_stdout_example_identity_distinguishes_heading_line_and_code_drift() -> 
     )
     expected_identity = _expected_stdout_identity(expected)
 
-    assert _stdout_example_identity(matching_block) == expected_identity
+    assert _standalone_example_identity(matching_block) == expected_identity
     assert (
-        _stdout_example_identity(
+        _standalone_example_identity(
             _MarkdownPythonBlock(
                 document_name=expected.document_name,
                 heading=f"{expected.heading} extra",
@@ -466,7 +495,7 @@ def test_stdout_example_identity_distinguishes_heading_line_and_code_drift() -> 
         != expected_identity
     )
     assert (
-        _stdout_example_identity(
+        _standalone_example_identity(
             _MarkdownPythonBlock(
                 document_name=expected.document_name,
                 heading=expected.heading,
@@ -478,7 +507,7 @@ def test_stdout_example_identity_distinguishes_heading_line_and_code_drift() -> 
         != expected_identity
     )
     assert (
-        _stdout_example_identity(
+        _standalone_example_identity(
             _MarkdownPythonBlock(
                 document_name=expected.document_name,
                 heading=expected.heading,
@@ -492,13 +521,17 @@ def test_stdout_example_identity_distinguishes_heading_line_and_code_drift() -> 
 
 
 def test_non_readme_standalone_python_examples_are_linted() -> None:
-    locations = {
-        (block.document_name, block.start_line)
+    current_identities = [
+        _standalone_example_identity(block)
         for block in _STANDALONE_DOC_EXAMPLES
         if block.document_name != _README.name
-    }
+    ]
+    expected_identities = frozenset(_EXPECTED_NON_README_STANDALONE_IDENTITIES)
 
-    assert locations == _EXPECTED_NON_README_STANDALONE_LOCATIONS
+    assert len(expected_identities) == len(_EXPECTED_NON_README_STANDALONE_IDENTITIES)
+    assert set(current_identities) == expected_identities
+    for expected in _EXPECTED_NON_README_STANDALONE_IDENTITIES:
+        assert current_identities.count(expected) == 1
 
 
 def test_migration_fragments_are_classified_intentionally() -> None:
@@ -514,7 +547,7 @@ def test_migration_redis_bucket_key_shape_is_guarded() -> None:
 
 def test_expected_stdout_examples_match_current_docs_identity() -> None:
     current_identities = [
-        _stdout_example_identity(block) for block in _STANDALONE_DOC_EXAMPLES
+        _standalone_example_identity(block) for block in _STANDALONE_DOC_EXAMPLES
     ]
     expected_stdout_by_identity = _expected_stdout_by_identity()
 
@@ -537,6 +570,6 @@ def test_standalone_python_examples_run(example: _MarkdownPythonBlock) -> None:
     result = _run_docs_example(example)
 
     expected_stdout_by_identity = _expected_stdout_by_identity()
-    identity = _stdout_example_identity(example)
+    identity = _standalone_example_identity(example)
     if identity in expected_stdout_by_identity:
         assert result.stdout.strip() == expected_stdout_by_identity[identity]
