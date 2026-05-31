@@ -14,19 +14,78 @@ _README = _REPO_ROOT / "README.md"
 _MIGRATION = _REPO_ROOT / "MIGRATION.md"
 _DEVELOPMENT = _REPO_ROOT / "DEVELOPMENT.md"
 _DOCS_WITH_STANDALONE_EXAMPLES = (_README, _MIGRATION, _DEVELOPMENT)
-_EXPECTED_MIGRATION_FRAGMENT_REASONS_BY_START_LINE = {
-    37: "illustrates unsafe cross-limiter refund with undefined limiters",
-    47: "requires a live async limiter and provider call",
-    131: "uses illustrative recovery hook and limiter variables",
-    143: "uses illustrative recovery hook and limiter variables",
-    191: "illustrates callback behavior with undefined limiter and reservation",
-    237: "requires a caller-provided backend builder",
-    274: "uses illustrative model and recovery flow variables",
-    409: "requires an operator-provided config mapping",
-    516: "requires an operator-supplied Redis client and target deployment prefix",
-}
+
+
+@dataclass(frozen=True)
+class _ExpectedMigrationFragment:
+    start_line: int
+    reason: str
+    heading: str
+    first_non_empty_code_line: str
+
+
+_EXPECTED_MIGRATION_FRAGMENTS = (
+    _ExpectedMigrationFragment(
+        start_line=37,
+        reason="illustrates unsafe cross-limiter refund with undefined limiters",
+        heading="### What changed",
+        first_non_empty_code_line="reservation = await limiter_a.acquire_capacity(",
+    ),
+    _ExpectedMigrationFragment(
+        start_line=47,
+        reason="requires a live async limiter and provider call",
+        heading="### What changed",
+        first_non_empty_code_line="reservation = await limiter.acquire_capacity(",
+    ),
+    _ExpectedMigrationFragment(
+        start_line=131,
+        reason="uses illustrative recovery hook and limiter variables",
+        heading="### What changed",
+        first_non_empty_code_line="from token_throttle import AcquireRefundFailedError",
+    ),
+    _ExpectedMigrationFragment(
+        start_line=143,
+        reason="uses illustrative recovery hook and limiter variables",
+        heading="### What changed",
+        first_non_empty_code_line="from token_throttle import AcquireRefundFailedError",
+    ),
+    _ExpectedMigrationFragment(
+        start_line=191,
+        reason="illustrates callback behavior with undefined limiter and reservation",
+        heading="### What changed",
+        first_non_empty_code_line="async def on_capacity_refunded(**kwargs) -> None:",
+    ),
+    _ExpectedMigrationFragment(
+        start_line=237,
+        reason="requires a caller-provided backend builder",
+        heading="### What changed",
+        first_non_empty_code_line="from token_throttle import run_conformance_test_for",
+    ),
+    _ExpectedMigrationFragment(
+        start_line=274,
+        reason="uses illustrative model and recovery flow variables",
+        heading="### AcquireRefundFailedError base class",
+        first_non_empty_code_line="from token_throttle import AcquireRefundFailedError",
+    ),
+    _ExpectedMigrationFragment(
+        start_line=409,
+        reason="requires an operator-provided config mapping",
+        heading="## 1. Preflight Config Dictionaries",
+        first_non_empty_code_line=(
+            "from token_throttle.migration import validate_config_for_v2_0"
+        ),
+    ),
+    _ExpectedMigrationFragment(
+        start_line=516,
+        reason="requires an operator-supplied Redis client and target deployment prefix",
+        heading="## 6a. Clean Up Pre-FIX-38 Redis Bucket Keys",
+        first_non_empty_code_line=(
+            "from token_throttle.migration import cleanup_legacy_buckets"
+        ),
+    ),
+)
 _EXPECTED_MIGRATION_FRAGMENT_START_LINES = frozenset(
-    _EXPECTED_MIGRATION_FRAGMENT_REASONS_BY_START_LINE
+    fragment.start_line for fragment in _EXPECTED_MIGRATION_FRAGMENTS
 )
 _EXPECTED_MIGRATION_REDIS_CLEANUP_SCAN_PATTERN = "`{key_prefix}:rate_limiting:bucket:*`"
 _EXPECTED_MIGRATION_REDIS_BUCKET_KEY_SHAPE = (
@@ -80,12 +139,15 @@ def _heading_from_line(line: str) -> str | None:
 
 
 def _is_fragment_python_block(code: str) -> bool:
+    return _first_non_empty_code_line(code).startswith(("# (fragment", "(fragment"))
+
+
+def _first_non_empty_code_line(code: str) -> str:
     for line in code.splitlines():
         stripped = line.strip()
-        if not stripped:
-            continue
-        return stripped.startswith(("# (fragment", "(fragment"))
-    return False
+        if stripped:
+            return stripped
+    return ""
 
 
 def _markdown_fence_info(line: str) -> str | None:
@@ -209,6 +271,28 @@ def _run_docs_example(
         capture_output=True,
         check=True,
     )
+
+
+def _assert_migration_fragment_expectations(
+    blocks: list[_MarkdownPythonBlock],
+) -> None:
+    fragments_by_start_line = {
+        block.start_line: block for block in blocks if block.classified_as_fragment
+    }
+
+    assert (
+        frozenset(fragments_by_start_line) == _EXPECTED_MIGRATION_FRAGMENT_START_LINES
+    )
+    for expected in _EXPECTED_MIGRATION_FRAGMENTS:
+        block = fragments_by_start_line[expected.start_line]
+        actual = _ExpectedMigrationFragment(
+            start_line=block.start_line,
+            reason=expected.reason,
+            heading=block.heading,
+            first_non_empty_code_line=_first_non_empty_code_line(block.code),
+        )
+        assert actual == expected
+        assert expected.reason.strip()
 
 
 _STANDALONE_README_EXAMPLES = _standalone_python_blocks(
@@ -337,21 +421,7 @@ def test_non_readme_standalone_python_examples_are_linted() -> None:
 
 
 def test_migration_fragments_are_classified_intentionally() -> None:
-    locations = {
-        block.start_line
-        for block in _MIGRATION_PYTHON_BLOCKS
-        if block.classified_as_fragment
-    }
-
-    assert locations == _EXPECTED_MIGRATION_FRAGMENT_START_LINES
-    assert all(
-        reason.strip()
-        for reason in _EXPECTED_MIGRATION_FRAGMENT_REASONS_BY_START_LINE.values()
-    )
-    assert (
-        _EXPECTED_MIGRATION_FRAGMENT_REASONS_BY_START_LINE[516]
-        == "requires an operator-supplied Redis client and target deployment prefix"
-    )
+    _assert_migration_fragment_expectations(_MIGRATION_PYTHON_BLOCKS)
 
 
 def test_migration_redis_bucket_key_shape_is_guarded() -> None:
