@@ -14,18 +14,23 @@ _README = _REPO_ROOT / "README.md"
 _MIGRATION = _REPO_ROOT / "MIGRATION.md"
 _DEVELOPMENT = _REPO_ROOT / "DEVELOPMENT.md"
 _DOCS_WITH_STANDALONE_EXAMPLES = (_README, _MIGRATION, _DEVELOPMENT)
+_EXPECTED_MIGRATION_FRAGMENT_REASONS_BY_START_LINE = {
+    37: "illustrates unsafe cross-limiter refund with undefined limiters",
+    47: "requires a live async limiter and provider call",
+    131: "uses illustrative recovery hook and limiter variables",
+    143: "uses illustrative recovery hook and limiter variables",
+    191: "illustrates callback behavior with undefined limiter and reservation",
+    237: "requires a caller-provided backend builder",
+    274: "uses illustrative model and recovery flow variables",
+    409: "requires an operator-provided config mapping",
+    516: "requires an operator-supplied Redis client and target deployment prefix",
+}
 _EXPECTED_MIGRATION_FRAGMENT_START_LINES = frozenset(
-    {
-        37,
-        47,
-        131,
-        143,
-        191,
-        237,
-        274,
-        409,
-        516,
-    }
+    _EXPECTED_MIGRATION_FRAGMENT_REASONS_BY_START_LINE
+)
+_EXPECTED_MIGRATION_REDIS_CLEANUP_SCAN_PATTERN = "`{key_prefix}:rate_limiting:bucket:*`"
+_EXPECTED_MIGRATION_REDIS_BUCKET_KEY_SHAPE = (
+    "{key_prefix}:rate_limiting:bucket:{model_family}:{metric}:{per_seconds}:{suffix}"
 )
 _EXPECTED_NON_README_STANDALONE_LOCATIONS = {
     ("MIGRATION.md", 61),
@@ -339,6 +344,21 @@ def test_migration_fragments_are_classified_intentionally() -> None:
     }
 
     assert locations == _EXPECTED_MIGRATION_FRAGMENT_START_LINES
+    assert all(
+        reason.strip()
+        for reason in _EXPECTED_MIGRATION_FRAGMENT_REASONS_BY_START_LINE.values()
+    )
+    assert (
+        _EXPECTED_MIGRATION_FRAGMENT_REASONS_BY_START_LINE[516]
+        == "requires an operator-supplied Redis client and target deployment prefix"
+    )
+
+
+def test_migration_redis_bucket_key_shape_is_guarded() -> None:
+    migration = _MIGRATION.read_text(encoding="utf-8")
+
+    assert _EXPECTED_MIGRATION_REDIS_CLEANUP_SCAN_PATTERN in migration
+    assert _EXPECTED_MIGRATION_REDIS_BUCKET_KEY_SHAPE in migration
 
 
 @pytest.mark.parametrize(
