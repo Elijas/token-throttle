@@ -560,13 +560,13 @@ exposing old processes to new ones.
 The Redis bucket key format is stable across v1.4.1, v1.5.0, v2.0.0, and
 v3.0.0:
 
-```
+```text
 {key_prefix}:rate_limiting:bucket:{model_family}:{metric}:{per_seconds}:{suffix}
 ```
 
 v3.0.0 also uses acquire-marker keys:
 
-```
+```text
 {key_prefix}:rate_limiting:acquired:{reservation_id}
 ```
 
