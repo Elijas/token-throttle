@@ -5,7 +5,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import pytest
@@ -40,6 +40,7 @@ class _NonPythonFenceKey:
     language: str
     heading: str
     first_non_empty_content_line: str
+    non_empty_content_lines: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -50,6 +51,7 @@ class _NonPythonFenceIdentity:
     classification: str
     heading: str
     first_non_empty_content_line: str
+    non_empty_content_lines: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -60,7 +62,7 @@ class _ExpectedNonPythonFence:
     classification: str
     reason: str
     heading: str
-    first_non_empty_content_line: str
+    non_empty_content_lines: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -154,7 +156,7 @@ _NON_PYTHON_FENCE_CLASSIFICATIONS = frozenset(
 )
 _UNLABELED_FENCE_LANGUAGE = "<unlabeled>"
 _SHELL_LIKE_FENCE_LANGUAGES = frozenset({"bash", "sh", "shell"})
-_UNCLASSIFIED_NON_PYTHON_FENCE = "<unclassified>"
+_MANUAL_NON_PYTHON_FENCE_KEYS: frozenset[_NonPythonFenceKey] = frozenset()
 _EXPECTED_NON_PYTHON_FENCES = (
     _ExpectedNonPythonFence(
         document_name="README.md",
@@ -163,8 +165,10 @@ _EXPECTED_NON_PYTHON_FENCES = (
         classification=_NON_PYTHON_CLASSIFICATION_SHELL_SYNTAX,
         reason="package installation command; lint syntax-checks but does not execute it",
         heading="# token-throttle",
-        first_non_empty_content_line=(
-            'pip install "token-throttle[redis,tiktoken]>=8.0.6,<8.1.0"   # OpenAI + Redis (recommended)'
+        non_empty_content_lines=(
+            'pip install "token-throttle[redis,tiktoken]>=8.0.6,<8.1.0"   # OpenAI + Redis (recommended)',
+            'pip install "token-throttle[redis]>=8.0.6,<8.1.0"            # Any provider + Redis',
+            'pip install "token-throttle>=8.0.6,<8.1.0"                   # Any provider + in-memory',
         ),
     ),
     _ExpectedNonPythonFence(
@@ -174,7 +178,9 @@ _EXPECTED_NON_PYTHON_FENCES = (
         classification=_NON_PYTHON_CLASSIFICATION_SHELL_SYNTAX,
         reason="package installation command; lint syntax-checks but does not execute it",
         heading="### OpenAI (built-in helpers)",
-        first_non_empty_content_line='pip install "token-throttle[redis,tiktoken]" openai',
+        non_empty_content_lines=(
+            'pip install "token-throttle[redis,tiktoken]" openai',
+        ),
     ),
     _ExpectedNonPythonFence(
         document_name="README.md",
@@ -183,8 +189,13 @@ _EXPECTED_NON_PYTHON_FENCES = (
         classification=_NON_PYTHON_CLASSIFICATION_TEXT,
         reason="Redis monitoring command inventory for operators, not a shell script",
         heading="#### Performance and capacity planning",
-        first_non_empty_content_line=(
-            "INFO commandstats   # eval/evalsha, set, get, del latency and call volume"
+        non_empty_content_lines=(
+            "INFO commandstats   # eval/evalsha, set, get, del latency and call volume",
+            "INFO clients        # connected_clients, blocked_clients, maxclients pressure",
+            "INFO memory         # used_memory, mem_fragmentation_ratio, evicted_keys",
+            "INFO stats          # instantaneous_ops_per_sec, rejected_connections",
+            "LATENCY LATEST      # server-side latency spikes",
+            "SLOWLOG GET 128     # slow Lua scripts or lock commands",
         ),
     ),
     _ExpectedNonPythonFence(
@@ -194,7 +205,7 @@ _EXPECTED_NON_PYTHON_FENCES = (
         classification=_NON_PYTHON_CLASSIFICATION_SHELL_SYNTAX,
         reason="environment setup command; lint syntax-checks but does not execute it",
         heading="## Setup",
-        first_non_empty_content_line="uv sync --all-extras --group dev",
+        non_empty_content_lines=("uv sync --all-extras --group dev",),
     ),
     _ExpectedNonPythonFence(
         document_name="DEVELOPMENT.md",
@@ -203,7 +214,12 @@ _EXPECTED_NON_PYTHON_FENCES = (
         classification=_NON_PYTHON_CLASSIFICATION_SHELL_SYNTAX,
         reason="test commands include the Redis full suite; lint syntax-checks but does not execute them",
         heading="## Running tests",
-        first_non_empty_content_line="# Unit tests only (no Redis required)",
+        non_empty_content_lines=(
+            "# Unit tests only (no Redis required)",
+            "uv run pytest tests/unit -v",
+            "# Full suite (requires Redis on localhost:6379)",
+            "uv run pytest tests/ -v --redis-url redis://localhost:6379",
+        ),
     ),
     _ExpectedNonPythonFence(
         document_name="DEVELOPMENT.md",
@@ -212,7 +228,10 @@ _EXPECTED_NON_PYTHON_FENCES = (
         classification=_NON_PYTHON_CLASSIFICATION_SHELL_SYNTAX,
         reason="setup and type-check commands; lint syntax-checks but does not execute them",
         heading="## Type checking",
-        first_non_empty_content_line="uv sync --all-extras --group dev",
+        non_empty_content_lines=(
+            "uv sync --all-extras --group dev",
+            "uv run mypy",
+        ),
     ),
     _ExpectedNonPythonFence(
         document_name="MIGRATION.md",
@@ -221,8 +240,8 @@ _EXPECTED_NON_PYTHON_FENCES = (
         classification=_NON_PYTHON_CLASSIFICATION_TEXT,
         reason="canonical migration error text, not an executable command",
         heading="## 2. Drain Reservations",
-        first_non_empty_content_line=(
-            "legacy v1.4.x reservations no longer supported in v2.0.0; drain v1.4.x before upgrade"
+        non_empty_content_lines=(
+            "legacy v1.4.x reservations no longer supported in v2.0.0; drain v1.4.x before upgrade",
         ),
     ),
     _ExpectedNonPythonFence(
@@ -232,7 +251,7 @@ _EXPECTED_NON_PYTHON_FENCES = (
         classification=_NON_PYTHON_CLASSIFICATION_TEXT,
         reason="documented Redis bucket key shape",
         heading="### 7b. Redis key format and Lua compatibility",
-        first_non_empty_content_line=_EXPECTED_MIGRATION_REDIS_BUCKET_KEY_SHAPE,
+        non_empty_content_lines=(_EXPECTED_MIGRATION_REDIS_BUCKET_KEY_SHAPE,),
     ),
     _ExpectedNonPythonFence(
         document_name="MIGRATION.md",
@@ -241,7 +260,7 @@ _EXPECTED_NON_PYTHON_FENCES = (
         classification=_NON_PYTHON_CLASSIFICATION_TEXT,
         reason="documented Redis acquire-marker key shape",
         heading="### 7b. Redis key format and Lua compatibility",
-        first_non_empty_content_line=_EXPECTED_MIGRATION_REDIS_ACQUIRED_KEY_SHAPE,
+        non_empty_content_lines=(_EXPECTED_MIGRATION_REDIS_ACQUIRED_KEY_SHAPE,),
     ),
 )
 _EXPECTED_NON_README_STANDALONE_IDENTITIES = (
@@ -341,12 +360,12 @@ def _is_fragment_python_block(code: str) -> bool:
     return _first_non_empty_code_line(code).startswith(("# (fragment", "(fragment"))
 
 
+def _non_empty_code_lines(code: str) -> tuple[str, ...]:
+    return tuple(line.strip() for line in code.splitlines() if line.strip())
+
+
 def _first_non_empty_code_line(code: str) -> str:
-    for line in code.splitlines():
-        stripped = line.strip()
-        if stripped:
-            return stripped
-    return ""
+    return next(iter(_non_empty_code_lines(code)), "")
 
 
 def _fence_language(fence_info: str) -> str:
@@ -553,37 +572,51 @@ def _assert_migration_fragment_expectations(
 
 
 def _non_python_fence_key(block: _MarkdownFenceBlock) -> _NonPythonFenceKey:
+    non_empty_content_lines = _non_empty_code_lines(block.code)
     return _NonPythonFenceKey(
         document_name=block.document_name,
         start_line=block.start_line,
         language=_fence_language(block.fence_info),
         heading=block.heading,
-        first_non_empty_content_line=_first_non_empty_code_line(block.code),
+        first_non_empty_content_line=next(iter(non_empty_content_lines), ""),
+        non_empty_content_lines=non_empty_content_lines,
     )
 
 
 def _expected_non_python_fence_key(
     expected: _ExpectedNonPythonFence,
 ) -> _NonPythonFenceKey:
+    first_non_empty_content_line = next(iter(expected.non_empty_content_lines), "")
     return _NonPythonFenceKey(
         document_name=expected.document_name,
         start_line=expected.start_line,
         language=expected.language,
         heading=expected.heading,
-        first_non_empty_content_line=expected.first_non_empty_content_line,
+        first_non_empty_content_line=first_non_empty_content_line,
+        non_empty_content_lines=expected.non_empty_content_lines,
     )
+
+
+def _non_python_fence_classification_from_key(key: _NonPythonFenceKey) -> str:
+    if key in _MANUAL_NON_PYTHON_FENCE_KEYS:
+        return _NON_PYTHON_CLASSIFICATION_MANUAL
+    if key.language in _SHELL_LIKE_FENCE_LANGUAGES:
+        return _NON_PYTHON_CLASSIFICATION_SHELL_SYNTAX
+    return _NON_PYTHON_CLASSIFICATION_TEXT
 
 
 def _expected_non_python_fence_identity(
     expected: _ExpectedNonPythonFence,
 ) -> _NonPythonFenceIdentity:
+    key = _expected_non_python_fence_key(expected)
     return _NonPythonFenceIdentity(
-        document_name=expected.document_name,
-        start_line=expected.start_line,
-        language=expected.language,
+        document_name=key.document_name,
+        start_line=key.start_line,
+        language=key.language,
         classification=expected.classification,
-        heading=expected.heading,
-        first_non_empty_content_line=expected.first_non_empty_content_line,
+        heading=key.heading,
+        first_non_empty_content_line=key.first_non_empty_content_line,
+        non_empty_content_lines=key.non_empty_content_lines,
     )
 
 
@@ -591,20 +624,26 @@ def _current_non_python_fence_identity(
     block: _MarkdownFenceBlock,
 ) -> _NonPythonFenceIdentity:
     key = _non_python_fence_key(block)
-    classification_by_key = {
-        _expected_non_python_fence_key(expected): expected.classification
-        for expected in _EXPECTED_NON_PYTHON_FENCES
-    }
     return _NonPythonFenceIdentity(
         document_name=key.document_name,
         start_line=key.start_line,
         language=key.language,
-        classification=classification_by_key.get(
-            key,
-            _UNCLASSIFIED_NON_PYTHON_FENCE,
-        ),
+        classification=_non_python_fence_classification_from_key(key),
         heading=key.heading,
         first_non_empty_content_line=key.first_non_empty_content_line,
+        non_empty_content_lines=key.non_empty_content_lines,
+    )
+
+
+def _expected_markdown_fence_block(
+    expected: _ExpectedNonPythonFence,
+) -> _MarkdownFenceBlock:
+    return _MarkdownFenceBlock(
+        document_name=expected.document_name,
+        heading=expected.heading,
+        code="\n".join(expected.non_empty_content_lines),
+        start_line=expected.start_line,
+        fence_info=expected.language,
     )
 
 
@@ -766,6 +805,55 @@ def test_non_readme_standalone_python_examples_are_linted() -> None:
         assert current_identities.count(expected) == 1
 
 
+def test_shell_like_non_python_classification_is_not_derived_from_expected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expected = _EXPECTED_NON_PYTHON_FENCES[0]
+    assert expected.language in _SHELL_LIKE_FENCE_LANGUAGES
+    downgraded_expected = replace(
+        expected,
+        classification=_NON_PYTHON_CLASSIFICATION_TEXT,
+        reason="incorrectly treats a shell command as text",
+    )
+    block = _expected_markdown_fence_block(expected)
+
+    monkeypatch.setattr(
+        sys.modules[__name__],
+        "_EXPECTED_NON_PYTHON_FENCES",
+        (downgraded_expected,),
+    )
+
+    current_identity = _current_non_python_fence_identity(block)
+    assert current_identity.classification == _NON_PYTHON_CLASSIFICATION_SHELL_SYNTAX
+    assert current_identity != _expected_non_python_fence_identity(downgraded_expected)
+
+
+def test_non_python_fence_identity_includes_later_content_lines() -> None:
+    expected = _EXPECTED_NON_PYTHON_FENCES[0]
+    drifted_content_lines = list(expected.non_empty_content_lines)
+    drifted_content_lines[1] = drifted_content_lines[1].replace(
+        "[redis]",
+        "[postgres]",
+        1,
+    )
+    block = _MarkdownFenceBlock(
+        document_name=expected.document_name,
+        heading=expected.heading,
+        code="\n".join(drifted_content_lines),
+        start_line=expected.start_line,
+        fence_info=expected.language,
+    )
+
+    current_identity = _current_non_python_fence_identity(block)
+    expected_identity = _expected_non_python_fence_identity(expected)
+
+    assert (
+        current_identity.first_non_empty_content_line
+        == expected_identity.first_non_empty_content_line
+    )
+    assert current_identity != expected_identity
+
+
 def test_non_python_fences_are_inventoried_and_classified() -> None:
     current_identities = [
         _current_non_python_fence_identity(block) for block in _NON_PYTHON_FENCE_BLOCKS
@@ -780,6 +868,10 @@ def test_non_python_fences_are_inventoried_and_classified() -> None:
     for expected in _EXPECTED_NON_PYTHON_FENCES:
         assert expected.classification in _NON_PYTHON_FENCE_CLASSIFICATIONS
         assert expected.language != _UNLABELED_FENCE_LANGUAGE
+        assert expected.non_empty_content_lines
+        assert expected.classification == _non_python_fence_classification_from_key(
+            _expected_non_python_fence_key(expected)
+        )
         assert expected.reason.strip()
         assert (
             current_identities.count(_expected_non_python_fence_identity(expected)) == 1
