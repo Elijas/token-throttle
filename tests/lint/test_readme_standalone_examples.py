@@ -319,6 +319,9 @@ _EXPECTED_STDOUT_EXAMPLES = (
     ),
 )
 _SUPPORTED_PYTHON_FENCE_TOKENS = {"python", "py"}
+_UNSUPPORTED_PYTHON_LIKE_FENCE_TOKENS = frozenset(
+    {"ipython", "ipython3", "pypy", "pycon", "pycon3"}
+)
 
 
 @dataclass(frozen=True)
@@ -454,7 +457,12 @@ def _is_markdown_fence_opener(line: str) -> bool:
 
 
 def _is_unsupported_python_like_fence_token(token: str) -> bool:
-    return token.startswith(("python", "py-", "py_")) or token in {"py3", "pycon"}
+    py_version_alias = token.startswith("py") and token.removeprefix("py").isdigit()
+    return (
+        token.startswith(("python", "py-", "py_"))
+        or py_version_alias
+        or token in _UNSUPPORTED_PYTHON_LIKE_FENCE_TOKENS
+    )
 
 
 def _is_python_fence_info(info: str, *, document_name: str) -> bool:
@@ -738,33 +746,29 @@ def test_readme_has_standalone_python_examples() -> None:
     assert _STANDALONE_README_EXAMPLES
 
 
-def test_standalone_python_blocks_accept_supported_fence_variants() -> None:
-    markdown = """
+@pytest.mark.parametrize(
+    "fence_info",
+    [
+        "python",
+        'python title="example.py" linenums="1"',
+        "py",
+    ],
+)
+def test_standalone_python_blocks_accept_supported_fence_variants(
+    fence_info: str,
+) -> None:
+    markdown = f"""
 # Demo
 
-```python
+```{fence_info}
 print("exact")
-```
-
-## Python attributes
-
-```python title="example.py" linenums="1"
-print("attrs")
-```
-
-## Py alias
-
-```py
-print("alias")
 ```
 """
 
     blocks = _standalone_python_blocks(markdown)
 
     assert [(block.heading, block.code) for block in blocks] == [
-        ("# Demo", 'print("exact")'),
-        ("## Python attributes", 'print("attrs")'),
-        ("## Py alias", 'print("alias")'),
+        ("# Demo", 'print("exact")')
     ]
 
 
@@ -795,17 +799,43 @@ print("standalone")
     ]
 
 
-def test_standalone_python_blocks_reject_unsupported_python_like_fences() -> None:
-    markdown = """
+@pytest.mark.parametrize(
+    "fence_info",
+    [
+        "python3",
+        "python-console",
+        "python_repl",
+        "pythonish",
+        "py2",
+        "py3",
+        "py10",
+        "py-repl",
+        "py_module",
+        "pycon",
+        "pycon3",
+        "ipython",
+        "ipython3",
+        "pypy",
+    ],
+)
+def test_standalone_python_blocks_reject_unsupported_python_like_fences(
+    fence_info: str,
+) -> None:
+    markdown = f"""
 # Demo
 
-```python3
+```{fence_info}
 print("not linted")
 ```
 """
 
-    with pytest.raises(AssertionError, match="Unsupported README Python fence"):
+    with pytest.raises(AssertionError) as error:
         _standalone_python_blocks(markdown)
+    assert "Unsupported README Python fence variant" in str(error.value)
+    assert f"`{fence_info}`" in str(error.value)
+    assert "use `python`, `python ...`, or `py` so examples are linted" in str(
+        error.value
+    )
 
 
 def test_standalone_example_identity_catches_drift() -> None:
