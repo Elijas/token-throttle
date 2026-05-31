@@ -329,6 +329,7 @@ class _MarkdownFenceBlock:
     document_name: str
     heading: str
     code: str
+    fence_line: int
     start_line: int
     fence_info: str
 
@@ -465,15 +466,15 @@ def _is_unsupported_python_like_fence_token(token: str) -> bool:
     )
 
 
-def _is_python_fence_info(info: str, *, document_name: str) -> bool:
-    first_token = _fence_language(info)
+def _is_python_fence(block: _MarkdownFenceBlock) -> bool:
+    first_token = _fence_language(block.fence_info)
     if first_token in _SUPPORTED_PYTHON_FENCE_TOKENS:
         return True
     if _is_unsupported_python_like_fence_token(first_token):
         raise AssertionError(
-            f"Unsupported {_document_label(document_name)} Python fence variant "
-            f"`{info}`; use `python`, `python ...`, or `py` so examples "
-            "are linted."
+            f"Unsupported {_document_label(block.document_name)} Python fence variant "
+            f"at line {block.fence_line}: `{block.fence_info}`; use `python`, "
+            "`python ...`, or `py` so examples are linted."
         )
     return False
 
@@ -518,6 +519,7 @@ def _markdown_fence_blocks(
                 document_name=document_name,
                 heading=heading,
                 code="\n".join(block_lines),
+                fence_line=start_line - 1,
                 start_line=start_line,
                 fence_info=fence_info,
             )
@@ -534,7 +536,7 @@ def _python_blocks(
     blocks: list[_MarkdownPythonBlock] = []
     explicit_fragment_start_lines = _explicit_fragment_start_lines(document_name)
     for fence in _markdown_fence_blocks(markdown, document_name=document_name):
-        if not _is_python_fence_info(fence.fence_info, document_name=document_name):
+        if not _is_python_fence(fence):
             continue
         blocks.append(
             _MarkdownPythonBlock(
@@ -577,7 +579,7 @@ def _non_python_fence_blocks_from_document(path: Path) -> list[_MarkdownFenceBlo
             path.read_text(encoding="utf-8"),
             document_name=path.name,
         )
-        if not _is_python_fence_info(block.fence_info, document_name=path.name)
+        if not _is_python_fence(block)
     ]
 
 
@@ -717,6 +719,7 @@ def _expected_markdown_fence_block(
         document_name=expected.document_name,
         heading=expected.heading,
         code="\n".join(expected.non_empty_content_lines),
+        fence_line=expected.start_line - 1,
         start_line=expected.start_line,
         fence_info=expected.language,
     )
@@ -838,6 +841,50 @@ print("not linted")
     )
 
 
+def _assert_unsupported_python_like_fence_reports_line(
+    markdown: str,
+    *,
+    document_name: str,
+    fence_info: str,
+    fence_line: int,
+) -> None:
+    with pytest.raises(AssertionError) as error:
+        _standalone_python_blocks(markdown, document_name=document_name)
+
+    message = str(error.value)
+    assert (
+        f"Unsupported {_document_label(document_name)} Python fence variant "
+        f"at line {fence_line}"
+    ) in message
+    assert f"`{fence_info}`" in message
+    assert "use `python`, `python ...`, or `py` so examples are linted" in message
+
+
+def test_unsupported_development_python_like_fence_reports_fence_line() -> None:
+    markdown = '# Development\n\n```py2\nprint("not linted")\n```\n'
+
+    _assert_unsupported_python_like_fence_reports_line(
+        markdown,
+        document_name="DEVELOPMENT.md",
+        fence_info="py2",
+        fence_line=3,
+    )
+
+
+def test_unsupported_migration_python_like_fence_reports_fence_line() -> None:
+    fence_info = 'IPython title="probe.py"'
+    markdown = (
+        f'# Migration\n\nSome prose.\n\n```{fence_info}\nprint("not linted")\n```\n'
+    )
+
+    _assert_unsupported_python_like_fence_reports_line(
+        markdown,
+        document_name="MIGRATION.md",
+        fence_info=fence_info,
+        fence_line=5,
+    )
+
+
 def test_standalone_example_identity_catches_drift() -> None:
     expected = _EXPECTED_STDOUT_EXAMPLES[0]
     matching_block = _MarkdownPythonBlock(
@@ -937,6 +984,7 @@ def test_non_python_fence_identity_includes_later_content_lines() -> None:
         document_name=expected.document_name,
         heading=expected.heading,
         code="\n".join(drifted_content_lines),
+        fence_line=expected.start_line - 1,
         start_line=expected.start_line,
         fence_info=expected.language,
     )
@@ -962,6 +1010,7 @@ def test_shell_like_non_python_identity_ignores_inline_comment_alignment() -> No
         document_name=expected.document_name,
         heading=expected.heading,
         code="\n".join(realigned_content_lines),
+        fence_line=expected.start_line - 1,
         start_line=expected.start_line,
         fence_info=expected.language,
     )
@@ -983,6 +1032,7 @@ def test_shell_like_non_python_identity_keeps_inline_comment_text_guarded() -> N
         document_name=expected.document_name,
         heading=expected.heading,
         code="\n".join(drifted_content_lines),
+        fence_line=expected.start_line - 1,
         start_line=expected.start_line,
         fence_info=expected.language,
     )
