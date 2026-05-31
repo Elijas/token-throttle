@@ -368,6 +368,48 @@ def _first_non_empty_code_line(code: str) -> str:
     return next(iter(_non_empty_code_lines(code)), "")
 
 
+def _unquoted_shell_comment_index(line: str) -> int | None:
+    in_single_quote = False
+    in_double_quote = False
+    escaped = False
+    for index, character in enumerate(line):
+        if escaped:
+            escaped = False
+            continue
+        if character == "\\" and not in_single_quote:
+            escaped = True
+            continue
+        if character == "'" and not in_double_quote:
+            in_single_quote = not in_single_quote
+            continue
+        if character == '"' and not in_single_quote:
+            in_double_quote = not in_double_quote
+            continue
+        if (
+            character == "#"
+            and not in_single_quote
+            and not in_double_quote
+            and (index == 0 or line[index - 1].isspace())
+        ):
+            return index
+    return None
+
+
+def _normalize_shell_like_non_python_content_line(line: str) -> str:
+    stripped = line.strip()
+    comment_index = _unquoted_shell_comment_index(stripped)
+    if comment_index is None or comment_index == 0:
+        return stripped
+    return f"{stripped[:comment_index].rstrip()} {stripped[comment_index:]}"
+
+
+def _non_python_content_lines(code: str, *, language: str) -> tuple[str, ...]:
+    lines = _non_empty_code_lines(code)
+    if language not in _SHELL_LIKE_FENCE_LANGUAGES:
+        return lines
+    return tuple(_normalize_shell_like_non_python_content_line(line) for line in lines)
+
+
 def _fence_language(fence_info: str) -> str:
     if not fence_info.strip():
         return _UNLABELED_FENCE_LANGUAGE
@@ -572,11 +614,15 @@ def _assert_migration_fragment_expectations(
 
 
 def _non_python_fence_key(block: _MarkdownFenceBlock) -> _NonPythonFenceKey:
-    non_empty_content_lines = _non_empty_code_lines(block.code)
+    language = _fence_language(block.fence_info)
+    non_empty_content_lines = _non_python_content_lines(
+        block.code,
+        language=language,
+    )
     return _NonPythonFenceKey(
         document_name=block.document_name,
         start_line=block.start_line,
-        language=_fence_language(block.fence_info),
+        language=language,
         heading=block.heading,
         first_non_empty_content_line=next(iter(non_empty_content_lines), ""),
         non_empty_content_lines=non_empty_content_lines,
@@ -586,14 +632,18 @@ def _non_python_fence_key(block: _MarkdownFenceBlock) -> _NonPythonFenceKey:
 def _expected_non_python_fence_key(
     expected: _ExpectedNonPythonFence,
 ) -> _NonPythonFenceKey:
-    first_non_empty_content_line = next(iter(expected.non_empty_content_lines), "")
+    non_empty_content_lines = _non_python_content_lines(
+        "\n".join(expected.non_empty_content_lines),
+        language=expected.language,
+    )
+    first_non_empty_content_line = next(iter(non_empty_content_lines), "")
     return _NonPythonFenceKey(
         document_name=expected.document_name,
         start_line=expected.start_line,
         language=expected.language,
         heading=expected.heading,
         first_non_empty_content_line=first_non_empty_content_line,
-        non_empty_content_lines=expected.non_empty_content_lines,
+        non_empty_content_lines=non_empty_content_lines,
     )
 
 
@@ -632,6 +682,23 @@ def _current_non_python_fence_identity(
         heading=key.heading,
         first_non_empty_content_line=key.first_non_empty_content_line,
         non_empty_content_lines=key.non_empty_content_lines,
+    )
+
+
+def _assert_manual_non_python_fence_keys_are_current(
+    *,
+    manual_keys: frozenset[_NonPythonFenceKey],
+    current_keys: frozenset[_NonPythonFenceKey],
+    expected_keys: frozenset[_NonPythonFenceKey],
+) -> None:
+    stale_current_keys = manual_keys - current_keys
+    assert not stale_current_keys, (
+        f"Manual non-Python fence keys are not current fences: {stale_current_keys!r}"
+    )
+
+    stale_expected_keys = manual_keys - expected_keys
+    assert not stale_expected_keys, (
+        f"Manual non-Python fence keys are not expected fences: {stale_expected_keys!r}"
     )
 
 
@@ -854,7 +921,86 @@ def test_non_python_fence_identity_includes_later_content_lines() -> None:
     assert current_identity != expected_identity
 
 
+def test_shell_like_non_python_identity_ignores_inline_comment_alignment() -> None:
+    expected = _EXPECTED_NON_PYTHON_FENCES[0]
+    realigned_content_lines = (
+        'pip install "token-throttle[redis,tiktoken]>=8.0.6,<8.1.0" # OpenAI + Redis (recommended)',
+        'pip install "token-throttle[redis]>=8.0.6,<8.1.0" # Any provider + Redis',
+        'pip install "token-throttle>=8.0.6,<8.1.0" # Any provider + in-memory',
+    )
+    block = _MarkdownFenceBlock(
+        document_name=expected.document_name,
+        heading=expected.heading,
+        code="\n".join(realigned_content_lines),
+        start_line=expected.start_line,
+        fence_info=expected.language,
+    )
+
+    assert _current_non_python_fence_identity(
+        block
+    ) == _expected_non_python_fence_identity(expected)
+
+
+def test_shell_like_non_python_identity_keeps_inline_comment_text_guarded() -> None:
+    expected = _EXPECTED_NON_PYTHON_FENCES[0]
+    drifted_content_lines = list(expected.non_empty_content_lines)
+    drifted_content_lines[1] = drifted_content_lines[1].replace(
+        "Any provider + Redis",
+        "Any provider + PostgreSQL",
+        1,
+    )
+    block = _MarkdownFenceBlock(
+        document_name=expected.document_name,
+        heading=expected.heading,
+        code="\n".join(drifted_content_lines),
+        start_line=expected.start_line,
+        fence_info=expected.language,
+    )
+
+    assert _current_non_python_fence_identity(
+        block
+    ) != _expected_non_python_fence_identity(expected)
+
+
+def test_manual_non_python_fence_allowlist_rejects_stale_keys() -> None:
+    expected_keys = frozenset(
+        _expected_non_python_fence_key(expected)
+        for expected in _EXPECTED_NON_PYTHON_FENCES
+    )
+    stale_key = replace(
+        _expected_non_python_fence_key(_EXPECTED_NON_PYTHON_FENCES[0]),
+        start_line=9999,
+    )
+
+    with pytest.raises(AssertionError, match="not current fences"):
+        _assert_manual_non_python_fence_keys_are_current(
+            manual_keys=frozenset({stale_key}),
+            current_keys=expected_keys,
+            expected_keys=expected_keys,
+        )
+
+    with pytest.raises(AssertionError, match="not expected fences"):
+        _assert_manual_non_python_fence_keys_are_current(
+            manual_keys=frozenset({stale_key}),
+            current_keys=frozenset({*expected_keys, stale_key}),
+            expected_keys=expected_keys,
+        )
+
+
 def test_non_python_fences_are_inventoried_and_classified() -> None:
+    current_keys = frozenset(
+        _non_python_fence_key(block) for block in _NON_PYTHON_FENCE_BLOCKS
+    )
+    expected_keys = frozenset(
+        _expected_non_python_fence_key(expected)
+        for expected in _EXPECTED_NON_PYTHON_FENCES
+    )
+    _assert_manual_non_python_fence_keys_are_current(
+        manual_keys=_MANUAL_NON_PYTHON_FENCE_KEYS,
+        current_keys=current_keys,
+        expected_keys=expected_keys,
+    )
+
     current_identities = [
         _current_non_python_fence_identity(block) for block in _NON_PYTHON_FENCE_BLOCKS
     ]
