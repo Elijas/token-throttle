@@ -14,7 +14,8 @@ _REPO_ROOT = Path(__file__).parent.parent.parent
 _README = _REPO_ROOT / "README.md"
 _MIGRATION = _REPO_ROOT / "MIGRATION.md"
 _DEVELOPMENT = _REPO_ROOT / "DEVELOPMENT.md"
-_DOCS_WITH_STANDALONE_EXAMPLES = (_README, _MIGRATION, _DEVELOPMENT)
+_CLAUDE = _REPO_ROOT / "CLAUDE.md"
+_DOCS_WITH_STANDALONE_EXAMPLES = (_README, _MIGRATION, _DEVELOPMENT, _CLAUDE)
 
 
 @dataclass(frozen=True)
@@ -231,6 +232,32 @@ _EXPECTED_NON_PYTHON_FENCES = (
         non_empty_content_lines=(
             "uv sync --all-extras --group dev",
             "uv run mypy",
+        ),
+    ),
+    _ExpectedNonPythonFence(
+        document_name="CLAUDE.md",
+        start_line=10,
+        language="bash",
+        classification=_NON_PYTHON_CLASSIFICATION_SHELL_SYNTAX,
+        reason="release dispatch commands; lint syntax-checks but does not execute them",
+        heading="### Trigger a release",
+        non_empty_content_lines=(
+            "gh workflow run release.yml -f bump=patch   # 0.5.0 -> 0.5.1",
+            "gh workflow run release.yml -f bump=minor   # 0.5.0 -> 0.6.0",
+            "gh workflow run release.yml -f bump=major   # 0.6.0 -> 1.0.0",
+        ),
+    ),
+    _ExpectedNonPythonFence(
+        document_name="CLAUDE.md",
+        start_line=39,
+        language="bash",
+        classification=_NON_PYTHON_CLASSIFICATION_SHELL_SYNTAX,
+        reason="maintainer development commands; lint syntax-checks but does not execute them",
+        heading="## Development",
+        non_empty_content_lines=(
+            "uv sync --group dev",
+            "uv run pytest",
+            "uv run ruff check .",
         ),
     ),
     _ExpectedNonPythonFence(
@@ -573,11 +600,22 @@ def _standalone_python_blocks_from_document(path: Path) -> list[_MarkdownPythonB
 
 
 def _non_python_fence_blocks_from_document(path: Path) -> list[_MarkdownFenceBlock]:
+    return _non_python_fence_blocks_from_markdown(
+        path.read_text(encoding="utf-8"),
+        document_name=path.name,
+    )
+
+
+def _non_python_fence_blocks_from_markdown(
+    markdown: str,
+    *,
+    document_name: str,
+) -> list[_MarkdownFenceBlock]:
     return [
         block
         for block in _markdown_fence_blocks(
-            path.read_text(encoding="utf-8"),
-            document_name=path.name,
+            markdown,
+            document_name=document_name,
         )
         if not _is_python_fence(block)
     ]
@@ -723,6 +761,41 @@ def _expected_markdown_fence_block(
         start_line=expected.start_line,
         fence_info=expected.language,
     )
+
+
+def _assert_non_python_fences_are_inventoried_and_classified(
+    *,
+    blocks: list[_MarkdownFenceBlock],
+    expected_fences: tuple[_ExpectedNonPythonFence, ...],
+) -> None:
+    current_keys = frozenset(_non_python_fence_key(block) for block in blocks)
+    expected_keys = frozenset(
+        _expected_non_python_fence_key(expected) for expected in expected_fences
+    )
+    _assert_manual_non_python_fence_keys_are_current(
+        manual_keys=_MANUAL_NON_PYTHON_FENCE_KEYS,
+        current_keys=current_keys,
+        expected_keys=expected_keys,
+    )
+
+    current_identities = [_current_non_python_fence_identity(block) for block in blocks]
+    expected_identities = frozenset(
+        _expected_non_python_fence_identity(expected) for expected in expected_fences
+    )
+
+    assert len(expected_identities) == len(expected_fences)
+    assert set(current_identities) == expected_identities
+    for expected in expected_fences:
+        assert expected.classification in _NON_PYTHON_FENCE_CLASSIFICATIONS
+        assert expected.language != _UNLABELED_FENCE_LANGUAGE
+        assert expected.non_empty_content_lines
+        assert expected.classification == _non_python_fence_classification_from_key(
+            _expected_non_python_fence_key(expected)
+        )
+        assert expected.reason.strip()
+        assert (
+            current_identities.count(_expected_non_python_fence_identity(expected)) == 1
+        )
 
 
 _STANDALONE_README_EXAMPLES = _standalone_python_blocks(
@@ -1067,41 +1140,42 @@ def test_manual_non_python_fence_allowlist_rejects_stale_keys() -> None:
         )
 
 
+def test_claude_release_command_inventory_catches_stale_workflow_name() -> None:
+    stale_claude = _CLAUDE.read_text(encoding="utf-8").replace(
+        "gh workflow run release.yml -f bump=patch",
+        "gh workflow run stale-release.yml -f bump=patch",
+        1,
+    )
+    expected_claude_fences = tuple(
+        expected
+        for expected in _EXPECTED_NON_PYTHON_FENCES
+        if expected.document_name == _CLAUDE.name
+    )
+    stale_blocks = _non_python_fence_blocks_from_markdown(
+        stale_claude,
+        document_name=_CLAUDE.name,
+    )
+    stale_release_identity = next(
+        _current_non_python_fence_identity(block)
+        for block in stale_blocks
+        if block.heading == "### Trigger a release"
+    )
+    assert "stale-release.yml" in "\n".join(
+        stale_release_identity.non_empty_content_lines
+    )
+
+    with pytest.raises(AssertionError):
+        _assert_non_python_fences_are_inventoried_and_classified(
+            blocks=stale_blocks,
+            expected_fences=expected_claude_fences,
+        )
+
+
 def test_non_python_fences_are_inventoried_and_classified() -> None:
-    current_keys = frozenset(
-        _non_python_fence_key(block) for block in _NON_PYTHON_FENCE_BLOCKS
+    _assert_non_python_fences_are_inventoried_and_classified(
+        blocks=_NON_PYTHON_FENCE_BLOCKS,
+        expected_fences=_EXPECTED_NON_PYTHON_FENCES,
     )
-    expected_keys = frozenset(
-        _expected_non_python_fence_key(expected)
-        for expected in _EXPECTED_NON_PYTHON_FENCES
-    )
-    _assert_manual_non_python_fence_keys_are_current(
-        manual_keys=_MANUAL_NON_PYTHON_FENCE_KEYS,
-        current_keys=current_keys,
-        expected_keys=expected_keys,
-    )
-
-    current_identities = [
-        _current_non_python_fence_identity(block) for block in _NON_PYTHON_FENCE_BLOCKS
-    ]
-    expected_identities = frozenset(
-        _expected_non_python_fence_identity(expected)
-        for expected in _EXPECTED_NON_PYTHON_FENCES
-    )
-
-    assert len(expected_identities) == len(_EXPECTED_NON_PYTHON_FENCES)
-    assert set(current_identities) == expected_identities
-    for expected in _EXPECTED_NON_PYTHON_FENCES:
-        assert expected.classification in _NON_PYTHON_FENCE_CLASSIFICATIONS
-        assert expected.language != _UNLABELED_FENCE_LANGUAGE
-        assert expected.non_empty_content_lines
-        assert expected.classification == _non_python_fence_classification_from_key(
-            _expected_non_python_fence_key(expected)
-        )
-        assert expected.reason.strip()
-        assert (
-            current_identities.count(_expected_non_python_fence_identity(expected)) == 1
-        )
 
 
 def test_shell_like_non_python_fences_are_bash_syntax_checked() -> None:
