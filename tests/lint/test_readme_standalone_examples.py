@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -15,6 +17,8 @@ _README = _REPO_ROOT / "README.md"
 _MIGRATION = _REPO_ROOT / "MIGRATION.md"
 _DEVELOPMENT = _REPO_ROOT / "DEVELOPMENT.md"
 _CLAUDE = _REPO_ROOT / "CLAUDE.md"
+_TASKFILE = _REPO_ROOT / "Taskfile.yml"
+_RELEASE_WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "release.yml"
 _DOCS_WITH_STANDALONE_EXAMPLES = (_README, _MIGRATION, _DEVELOPMENT, _CLAUDE)
 
 
@@ -73,6 +77,35 @@ class _ExpectedStdoutExample:
     heading: str
     first_non_empty_code_line: str
     expected_stdout: str
+
+
+@dataclass(frozen=True)
+class _ReleaseWorkflowContract:
+    workflow_file: str
+    ref: str
+    bump_input_name: str
+    bump_options: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class _GhWorkflowRunCommand:
+    workflow_file: str
+    ref: str | None
+    fields: tuple[tuple[str, str], ...]
+
+
+@dataclass(frozen=True)
+class _TaskfileTask:
+    name: str
+    commands: tuple[str, ...]
+    aliases: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class _ExpectedTaskfileReleaseDispatch:
+    task_name: str
+    aliases: tuple[str, ...]
+    bump: str
 
 
 _EXPECTED_MIGRATION_FRAGMENTS = (
@@ -242,9 +275,9 @@ _EXPECTED_NON_PYTHON_FENCES = (
         reason="release dispatch commands; lint syntax-checks but does not execute them",
         heading="### Trigger a release",
         non_empty_content_lines=(
-            "gh workflow run release.yml -f bump=patch   # 0.5.0 -> 0.5.1",
-            "gh workflow run release.yml -f bump=minor   # 0.5.0 -> 0.6.0",
-            "gh workflow run release.yml -f bump=major   # 0.6.0 -> 1.0.0",
+            "gh workflow run release.yml --ref main -f bump=patch   # 0.5.0 -> 0.5.1",
+            "gh workflow run release.yml --ref main -f bump=minor   # 0.5.0 -> 0.6.0",
+            "gh workflow run release.yml --ref main -f bump=major   # 0.6.0 -> 1.0.0",
         ),
     ),
     _ExpectedNonPythonFence(
@@ -288,6 +321,18 @@ _EXPECTED_NON_PYTHON_FENCES = (
         reason="documented Redis acquire-marker key shape",
         heading="### 7b. Redis key format and Lua compatibility",
         non_empty_content_lines=(_EXPECTED_MIGRATION_REDIS_ACQUIRED_KEY_SHAPE,),
+    ),
+)
+_EXPECTED_TASKFILE_RELEASE_DISPATCHES = (
+    _ExpectedTaskfileReleaseDispatch(
+        task_name="publish:patch",
+        aliases=("pp",),
+        bump="patch",
+    ),
+    _ExpectedTaskfileReleaseDispatch(
+        task_name="publish:minor",
+        aliases=("pm",),
+        bump="minor",
     ),
 )
 _EXPECTED_NON_README_STANDALONE_IDENTITIES = (
@@ -439,6 +484,362 @@ def _non_python_content_lines(code: str, *, language: str) -> tuple[str, ...]:
     if language not in _SHELL_LIKE_FENCE_LANGUAGES:
         return lines
     return tuple(_normalize_shell_like_non_python_content_line(line) for line in lines)
+
+
+def _line_indent(line: str) -> int:
+    return len(line) - len(line.lstrip(" "))
+
+
+def _is_yaml_key_line(line: str, *, key: str, indent: int) -> bool:
+    return re.fullmatch(rf" {{{indent}}}{re.escape(key)}:\s*(?:#.*)?", line) is not None
+
+
+def _find_yaml_key_line(
+    lines: list[str],
+    *,
+    key: str,
+    indent: int,
+    start: int = 0,
+    stop: int | None = None,
+) -> int:
+    end = len(lines) if stop is None else stop
+    for index in range(start, end):
+        if _is_yaml_key_line(lines[index], key=key, indent=indent):
+            return index
+    raise AssertionError(f"Could not find YAML key {key!r} at indent {indent}")
+
+
+def _yaml_block_end(lines: list[str], *, key_line_index: int, key_indent: int) -> int:
+    for index in range(key_line_index + 1, len(lines)):
+        stripped = lines[index].strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if _line_indent(lines[index]) <= key_indent:
+            return index
+    return len(lines)
+
+
+def _workflow_dispatch_inputs_range(workflow_text: str) -> tuple[list[str], int, int]:
+    lines = workflow_text.splitlines()
+    on_index = _find_yaml_key_line(lines, key="on", indent=0)
+    on_end = _yaml_block_end(lines, key_line_index=on_index, key_indent=0)
+    dispatch_index = _find_yaml_key_line(
+        lines,
+        key="workflow_dispatch",
+        indent=2,
+        start=on_index + 1,
+        stop=on_end,
+    )
+    dispatch_end = _yaml_block_end(lines, key_line_index=dispatch_index, key_indent=2)
+    inputs_index = _find_yaml_key_line(
+        lines,
+        key="inputs",
+        indent=4,
+        start=dispatch_index + 1,
+        stop=dispatch_end,
+    )
+    inputs_end = _yaml_block_end(lines, key_line_index=inputs_index, key_indent=4)
+    return lines, inputs_index + 1, inputs_end
+
+
+def _yaml_plain_scalar(value: str) -> str:
+    return value.strip().strip("\"'")
+
+
+def _workflow_dispatch_input_names(workflow_text: str) -> frozenset[str]:
+    lines, start, end = _workflow_dispatch_inputs_range(workflow_text)
+    input_names: set[str] = set()
+    for line in lines[start:end]:
+        if _line_indent(line) != 6:
+            continue
+        match = re.fullmatch(r" {6}([A-Za-z_][A-Za-z0-9_-]*):\s*(?:#.*)?", line)
+        if match is not None:
+            input_names.add(match.group(1))
+    assert input_names, "Release workflow has no workflow_dispatch inputs"
+    return frozenset(input_names)
+
+
+def _workflow_dispatch_input_options(
+    workflow_text: str,
+    *,
+    input_name: str,
+) -> tuple[str, ...]:
+    lines, start, end = _workflow_dispatch_inputs_range(workflow_text)
+    input_index = _find_yaml_key_line(
+        lines,
+        key=input_name,
+        indent=6,
+        start=start,
+        stop=end,
+    )
+    input_end = _yaml_block_end(lines, key_line_index=input_index, key_indent=6)
+    options_index = _find_yaml_key_line(
+        lines,
+        key="options",
+        indent=8,
+        start=input_index + 1,
+        stop=input_end,
+    )
+    options_end = _yaml_block_end(lines, key_line_index=options_index, key_indent=8)
+    options = []
+    for line in lines[options_index + 1 : options_end]:
+        stripped = line.strip()
+        if stripped.startswith("- "):
+            options.append(_yaml_plain_scalar(stripped.removeprefix("- ")))
+    assert options, f"Release workflow input {input_name!r} has no choice options"
+    return tuple(options)
+
+
+def _release_bump_input_name_from_workflow(workflow_text: str) -> str:
+    matches = re.findall(
+        r"uv run bump-my-version bump\s+\$\{\{\s*inputs\.([A-Za-z_][A-Za-z0-9_]*)\s*\}\}",
+        workflow_text,
+    )
+    unique_matches = tuple(dict.fromkeys(matches))
+    assert len(unique_matches) == 1, (
+        "Expected exactly one release workflow bump-my-version input reference, "
+        f"found {unique_matches!r}"
+    )
+    return unique_matches[0]
+
+
+def _manual_release_branch_from_workflow(workflow_text: str) -> str:
+    branches = re.findall(
+        r'\$\{GITHUB_REF\}" != "refs/heads/([^"]+)"',
+        workflow_text,
+    )
+    unique_branches = tuple(dict.fromkeys(branches))
+    assert len(unique_branches) == 1, (
+        "Expected exactly one manual release branch preflight, "
+        f"found {unique_branches!r}"
+    )
+    return unique_branches[0]
+
+
+def _release_workflow_contract_from_text(
+    workflow_text: str,
+    *,
+    workflow_file: str,
+) -> _ReleaseWorkflowContract:
+    bump_input_name = _release_bump_input_name_from_workflow(workflow_text)
+    input_names = _workflow_dispatch_input_names(workflow_text)
+    assert bump_input_name in input_names, (
+        f"Release bump input {bump_input_name!r} is not declared under "
+        "workflow_dispatch.inputs"
+    )
+    return _ReleaseWorkflowContract(
+        workflow_file=workflow_file,
+        ref=_manual_release_branch_from_workflow(workflow_text),
+        bump_input_name=bump_input_name,
+        bump_options=_workflow_dispatch_input_options(
+            workflow_text,
+            input_name=bump_input_name,
+        ),
+    )
+
+
+def _shell_command_without_comment(line: str) -> str:
+    comment_index = _unquoted_shell_comment_index(line)
+    if comment_index is None:
+        return line.strip()
+    return line[:comment_index].strip()
+
+
+def _parse_gh_field(field: str) -> tuple[str, str]:
+    name, separator, value = field.partition("=")
+    assert separator, f"Invalid gh workflow field {field!r}"
+    assert name, f"Invalid gh workflow field {field!r}"
+    assert value, f"Invalid gh workflow field {field!r}"
+    return name, value
+
+
+def _parse_gh_workflow_run_command(command_line: str) -> _GhWorkflowRunCommand:
+    command = _shell_command_without_comment(command_line)
+    tokens = shlex.split(command)
+    assert len(tokens) >= 4, f"Expected gh workflow run command, got {command_line!r}"
+    assert tokens[:3] == ["gh", "workflow", "run"], (
+        f"Expected gh workflow run command, got {command_line!r}"
+    )
+
+    ref: str | None = None
+    fields: list[tuple[str, str]] = []
+    index = 4
+    while index < len(tokens):
+        argument = tokens[index]
+        if argument == "--ref":
+            assert index + 1 < len(tokens), f"Missing --ref value in {command_line!r}"
+            ref = tokens[index + 1]
+            index += 2
+            continue
+        if argument.startswith("--ref="):
+            ref = argument.split("=", maxsplit=1)[1]
+            index += 1
+            continue
+        if argument in {"-f", "--field", "--raw-field"}:
+            assert index + 1 < len(tokens), (
+                f"Missing {argument} value in {command_line!r}"
+            )
+            fields.append(_parse_gh_field(tokens[index + 1]))
+            index += 2
+            continue
+        if argument.startswith(("--field=", "--raw-field=")):
+            fields.append(_parse_gh_field(argument.split("=", maxsplit=1)[1]))
+            index += 1
+            continue
+        raise AssertionError(
+            f"Unsupported gh workflow run argument {argument!r} in {command_line!r}"
+        )
+
+    field_names = [name for name, _value in fields]
+    assert len(set(field_names)) == len(field_names), (
+        f"Duplicate gh workflow fields in {command_line!r}: {field_names!r}"
+    )
+    return _GhWorkflowRunCommand(
+        workflow_file=tokens[3],
+        ref=ref,
+        fields=tuple(fields),
+    )
+
+
+def _assert_release_dispatch_command_matches_contract(
+    command_line: str,
+    *,
+    contract: _ReleaseWorkflowContract,
+    expected_bump: str,
+    label: str,
+) -> None:
+    parsed = _parse_gh_workflow_run_command(command_line)
+    assert parsed.workflow_file == contract.workflow_file, (
+        f"{label} dispatches {parsed.workflow_file!r}, expected "
+        f"{contract.workflow_file!r}"
+    )
+    assert parsed.ref == contract.ref, (
+        f"{label} dispatches ref {parsed.ref!r}, expected {contract.ref!r}"
+    )
+    assert dict(parsed.fields) == {contract.bump_input_name: expected_bump}, (
+        f"{label} fields {parsed.fields!r} do not match live release workflow "
+        f"input {contract.bump_input_name!r}={expected_bump!r}"
+    )
+
+
+def _claude_release_dispatch_command_lines(markdown: str) -> tuple[str, ...]:
+    matching_blocks = [
+        block
+        for block in _non_python_fence_blocks_from_markdown(
+            markdown,
+            document_name=_CLAUDE.name,
+        )
+        if block.heading == "### Trigger a release"
+    ]
+    assert len(matching_blocks) == 1, (
+        f"Expected one CLAUDE release dispatch fence, found {len(matching_blocks)}"
+    )
+    block = matching_blocks[0]
+    language = _fence_language(block.fence_info)
+    assert language in _SHELL_LIKE_FENCE_LANGUAGES
+    return _non_python_content_lines(block.code, language=language)
+
+
+def _assert_claude_release_dispatch_matches_contract(
+    markdown: str,
+    *,
+    contract: _ReleaseWorkflowContract,
+) -> None:
+    command_lines = _claude_release_dispatch_command_lines(markdown)
+    assert len(command_lines) == len(contract.bump_options), (
+        "CLAUDE release dispatch commands must cover the live release workflow "
+        f"bump options {contract.bump_options!r}"
+    )
+    for command_line, expected_bump in zip(
+        command_lines,
+        contract.bump_options,
+        strict=True,
+    ):
+        _assert_release_dispatch_command_matches_contract(
+            command_line,
+            contract=contract,
+            expected_bump=expected_bump,
+            label=f"CLAUDE.md release command for {expected_bump}",
+        )
+
+
+def _taskfile_aliases_from_value(value: str) -> tuple[str, ...]:
+    stripped = value.strip()
+    assert stripped.startswith("["), (
+        f"Expected Taskfile aliases in inline list form, got {value!r}"
+    )
+    assert stripped.endswith("]"), (
+        f"Expected Taskfile aliases in inline list form, got {value!r}"
+    )
+    return tuple(
+        _yaml_plain_scalar(alias)
+        for alias in stripped.removeprefix("[").removesuffix("]").split(",")
+        if alias.strip()
+    )
+
+
+def _taskfile_task_from_text(taskfile_text: str, *, task_name: str) -> _TaskfileTask:
+    lines = taskfile_text.splitlines()
+    task_index = _find_yaml_key_line(lines, key=task_name, indent=2)
+    task_end = _yaml_block_end(lines, key_line_index=task_index, key_indent=2)
+    commands: list[str] = []
+    aliases: tuple[str, ...] = ()
+    for line in lines[task_index + 1 : task_end]:
+        stripped = line.strip()
+        if stripped.startswith("- "):
+            commands.append(stripped.removeprefix("- ").strip())
+        elif stripped.startswith("aliases:"):
+            aliases = _taskfile_aliases_from_value(stripped.partition(":")[2])
+    return _TaskfileTask(
+        name=task_name,
+        commands=tuple(commands),
+        aliases=aliases,
+    )
+
+
+def _assert_taskfile_release_dispatches_match_contract(
+    taskfile_text: str,
+    *,
+    contract: _ReleaseWorkflowContract,
+) -> None:
+    assert _EXPECTED_TASKFILE_RELEASE_DISPATCHES
+    for expected in _EXPECTED_TASKFILE_RELEASE_DISPATCHES:
+        assert expected.bump in contract.bump_options, (
+            f"Taskfile release task {expected.task_name!r} documents unsupported "
+            f"bump option {expected.bump!r}"
+        )
+        task = _taskfile_task_from_text(taskfile_text, task_name=expected.task_name)
+        assert task.aliases == expected.aliases
+        assert len(task.commands) == 1, (
+            f"Expected one command for Taskfile task {task.name!r}, "
+            f"found {task.commands!r}"
+        )
+        _assert_release_dispatch_command_matches_contract(
+            task.commands[0],
+            contract=contract,
+            expected_bump=expected.bump,
+            label=f"Taskfile.yml {expected.task_name}",
+        )
+
+
+def _assert_release_dispatch_commands_match_live_workflow(
+    *,
+    release_workflow_text: str,
+    taskfile_text: str,
+    claude_markdown: str,
+) -> None:
+    contract = _release_workflow_contract_from_text(
+        release_workflow_text,
+        workflow_file=_RELEASE_WORKFLOW.name,
+    )
+    _assert_claude_release_dispatch_matches_contract(
+        claude_markdown,
+        contract=contract,
+    )
+    _assert_taskfile_release_dispatches_match_contract(
+        taskfile_text,
+        contract=contract,
+    )
 
 
 def _fence_language(fence_info: str) -> str:
@@ -1142,8 +1543,8 @@ def test_manual_non_python_fence_allowlist_rejects_stale_keys() -> None:
 
 def test_claude_release_command_inventory_catches_stale_workflow_name() -> None:
     stale_claude = _CLAUDE.read_text(encoding="utf-8").replace(
-        "gh workflow run release.yml -f bump=patch",
-        "gh workflow run stale-release.yml -f bump=patch",
+        "gh workflow run release.yml --ref main -f bump=patch",
+        "gh workflow run stale-release.yml --ref main -f bump=patch",
         1,
     )
     expected_claude_fences = tuple(
@@ -1168,6 +1569,78 @@ def test_claude_release_command_inventory_catches_stale_workflow_name() -> None:
         _assert_non_python_fences_are_inventoried_and_classified(
             blocks=stale_blocks,
             expected_fences=expected_claude_fences,
+        )
+
+
+def test_release_dispatch_commands_match_live_workflow_contract() -> None:
+    _assert_release_dispatch_commands_match_live_workflow(
+        release_workflow_text=_RELEASE_WORKFLOW.read_text(encoding="utf-8"),
+        taskfile_text=_TASKFILE.read_text(encoding="utf-8"),
+        claude_markdown=_CLAUDE.read_text(encoding="utf-8"),
+    )
+
+
+def test_release_dispatch_contract_catches_workflow_bump_input_rename() -> None:
+    renamed_workflow = (
+        _RELEASE_WORKFLOW.read_text(encoding="utf-8")
+        .replace("      bump:", "      release_bump:", 1)
+        .replace("inputs.bump", "inputs.release_bump")
+    )
+
+    with pytest.raises(AssertionError, match=r"input 'release_bump'=.+"):
+        _assert_release_dispatch_commands_match_live_workflow(
+            release_workflow_text=renamed_workflow,
+            taskfile_text=_TASKFILE.read_text(encoding="utf-8"),
+            claude_markdown=_CLAUDE.read_text(encoding="utf-8"),
+        )
+
+
+def test_release_dispatch_contract_catches_taskfile_stale_workflow_name() -> None:
+    stale_taskfile = _TASKFILE.read_text(encoding="utf-8").replace(
+        "gh workflow run release.yml --ref main -f bump=patch",
+        "gh workflow run stale-release.yml --ref main -f bump=patch",
+        1,
+    )
+
+    with pytest.raises(AssertionError, match=re.escape("stale-release.yml")):
+        _assert_release_dispatch_commands_match_live_workflow(
+            release_workflow_text=_RELEASE_WORKFLOW.read_text(encoding="utf-8"),
+            taskfile_text=stale_taskfile,
+            claude_markdown=_CLAUDE.read_text(encoding="utf-8"),
+        )
+
+
+def test_release_dispatch_contract_catches_taskfile_input_name_mismatch() -> None:
+    renamed_workflow = (
+        _RELEASE_WORKFLOW.read_text(encoding="utf-8")
+        .replace("      bump:", "      release_bump:", 1)
+        .replace("inputs.bump", "inputs.release_bump")
+    )
+    renamed_claude = _CLAUDE.read_text(encoding="utf-8").replace(
+        "-f bump=",
+        "-f release_bump=",
+    )
+
+    with pytest.raises(AssertionError, match=r"Taskfile.+input 'release_bump'"):
+        _assert_release_dispatch_commands_match_live_workflow(
+            release_workflow_text=renamed_workflow,
+            taskfile_text=_TASKFILE.read_text(encoding="utf-8"),
+            claude_markdown=renamed_claude,
+        )
+
+
+def test_release_dispatch_contract_catches_taskfile_missing_main_ref() -> None:
+    stale_taskfile = _TASKFILE.read_text(encoding="utf-8").replace(
+        "gh workflow run release.yml --ref main -f bump=patch",
+        "gh workflow run release.yml -f bump=patch",
+        1,
+    )
+
+    with pytest.raises(AssertionError, match="expected 'main'"):
+        _assert_release_dispatch_commands_match_live_workflow(
+            release_workflow_text=_RELEASE_WORKFLOW.read_text(encoding="utf-8"),
+            taskfile_text=stale_taskfile,
+            claude_markdown=_CLAUDE.read_text(encoding="utf-8"),
         )
 
 
