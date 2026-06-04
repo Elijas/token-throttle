@@ -194,7 +194,7 @@ _MANUAL_NON_PYTHON_FENCE_KEYS: frozenset[_NonPythonFenceKey] = frozenset()
 _EXPECTED_NON_PYTHON_FENCES = (
     _ExpectedNonPythonFence(
         document_name="README.md",
-        start_line=22,
+        start_line=18,
         language="bash",
         classification=_NON_PYTHON_CLASSIFICATION_SHELL_SYNTAX,
         reason="package installation command; lint syntax-checks but does not execute it",
@@ -207,29 +207,13 @@ _EXPECTED_NON_PYTHON_FENCES = (
     ),
     _ExpectedNonPythonFence(
         document_name="README.md",
-        start_line=91,
+        start_line=89,
         language="bash",
         classification=_NON_PYTHON_CLASSIFICATION_SHELL_SYNTAX,
         reason="package installation command; lint syntax-checks but does not execute it",
         heading="### OpenAI (built-in helpers)",
         non_empty_content_lines=(
-            'pip install "token-throttle[redis,tiktoken]" openai',
-        ),
-    ),
-    _ExpectedNonPythonFence(
-        document_name="README.md",
-        start_line=469,
-        language="text",
-        classification=_NON_PYTHON_CLASSIFICATION_TEXT,
-        reason="Redis monitoring command inventory for operators, not a shell script",
-        heading="#### Performance and capacity planning",
-        non_empty_content_lines=(
-            "INFO commandstats   # eval/evalsha, set, get, del latency and call volume",
-            "INFO clients        # connected_clients, blocked_clients, maxclients pressure",
-            "INFO memory         # used_memory, mem_fragmentation_ratio, evicted_keys",
-            "INFO stats          # instantaneous_ops_per_sec, rejected_connections",
-            "LATENCY LATEST      # server-side latency spikes",
-            "SLOWLOG GET 128     # slow Lua scripts or lock commands",
+            'pip install "token-throttle[redis,tiktoken]>=8.0.6,<8.1.0" openai',
         ),
     ),
     _ExpectedNonPythonFence(
@@ -364,7 +348,7 @@ _EXPECTED_NON_README_STANDALONE_IDENTITIES = (
     ),
     _StandaloneExampleIdentity(
         document_name="DEVELOPMENT.md",
-        start_line=336,
+        start_line=337,
         heading="### Redis connection pool sizing",
         first_non_empty_code_line="import redis.asyncio as aioredis",
     ),
@@ -375,14 +359,14 @@ _EXPLICIT_FRAGMENT_START_LINES_BY_DOCUMENT = {
 _EXPECTED_STDOUT_EXAMPLES = (
     _ExpectedStdoutExample(
         document_name="README.md",
-        start_line=34,
+        start_line=32,
         heading="### Memory quickstart (zero-service)",
         first_non_empty_code_line="import asyncio",
         expected_stdout="reserved 1000 tokens, refunded 575 unused tokens",
     ),
     _ExpectedStdoutExample(
         document_name="README.md",
-        start_line=154,
+        start_line=147,
         heading="### Any provider (manual usage)",
         first_non_empty_code_line="import asyncio",
         expected_stdout=(

@@ -326,8 +326,9 @@ The Redis backend accepts a user-provided `redis.asyncio.Redis` (or `redis.Redis
 
 If you need to bound connection usage, use `BlockingConnectionPool` before passing the client to the rate limiter. Size `max_connections` to at least your expected `max_concurrent_acquires` plus headroom for Redis lock acquire/release, the `TIME` command, and pipeline reads/writes. As a starting point, use `max_connections >= max_concurrent_acquires + 10` and tune from Redis pool wait time and server connection metrics. The Redis backend emits a `RuntimeWarning` when it sees `max_connections < 10`, because that is usually too small for production traffic.
 
-The README sizing numbers come from R7 short local runs and Redis object-size
-estimates, not a maintained sustained-load production benchmark suite. Treat
+The sizing numbers in [docs/operations.md](docs/operations.md#performance-and-capacity-planning)
+come from short local runs and Redis object-size estimates, not a maintained
+sustained-load production benchmark suite. Treat
 them as planning guidance only and validate throughput, p99 latency, key
 cardinality, memory, and `maxclients` pressure under the workload and Redis
 configuration you will run in production.
