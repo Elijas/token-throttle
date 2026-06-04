@@ -27,9 +27,9 @@ Notable changes for token-throttle releases. For operator upgrade steps, see
 
 - Breaking: backend-method lifecycle-critical exceptions now propagate raw
   instead of being wrapped by acquire-cleanup recovery paths.
-- Closed TC2-001/002/003 critical propagation contracts.
+- Closed the critical exception-propagation contracts.
 - Added conformance AST guards for cancellation-composition reachability.
-- Skipped Redis-specific TC2 tests when the Redis optional dependency is absent.
+- Skipped Redis-specific critical-propagation tests when the Redis optional dependency is absent.
 
 ## v6.0.0 - 2026-05-20
 
@@ -62,8 +62,8 @@ Notable changes for token-throttle releases. For operator upgrade steps, see
 ## v5.1.0 - 2026-05-16
 
 - Expanded custom-backend conformance coverage for timing, callback payloads,
-  marker authority, constructor cleanup, public limiter round trips, and FIX-50
-  fault injection.
+  marker authority, constructor cleanup, public limiter round trips, and fault
+  injection for interrupted acquire delivery with failed fallback refunds.
 
 ## v5.0.1 - 2026-05-16
 

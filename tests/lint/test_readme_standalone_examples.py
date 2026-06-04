@@ -162,7 +162,7 @@ _EXPECTED_MIGRATION_FRAGMENTS = (
     _ExpectedMigrationFragment(
         start_line=516,
         reason="requires an operator-supplied Redis client and target deployment prefix",
-        heading="## 6a. Clean Up Pre-FIX-38 Redis Bucket Keys",
+        heading="## 6a. Clean Up Legacy Redis Bucket Keys",
         first_non_empty_code_line=(
             "from token_throttle.migration import cleanup_legacy_buckets"
         ),

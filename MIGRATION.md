@@ -8,17 +8,17 @@ v8.0.0 is the greenfield hardening release for the production-readiness sweep.
 It closes Redis refund authority gaps, removes implicit loguru routing, updates
 dependency floors, and changes one Redis failure-mode default to fail safe.
 
-- **Strict limiter binding for refunds (PD-1):** Redis refunds now require the
+- **Strict limiter binding for refunds:** Redis refunds now require the
   `CapacityReservation.limiter_instance_id` to match the limiter instance that
   is processing the refund. A reservation issued by one limiter instance is no
   longer refundable through another limiter even when both share the same Redis
   `key_prefix`. Those refunds raise `UnknownReservationError` with
   `reservation issued by a different limiter instance`.
-- **Partial Redis bucket state is treated as drained (PD-2):** if Redis returns
+- **Partial Redis bucket state is treated as drained:** if Redis returns
   only one half of a bucket state pair, token-throttle must not infer fresh full
   capacity. It fires the missing-consumption callback and treats the bucket as
   unavailable until refill/state repair rather than silently overgranting.
-- **loguru auto-routing removed (PD-4):** `create_logging_callbacks()` and
+- **loguru auto-routing removed:** `create_logging_callbacks()` and
   `create_sync_logging_callbacks()` are stdlib logging factories. loguru is no
   longer selected merely because it is importable, and any loguru-specific
   callback helpers should be replaced with stdlib logging callbacks or
@@ -306,7 +306,7 @@ Cluster-aware client handling, and cross-shard transaction semantics. If you
 need Cluster, fork and rework key hashing and multi-key Lua routing as one
 design; PRs are welcome, but partial hash-tag changes are not enough.
 
-R7 validation covered `fakeredis` plus local vanilla Redis 7.x. token-throttle
+Validation covered `fakeredis` plus local vanilla Redis 7.x. token-throttle
 targets vanilla Redis 6.2 or newer; Redis 6.0/6.1, Sentinel failover behavior,
 Redis Cluster, KeyDB, Dragonfly, and low `maxmemory` / low `maxclients`
 configurations were not part of that validation matrix. Treat those as
@@ -505,12 +505,12 @@ Schedule `SCRIPT FLUSH` only during planned maintenance windows when token-throt
 is not running, or use a dedicated Redis DB that is not shared with other
 services that flush the script cache.
 
-## 6a. Clean Up Pre-FIX-38 Redis Bucket Keys
+## 6a. Clean Up Legacy Redis Bucket Keys
 
-FIX-38 added expiries to bucket state when keys are touched. Idle keys written
-before that fix may still have no TTL. After draining in-flight reservations
-and during a maintenance window, run the cleanup helper for each deployment
-prefix:
+Redis bucket-state keys written before the v2.0.0 bucket-state TTL change may
+still have no TTL. Current Redis backends refresh expiries on bucket state
+whenever those keys are touched. After draining in-flight reservations and
+during a maintenance window, run the cleanup helper for each deployment prefix:
 
 ```python
 from token_throttle.migration import cleanup_legacy_buckets
@@ -528,8 +528,8 @@ other prefixes.
 
 The cleanup is idempotent. Re-running it after a successful live run should
 delete `0` keys because only no-expiry legacy bucket-state keys are eligible.
-Run it separately for each deployment prefix that used token-throttle before
-FIX-38.
+Run it separately for each deployment prefix that used Redis backends before
+the v2.0.0 bucket-state TTL change.
 
 Recommended dry-run workflow:
 
@@ -583,5 +583,5 @@ The five callback slots (`on_wait_start`, `after_wait_end_consumption`,
 `on_capacity_consumed`, `on_capacity_refunded`, `on_missing_consumption_data`)
 are unchanged in v2.0.0. Partial callback construction such as
 `RateLimiterCallbacks(on_wait_start=my_fn)` remains valid. The behavioral
-change in v2.0.0 (FIX-27) is that factory-provided defaults are now *merged*
-into partial bundles rather than replaced; see section 4 above.
+change in v2.0.0 is that factory-provided defaults are now *merged* into
+partial bundles rather than replaced; see section 4 above.

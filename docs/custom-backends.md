@@ -148,7 +148,7 @@ Backends should raise:
 - `BackendConformanceError` only from conformance tests, not from normal backend
   operations.
 
-## FIX-50 Acquire/Refund Failure Contract
+## Acquire Delivery and Fallback Refund Failure Contract
 
 `AcquireRefundFailedError` is a regular `Exception`, not an
 `asyncio.CancelledError`. Catch it directly when callers need to recover a
@@ -176,7 +176,7 @@ override `prepare_reconfigured_backend()` to migrate or share in-process state
 with the rebuilt backend. Returning `True` while inheriting the default no-op
 hook is a contract violation because it can silently reset consumption state.
 
-## Marker Authority (FIX-48)
+## Marker Authority for Acquired Reservations
 
 `supports_acquire_marker_authority()` must return a plain synchronous `bool`.
 
@@ -210,7 +210,7 @@ positional `reserved_usage` must match the corresponding projection of
 `reservation_reserved_usage`. Do not credit arbitrary caller-supplied buckets
 after only validating the marker metadata.
 
-## TTL Hooks (FIX-53)
+## Reservation Lifetime and Durable Marker TTLs
 
 `reservation_lifetime_seconds` is meaningful when `reservation_id` is supplied.
 Durable marker backends must expire acquire markers and refund-dedup tombstones
@@ -228,7 +228,7 @@ Custom durable backends should enforce the same invariant:
 Memory-style backends may ignore the TTL parameter because their markers are
 process-local and are not durable across restarts.
 
-## Observability Emit Points (FIX-54)
+## Observability Callback Emit Points
 
 Backends receive `RateLimiterCallbacks` or `SyncRateLimiterCallbacks` from their
 builder. They must invoke callback slots outside backend locks where possible:
@@ -309,7 +309,7 @@ logger.debug(
 )
 ```
 
-## Snapshot State (FIX-54)
+## Public Limiter Snapshot State
 
 `RateLimiter.snapshot_state()` and `SyncRateLimiter.snapshot_state()` are owned
 by the public limiters rather than custom backends. Backend authors still affect
@@ -350,7 +350,8 @@ As of v7/v8, the bundled helpers check:
 - durable refund dedup claim consistency and duplicate-refund behavior
 - metric-set-change claim consistency and reconfiguration behavior
 - public limiter round-trip behavior across backend builders
-- the FIX-50 `AcquireRefundFailedError` shape exposed by public limiters
+- the `AcquireRefundFailedError` shape exposed by public limiters, including
+  `.reservation`, `.interrupted_by`, `.refund_error`, and exception chaining
 - conformance-harness handling for the canonical lifecycle-critical exception
   taxonomy, including `MemoryError` and `RecursionError` added in v6.0.0
 
