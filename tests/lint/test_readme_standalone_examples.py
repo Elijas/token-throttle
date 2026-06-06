@@ -463,11 +463,37 @@ def _normalize_shell_like_non_python_content_line(line: str) -> str:
     return f"{stripped[:comment_index].rstrip()} {stripped[comment_index:]}"
 
 
+# `devtools/bump_readme_version.py` rewrites the version span of every
+# `pip install "token-throttle..."` line on each release (`>=X.Y.Z,<X.Y.0`).
+# The inventory comparison masks that span to a placeholder so the immutable
+# release tag's CI matches main -- otherwise every release would have to
+# hand-edit `_EXPECTED_NON_PYTHON_FENCES` and the tag job would fail the bump.
+# The pattern mirrors the one the bumper uses, so it masks exactly what it
+# rewrites. (`_EXPECTED_NON_PYTHON_FENCES` deliberately keeps an older version
+# than the live README; the inventory test passing is itself proof the digits
+# are ignored.)
+_TOKEN_THROTTLE_INSTALL_VERSION_SPAN = re.compile(
+    r'(?P<prefix>pip install "token-throttle(?:\[[^\]]*\])?)'
+    r'>=\d+\.\d+\.\d+,<\d+\.\d+\.\d+"'
+)
+
+
+def _normalize_token_throttle_install_version(line: str) -> str:
+    return _TOKEN_THROTTLE_INSTALL_VERSION_SPAN.sub(
+        r'\g<prefix>>=<release-version-span>"', line
+    )
+
+
 def _non_python_content_lines(code: str, *, language: str) -> tuple[str, ...]:
     lines = _non_empty_code_lines(code)
     if language not in _SHELL_LIKE_FENCE_LANGUAGES:
         return lines
-    return tuple(_normalize_shell_like_non_python_content_line(line) for line in lines)
+    return tuple(
+        _normalize_token_throttle_install_version(
+            _normalize_shell_like_non_python_content_line(line)
+        )
+        for line in lines
+    )
 
 
 def _line_indent(line: str) -> int:
@@ -1498,6 +1524,39 @@ def test_shell_like_non_python_identity_keeps_inline_comment_text_guarded() -> N
     assert _current_non_python_fence_identity(
         block
     ) != _expected_non_python_fence_identity(expected)
+
+
+def test_token_throttle_install_version_span_is_release_agnostic() -> None:
+    """A release version bump must not break the non-Python fence inventory.
+
+    `devtools/bump_readme_version.py` rewrites the `>=X.Y.Z,<X.Y.0` span in every
+    `pip install "token-throttle..."` line on each release, so the immutable
+    release tag carries a different version than `_EXPECTED_NON_PYTHON_FENCES`.
+    Simulate a bump to an unrelated version and assert the install fence still
+    matches its expected identity (the version digits are normalized away).
+    """
+    install_fence = next(
+        expected
+        for expected in _EXPECTED_NON_PYTHON_FENCES
+        if expected.document_name == _README.name and expected.start_line == 18
+    )
+    bumped_lines = tuple(
+        re.sub(r'>=\d+\.\d+\.\d+,<\d+\.\d+\.\d+"', '>=99.4.0,<99.5.0"', line)
+        for line in install_fence.non_empty_content_lines
+    )
+    assert bumped_lines != install_fence.non_empty_content_lines
+    bumped_block = _MarkdownFenceBlock(
+        document_name=install_fence.document_name,
+        heading=install_fence.heading,
+        code="\n".join(bumped_lines),
+        fence_line=install_fence.start_line - 1,
+        start_line=install_fence.start_line,
+        fence_info=install_fence.language,
+    )
+
+    assert _current_non_python_fence_identity(
+        bumped_block
+    ) == _expected_non_python_fence_identity(install_fence)
 
 
 def test_manual_non_python_fence_allowlist_rejects_stale_keys() -> None:
