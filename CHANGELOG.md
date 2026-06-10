@@ -32,6 +32,13 @@ Notable changes for token-throttle releases. For operator upgrade steps, see
   catching cross-test interference that previously surfaced only as full-suite
   flakiness. Set `TOKEN_THROTTLE_THREAD_LEAK_MODE=report` to investigate a leak
   without failing the run.
+- Adds a stdlib-only acquire-path benchmark harness under `benchmarks/`
+  (`uv run python -m benchmarks.run`, or `task bench`) that reports p50/p90/p99
+  and ops/sec for the memory and Redis backends across sync/async and
+  uncontended/contended workloads, with optional JSON output. It is not part of
+  the test suite and adds no runtime dependency; absolute numbers are
+  machine- and Redis-locality-dependent and meant to be read relatively. See
+  `benchmarks/README.md`.
 
 ## v7.0.1 - 2026-05-22
 
