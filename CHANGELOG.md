@@ -27,6 +27,11 @@ Notable changes for token-throttle releases. For operator upgrade steps, see
   so it now aborts with an actionable message instead of silently wiping data;
   set `TOKEN_THROTTLE_TESTS_ALLOW_FLUSH=1` to opt in to running against a
   non-empty database.
+- Adds a test-suite thread-leak detector that fails the session if a test leaves
+  a non-daemon thread or a thread-pool worker alive after a short grace period,
+  catching cross-test interference that previously surfaced only as full-suite
+  flakiness. Set `TOKEN_THROTTLE_THREAD_LEAK_MODE=report` to investigate a leak
+  without failing the run.
 
 ## v7.0.1 - 2026-05-22
 

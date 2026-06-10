@@ -463,3 +463,70 @@ Redis ACL and SCRIPT FLUSH hazard (D16); reservation future-field contract
 compatibility (D20); runtime-override map `_lock` invariant (D32);
 `config_getter` reentrancy under `_validation_lock` (D33); Redis
 `_extend_locks` coverage confirmed clean, lint test added (D34).
+
+## Thread-leak detection
+
+The test suite spawns many `concurrent.futures.ThreadPoolExecutor` instances
+(sync limiters, sync conformance steps, the sync concurrency tests). A test that
+fails to join or shut down its executor leaks worker threads that outlive it.
+Accumulated leaked threads compete for the GIL and can stretch lock-hold
+windows, which is the leading hypothesis for the cross-test interference that
+historically made the Redis stress tests flake only in full-suite runs (never in
+isolation). The detector makes this class of cross-test interference visible at
+its source.
+
+### What the detector does
+
+Implemented in `tests/conftest.py` as a pair of session hooks:
+
+- `pytest_sessionstart` snapshots the idents of every live thread before any
+  test runs (the baseline).
+- `pytest_sessionfinish` polls `threading.enumerate()` for up to a 5-second
+  grace period and reports any thread that is (a) not in the start snapshot,
+  (b) still alive, and (c) non-daemon **or** a `ThreadPoolExecutor` worker.
+
+Executor workers are matched by thread-name prefix (`ThreadPoolExecutor-` and
+this project's explicit `token-throttle-` prefix) rather than by the daemon
+flag, because executor workers are daemonic in some CPython versions and a
+daemon-only filter would miss them. The grace period exists so that naturally
+finishing executor threads are not reported as false positives; the poll returns
+early the moment no candidate leaks remain.
+
+Hooks are used instead of a session-scoped autouse fixture so the check still
+runs on `-x` early exit, on selection subsets, and on collection errors, and so
+it can read `exitstatus` to stay silent on keyboard interrupt (a half-run
+session may legitimately leave executors mid-shutdown).
+
+A small, explicit ignore list (`pydevd` / `Debugger` debugger helper threads and
+asyncio's runtime-managed `asyncio_` default-executor pool) keeps runtime-owned
+threads from being miscounted. Nothing is ignored silently — the list lives next
+to the detector with a comment explaining each entry.
+
+### Severity policy: strict-fail
+
+A full-suite REPORT-mode pass over the unit, conformance, property, and
+integration tests found **zero** leaked threads, including the documented
+conformance timed-out-worker case (those workers either never reach the timeout
+path under the suite's inputs or finish within the grace period). Because the
+suite starts clean, the detector runs in **strict mode**: any non-ignored leak
+fails the session (`exitstatus` is set to the tests-failed code). There is no
+WARNING carve-out — if a leak appears, it is a real regression to fix at the
+source.
+
+### Debugging a reported leak
+
+When the detector fails a run it prints, per leaked thread, the name, daemon
+flag, ident, whether it is an executor worker, and the thread target. To debug:
+
+- Identify the leaking test by bisecting with targeted selections (by directory,
+  then file, then test). Prefer narrow selections over repeated full-suite runs.
+- The usual fix is in test code: shut down or join the executor/thread the test
+  created — use `ThreadPoolExecutor` as a context manager (`with ... as pool:`)
+  or call `pool.shutdown(wait=True)`, and `join()` raw `threading.Thread`
+  objects before the test returns.
+- To investigate without failing the run, force report-only mode:
+  `TOKEN_THROTTLE_THREAD_LEAK_MODE=report uv run pytest ...`. It prints the same
+  per-thread report but does not change the exit code.
+- A genuinely unkillable thread (for example a conformance worker that ignored
+  its deadline and cannot be killed in-process) would warrant adding a narrow,
+  documented exemption rather than a blanket downgrade. None is needed today.
