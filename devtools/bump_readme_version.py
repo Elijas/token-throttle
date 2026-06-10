@@ -7,11 +7,11 @@ from pathlib import Path
 
 def _replace_install_lines(content: str, version: str) -> str:
     """Replace version bounds in pip install lines, preserving extras."""
-    major, minor, *_ = version.split(".")
-    next_minor = f"{major}.{int(minor) + 1}.0"
+    major, *_ = version.split(".")
+    next_major = f"{int(major) + 1}.0.0"
     new_content, n = re.subn(
         r'(pip install "token-throttle(?:\[[^\]]*\])?)>=\d+\.\d+\.\d+,<\d+\.\d+\.\d+"',
-        rf'\1>={version},<{next_minor}"',
+        rf'\1>={version},<{next_major}"',
         content,
     )
     if n == 0:
