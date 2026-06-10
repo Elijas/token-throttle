@@ -31,6 +31,14 @@ tasks:
     desc: Run pytest-watch with coverage reporting
     aliases: [twc, tcw]
   ##############################
+  ### BENCHMARKS
+  ##############################
+  bench:
+    cmds:
+      - uv run python -m benchmarks.run -n 2000 {{.CLI_ARGS}}
+    desc: Run a quick memory-only acquire-path benchmark profile (numbers are machine-relative; see benchmarks/README.md)
+    aliases: [b]
+  ##############################
   ### LINT AND DEPENDENCIES
   ##############################
   lint:

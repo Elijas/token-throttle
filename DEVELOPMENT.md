@@ -530,3 +530,13 @@ flag, ident, whether it is an executor worker, and the thread target. To debug:
 - A genuinely unkillable thread (for example a conformance worker that ignored
   its deadline and cannot be killed in-process) would warrant adding a narrow,
   documented exemption rather than a blanket downgrade. None is needed today.
+
+## Performance benchmarks
+
+A stdlib-only acquire-path benchmark harness lives in `benchmarks/`. Run it with
+`uv run python -m benchmarks.run` (or `task bench` for a quick memory-only
+profile); pass `--redis-url redis://localhost:6379/13` to include the Redis
+scenarios against a dedicated empty database. It is not collected by `pytest`
+and adds no runtime dependency. Numbers are machine- and Redis-locality-dependent
+and meant to be read relatively; see `benchmarks/README.md` for scenarios, flags,
+and interpretation guidance.

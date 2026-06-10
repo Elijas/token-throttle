@@ -233,6 +233,16 @@ target-version = "py312"
     "C901",    # Function is too complex
     "PLR0912", # Too many branches
 ]
+"benchmarks/**/*.py" = [
+    "T201",     # print() is the benchmark table/report output channel
+    "C901",     # benchmark scenario builders are intentionally explicit
+    "PLR0912",  # ditto
+    "PLR0915",  # ditto
+    "PLR2004",  # benchmark sizing constants are inline magic numbers by design
+    "S311",     # randomness here is for key names, not security
+    "PLC0415",  # intentional lazy imports of optional redis deps inside scenarios
+    "SLF001",   # run.py imports the workloads module's internal helpers on purpose
+]
 "token_throttle/_interfaces/_interfaces.py" = [
     "ARG002",    # bucket_ids is part of interface contract, unused in default implementations
     "TC001",     # Pydantic models need these imports at runtime
