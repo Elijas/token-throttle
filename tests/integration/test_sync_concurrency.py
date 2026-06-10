@@ -30,6 +30,30 @@ def _build_backend(
     return builder.build(config)
 
 
+# Stress tests fan out many concurrent mutations onto a single bucket. The Redis
+# backend serializes every bucket mutation through a polling per-bucket lock, so
+# the default lock_blocking_timeout_seconds (5s) can be exceeded under that much
+# contention — consume/refund/set_max have no wait-retry loop and would then
+# raise BackendLockContentionError. Rebuild the Redis builder with a generous
+# lock-blocking timeout so the zero-error assertions are justified; the memory
+# builder (no Redis lock) passes through unchanged.
+_STRESS_LOCK_BLOCKING_TIMEOUT_SECONDS = 60.0
+
+
+def _stress_backend_builder(builder):
+    if type(builder).__name__ == "SyncRedisBackendBuilder":
+        from token_throttle._limiter_backends._redis._sync_backend import (  # noqa: PLC0415
+            SyncRedisBackendBuilder,
+        )
+
+        return SyncRedisBackendBuilder(
+            builder._redis,
+            key_prefix=builder._key_prefix,
+            lock_blocking_timeout_seconds=_STRESS_LOCK_BLOCKING_TIMEOUT_SECONDS,
+        )
+    return builder
+
+
 def _get_memory_buckets(backend):
     """Return the memory bucket list, or None if this is a Redis backend.
 
@@ -471,7 +495,9 @@ class TestConcurrentSetMaxCapacity:
 
         Final capacity should be within [negative, current_max].
         """
-        backend = _build_backend(sync_backend_builder, limit=200, per_seconds=60)
+        backend = _build_backend(
+            _stress_backend_builder(sync_backend_builder), limit=200, per_seconds=60
+        )
         errors: list[BaseException] = []
 
         def do_consume():
@@ -510,7 +536,9 @@ class TestConcurrentSetMaxCapacity:
         Both paths hold the condition lock. Capacity changes also call
         notify_all, which should unblock waiters.
         """
-        backend = _build_backend(sync_backend_builder, limit=100, per_seconds=1)
+        backend = _build_backend(
+            _stress_backend_builder(sync_backend_builder), limit=100, per_seconds=1
+        )
         errors: list[BaseException] = []
 
         def do_acquire():
@@ -569,7 +597,9 @@ class TestConcurrentSetMaxCapacity:
 
         Final capacity must be <= current max_capacity.
         """
-        backend = _build_backend(sync_backend_builder, limit=100, per_seconds=3600)
+        backend = _build_backend(
+            _stress_backend_builder(sync_backend_builder), limit=100, per_seconds=3600
+        )
         errors: list[BaseException] = []
 
         def do_consume():

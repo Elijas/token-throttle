@@ -22,6 +22,7 @@ from token_throttle._diagnostic import (
 from token_throttle._exceptions import (
     AcquireRefundFailedError,
     BackendConformanceError,
+    BackendLockContentionError,
     CardinalityLimitExceededError,
     DuplicateRefundError,
     UnknownReservationError,
@@ -219,6 +220,7 @@ __all__ = [
     "BackendHealthDiagnostic",
     "BackendIntrospectable",
     "BackendIntrospectionDiagnostic",
+    "BackendLockContentionError",
     "BucketDiagnostic",
     "BucketId",
     "CalculatedCapacity",

@@ -18,6 +18,18 @@ dependency floors, and changes one Redis failure-mode default to fail safe.
   only one half of a bucket state pair, token-throttle must not infer fresh full
   capacity. It fires the missing-consumption callback and treats the bucket as
   unavailable until refill/state repair rather than silently overgranting.
+- **Redis lock contention no longer leaks raw `redis.exceptions.LockError`:**
+  the Redis backend serializes each bucket through a per-bucket lock, and under
+  heavy contention an attempt could previously fail with a raw
+  `redis.exceptions.LockError`. v8 surfaces lock contention through the new
+  public `BackendLockContentionError` instead. `await_for_capacity` /
+  `wait_for_capacity` with no caller timeout now retry through contention and
+  never raise on lock starvation (the same calls with a timeout still raise
+  `TimeoutError`); `consume_capacity`, `refund_capacity`, `set_max_capacity`,
+  and reconfiguration raise `BackendLockContentionError` (chained from the
+  underlying redis error). The aborted operation made no change and is safe to
+  retry. See the per-bucket locking section in
+  [`docs/operations.md`](docs/operations.md).
 - **loguru auto-routing removed:** `create_logging_callbacks()` and
   `create_sync_logging_callbacks()` are stdlib logging factories. loguru is no
   longer selected merely because it is importable, and any loguru-specific
@@ -107,6 +119,15 @@ For Redis deployments with eviction enabled, monitor
 causes temporary undergranting instead of silent overgranting; investigate Redis
 memory pressure, eviction policy, TTL settings, and persistence before raising
 traffic.
+
+Replace any handler that caught `redis.exceptions.LockError` from a
+token-throttle call with one that catches `BackendLockContentionError` (imported
+from the top-level `token_throttle` package). Callers that wait with no timeout
+need no change — those calls now absorb contention and keep waiting. Callers of
+`consume_capacity`, `refund_capacity`, `set_max_capacity`, or reconfiguration
+should treat `BackendLockContentionError` as a safe-to-retry signal; persistent
+occurrences indicate a hot bucket, so reduce per-bucket concurrency or raise
+`lock_blocking_timeout_seconds`.
 
 ## Migrating from v6.x to v7.0.0
 

@@ -38,6 +38,7 @@ from token_throttle._diagnostic import (
     waiter_diagnostic_from_state,
 )
 from token_throttle._exceptions import (
+    BackendLockContentionError,
     DuplicateRefundError,
     UnknownReservationError,
     _mark_unknown_reservation_forget_in_flight,
@@ -127,6 +128,10 @@ _PIPELINE_CMDS_PER_OVERRIDE = 1
 DEFAULT_LOCK_BLOCKING_TIMEOUT_SECONDS = 5.0
 DEFAULT_LOCK_SLEEP_SECONDS = 0.05
 DEFAULT_LOCK_BLOCKING_THREAD_SLEEP_SECONDS = 0.05
+# How often a no-timeout waiter re-emits the "still contending for the lock"
+# warning while it keeps retrying. Mirrors the backward-clock warning throttle
+# in _capacity.py: warn on the first occurrence, then suppress for an interval.
+_LOCK_CONTENTION_WARNING_INTERVAL_SECONDS = 60.0
 _MIN_PRODUCTION_REDIS_POOL_CONNECTIONS = 10
 _MISSING = object()
 _ACQUIRE_MARKER_SET_SCRIPT = """
@@ -324,6 +329,42 @@ class RedisScriptResultError(RuntimeError):
 
 def _raise_lock_timeout_error() -> typing.NoReturn:
     raise redis.exceptions.LockError("Unable to acquire lock within the time specified")
+
+
+# Throttle state for the no-timeout lock-contention warning. Shared across all
+# backends in the process so a fleet of contending waiters does not spam logs.
+_lock_contention_warned: bool = False
+_lock_contention_last_warning_at: float | None = None
+
+
+def _warn_lock_contention_retry(exc: BaseException) -> None:
+    """
+    Emit a throttled warning that a no-timeout waiter is retrying lock acquisition.
+
+    ``wait_for_capacity`` with no caller timeout treats lock contention as "wait
+    as long as it takes" and silently retries. We surface a periodic warning so
+    operators can still see that a bucket is hot. Mirrors the backward-clock
+    warning throttle in ``_capacity.py``.
+    """
+    global _lock_contention_warned, _lock_contention_last_warning_at  # noqa: PLW0603
+    now = time.monotonic()
+    should_warn = (
+        not _lock_contention_warned
+        or _lock_contention_last_warning_at is None
+        or now - _lock_contention_last_warning_at
+        >= _LOCK_CONTENTION_WARNING_INTERVAL_SECONDS
+    )
+    if not should_warn:
+        return
+    _lock_contention_warned = True
+    _lock_contention_last_warning_at = now
+    _lock_logger.warning(
+        "Per-bucket Redis lock is under contention; the no-timeout waiter could "
+        "not acquire it within lock_blocking_timeout_seconds and is retrying. "
+        "Cause: %s. Further lock-contention warnings suppressed for %.0fs.",
+        exc,
+        _LOCK_CONTENTION_WARNING_INTERVAL_SECONDS,
+    )
 
 
 def _lock_name_hash(lock_name: str | bytes | memoryview) -> str:
@@ -1285,6 +1326,35 @@ class SyncRedisBackend(SyncRateLimiterBackend):
 
         return stack
 
+    def _lock_or_contention(
+        self,
+        *,
+        timeout: float,
+        blocking_timeout: float | None = None,
+        buckets: tuple[SyncRedisBucket, ...] | list[SyncRedisBucket] | None = None,
+        reservation_id: str | None = None,
+    ) -> _SyncRedisLockStack:
+        """
+        Acquire locks like ``_lock``, surfacing acquisition starvation as the
+        library lock-contention error instead of a raw redis ``LockError``.
+
+        Public ops that do not run their own retry loop use this so callers
+        never see ``redis.exceptions.LockError``. The polling-wait path keeps
+        using ``_lock`` directly because its retry loop classifies contention
+        itself (see ``wait_for_capacity``).
+        """
+        try:
+            return self._lock(
+                timeout=timeout,
+                blocking_timeout=blocking_timeout,
+                buckets=buckets,
+                reservation_id=reservation_id,
+            )
+        except redis.exceptions.LockError as exc:
+            raise BackendLockContentionError(
+                BackendLockContentionError.ACQUISITION_MESSAGE
+            ) from exc
+
     @staticmethod
     def _release_lock_logged(
         lock: redis.lock.Lock,
@@ -1316,8 +1386,8 @@ class SyncRedisBackend(SyncRateLimiterBackend):
             try:
                 lock.reacquire()
             except redis.exceptions.LockNotOwnedError as exc:
-                raise redis.exceptions.LockError(
-                    "Lock expired or was stolen mid-operation; aborting write."
+                raise BackendLockContentionError(
+                    BackendLockContentionError.LOCK_LOST_MESSAGE
                 ) from exc
             _debug_event(
                 _lock_logger,
@@ -2103,7 +2173,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         postconsumption_capacities: Capacities = frozendict()
         current_time: float = 0.0
         fresh_start_buckets: list[SyncRedisBucket] = []
-        with self._lock(
+        with self._lock_or_contention(
             timeout=LOCK_TIMEOUT_SECONDS,
             buckets=buckets,
             reservation_id=reservation_id,
@@ -2227,13 +2297,26 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                             reservation_lifetime_seconds=reservation_lifetime_seconds,
                         )
                     )
-                except redis.exceptions.LockError as exc:
-                    # When deadline is None (no caller timeout), the configured
-                    # Redis lock blocking timeout still bounds lock polling.
-                    # Propagating raw LockError preserves that distinction from
-                    # a caller-level wait timeout.
-                    if deadline is None:  # pragma: no cover
-                        raise
+                except (
+                    redis.exceptions.LockError,
+                    BackendLockContentionError,
+                ) as exc:
+                    # Lock contention: either acquisition starved past
+                    # lock_blocking_timeout_seconds (raw LockError from _lock)
+                    # or the lock was lost mid-operation
+                    # (BackendLockContentionError from _extend_locks).
+                    #
+                    # No caller timeout means "wait as long as it takes": never
+                    # surface contention as an error. Sleep one lock-poll
+                    # interval and retry the acquire loop, warning periodically
+                    # so operators can still see a hot bucket.
+                    if deadline is None:
+                        _warn_lock_contention_retry(exc)
+                        time.sleep(self._lock_sleep_seconds)
+                        continue
+                    # With a deadline, the configured Redis lock blocking
+                    # timeout already bounded the polling; convert to the
+                    # library capacity-timeout error for a uniform contract.
                     raise self._capacity_timeout_error(usage, frozendict()) from exc
                 if available:
                     try:
@@ -2564,7 +2647,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         refund_usage: frozendict[str, float] = frozendict(refund_usage_)
 
         fresh_start_buckets: list[SyncRedisBucket] = []
-        with self._lock(
+        with self._lock_or_contention(
             timeout=LOCK_TIMEOUT_SECONDS,
             buckets=buckets,
             reservation_id=reservation_id,
@@ -2820,7 +2903,9 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         )
         if bucket is None:
             raise ValueError(f"Bucket '{metric}/{per_seconds}s' not found")
-        with self._lock(timeout=LOCK_TIMEOUT_SECONDS, buckets=buckets) as lock_stack:
+        with self._lock_or_contention(
+            timeout=LOCK_TIMEOUT_SECONDS, buckets=buckets
+        ) as lock_stack:
             self._extend_locks(lock_stack)
             self._snapshot_bucket_state(bucket)
             bucket.set_max_capacity(value)
@@ -2841,7 +2926,9 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         )
         if bucket is None:
             raise ValueError(f"Bucket '{metric}/{per_seconds}s' not found")
-        with self._lock(timeout=LOCK_TIMEOUT_SECONDS, buckets=buckets) as lock_stack:
+        with self._lock_or_contention(
+            timeout=LOCK_TIMEOUT_SECONDS, buckets=buckets
+        ) as lock_stack:
             self._extend_locks(lock_stack)
             self._snapshot_bucket_state(bucket)
             bucket.clear_max_capacity_override()
@@ -2875,7 +2962,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
             is None
         )
 
-        with self._lock(
+        with self._lock_or_contention(
             timeout=LOCK_TIMEOUT_SECONDS, buckets=reconfigure_buckets
         ) as lock_stack:
             for bucket in removed_buckets:
@@ -2971,7 +3058,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         Fires no callbacks to avoid recursion and another interruption window.
         """
         target_buckets = self._snapshot_buckets() if buckets is None else tuple(buckets)
-        with self._lock(
+        with self._lock_or_contention(
             timeout=LOCK_TIMEOUT_SECONDS,
             buckets=target_buckets,
         ) as lock_stack:

@@ -25,6 +25,7 @@ import redis.asyncio as aioredis
 import redis.exceptions
 from frozendict import frozendict
 
+from token_throttle._exceptions import BackendLockContentionError
 from token_throttle._interfaces._callbacks import RateLimiterCallbacks
 from token_throttle._interfaces._interfaces import PerModelConfig
 from token_throttle._interfaces._models import Quota, UsageQuotas
@@ -690,7 +691,7 @@ class TestLockTTLExpiry:
     """Lock expiry mid-operation must be detected, not silently ignored."""
 
     async def test_extend_locks_detects_expired_lock(self, redis_client):
-        """_extend_locks raises LockError when the lock has expired."""
+        """_extend_locks raises BackendLockContentionError when the lock expired."""
         builder = RedisBackendBuilder(redis_client, key_prefix="test")
         config = _make_config()
         backend = builder.build(config, callbacks=RateLimiterCallbacks())
@@ -701,8 +702,11 @@ class TestLockTTLExpiry:
             lock = stack.locks[0]
             await redis_client.delete(lock.name)
 
-            with pytest.raises(redis.exceptions.LockError):
+            with pytest.raises(BackendLockContentionError) as excinfo:
                 await backend._extend_locks(stack)
+            assert isinstance(
+                excinfo.value.__cause__, redis.exceptions.LockNotOwnedError
+            )
         finally:
             with contextlib.suppress(redis.exceptions.LockNotOwnedError):
                 await stack.aclose()
@@ -726,7 +730,9 @@ class TestLockTTLExpiry:
         backend._extend_locks = expiring_extend
 
         try:
-            with pytest.raises((TimeoutError, redis.exceptions.LockError)):
+            # timeout=0 sets a deadline, so the wait loop converts the
+            # mid-operation lock loss into the capacity-timeout error.
+            with pytest.raises((TimeoutError, BackendLockContentionError)):
                 await backend.await_for_capacity(
                     frozendict({"requests": 5.0}), timeout=0
                 )
@@ -741,7 +747,7 @@ class TestLockTTLExpiry:
         )
 
     async def test_lock_stolen_by_another_worker_detected(self, redis_client):
-        """If another worker steals the lock, _extend_locks raises LockError."""
+        """If another worker steals the lock, _extend_locks raises contention error."""
         builder = RedisBackendBuilder(redis_client, key_prefix="test")
         config = _make_config()
         backend = builder.build(config, callbacks=RateLimiterCallbacks())
@@ -754,7 +760,7 @@ class TestLockTTLExpiry:
             thief_lock = backend.sorted_buckets[0].lock(timeout=10)
             assert await thief_lock.acquire(blocking_timeout=1)
 
-            with pytest.raises(redis.exceptions.LockError):
+            with pytest.raises(BackendLockContentionError):
                 await backend._extend_locks(stack)
 
             await thief_lock.release()
@@ -776,7 +782,7 @@ class TestLockTTLExpiry:
 
         backend._lock = short_ttl_lock
 
-        with contextlib.suppress(redis.exceptions.LockError):
+        with contextlib.suppress(BackendLockContentionError):
             await backend.consume_capacity(frozendict({"requests": 10.0}))
 
         cap = await _get_redis_capacity(backend)

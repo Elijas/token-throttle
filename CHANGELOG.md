@@ -5,6 +5,14 @@ Notable changes for token-throttle releases. For operator upgrade steps, see
 
 ## v8.0.0 - Unreleased
 
+- Adds the public `BackendLockContentionError` exception and stops leaking raw
+  `redis.exceptions.LockError`. Redis per-bucket lock contention now surfaces as
+  this library exception: `await_for_capacity` / `wait_for_capacity` with no
+  caller timeout retry through contention instead of raising (logging a throttled
+  warning), and `consume_capacity`, `refund_capacity`, `set_max_capacity`, and
+  reconfiguration raise `BackendLockContentionError` (chained from the underlying
+  redis error) on lock starvation or mid-operation lock loss. See the per-bucket
+  locking section in [`docs/operations.md`](docs/operations.md).
 - Enforces strict `limiter_instance_id` binding for Redis refunds; reservations
   must be refunded by the limiter lifetime that issued them.
 - Treats partial Redis bucket state as drained instead of fresh capacity, firing
