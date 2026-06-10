@@ -92,6 +92,48 @@ Redis refunds also write a cross-process idempotency key:
 builders or Redis OpenAI factories. Memory backends keep only process-local
 refund dedup state and cannot safely refund reservations after a cold restart.
 
+## Per-bucket locking and contention
+
+The Redis backend serializes every mutation of a given bucket through a
+short-lived per-bucket lock, so concurrent workers never race on the same
+capacity counter. Two knobs on the Redis backend builders (and the Redis OpenAI
+factories) tune that lock:
+
+- `lock_blocking_timeout_seconds` (default `5.0`): how long a single attempt to
+  acquire a bucket lock will poll before giving up. This bounds one acquire
+  attempt; it does not bound how long `await_for_capacity` /
+  `wait_for_capacity` will wait overall.
+- `lock_sleep_seconds` (default `0.05`): the poll interval while waiting for a
+  contended lock.
+
+Because the lock is poll-based, it is not strictly fair: under heavy contention
+(many workers on one hot bucket) an individual waiter can be repeatedly outraced
+and fail to acquire within `lock_blocking_timeout_seconds`. Behavior under that
+contention depends on the call:
+
+- `await_for_capacity` / `wait_for_capacity` **with no `timeout`** treat lock
+  contention as part of waiting: they keep retrying the acquire indefinitely and
+  never raise because of lock starvation. Contention is reported through a
+  throttled warning on the `token_throttle.lock` logger (logged once, then
+  suppressed for a cooldown) so a hot bucket is still visible in logs.
+- `await_for_capacity` / `wait_for_capacity` **with a `timeout`** convert lock
+  starvation into the same `TimeoutError` you already handle for "no capacity in
+  time" — the caller-supplied deadline is the single source of truth.
+- `consume_capacity`, `refund_capacity` / `refund_capacity_for_buckets`,
+  `set_max_capacity`, and reconfiguration have no internal wait loop. If they
+  cannot acquire the lock within `lock_blocking_timeout_seconds`, or if the lock
+  is lost mid-operation (it expired or was stolen by another worker, in which
+  case the write is aborted and makes no change), they raise
+  `BackendLockContentionError`.
+
+`BackendLockContentionError` is exported from the top-level `token_throttle`
+package. When you see it, the operation did not modify state and is safe to
+retry. Seeing it repeatedly means a bucket is genuinely hot; the durable fixes
+are to reduce concurrency on that bucket, spread traffic across more model
+families/windows, provision Redis CPU headroom, or raise
+`lock_blocking_timeout_seconds` so attempts wait longer before giving up. The
+memory backends have no Redis lock and never raise `BackendLockContentionError`.
+
 ## Performance and capacity planning
 
 Performance testing identified two important ceilings for 10k RPS-class

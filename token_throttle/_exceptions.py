@@ -93,6 +93,46 @@ class BackendConformanceError(Exception):
     reason = "backend_conformance_error"
 
 
+class BackendLockContentionError(Exception):
+    """
+    Raised when a backend cannot acquire (or loses) its internal per-bucket lock.
+
+    The Redis backend serializes every bucket mutation through a short-lived
+    per-bucket lock. Two situations surface as this exception:
+
+    * **Acquisition starvation** — the lock could not be acquired within the
+      configured ``lock_blocking_timeout_seconds`` because other workers held
+      it for the whole window. Retry, raise ``lock_blocking_timeout_seconds``,
+      or reduce contention (fewer concurrent callers, smaller bucket fan-out).
+    * **Mid-operation loss** — the lock expired or was stolen by another worker
+      between the read and the write, so the in-progress write was aborted to
+      avoid clobbering another worker's state. The operation made no change and
+      is safe to retry.
+
+    ``wait_for_capacity`` / ``await_for_capacity`` with no caller timeout absorb
+    this internally and keep waiting, so callers normally see it only from
+    ``consume_capacity``, ``refund_capacity``, ``set_max_capacity``, and
+    reconfiguration. It always chains the underlying cause via ``__cause__``.
+    """
+
+    reason = "backend_lock_contention"
+
+    ACQUISITION_MESSAGE = (
+        "could not acquire the internal per-bucket Redis lock within the "
+        "configured lock_blocking_timeout_seconds; the bucket is under heavy "
+        "contention. Retry, raise lock_blocking_timeout_seconds, or reduce "
+        "the number of concurrent callers."
+    )
+    LOCK_LOST_MESSAGE = (
+        "lost the internal per-bucket Redis lock mid-operation (it expired or "
+        "was stolen by another worker); the write was aborted and made no "
+        "change. Retry the operation."
+    )
+
+    def __init__(self, message: str | None = None) -> None:
+        super().__init__(self.ACQUISITION_MESSAGE if message is None else message)
+
+
 class DuplicateRefundError(ValueError):
     """Raised when a refund is duplicate, already in progress, or already acquired."""
 

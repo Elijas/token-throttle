@@ -26,6 +26,31 @@ def _build_backend(
     return backend_builder.build(config)
 
 
+# Stress tests fan out 50 concurrent operations onto a single bucket. The Redis
+# backend serializes every bucket mutation through a polling per-bucket lock, so
+# the default lock_blocking_timeout_seconds (5s) can be exceeded under that much
+# contention. await_for_capacity with no caller timeout now absorbs contention by
+# retrying, but the non-retrying refund path can still raise
+# BackendLockContentionError under extreme starvation. Rebuild the Redis builder
+# with a generous lock-blocking timeout so the zero-error assertions are
+# justified; the memory builder (no Redis lock) passes through unchanged.
+_STRESS_LOCK_BLOCKING_TIMEOUT_SECONDS = 60.0
+
+
+def _stress_backend_builder(backend_builder):
+    if type(backend_builder).__name__ == "RedisBackendBuilder":
+        from token_throttle._limiter_backends._redis._backend import (  # noqa: PLC0415
+            RedisBackendBuilder,
+        )
+
+        return RedisBackendBuilder(
+            backend_builder._redis,
+            key_prefix=backend_builder._key_prefix,
+            lock_blocking_timeout_seconds=_STRESS_LOCK_BLOCKING_TIMEOUT_SECONDS,
+        )
+    return backend_builder
+
+
 class TestConcurrentAcquiresRespectCapacity:
     """N concurrent acquires must never consume more than max capacity."""
 
@@ -155,7 +180,9 @@ class TestHighParallelismStress:
 
         Capacity is set high enough that all 50 can succeed.
         """
-        backend = _build_backend(backend_builder, limit=500, per_seconds=1)
+        backend = _build_backend(
+            _stress_backend_builder(backend_builder), limit=500, per_seconds=1
+        )
         usage = frozen_usage({"requests": 10})
 
         async def single_acquire():
@@ -172,7 +199,9 @@ class TestHighParallelismStress:
 
     async def test_fifty_mixed_operations_no_errors(self, backend_builder):
         """50 tasks doing a mix of acquires and refunds complete without errors."""
-        backend = _build_backend(backend_builder, limit=1000, per_seconds=1)
+        backend = _build_backend(
+            _stress_backend_builder(backend_builder), limit=1000, per_seconds=1
+        )
         usage = frozen_usage({"requests": 5})
 
         async def acquire_only():
