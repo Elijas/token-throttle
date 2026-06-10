@@ -3,25 +3,21 @@
 Notable changes for token-throttle releases. For operator upgrade steps, see
 [`MIGRATION.md`](MIGRATION.md).
 
-## v8.0.0 - Unreleased
+## Unreleased
 
-- Adds the public `BackendLockContentionError` exception and stops leaking raw
-  `redis.exceptions.LockError`. Redis per-bucket lock contention now surfaces as
-  this library exception: `await_for_capacity` / `wait_for_capacity` with no
-  caller timeout retry through contention instead of raising (logging a throttled
-  warning), and `consume_capacity`, `refund_capacity`, `set_max_capacity`, and
-  reconfiguration raise `BackendLockContentionError` (chained from the underlying
-  redis error) on lock starvation or mid-operation lock loss. See the per-bucket
-  locking section in [`docs/operations.md`](docs/operations.md).
-- Enforces strict `limiter_instance_id` binding for Redis refunds; reservations
-  must be refunded by the limiter lifetime that issued them.
-- Treats partial Redis bucket state as drained instead of fresh capacity, firing
-  missing-consumption callbacks and avoiding silent overgrant.
-- Removes implicit loguru routing from generic logging callback factories;
-  stdlib logging is the default path.
-- Raises dependency floors to `pydantic>=2.12.0` and `tiktoken>=0.10.0`.
-- Retains Python 3.14 support after fixing the conformance harness behavior.
-- Refreshes README, migration, custom-backend, and public docstring coverage.
+These changes are on `main` and not yet in a tagged release. The lock-contention
+change below is breaking, so the next release is expected to be a major version.
+
+- **Breaking:** adds the public `BackendLockContentionError` exception and stops
+  leaking raw `redis.exceptions.LockError`. Redis per-bucket lock contention now
+  surfaces as this library exception: `await_for_capacity` / `wait_for_capacity`
+  with no caller timeout retry through contention instead of raising (logging a
+  throttled warning), and `consume_capacity`, `refund_capacity`,
+  `set_max_capacity`, and reconfiguration raise `BackendLockContentionError`
+  (chained from the underlying redis error) on lock starvation or mid-operation
+  lock loss. Handlers that caught `redis.exceptions.LockError` must catch
+  `BackendLockContentionError` instead; see [`MIGRATION.md`](MIGRATION.md) and
+  the per-bucket locking section in [`docs/operations.md`](docs/operations.md).
 - Adds a test-suite safety gate that refuses to run when `--redis-url` points at
   a non-empty Redis database. The suite flushes that database around every test,
   so it now aborts with an actionable message instead of silently wiping data;
@@ -47,13 +43,34 @@ Notable changes for token-throttle releases. For operator upgrade steps, see
   repeated load) that the single-pass PR CI does not exercise. It changes no
   library behavior.
 - Widens the recommended pip install version bounds in the README from a
-  next-minor cap to a next-major cap (for example `>=8.0.6,<9.0.0` instead of
-  `>=8.0.6,<8.1.0`), so installs can pick up minor and patch releases within the
+  next-minor cap to a next-major cap (for example `>=8.0.8,<9.0.0` instead of
+  `>=8.0.8,<8.1.0`), so installs can pick up minor and patch releases within the
   same major version without re-pinning. This reflects the project's semantic
   versioning guarantee that no breaking changes ship within a major.
 - Removes a stray empty `__init__.py` from the repository root that was never
   part of the published `token_throttle` package; it changes no library
   behavior.
+
+## v8.0.1 – v8.0.8 - 2026-05-28 to 2026-06-06
+
+- Patch releases with internal hardening, portability and test-coverage
+  improvements, and release-tooling fixes — including making the README
+  install-line lint release-agnostic so tagged-release CI passes. No intended
+  public API changes; see the git tags for per-release details. Note: v8.0.7
+  was tagged but never published to PyPI because that lint failure gated the
+  publish step; v8.0.8 supersedes it.
+
+## v8.0.0 - 2026-05-25
+
+- Enforces strict `limiter_instance_id` binding for Redis refunds; reservations
+  must be refunded by the limiter lifetime that issued them.
+- Treats partial Redis bucket state as drained instead of fresh capacity, firing
+  missing-consumption callbacks and avoiding silent overgrant.
+- Removes implicit loguru routing from generic logging callback factories;
+  stdlib logging is the default path.
+- Raises dependency floors to `pydantic>=2.12.0` and `tiktoken>=0.10.0`.
+- Retains Python 3.14 support after fixing the conformance harness behavior.
+- Refreshes README, migration, custom-backend, and public docstring coverage.
 
 ## v7.0.1 - 2026-05-22
 
