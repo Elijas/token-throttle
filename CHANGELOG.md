@@ -22,6 +22,11 @@ Notable changes for token-throttle releases. For operator upgrade steps, see
 - Raises dependency floors to `pydantic>=2.12.0` and `tiktoken>=0.10.0`.
 - Retains Python 3.14 support after fixing the conformance harness behavior.
 - Refreshes README, migration, custom-backend, and public docstring coverage.
+- Adds a test-suite safety gate that refuses to run when `--redis-url` points at
+  a non-empty Redis database. The suite flushes that database around every test,
+  so it now aborts with an actionable message instead of silently wiping data;
+  set `TOKEN_THROTTLE_TESTS_ALLOW_FLUSH=1` to opt in to running against a
+  non-empty database.
 
 ## v7.0.1 - 2026-05-22
 

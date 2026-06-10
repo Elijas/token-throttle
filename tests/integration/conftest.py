@@ -1,5 +1,6 @@
 import pytest
 
+from tests._redis_guard import ensure_flush_allowed
 from token_throttle._limiter_backends._memory._backend import MemoryBackendBuilder
 from token_throttle._limiter_backends._memory._sync_backend import (
     SyncMemoryBackendBuilder,
@@ -26,6 +27,7 @@ async def redis_client(redis_url: str):
     except redis_exceptions.RedisError as exc:
         await client.aclose()
         pytest.skip(f"Redis unavailable at {redis_url}: {exc}")
+    ensure_flush_allowed(redis_url)
     try:
         await client.flushdb()
         yield client
@@ -63,6 +65,7 @@ def sync_redis_client(redis_url: str):
     except redis_exceptions.RedisError as exc:
         client.close()
         pytest.skip(f"Redis unavailable at {redis_url}: {exc}")
+    ensure_flush_allowed(redis_url)
     try:
         client.flushdb()
         yield client

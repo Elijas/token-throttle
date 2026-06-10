@@ -9,6 +9,7 @@ pytest.importorskip("redis")
 import redis as sync_redis
 import redis.asyncio as redis
 
+from tests._redis_guard import ensure_flush_allowed
 from token_throttle._interfaces._interfaces import PerModelConfig
 from token_throttle._interfaces._models import Quota, UsageQuotas
 from token_throttle._limiter_backends._redis._backend import RedisBackendBuilder
@@ -45,6 +46,7 @@ def _sync_capacity(observer: sync_redis.Redis, key: str) -> float:
 
 @pytest.mark.redis
 async def test_p5_02_aclose_waits_for_in_flight_redis_refunds(redis_url: str):
+    ensure_flush_allowed(redis_url)
     owned_client = redis.from_url(redis_url)
     observer = redis.from_url(redis_url)
     await observer.flushdb()
@@ -102,6 +104,7 @@ async def test_p5_02_aclose_waits_for_in_flight_redis_refunds(redis_url: str):
 
 @pytest.mark.redis
 def test_p5_02_close_waits_for_in_flight_sync_redis_refunds(redis_url: str):
+    ensure_flush_allowed(redis_url)
     owned_client = sync_redis.from_url(redis_url)
     observer = sync_redis.from_url(redis_url)
     observer.flushdb()

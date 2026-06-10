@@ -7,6 +7,7 @@ import asyncio
 import pytest
 from frozendict import frozendict
 
+from tests._redis_guard import ensure_flush_allowed
 from token_throttle import PerModelConfig, Quota, RateLimiterCallbacks, UsageQuotas
 
 pytest.importorskip("redis", reason="redis package not installed")
@@ -27,12 +28,14 @@ AFTER_WAIT_CRITICAL_EXCEPTIONS = (
 
 @pytest.fixture
 async def redis_client(request: pytest.FixtureRequest):
-    client = redis_async.from_url(request.config.getoption("--redis-url"))
+    redis_url = request.config.getoption("--redis-url")
+    client = redis_async.from_url(redis_url)
     try:
         await client.ping()
     except Exception as exc:
         await client.aclose()
         pytest.skip(f"Redis server unavailable: {exc!r}")
+    ensure_flush_allowed(redis_url)
     await client.flushdb()
     try:
         yield client

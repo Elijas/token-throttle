@@ -16,6 +16,42 @@ uv run pytest tests/unit -v
 uv run pytest tests/ -v --redis-url redis://localhost:6379
 ```
 
+### Redis flush safety gate
+
+The integration, property, and Redis-touching unit tests **flush the configured
+Redis database around every test** to isolate state. That is safe against a
+dedicated empty test database but catastrophic if `--redis-url` points at a
+shared or production host.
+
+`tests/_redis_guard.py` installs a one-time-per-session gate (keyed by Redis
+URL). The first time any flush call site is reached for a URL,
+`ensure_flush_allowed()` makes a short-lived synchronous connection and checks
+`DBSIZE`:
+
+- **Empty database** (`DBSIZE == 0`): proceeds, and the URL is not re-probed for
+  the rest of the session (only test keys can exist from then on).
+- **Non-empty database**: aborts the whole pytest session via `pytest.exit` with
+  an actionable message *before any flush runs*, so existing data is preserved.
+- **Server unreachable**: the gate stays silent and the test's own
+  `importorskip`/`ping` path skips the test exactly as before — the gate only
+  fires on an established connection.
+
+To run against a non-empty database anyway (accepting that the suite will delete
+its contents), set `TOKEN_THROTTLE_TESTS_ALLOW_FLUSH=1`:
+
+```bash
+# Recommended: point at a dedicated, empty DB index instead of opting out.
+uv run pytest tests/ -v --redis-url redis://localhost:6379/13
+
+# Explicit opt-out (accepts data loss on the targeted database):
+TOKEN_THROTTLE_TESTS_ALLOW_FLUSH=1 uv run pytest tests/ -v --redis-url redis://localhost:6379
+```
+
+Every `flushdb` call site (the shared async/sync client fixtures plus the
+property and Redis-close tests that build their own clients) routes through
+`ensure_flush_allowed()`, so the gate runs even when only those files are
+selected.
+
 ## Type checking
 
 ```bash
