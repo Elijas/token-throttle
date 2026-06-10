@@ -15,9 +15,9 @@
 Works with any LLM provider and any client library — token-throttle limits the _rate_, not the _client_.
 
 ```bash
-pip install "token-throttle[redis,tiktoken]>=8.0.6,<9.0.0"   # OpenAI + Redis (recommended)
-pip install "token-throttle[redis]>=8.0.6,<9.0.0"            # Any provider + Redis
-pip install "token-throttle>=8.0.6,<9.0.0"                   # Any provider + in-memory
+pip install "token-throttle[redis,tiktoken]>=8.0.8,<9.0.0"   # OpenAI + Redis (recommended)
+pip install "token-throttle[redis]>=8.0.8,<9.0.0"            # Any provider + Redis
+pip install "token-throttle>=8.0.8,<9.0.0"                   # Any provider + in-memory
 ```
 
 Upgrading from an earlier major version? See [MIGRATION.md](MIGRATION.md) for the v2/v5/v6/v7/v8 contract changes. Public constants and type aliases: [docs/api.md](docs/api.md).
@@ -86,7 +86,7 @@ asyncio.run(main())
 Install token-throttle's Redis and tokenizer extras plus the OpenAI client:
 
 ```bash
-pip install "token-throttle[redis,tiktoken]>=8.0.6,<9.0.0" openai
+pip install "token-throttle[redis,tiktoken]>=8.0.8,<9.0.0" openai
 ```
 
 ```python
