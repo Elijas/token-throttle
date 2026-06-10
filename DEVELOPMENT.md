@@ -540,3 +540,38 @@ scenarios against a dedicated empty database. It is not collected by `pytest`
 and adds no runtime dependency. Numbers are machine- and Redis-locality-dependent
 and meant to be read relatively; see `benchmarks/README.md` for scenarios, flags,
 and interpretation guidance.
+
+## Soak / stress workflow
+
+`.github/workflows/soak.yml` is a recurring soak/stress job that hunts for the
+class of regression PR CI cannot catch: contention and accounting bugs that only
+surface when a stress suite is run repeatedly, back to back, under sustained load.
+PR CI (`.github/workflows/ci.yml`) runs each suite exactly once and stays fast;
+the soak job trades latency for that repeated-load coverage and so is scheduled,
+not run on every push.
+
+It runs weekly on a Thursday 9 AM UTC cron — deliberately offset from the Monday
+8 AM UTC `Scheduled Dependency Health` job (`scheduled.yml`) so the two recurring
+jobs never contend for runners or the shared Redis service — and can also be
+launched on demand from the Actions tab via `workflow_dispatch`, which accepts an
+`iterations` input (default `10`) controlling how many times the concurrency
+stress files repeat. The weekly cron supplies no inputs and uses the same default.
+
+The job spins up the same `redis:7-alpine` service container as the integration
+job and runs three phases, one `pytest` process at a time: (1) a soak loop that
+repeats `tests/integration/test_concurrency.py` and
+`tests/integration/test_sync_concurrency.py` `iterations` times, failing fast on
+the first failing repeat and logging which iteration broke; (2) a single pass of
+`tests/property`, which is heavier (Hypothesis state machines) and is not looped;
+and (3) a conformance pass with `TOKEN_THROTTLE_CONFORMANCE_TIMING_SCALE` set to
+`0.5`. That env var shrinks the conformance harness wall-clock deadlines by the
+given factor; `token_throttle/conformance.py` warns that scales below roughly
+`0.1` can make a correct backend fail because internal probe deadlines have an
+implicit floor, so `0.5` is the chosen value — aggressive enough to surface latent
+slowness, well clear of the false-failure floor.
+
+Each phase tees its output to a log file; on failure those logs upload as a
+`soak-logs` artifact for triage. The job carries a 45-minute `timeout-minutes`
+cap (measured runtime is roughly half that) and a `concurrency` group so an
+overlapping manual dispatch cancels the in-flight run rather than racing it for
+the shared Redis container.

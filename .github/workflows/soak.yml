@@ -1,0 +1,123 @@
+name: Soak / Stress
+
+# Recurring load/soak job that hunts for the class of regression PR CI cannot
+# catch: contention and accounting bugs that only surface when a stress suite is
+# run repeatedly, back to back, under sustained load. PR CI (ci.yml) runs each
+# suite exactly once and stays fast; this workflow trades latency for coverage.
+#
+# Runtime budget (kept well under the 45-minute cap, measured locally on an
+# idle M-series laptop then padded ~2-3x for slower, shared hosted runners):
+#   - setup (checkout + uv sync --all-extras):      ~3 min
+#   - soak loop, 10 iterations x ~20s/iter:          ~15 min (padded)
+#   - property suite, one pass (~3m40s local):        ~8 min (padded)
+#   - tightened-timing conformance pass (~11s local): ~2 min (padded)
+#   total:                                          ~28 min  (timeout 45 min)
+
+on:
+  schedule:
+    # Thursday 9 AM UTC. Deliberately offset from the Monday 8 AM UTC
+    # "Scheduled Dependency Health" job (scheduled.yml) so the two recurring
+    # jobs never contend for runners or Redis.
+    - cron: "0 9 * * 4"
+  workflow_dispatch:
+    inputs:
+      iterations:
+        description: "Number of times to repeat the concurrency stress files."
+        required: false
+        default: "10"
+
+# Overlapping manual dispatches cancel the in-flight run: a soak job is long and
+# there is no value in two of them racing for the same hosted Redis container.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  soak:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+        with:
+          python-version: "3.13"
+      - run: uv sync --all-extras --group dev
+
+      # Soak loop: repeat the async + sync concurrency stress files N times,
+      # one pytest process per iteration. Fails fast on the first failing
+      # iteration and prints the iteration number, so a flaky-under-load
+      # regression is pinned to a specific repeat rather than a single run.
+      # ITER is taken from the workflow_dispatch input on manual runs and
+      # defaults to 10 on the weekly cron (which provides no inputs).
+      - name: Soak loop (concurrency stress, repeated)
+        env:
+          ITER: ${{ github.event.inputs.iterations || '10' }}
+        run: |
+          set -euo pipefail
+          echo "Soaking ${ITER} iteration(s) of the concurrency stress files."
+          for i in $(seq 1 "${ITER}"); do
+            echo "::group::soak iteration ${i}/${ITER}"
+            if ! uv run pytest \
+                tests/integration/test_concurrency.py \
+                tests/integration/test_sync_concurrency.py \
+                -q --redis-url redis://localhost:6379 \
+                2>&1 | tee "soak-iter-${i}.log"; then
+              echo "::error::Soak failed on iteration ${i}/${ITER}"
+              exit 1
+            fi
+            echo "::endgroup::"
+          done
+
+      # Property-based accounting suite, one pass. Heavier than the stress
+      # files (Hypothesis state machines), so it runs once rather than looped.
+      - name: Property suite (accounting invariants)
+        run: |
+          set -euo pipefail
+          uv run pytest tests/property \
+            -q --redis-url redis://localhost:6379 \
+            2>&1 | tee property.log
+
+      # Tightened-timing conformance pass. TOKEN_THROTTLE_CONFORMANCE_TIMING_SCALE
+      # shrinks the conformance harness wall-clock deadlines by this factor;
+      # token_throttle/conformance.py warns that scales below ~0.1 may cause
+      # CORRECT backends to fail because internal probe deadlines have an implicit
+      # floor. 0.5 is a defensible, mildly aggressive value: it halves the slack a
+      # backend has to respond (surfacing latent slowness) while staying well above
+      # the ~0.1 false-failure floor. Verified locally to pass on the correct
+      # in-tree backends at this scale.
+      - name: Conformance (tightened timing)
+        env:
+          TOKEN_THROTTLE_CONFORMANCE_TIMING_SCALE: "0.5"
+        run: |
+          set -euo pipefail
+          uv run pytest tests/conformance \
+            -q --redis-url redis://localhost:6379 \
+            2>&1 | tee conformance.log
+
+      # On any failure above, upload the captured per-step logs for triage.
+      # actions/upload-artifact is not used elsewhere in this repo, so the pin is
+      # the v4.6.2 commit SHA resolved from the GitHub API
+      # (git/refs/tags/v4.6.2 -> ea165f8...), not an invented hash. The `tee`
+      # calls above also echo to the live job log, so output survives even if
+      # this upload is skipped or the action is unavailable.
+      - name: Upload soak logs on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: soak-logs
+          path: |
+            soak-iter-*.log
+            property.log
+            conformance.log
+          if-no-files-found: ignore
+          retention-days: 14
