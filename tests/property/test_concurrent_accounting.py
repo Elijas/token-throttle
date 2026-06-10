@@ -34,6 +34,7 @@ from hypothesis import given
 from hypothesis import settings as hypothesis_settings
 from hypothesis import strategies as st
 
+from tests._redis_guard import ensure_flush_allowed
 from token_throttle._interfaces._interfaces import PerModelConfig
 from token_throttle._interfaces._models import Quota, UsageQuotas, frozen_usage
 from token_throttle._limiter_backends._memory._backend import (
@@ -741,6 +742,7 @@ def _get_redis_sync_capacity(backend) -> float:
 def test_async_concurrent_all_acquires_no_double_spend_redis(n_requesters, request):
     """Redis variant of test 4 — distributed lock + pipeline atomicity under contention."""
     redis_url = request.config.getoption("--redis-url")
+    ensure_flush_allowed(redis_url)
 
     async def run():
         client = async_redis.from_url(redis_url)
@@ -787,6 +789,7 @@ def test_async_concurrent_all_acquires_no_double_spend_redis(n_requesters, reque
 def test_sync_concurrent_refund_cap_clipping_redis(n_refunders, refund_amount, request):
     """Redis variant of test 10 — distributed lock cap-clipping atomicity."""
     redis_url = request.config.getoption("--redis-url")
+    ensure_flush_allowed(redis_url)
     client = sync_redis.from_url(redis_url)
     client.flushdb()
     try:

@@ -241,7 +241,21 @@ _EXPECTED_NON_PYTHON_FENCES = (
     ),
     _ExpectedNonPythonFence(
         document_name="DEVELOPMENT.md",
-        start_line=22,
+        start_line=43,
+        language="bash",
+        classification=_NON_PYTHON_CLASSIFICATION_SHELL_SYNTAX,
+        reason="Redis flush-gate examples; lint syntax-checks but does not execute them",
+        heading="### Redis flush safety gate",
+        non_empty_content_lines=(
+            "# Recommended: point at a dedicated, empty DB index instead of opting out.",
+            "uv run pytest tests/ -v --redis-url redis://localhost:6379/13",
+            "# Explicit opt-out (accepts data loss on the targeted database):",
+            "TOKEN_THROTTLE_TESTS_ALLOW_FLUSH=1 uv run pytest tests/ -v --redis-url redis://localhost:6379",
+        ),
+    ),
+    _ExpectedNonPythonFence(
+        document_name="DEVELOPMENT.md",
+        start_line=58,
         language="bash",
         classification=_NON_PYTHON_CLASSIFICATION_SHELL_SYNTAX,
         reason="setup and type-check commands; lint syntax-checks but does not execute them",
@@ -348,7 +362,7 @@ _EXPECTED_NON_README_STANDALONE_IDENTITIES = (
     ),
     _StandaloneExampleIdentity(
         document_name="DEVELOPMENT.md",
-        start_line=337,
+        start_line=373,
         heading="### Redis connection pool sizing",
         first_non_empty_code_line="import redis.asyncio as aioredis",
     ),
