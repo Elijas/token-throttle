@@ -39,6 +39,13 @@ Notable changes for token-throttle releases. For operator upgrade steps, see
   the test suite and adds no runtime dependency; absolute numbers are
   machine- and Redis-locality-dependent and meant to be read relatively. See
   `benchmarks/README.md`.
+- Adds a weekly scheduled soak/stress workflow (`.github/workflows/soak.yml`,
+  also runnable on demand) that repeats the concurrency stress suites many times
+  back to back, runs the property-based accounting suite, and runs a
+  tightened-timing conformance pass. It exists to catch load- and soak-class
+  regressions (contention and accounting bugs that only appear under sustained,
+  repeated load) that the single-pass PR CI does not exercise. It changes no
+  library behavior.
 
 ## v7.0.1 - 2026-05-22
 
