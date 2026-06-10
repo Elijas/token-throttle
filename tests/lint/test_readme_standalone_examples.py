@@ -200,9 +200,9 @@ _EXPECTED_NON_PYTHON_FENCES = (
         reason="package installation command; lint syntax-checks but does not execute it",
         heading="# token-throttle",
         non_empty_content_lines=(
-            'pip install "token-throttle[redis,tiktoken]>=8.0.6,<8.1.0"   # OpenAI + Redis (recommended)',
-            'pip install "token-throttle[redis]>=8.0.6,<8.1.0"            # Any provider + Redis',
-            'pip install "token-throttle>=8.0.6,<8.1.0"                   # Any provider + in-memory',
+            'pip install "token-throttle[redis,tiktoken]>=8.0.6,<9.0.0"   # OpenAI + Redis (recommended)',
+            'pip install "token-throttle[redis]>=8.0.6,<9.0.0"            # Any provider + Redis',
+            'pip install "token-throttle>=8.0.6,<9.0.0"                   # Any provider + in-memory',
         ),
     ),
     _ExpectedNonPythonFence(
@@ -213,7 +213,7 @@ _EXPECTED_NON_PYTHON_FENCES = (
         reason="package installation command; lint syntax-checks but does not execute it",
         heading="### OpenAI (built-in helpers)",
         non_empty_content_lines=(
-            'pip install "token-throttle[redis,tiktoken]>=8.0.6,<8.1.0" openai',
+            'pip install "token-throttle[redis,tiktoken]>=8.0.6,<9.0.0" openai',
         ),
     ),
     _ExpectedNonPythonFence(
@@ -1474,9 +1474,9 @@ def test_non_python_fence_identity_includes_later_content_lines() -> None:
 def test_shell_like_non_python_identity_ignores_inline_comment_alignment() -> None:
     expected = _EXPECTED_NON_PYTHON_FENCES[0]
     realigned_content_lines = (
-        'pip install "token-throttle[redis,tiktoken]>=8.0.6,<8.1.0" # OpenAI + Redis (recommended)',
-        'pip install "token-throttle[redis]>=8.0.6,<8.1.0" # Any provider + Redis',
-        'pip install "token-throttle>=8.0.6,<8.1.0" # Any provider + in-memory',
+        'pip install "token-throttle[redis,tiktoken]>=8.0.6,<9.0.0" # OpenAI + Redis (recommended)',
+        'pip install "token-throttle[redis]>=8.0.6,<9.0.0" # Any provider + Redis',
+        'pip install "token-throttle>=8.0.6,<9.0.0" # Any provider + in-memory',
     )
     block = _MarkdownFenceBlock(
         document_name=expected.document_name,

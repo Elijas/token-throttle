@@ -46,6 +46,14 @@ Notable changes for token-throttle releases. For operator upgrade steps, see
   regressions (contention and accounting bugs that only appear under sustained,
   repeated load) that the single-pass PR CI does not exercise. It changes no
   library behavior.
+- Widens the recommended pip install version bounds in the README from a
+  next-minor cap to a next-major cap (for example `>=8.0.6,<9.0.0` instead of
+  `>=8.0.6,<8.1.0`), so installs can pick up minor and patch releases within the
+  same major version without re-pinning. This reflects the project's semantic
+  versioning guarantee that no breaking changes ship within a major.
+- Removes a stray empty `__init__.py` from the repository root that was never
+  part of the published `token_throttle` package; it changes no library
+  behavior.
 
 ## v7.0.1 - 2026-05-22
 
