@@ -29,6 +29,31 @@ before upgrading and do not run mixed v1.4.x/v2.0.0 fleets. See
 [`MIGRATION.md`](../MIGRATION.md#migrating-from-v14x-to-v200) for the full
 upgrade procedure.
 
+### If a worker crashes before refunding
+
+There is no crash-recovery path that gives reserved-but-unrefunded capacity
+back early. A reservation that is never refunded — because the worker process
+died, was killed, or lost its network connection before calling
+`refund_capacity()` — behaves exactly like fully-used capacity: it stays
+consumed against the bucket. Capacity is not returned in a burst when the
+crash is detected; it recovers the same way any other consumed capacity does,
+through the bucket's normal linear refill over the quota window.
+
+The TTL knobs (`bucket_ttl_seconds`, `refund_dedup_ttl_seconds`,
+`max_reservation_lifetime_seconds`) govern how long Redis keeps the
+bookkeeping keys that make a reservation *refundable* and how long refund
+idempotency is remembered — they do not govern capacity crediting. Letting a
+TTL expire does not credit capacity back; it only means a late refund for that
+reservation will fail closed (`UnknownReservationError`) instead of being
+applied.
+
+`snapshot_state()["in_flight_reservations"]` is a process-local, in-memory
+count on the limiter instance that issued the reservations. It cannot detect
+reservations orphaned by a crashed process — that process's counter is gone
+with it. Use application-level request tracing or deadline enforcement
+(bound `max_reservation_lifetime_seconds` to a value close to your real
+request timeout) if you need to detect or bound crash-orphaned reservations.
+
 ## Redis topology support
 
 token-throttle supports standalone Redis and Sentinel-aware clients connected
@@ -136,6 +161,92 @@ are to reduce concurrency on that bucket, spread traffic across more model
 families/windows, provision Redis CPU headroom, or raise
 `lock_blocking_timeout_seconds` so attempts wait longer before giving up. The
 memory backends have no Redis lock and never raise `BackendLockContentionError`.
+
+## Application-facing errors
+
+Beyond `BackendLockContentionError` (lock contention, covered above) and
+`TimeoutError` (capacity-wait deadline exceeded, see the
+[README Timeout section](../README.md#timeout)), these are the exceptions an
+application should expect to catch at the acquire/refund call site.
+
+### `DuplicateRefundError`
+
+Despite the name, this is raised in two different places:
+
+- From `refund_capacity()` / `refund_capacity_from_response()`, with
+  `.reason` `"already_refunded"` or `"in_progress"`, when the same
+  reservation is refunded a second time, or refunded concurrently by two
+  callers. The refund-dedup tombstone (or in-progress marker) already
+  prevented a second credit, so **no additional capacity state changed** —
+  the legitimate (or racing) refund already happened. Retrying the same
+  refund call keeps raising; it is not a transient error. Treat it as a
+  signal that your call site refunds the same reservation more than once
+  (for example both a `finally` block and an earlier explicit refund) and
+  fix the call site rather than retry.
+- From `acquire_capacity()` / `record_usage()`, with `.reason`
+  `"duplicate_acquire"`, only if a `reservation_id` is reused across two
+  acquire attempts with different usage or buckets. token-throttle generates
+  a fresh id per reservation, so this should not happen from normal use of
+  the public API; it indicates a reservation object was manually reused or
+  constructed by hand.
+
+`.reservation_id` and `.model_family` identify the reservation for all three
+reasons.
+
+### `UnknownReservationError`
+
+Raised by `refund_capacity()` / `refund_capacity_from_response()` when the
+backend has no record that this reservation was ever acquired: its acquire
+marker already expired (`max_reservation_lifetime_seconds`,
+`bucket_ttl_seconds`, or `refund_dedup_ttl_seconds` elapsed — see
+[If a worker crashes before refunding](#if-a-worker-crashes-before-refunding)
+above), it was issued by a different limiter instance (see
+[`MIGRATION.md`](../MIGRATION.md#migrating-from-v7x-to-v800)), or it is a
+forged or deserialized reservation. This fails closed: **capacity is not
+credited**. Retrying the identical refund keeps failing — there is no
+transient condition to wait out. Refund through the same limiter instance
+that issued the reservation, refund promptly (before its lifetime/TTL window
+elapses), and do not serialize or queue reservations across processes.
+
+### `AcquireRefundFailedError`
+
+Raised only from `acquire_capacity()` / `acquire_capacity_for_request()` (and
+their sync equivalents), never from `refund_capacity()`. It means acquire
+delivery was interrupted after capacity was already reserved (for example by
+cancellation), and token-throttle's own best-effort cleanup refund then also
+failed. Unlike the errors above, **state did change**: real capacity is
+reserved and outstanding, and it was not automatically returned. Recovery
+uses three attributes:
+
+- `.reservation` — the delivered `CapacityReservation`. Refund it yourself
+  (`await limiter.refund_capacity(actual_usage, exc.reservation)`) once your
+  cleanup path can reach the backend again.
+- `.interrupted_by` — the exception that interrupted acquire delivery (for
+  example `asyncio.CancelledError` or a caller timeout), for diagnosing *why*
+  delivery was interrupted.
+- `.refund_error` — the exception raised by the automatic cleanup refund
+  attempt itself (for example a `BackendLockContentionError` or a backend
+  connection error), for diagnosing *why cleanup failed*.
+
+Manually refunding `.reservation` is the correct recovery action. If you do
+nothing, the reservation stays outstanding until it is refunded or its
+`max_reservation_lifetime_seconds` window elapses (see
+[If a worker crashes before refunding](#if-a-worker-crashes-before-refunding)
+above for what "outstanding" means for bucket capacity).
+
+### `CardinalityLimitExceededError`
+
+Raised when a mandatory in-process cap is exceeded — model families, metrics
+per family, model aliases, or in-flight reservations, see
+[docs/configuration.md](configuration.md#per-model-configuration) — or when a
+DTO length cap is exceeded while constructing `Quota`, `CapacityReservation`,
+or `PerModelConfig` directly (surfaced there as a pydantic `ValidationError`
+instead; see [`MIGRATION.md`](../MIGRATION.md#stricter-public-input-validation)).
+Every one of these checks runs before any backend capacity is consumed, so
+**no capacity state changed**. Retrying the identical call keeps failing; it
+is a structural limit, not contention. Raise the relevant constructor cap,
+reduce the cardinality your application generates (fix a `model_family` or
+alias typo, cap distinct metric names), or reduce in-flight concurrency.
 
 ## Performance and capacity planning
 

@@ -83,6 +83,12 @@ asyncio.run(main())
 
 ### OpenAI (built-in helpers)
 
+`create_openai_redis_rate_limiter` (and its sync/memory variants) is a
+convenience adapter over `RateLimiter`: it wires up `OpenAIUsageCounter`, a
+best-effort local token counter, so you don't have to write your own
+`usage_counter` for OpenAI requests. Use the "Any provider" pattern below (or
+a custom `usage_counter`) when you need exact provider-side counts instead.
+
 Install token-throttle's Redis and tokenizer extras plus the OpenAI client:
 
 ```bash
@@ -111,12 +117,21 @@ async def main() -> None:
     request = {
         "model": "gpt-4.1",
         "messages": [{"role": "user", "content": "Hi"}],
+        # Output tokens are reserved only when the request carries an
+        # explicit output budget; without one, output tokens aren't reserved
+        # at all, and refund_capacity_from_response() below emits a
+        # RuntimeWarning and applies a negative refund on every completion.
+        "max_tokens": 512,
     }
 
     reservation = await limiter.acquire_capacity_for_request(**request)
     try:
         response = await client.chat.completions.create(**request)
     except Exception:
+        # Refunding 0 tokens here is an approximation: a client timeout or an
+        # SDK-internal retry can still bill real tokens upstream even though
+        # this process never saw a response; reconcile against provider
+        # billing periodically if that gap matters for your quotas.
         await limiter.refund_capacity(
             reservation=reservation,
             # The OpenAI helper uses OpenAIUsageCounter and the quota metric
@@ -137,9 +152,10 @@ asyncio.run(main())
 `OpenAIUsageCounter` counts text-only OpenAI payloads (`input` or `messages`,
 plus chat/tool/schema/output overhead via `tiktoken`). The plural `inputs` field
 and image/audio/file inputs are unsupported — pass usage manually for those.
-Estimates are best-effort and not reconciled against live billing, so compare
-reserved tokens with actual usage periodically. Full contract:
-[docs/configuration.md](docs/configuration.md#usage-counters).
+Unrecognized model names raise a clear error directing you to pass a custom
+`get_encoding_func`. Estimates are best-effort and not reconciled against live
+billing, so compare reserved tokens with actual usage periodically. Full
+contract: [docs/configuration.md](docs/configuration.md#usage-counters).
 
 ### Any provider (manual usage)
 
@@ -172,9 +188,20 @@ async def main() -> None:
         usage={"requests": 1, "input_tokens": 500, "output_tokens": 4_000},
     )
 
-    actual_usage = await call_your_llm()
-    await limiter.refund_capacity(actual_usage=actual_usage, reservation=reservation)
-    await limiter.aclose()
+    try:
+        actual_usage = await call_your_llm()
+    except Exception:
+        # Refund a stranded reservation on failure so unused capacity isn't
+        # locked out until the quota window refills.
+        await limiter.refund_capacity(
+            actual_usage={"requests": 1, "input_tokens": 0, "output_tokens": 0},
+            reservation=reservation,
+        )
+        raise
+    else:
+        await limiter.refund_capacity(actual_usage=actual_usage, reservation=reservation)
+    finally:
+        await limiter.aclose()
     print("unused 20 input tokens and 2800 output tokens returned to the pool")
 
 
@@ -468,7 +495,7 @@ with SyncRateLimiter(get_config, backend=SyncMemoryBackendBuilder()) as limiter:
 
 - [docs/api.md](docs/api.md) — public constants and type aliases
 - [docs/configuration.md](docs/configuration.md) — per-model caps, unlimited configs, custom usage counters, dynamic limits
-- [docs/operations.md](docs/operations.md) — reservation durability, Redis topology, multi-tenant isolation, capacity planning
+- [docs/operations.md](docs/operations.md) — reservation durability, Redis topology, multi-tenant isolation, capacity planning, application-facing errors
 - [docs/observability.md](docs/observability.md) — logging, lifecycle events, health snapshots, PII surface
 - [docs/custom-backends.md](docs/custom-backends.md) — implement your own backend
 - [MIGRATION.md](MIGRATION.md) — breaking-change upgrade guides
