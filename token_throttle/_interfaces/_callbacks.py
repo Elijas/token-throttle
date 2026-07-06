@@ -257,13 +257,23 @@ def _invoke_sync_callback_checked(callback, **kwargs) -> None:
 
 class _CallbackCriticalCarrierError(Exception):
     """
-    Carry a callback's ``KeyboardInterrupt``/``SystemExit`` out of its task.
+    Carry a callback's ``KeyboardInterrupt``/``SystemExit``/``GeneratorExit`` out
+    of its task.
 
-    A task's step re-raises those two exceptions into the event loop rather than
-    the awaiting frame, which would bypass the limiter's inline critical-exception
-    handling (and any acquire/close cleanup). Wrapping them lets the shielded
-    timeout path surface them through the normal ``await`` chain, matching the
-    sync path, whose helper thread captures every ``BaseException`` into a future.
+    A task's step re-raises ``KeyboardInterrupt``/``SystemExit`` into the event
+    loop rather than the awaiting frame, which would bypass the limiter's inline
+    critical-exception handling (and any acquire/close cleanup). ``GeneratorExit``
+    has a separate hazard: retrieving it from a *different* task re-enters the
+    awaiting coroutine via ``Task.__wakeup`` -> ``coro.throw()``, and per PEP 380,
+    throwing ``GeneratorExit`` into a suspended ``await``/``yield from`` chain is
+    delegated as ``close()`` on the innermost suspended awaitable. If any cleanup
+    handler downstream (e.g. the refund-on-raise context manager) does further
+    real awaiting before the exception is done propagating, Python raises
+    ``RuntimeError: coroutine ignored GeneratorExit`` instead of letting
+    ``GeneratorExit`` through. Wrapping all three in this carrier and re-raising
+    the original via a plain ``raise`` statement in the awaiting frame sidesteps
+    both hazards: the sync path's helper thread captures every ``BaseException``
+    into a future and gets the same treatment there.
     """
 
     def __init__(self, exc: BaseException) -> None:
@@ -274,7 +284,7 @@ class _CallbackCriticalCarrierError(Exception):
 async def _run_timed_callback(callback, callback_kwargs: dict[str, object]) -> None:
     try:
         await callback(**callback_kwargs)
-    except (KeyboardInterrupt, SystemExit) as exc:
+    except (KeyboardInterrupt, SystemExit, GeneratorExit) as exc:
         raise _CallbackCriticalCarrierError(exc) from exc
 
 
