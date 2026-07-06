@@ -4,6 +4,12 @@ Local OpenAI token estimation built on tiktoken and best-effort heuristics.
 This module does not reconcile estimates against live OpenAI billing records.
 Operators should periodically sanity-check reserved tokens against billing,
 especially for new API shapes, tools, schemas, and model families.
+
+Known best-effort blind spot: a Responses ``prompt`` template reference is
+counted only by its client-visible ``variables``. The stored, server-side
+template body those variables expand into is not visible from the client, so
+its tokens are not included; reserved tokens for such requests understate the
+real prompt by the hidden template's size.
 """
 
 from __future__ import annotations
@@ -35,6 +41,15 @@ _REQUEST_CONTEXT_KEYS = (
     "functions",
     "response_format",
     "text",
+    # Chat Predicted Outputs: {"type": "content", "content": str | text-parts}.
+    # The content text is real billed token volume (accepted/rejected
+    # prediction tokens appear in usage), so it contributes to the reserve.
+    # It is prose, not a wire schema, so it stays on the fragment-walk path
+    # (like `instructions`) rather than being JSON-serialized.
+    "prediction",
+    # Responses stored-prompt reference: {"id", "version", "variables"}. Only
+    # `variables` carry client-visible text; see `_count_prompt_variable_tokens`.
+    "prompt",
 )
 # Fields whose values are JSON schemas on the wire (tool/function definitions,
 # structured-output response schemas, and the Responses API's `text.format`
@@ -387,7 +402,13 @@ def _count_request_context_tokens(
         if raw_value is None:
             continue
         invalid_error = f"Unsupported value for request field '{key}'"
-        if key in _JSON_SERIALIZED_CONTEXT_KEYS:
+        if key == "prompt":
+            total += _count_prompt_variable_tokens(
+                encoding,
+                raw_value,
+                invalid_error=invalid_error,
+            )
+        elif key in _JSON_SERIALIZED_CONTEXT_KEYS:
             total += _count_json_serialized_tokens(
                 encoding,
                 raw_value,
@@ -400,6 +421,42 @@ def _count_request_context_tokens(
                 invalid_error=invalid_error,
             )
     return total
+
+
+def _count_prompt_variable_tokens(
+    encoding: Encoding,
+    value: object,
+    *,
+    invalid_error: str,
+) -> int:
+    """
+    Count client-visible text in a Responses ``prompt`` template reference.
+
+    Only ``variables`` carry text the client can see and substitute into the
+    template; ``id`` and ``version`` are opaque references, and the server-side
+    template body they expand into is unknowable here (see the module
+    docstring's best-effort caveat). Variable values reuse the shared
+    content-part counter so non-text parts (images, files) are rejected rather
+    than silently under-counted, exactly as they are inside chat/input content.
+    """
+    if not isinstance(value, dict) or not all(isinstance(key, str) for key in value):
+        raise ValueError(invalid_error)
+    variables = value.get("variables")
+    if variables is None:
+        return 0
+    if not isinstance(variables, dict) or not all(
+        isinstance(name, str) for name in variables
+    ):
+        raise ValueError(invalid_error)
+    return sum(
+        _count_text_fragments(
+            encoding,
+            variable_value,
+            invalid_error=invalid_error,
+            content_part_context=True,
+        )
+        for variable_value in variables.values()
+    )
 
 
 def _count_json_serialized_tokens(
