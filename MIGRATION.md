@@ -16,6 +16,15 @@
   underlying redis error). The aborted operation made no change and is safe to
   retry. See the per-bucket locking section in
   [`docs/operations.md`](docs/operations.md).
+- **Redis acquire/wait with a caller `timeout` no longer times out early under
+  lock contention:** `await_for_capacity` / `wait_for_capacity` called with a
+  `timeout` now retry a contended per-bucket lock until the caller's own
+  deadline instead of raising `TimeoutError` after about
+  `lock_blocking_timeout_seconds` (default 5s) of lock contention. `timeout=0`
+  still fails fast. If the caller's deadline genuinely expires while the lock
+  stays contended, the `TimeoutError` message now names lock contention as the
+  cause instead of reporting misleading capacity fields. See the per-bucket
+  locking section in [`docs/operations.md`](docs/operations.md).
 - **Redis backend builders now enforce a TTL/quota invariant:**
   `RedisBackendBuilder.build()` and `SyncRedisBackendBuilder.build()` raise
   `ValueError` at build time if any configured quota's `per_seconds` window is
@@ -29,6 +38,49 @@
   resolve on its own now raises `ValueError` instead of either a possibly
   wrong guessed encoding or, for names the old table also failed to match, a
   raw `tiktoken.KeyError`.
+- **OpenAI Responses API `text=` structured-output requests reserve more
+  accurate (larger) capacity:** requests that set `text={"format": {...}}` for
+  structured output are now token-counted by JSON-serializing that field, the
+  same way `response_format` / `tools` / `functions` already are, instead of
+  being walked as plain text fragments that dropped the JSON structural
+  tokens. Previously affected requests undercounted usage by roughly 62%.
+- **`UsageQuotas` drops the private `_allow_empty_quotas` constructor escape
+  hatch:** the underscore-prefixed keyword argument is no longer accepted by
+  `UsageQuotas(...)`. An empty `UsageQuotas([])` still raises `ValueError` as
+  before; `UsageQuotas.unlimited()` remains the supported way to build an
+  explicit no-limit quota set.
+- **Async `callback_timeout` no longer risks blocking indefinitely:** a
+  callback that swallows cancellation (including one torn down via
+  `GeneratorExit`, for example an async generator using the limiter that gets
+  closed early) is now abandoned at the `callback_timeout` deadline instead of
+  blocking `acquire_capacity` / `refund_capacity` for its full runtime. The
+  abandoned callback keeps running in the background; its eventual completion
+  or any exception it raises afterward is logged rather than surfaced to the
+  caller. See [`docs/observability.md`](docs/observability.md#callback-timeouts).
+- **Closing a limiter with nothing in flight is quiet again:** `aclose()` /
+  `close()` no longer logs a "reservations still in flight" warning when there
+  are zero in-flight reservations at close time.
+- **Adds `RateLimiter.reserve()` / `SyncRateLimiter.reserve()`:** a context
+  manager over the acquire -> call -> refund cycle that refunds the unused
+  remainder automatically. This is additive; existing `acquire_capacity` /
+  `refund_capacity` call sites need no change. See the README's "Reserve
+  capacity around a call" example.
+- **Two validation error messages changed:** the `ValueError` raised when
+  acquire-time usage exceeds a bucket's max capacity now names the failing
+  quota window (for example "...for the 60s window"); and `set_max_capacity`'s
+  wrong-type validation now reports a dedicated "must be an int or float"
+  message instead of reusing the finite/positive-value message, and the
+  `sleep_interval` builder parameter gained the same wrong-type/finite-value
+  split. Code that pattern-matches these error strings should update its
+  patterns.
+- **Redis server-time forward-jump detection no longer reacts to a lagging
+  local clock:** the Redis backend now detects a genuine Redis server-side
+  clock jump by comparing consecutive `TIME` readings against
+  locally-elapsed monotonic time, instead of comparing the server clock
+  directly against the local wall clock. A lagging local wall clock (an NTP
+  outage, a paused/resumed VM, container clock drift) no longer hard-fails
+  Redis operations; a large server-vs-wall divergence now logs a one-time
+  warning instead of raising.
 
 ### What you must do
 
@@ -41,6 +93,11 @@ should treat `BackendLockContentionError` as a safe-to-retry signal; persistent
 occurrences indicate a hot bucket, so reduce per-bucket concurrency or raise
 `lock_blocking_timeout_seconds`.
 
+Callers who relied on the previous early, spurious `TimeoutError` under lock
+contention (rather than their own configured `timeout`) to bound a wait should
+set a shorter `timeout` explicitly; the deadline you pass is now honored
+precisely instead of capped by `lock_blocking_timeout_seconds`.
+
 Widen `bucket_ttl_seconds` (or shorten the offending quota's `per_seconds`) for
 any Redis backend configuration the new build-time check rejects; the raised
 `ValueError` names the offending metric and window.
@@ -48,6 +105,21 @@ any Redis backend configuration the new build-time check rejects; the raised
 Catch `ValueError` (not `KeyError`) around `OpenAIUsageCounter` /
 `get_encoding()` calls for models that might be unresolvable, and upgrade
 `tiktoken` or pass an explicit `get_encoding_func` for any model it raises on.
+If you track reservation sizing budgets for OpenAI Responses API calls that use
+`text=` structured output, expect slightly larger (more accurate) reservations
+after upgrading.
+
+Replace any `UsageQuotas([], _allow_empty_quotas=True)` construction with
+`UsageQuotas.unlimited()`.
+
+If a callback passed to `RateLimiter` relies on `callback_timeout` blocking the
+caller until the callback finishes, audit it for idempotency: after a timeout,
+the callback keeps running in the background and may complete (with side
+effects) after `acquire_capacity` / `refund_capacity` has already returned.
+
+Update any regex or substring matching against the "exceeds bucket max
+capacity", `set_max_capacity`, or `sleep_interval` validation error text to
+match the new wording.
 
 ## Migrating from v7.x to v8.0.0
 
@@ -542,16 +614,25 @@ factory functions, or explicit `PerModelConfig` construction before upgrading.
 
 ## 6. Redis ACL Requirements
 
-Redis backends require Redis server 6.2 or newer. token-throttle uses `GET`,
-`EXISTS`, `SET`, `DEL`, `EXPIRE`, `PTTL`, `TIME`, and pipeline operations. No
-`KEYS`, `FLUSHDB`, `FLUSHALL`, `CONFIG`, or Pub/Sub commands are issued by the
-library.
+Redis backends require Redis server 6.2 or newer and a connection user that
+can run `GET`, `EXISTS`, `SET`, `DEL`, `EXPIRE`, `PEXPIRE`, `PTTL`, `TIME`,
+`MULTI`, `EXEC`, `DISCARD`, plus Lua scripting (`EVAL`, `EVALSHA`, `SCRIPT
+LOAD`). No `KEYS`, `FLUSHDB`, `FLUSHALL`, `CONFIG`, or Pub/Sub commands are
+issued by the library.
 
-Redis acquire-marker and refund transactions use Lua `EVAL`. Redis lock release
-and extension (via redis-py) also require `EVALSHA` and `SCRIPT LOAD`. These are
-typically covered by the `+@scripting` ACL category. If your managed Redis
-restricts scripting, ensure that category is allowed for the token-throttle
-connection user.
+`PEXPIRE` (called by redis-py's lock extend/reacquire Lua script) and
+`MULTI`/`EXEC`/`DISCARD` (issued by redis-py's transaction pipelines, which
+token-throttle uses for every atomic multi-key acquire/refund write) are easy
+to omit from a hand-written ACL because token-throttle's own code never issues
+them by name. An ACL user provisioned with only `GET`/`EXISTS`/`SET`/`DEL`/
+`EXPIRE`/`PTTL`/`TIME` plus scripting can pass an initial smoke test but fails
+during ordinary multi-quota usage as soon as a lock needs to extend or a
+pipelined transaction is discarded.
+
+Lua scripting access (`EVAL`, `EVALSHA`, `SCRIPT LOAD`) is typically covered by
+the `+@scripting` ACL category. If your managed Redis restricts scripting,
+ensure that category — or the three individual commands — is allowed for the
+token-throttle connection user.
 
 **`SCRIPT FLUSH` operational hazard**: avoid running `SCRIPT FLUSH` on a
 Redis instance shared with token-throttle. It evicts the cached Lua SHA for

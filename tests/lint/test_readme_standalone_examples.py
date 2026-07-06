@@ -110,49 +110,49 @@ class _ExpectedTaskfileReleaseDispatch:
 
 _EXPECTED_MIGRATION_FRAGMENTS = (
     _ExpectedMigrationFragment(
-        start_line=86,
+        start_line=158,
         reason="illustrates unsafe cross-limiter refund with undefined limiters",
         heading="### What changed",
         first_non_empty_code_line="reservation = await limiter_a.acquire_capacity(",
     ),
     _ExpectedMigrationFragment(
-        start_line=96,
+        start_line=168,
         reason="requires a live async limiter and provider call",
         heading="### What changed",
         first_non_empty_code_line="reservation = await limiter.acquire_capacity(",
     ),
     _ExpectedMigrationFragment(
-        start_line=180,
+        start_line=252,
         reason="uses illustrative recovery hook and limiter variables",
         heading="### What changed",
         first_non_empty_code_line="from token_throttle import AcquireRefundFailedError",
     ),
     _ExpectedMigrationFragment(
-        start_line=192,
+        start_line=264,
         reason="uses illustrative recovery hook and limiter variables",
         heading="### What changed",
         first_non_empty_code_line="from token_throttle import AcquireRefundFailedError",
     ),
     _ExpectedMigrationFragment(
-        start_line=240,
+        start_line=312,
         reason="illustrates callback behavior with undefined limiter and reservation",
         heading="### What changed",
         first_non_empty_code_line="async def on_capacity_refunded(**kwargs) -> None:",
     ),
     _ExpectedMigrationFragment(
-        start_line=286,
+        start_line=358,
         reason="requires a caller-provided backend builder",
         heading="### What changed",
         first_non_empty_code_line="from token_throttle import run_conformance_test_for",
     ),
     _ExpectedMigrationFragment(
-        start_line=323,
+        start_line=395,
         reason="uses illustrative model and recovery flow variables",
         heading="### AcquireRefundFailedError base class",
         first_non_empty_code_line="from token_throttle import AcquireRefundFailedError",
     ),
     _ExpectedMigrationFragment(
-        start_line=465,
+        start_line=537,
         reason="requires an operator-provided config mapping",
         heading="## 1. Preflight Config Dictionaries",
         first_non_empty_code_line=(
@@ -160,7 +160,7 @@ _EXPECTED_MIGRATION_FRAGMENTS = (
         ),
     ),
     _ExpectedMigrationFragment(
-        start_line=573,
+        start_line=654,
         reason="requires an operator-supplied Redis client and target deployment prefix",
         heading="## 6a. Clean Up Legacy Redis Bucket Keys",
         first_non_empty_code_line=(
@@ -293,7 +293,7 @@ _EXPECTED_NON_PYTHON_FENCES = (
     ),
     _ExpectedNonPythonFence(
         document_name="MIGRATION.md",
-        start_line=495,
+        start_line=567,
         language="text",
         classification=_NON_PYTHON_CLASSIFICATION_TEXT,
         reason="canonical migration error text, not an executable command",
@@ -304,7 +304,7 @@ _EXPECTED_NON_PYTHON_FENCES = (
     ),
     _ExpectedNonPythonFence(
         document_name="MIGRATION.md",
-        start_line=621,
+        start_line=702,
         language="text",
         classification=_NON_PYTHON_CLASSIFICATION_TEXT,
         reason="documented Redis bucket key shape",
@@ -313,7 +313,7 @@ _EXPECTED_NON_PYTHON_FENCES = (
     ),
     _ExpectedNonPythonFence(
         document_name="MIGRATION.md",
-        start_line=627,
+        start_line=708,
         language="text",
         classification=_NON_PYTHON_CLASSIFICATION_TEXT,
         reason="documented Redis acquire-marker key shape",
@@ -336,7 +336,7 @@ _EXPECTED_TASKFILE_RELEASE_DISPATCHES = (
 _EXPECTED_NON_README_STANDALONE_IDENTITIES = (
     _StandaloneExampleIdentity(
         document_name="MIGRATION.md",
-        start_line=110,
+        start_line=182,
         heading="### What changed",
         first_non_empty_code_line=(
             "from token_throttle import create_logging_callbacks"
@@ -344,19 +344,19 @@ _EXPECTED_NON_README_STANDALONE_IDENTITIES = (
     ),
     _StandaloneExampleIdentity(
         document_name="MIGRATION.md",
-        start_line=119,
+        start_line=191,
         heading="### What changed",
         first_non_empty_code_line="import logging",
     ),
     _StandaloneExampleIdentity(
         document_name="MIGRATION.md",
-        start_line=231,
+        start_line=303,
         heading="### What changed",
         first_non_empty_code_line="async def on_capacity_refunded(**kwargs) -> None:",
     ),
     _StandaloneExampleIdentity(
         document_name="MIGRATION.md",
-        start_line=275,
+        start_line=347,
         heading="### What changed",
         first_non_empty_code_line="from token_throttle import RateLimiterBackend",
     ),
