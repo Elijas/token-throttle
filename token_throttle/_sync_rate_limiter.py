@@ -11,7 +11,7 @@ import uuid
 import warnings
 from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Self
+from typing import Literal, Self
 
 from frozendict import frozendict
 
@@ -2705,7 +2705,7 @@ class _SyncReservationScope:
         )
         return self
 
-    def __exit__(self, exc_type, exc, tb) -> bool:
+    def __exit__(self, exc_type, exc, tb) -> Literal[False]:
         reservation = self.reservation
         assert reservation is not None  # noqa: S101 - set in __enter__ before exit
         if exc is not None:
@@ -2722,6 +2722,7 @@ class _SyncReservationScope:
                 )
             return False
         if self._actual_usage_set:
+            assert self._actual_usage is not None  # noqa: S101 - set with the flag
             self._limiter.refund_capacity(self._actual_usage, reservation)
             return False
         warnings.warn(

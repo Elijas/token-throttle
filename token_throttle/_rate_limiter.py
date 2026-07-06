@@ -11,7 +11,7 @@ import uuid
 import warnings
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Self
+from typing import Literal, Self
 
 from frozendict import frozendict
 
@@ -3060,7 +3060,7 @@ class _ReservationScope:
         )
         return self
 
-    async def __aexit__(self, exc_type, exc, tb) -> bool:
+    async def __aexit__(self, exc_type, exc, tb) -> Literal[False]:
         reservation = self.reservation
         assert reservation is not None  # noqa: S101 - set in __aenter__ before exit
         if exc is not None:
@@ -3077,6 +3077,7 @@ class _ReservationScope:
                 )
             return False
         if self._actual_usage_set:
+            assert self._actual_usage is not None  # noqa: S101 - set with the flag
             await self._limiter.refund_capacity(self._actual_usage, reservation)
             return False
         warnings.warn(
