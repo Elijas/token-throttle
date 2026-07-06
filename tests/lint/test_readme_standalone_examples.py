@@ -207,7 +207,7 @@ _EXPECTED_NON_PYTHON_FENCES = (
     ),
     _ExpectedNonPythonFence(
         document_name="README.md",
-        start_line=95,
+        start_line=93,
         language="bash",
         classification=_NON_PYTHON_CLASSIFICATION_SHELL_SYNTAX,
         reason="package installation command; lint syntax-checks but does not execute it",
@@ -373,14 +373,14 @@ _EXPLICIT_FRAGMENT_START_LINES_BY_DOCUMENT = {
 _EXPECTED_STDOUT_EXAMPLES = (
     _ExpectedStdoutExample(
         document_name="README.md",
-        start_line=32,
+        start_line=34,
         heading="### Memory quickstart (zero-service)",
         first_non_empty_code_line="import asyncio",
         expected_stdout="reserved 1000 tokens, refunded 575 unused tokens",
     ),
     _ExpectedStdoutExample(
         document_name="README.md",
-        start_line=163,
+        start_line=153,
         heading="### Any provider (manual usage)",
         first_non_empty_code_line="import asyncio",
         expected_stdout=(

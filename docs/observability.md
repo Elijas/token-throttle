@@ -39,6 +39,29 @@ from `acquire_capacity_for_request(..., request_id="...")`, `model_family`,
 `model_alias`, `bucket_ids`, `usage`, and `timestamp`. Existing wait, consume,
 refund, and missing-data callbacks keep their original keyword signatures.
 
+Wire the additive `on_lifecycle_event` callback on `RateLimiterCallbacks` to
+receive these events without changing existing callback signatures:
+
+```python
+# (fragment — see the README Any provider example for standalone context)
+from token_throttle import LifecycleEvent, RateLimiterCallbacks
+
+async def on_lifecycle_event(*, event: LifecycleEvent) -> None:
+    metrics.increment(
+        f"token_throttle.{event.event_type}",
+        tags={
+            "model_family": event.model_family,
+            "model_alias": event.model_alias,
+        },
+    )
+
+limiter = RateLimiter(
+    get_config,
+    backend=backend,
+    callbacks=RateLimiterCallbacks(on_lifecycle_event=on_lifecycle_event),
+)
+```
+
 ## Structured errors
 
 For alerting or retry routing, public token-throttle exception classes expose a

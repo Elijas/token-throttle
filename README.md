@@ -20,7 +20,9 @@ pip install "token-throttle[redis]>=9.0.0,<10.0.0"            # Any provider + R
 pip install "token-throttle>=9.0.0,<10.0.0"                   # Any provider + in-memory
 ```
 
-Upgrading from an earlier major version? See [MIGRATION.md](MIGRATION.md) for the v2/v5/v6/v7/v8 contract changes. Public constants and type aliases: [docs/api.md](docs/api.md).
+Requires Python 3.12+. The Redis backend requires Redis 6.2+, standalone or Sentinel only — not Redis Cluster or client-side sharding (see [docs/operations.md](docs/operations.md)).
+
+token-throttle follows strict semver: breaking changes ship only as major versions, and several recent majors were correctness hardening found through fault-injection testing rather than churn. Pin an exact major range (as shown above) and read [MIGRATION.md](MIGRATION.md) before upgrading — see it for the v2/v5/v6/v7/v8/v9 contract changes. Public constants and type aliases: [docs/api.md](docs/api.md).
 
 ## Quickstart
 
@@ -47,27 +49,13 @@ async def main() -> None:
         backend=MemoryBackendBuilder(),
     )
 
-    reservation = await limiter.acquire_capacity(
+    async with limiter.reserve(
+        {"requests": 1, "tokens": 1_000},
         model="demo-model",
-        usage={"requests": 1, "tokens": 1_000},
-    )
-
-    # Replace this block with your provider call.
-    actual_usage = {"requests": 1, "tokens": 425}
-
-    await limiter.refund_capacity(
-        reservation=reservation,
-        actual_usage=actual_usage,
-    )
-
-    second_reservation = await limiter.acquire_capacity(
-        model="demo-model",
-        usage={"requests": 1, "tokens": 250},
-    )
-    await limiter.refund_capacity(
-        reservation=second_reservation,
-        actual_usage={"requests": 1, "tokens": 250},
-    )
+        usage_on_error={"requests": 1, "tokens": 0},
+    ) as handle:
+        # Replace this block with your provider call.
+        handle.set_actual_usage({"requests": 1, "tokens": 425})
 
     state = limiter.snapshot_state()
     assert state["in_flight_reservations"] == 0
@@ -80,6 +68,16 @@ async def main() -> None:
 
 asyncio.run(main())
 ```
+
+`reserve()` (and `SyncRateLimiter.reserve()`) is the recommended wrapper over
+the acquire -> call -> refund cycle. It refunds the unused remainder on exit; on
+an exception it refunds `usage_on_error` (or, if omitted, the full reservation)
+and re-raises. `handle.reservation` exposes the underlying `CapacityReservation`;
+if the block exits without `set_actual_usage` it conservatively refunds the full
+reserved usage and emits a `RuntimeWarning`. Full contract: the `reserve()`
+docstring and [docs/operations.md](docs/operations.md#reservation-lifecycle-and-durability).
+For explicit acquire/refund control, see the [Any-provider quickstart](#any-provider-manual-usage)
+below.
 
 ### OpenAI (built-in helpers)
 
@@ -117,26 +115,16 @@ async def main() -> None:
     request = {
         "model": "gpt-4.1",
         "messages": [{"role": "user", "content": "Hi"}],
-        # Output tokens are reserved only when the request carries an
-        # explicit output budget; without one, output tokens aren't reserved
-        # at all, and refund_capacity_from_response() below emits a
-        # RuntimeWarning and applies a negative refund on every completion.
-        "max_tokens": 512,
+        "max_tokens": 512,  # output budget; without one, output tokens aren't reserved — see docs/configuration.md
     }
 
     reservation = await limiter.acquire_capacity_for_request(**request)
     try:
         response = await client.chat.completions.create(**request)
     except Exception:
-        # Refunding 0 tokens here is an approximation: a client timeout or an
-        # SDK-internal retry can still bill real tokens upstream even though
-        # this process never saw a response; reconcile against provider
-        # billing periodically if that gap matters for your quotas.
         await limiter.refund_capacity(
             reservation=reservation,
-            # The OpenAI helper uses OpenAIUsageCounter and the quota metric
-            # names "requests" and "tokens"; refund with those same keys.
-            actual_usage={"requests": 1, "tokens": 0},
+            actual_usage={"requests": 1, "tokens": 0},  # zero-token refund on error is an approximation; reconcile against billing
         )
         raise
     else:
@@ -158,6 +146,8 @@ billing, so compare reserved tokens with actual usage periodically. Full
 contract: [docs/configuration.md](docs/configuration.md#usage-counters).
 
 ### Any provider (manual usage)
+
+The manual acquire -> refund pattern that `reserve()` wraps, with explicit error handling:
 
 ```python
 import asyncio
@@ -214,6 +204,8 @@ asyncio.run(main())
 
 **The solution:** Reserve before you call, refund after. Actual usage is tracked, not estimated maximums.
 
+Why not a semaphore or a generic rate limiter? Those cap request count or assume a fixed worst-case token cost and never return unused capacity, so you either overprovision (crawl at half throughput) or underprovision (429s). token-throttle reserves your declared maximum, then refunds the delta from actual usage — across multiple simultaneous resources (requests, tokens, input/output), coordinated across processes via Redis.
+
 | Feature | Details |
 |---------|---------|
 | **Multi-resource limits** | Limit requests, tokens, input/output tokens — simultaneously, each with its own quota |
@@ -242,33 +234,6 @@ queue). A `CapacityReservation` is a trusted in-process accounting token, not a
 portable credential: don't pickle it or pass it across trust boundaries.
 Durability semantics, config-change behavior, and the v2.0.0 compatibility break
 are covered in [docs/operations.md](docs/operations.md#reservation-lifecycle-and-durability).
-
-### Reserve capacity around a call
-
-`reserve()` (and the sync `SyncRateLimiter.reserve()`) wraps the acquire ->
-call -> refund cycle in a single context manager, so you don't have to
-hand-roll the try/except/refund/raise dance shown in the quickstarts above:
-
-```python
-# (fragment — needs a live Redis + OPENAI_API_KEY; see the OpenAI quickstart for full setup)
-async with limiter.reserve(
-    {"requests": 1, "tokens": 500},
-    model="gpt-4.1",
-    usage_on_error={"requests": 1, "tokens": 0},
-) as handle:
-    response = await client.chat.completions.create(**request)
-    handle.set_actual_usage(
-        {"requests": 1, "tokens": response.usage.total_tokens}
-    )
-# Unused capacity is refunded on exit; on an exception the reservation is
-# refunded with usage_on_error instead, and the exception re-raises either way.
-```
-
-`handle.reservation` exposes the underlying `CapacityReservation` if you need
-it directly. If the block exits without calling `set_actual_usage`, `reserve`
-conservatively refunds the full reserved usage and emits a `RuntimeWarning`.
-Full contract in the `reserve()` / `SyncRateLimiter.reserve()` docstrings and
-[docs/operations.md](docs/operations.md#reservation-lifecycle-and-durability).
 
 ## Configuration
 
@@ -330,6 +295,10 @@ backend = MemoryBackendBuilder()
 
 Both backends are available in sync (`SyncRedisBackendBuilder`, `SyncMemoryBackendBuilder`) and async variants.
 
+Custom backends implement `RateLimiterBackend` or `SyncRateLimiterBackend`. See
+[docs/custom-backends.md](docs/custom-backends.md) for the protocol contract and
+conformance helper.
+
 Redis builders and Redis OpenAI factories require a non-empty `key_prefix`.
 All Redis keys are scoped as `{key_prefix}:rate_limiting:...`; choose a stable
 deployment-scoped value and share it across workers that intentionally share
@@ -342,12 +311,9 @@ deployment. The prefix and user-controlled key segments cannot contain
 Distributed deployments have operational considerations worth reading before you
 ship: supported Redis topologies (standalone and Sentinel — **not** Redis
 Cluster or client-side sharding), multi-tenant isolation limits, connection-pool
-sizing, key TTLs, and capacity planning for high-RPS fleets. See
+sizing, key TTLs, capacity planning for high-RPS fleets, and how the library
+behaves on Redis data loss and raw connection errors. See
 [docs/operations.md](docs/operations.md).
-
-Custom backends implement `RateLimiterBackend` or `SyncRateLimiterBackend`. See
-[docs/custom-backends.md](docs/custom-backends.md) for the protocol contract and
-conformance helper.
 
 ### Dynamic rate limits
 
@@ -424,28 +390,9 @@ state = limiter.snapshot_state()
 # }
 ```
 
-For request correlation without changing existing callback signatures, use the
-additive lifecycle callback:
-
-```python
-# (fragment — see Any provider example for standalone context)
-from token_throttle import LifecycleEvent, RateLimiterCallbacks
-
-async def on_lifecycle_event(*, event: LifecycleEvent) -> None:
-    metrics.increment(
-        f"token_throttle.{event.event_type}",
-        tags={
-            "model_family": event.model_family,
-            "model_alias": event.model_alias,
-        },
-    )
-
-limiter = RateLimiter(
-    get_config,
-    backend=backend,
-    callbacks=RateLimiterCallbacks(on_lifecycle_event=on_lifecycle_event),
-)
-```
+For request correlation without changing existing callback signatures, wire the
+additive `on_lifecycle_event` callback on `RateLimiterCallbacks`. Full example
+and event-field reference: [docs/observability.md](docs/observability.md#lifecycle-events).
 
 Debug loggers (`token_throttle.acquire` / `.refund` / `.lock`), lifecycle event
 fields, `snapshot_state()` estimate semantics, callback timeouts, and the full
@@ -490,19 +437,10 @@ finally:
 
 ## Concurrency Model
 
-Create one limiter per process and, for the async API, one limiter per event
-loop. `RateLimiter` and `SyncRateLimiter` own in-process locks, lifecycle
-state, and backend builders; they are not pickleable and should be constructed
-inside each worker process after `fork()` or `spawn()`. By default they check
-process affinity on every public method and raise if a limiter is reused in a
-different PID. Pass `pid_check=False` only when you deliberately accept the
-unsupported risk of divergent in-memory state.
-
-Use `RateLimiter` from async code and `SyncRateLimiter` from synchronous code.
-Calling `SyncRateLimiter.acquire_capacity()` while an event loop is running
-blocks that loop; token-throttle emits a `RuntimeWarning` once per process.
-
-Both limiter types can own their close lifecycle through context managers:
+Create one limiter per process and, for the async API, one per event loop. Use
+`RateLimiter` from async code and `SyncRateLimiter` from sync code; both are not
+pickleable and must be constructed inside each worker after `fork()`/`spawn()`.
+Both support context-manager close:
 
 ```python
 # (fragment — see Memory quickstart for standalone context)
@@ -511,18 +449,15 @@ async with RateLimiter(get_config, backend=MemoryBackendBuilder()) as limiter:
     await limiter.refund_capacity({"requests": 1, "tokens": 320}, reservation)
 ```
 
-```python
-# (fragment — see Sync API example for standalone context)
-with SyncRateLimiter(get_config, backend=SyncMemoryBackendBuilder()) as limiter:
-    reservation = limiter.acquire_capacity({"requests": 1, "tokens": 500}, model="gpt-4.1")
-    limiter.refund_capacity({"requests": 1, "tokens": 320}, reservation)
-```
+Process-affinity (`pid_check`) semantics, fork/spawn requirements including the
+`redis_client`, the blocking-event-loop warning, and graceful-shutdown draining
+are covered in [docs/operations.md](docs/operations.md#concurrency-model).
 
 ## Documentation
 
 - [docs/api.md](docs/api.md) — public constants and type aliases
 - [docs/configuration.md](docs/configuration.md) — per-model caps, unlimited configs, custom usage counters, dynamic limits
-- [docs/operations.md](docs/operations.md) — reservation durability, Redis topology, multi-tenant isolation, capacity planning, application-facing errors
+- [docs/operations.md](docs/operations.md) — reservation durability, concurrency model, Redis topology, multi-tenant isolation, capacity planning, application-facing errors
 - [docs/observability.md](docs/observability.md) — logging, lifecycle events, health snapshots, PII surface
 - [docs/custom-backends.md](docs/custom-backends.md) — implement your own backend
 - [MIGRATION.md](MIGRATION.md) — breaking-change upgrade guides

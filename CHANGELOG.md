@@ -5,8 +5,7 @@ Notable changes for token-throttle releases. For operator upgrade steps, see
 
 ## Unreleased
 
-These changes are on `main` and not yet in a tagged release. The lock-contention
-change below is breaking, so the next release is expected to be a major version.
+## v9.0.0 - 2026-07-06
 
 - **Breaking:** adds the public `BackendLockContentionError` exception and stops
   leaking raw `redis.exceptions.LockError`. Redis per-bucket lock contention now

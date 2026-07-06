@@ -1,6 +1,6 @@
 # Migration Guide
 
-## Migrating from v8.x to v9.0.0 - Unreleased
+## Migrating from v8.x to v9.0.0 - 2026-07-06
 
 ### What changed
 
