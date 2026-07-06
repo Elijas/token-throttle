@@ -133,7 +133,7 @@ DEFAULT_LOCK_BLOCKING_TIMEOUT_SECONDS = 5.0
 DEFAULT_LOCK_SLEEP_SECONDS = 0.05
 LOCK_CANCEL_RELEASE_TIMEOUT_SECONDS = 0.25
 LOCK_CANCEL_REFUND_TIMEOUT_SECONDS = 1.0
-# How often a no-timeout waiter re-emits the "still contending for the lock"
+# How often a waiter re-emits the "still contending for the lock"
 # warning while it keeps retrying. Mirrors the backward-clock warning throttle
 # in _capacity.py: warn on the first occurrence, then suppress for an interval.
 _LOCK_CONTENTION_WARNING_INTERVAL_SECONDS = 60.0
@@ -344,12 +344,12 @@ _lock_contention_last_warning_at: float | None = None
 
 def _warn_lock_contention_retry(exc: BaseException) -> None:
     """
-    Emit a throttled warning that a no-timeout waiter is retrying lock acquisition.
+    Emit a throttled warning that a waiter is retrying lock acquisition.
 
-    ``await_for_capacity`` / ``wait_for_capacity`` with no caller timeout treat
-    lock contention as "wait as long as it takes" and silently retry. We surface
-    a periodic warning so operators can still see that a bucket is hot. Mirrors
-    the backward-clock warning throttle in ``_capacity.py``.
+    ``await_for_capacity`` / ``wait_for_capacity`` with no caller timeout or a
+    deadline treat lock contention as "wait as long as needed" and silently
+    retry. We surface a periodic warning so operators can still see that a bucket
+    is hot. Mirrors the backward-clock warning throttle in ``_capacity.py``.
     """
     global _lock_contention_warned, _lock_contention_last_warning_at  # noqa: PLW0603
     now = time.monotonic()
@@ -364,7 +364,7 @@ def _warn_lock_contention_retry(exc: BaseException) -> None:
     _lock_contention_warned = True
     _lock_contention_last_warning_at = now
     _lock_logger.warning(
-        "Per-bucket Redis lock is under contention; the no-timeout waiter could "
+        "Per-bucket Redis lock is under contention; a waiter could "
         "not acquire it within lock_blocking_timeout_seconds and is retrying. "
         "Cause: %s. Further lock-contention warnings suppressed for %.0fs.",
         exc,
