@@ -37,11 +37,14 @@ _REQUEST_CONTEXT_KEYS = (
     "text",
 )
 # Fields whose values are JSON schemas on the wire (tool/function definitions,
-# structured-output response schemas). Counting these via a recursive walk over
+# structured-output response schemas, and the Responses API's `text.format`
+# structured-output config). Counting these via a recursive walk over
 # keys+values misses the JSON structural tokens ({, }, [, ], :, ",", whitespace)
 # which can be the majority of the wire-format cost. Serialize with json.dumps
 # and encode the full string so the counter matches what the API actually sees.
-_JSON_SERIALIZED_CONTEXT_KEYS = frozenset({"tools", "functions", "response_format"})
+_JSON_SERIALIZED_CONTEXT_KEYS = frozenset(
+    {"tools", "functions", "response_format", "text"}
+)
 _UNSUPPORTED_CONTENT_PART_TYPES = frozenset(
     {
         "input_audio",
@@ -245,10 +248,16 @@ def get_encoding(model_name: str) -> Encoding:
     """
     Return the tiktoken encoding used for an OpenAI model name.
 
-    Strips an ``openai/`` provider prefix, asks tiktoken for an exact model
-    match, then falls back to known OpenAI model-family encodings before trying
-    tiktoken again. Raises ``ImportError`` with the package extra hint when
-    tiktoken is not installed.
+    Strips an ``openai/`` provider prefix and asks tiktoken for the model's
+    encoding. Raises ``ImportError`` with the package extra hint when tiktoken
+    is not installed, or a ``ValueError`` with actionable guidance when the
+    installed tiktoken does not know the model.
+
+    There is intentionally no hardcoded model-family fallback table here: such
+    tables silently go stale as OpenAI ships new model families, converting
+    unknown models into confidently wrong token counts instead of a visible
+    failure. Resolution is delegated entirely to tiktoken, which is updated
+    for new models over time.
     """
     try:
         import tiktoken
@@ -261,32 +270,14 @@ def get_encoding(model_name: str) -> Encoding:
     model_name = model_name.removeprefix("openai/")
     try:
         return tiktoken.encoding_for_model(model_name)
-    except KeyError:
-        pass
-
-    substring_to_encoding = {
-        "gpt-4o-mini": "o200k_base",
-        "gpt-4o": "o200k_base",
-        "gpt-4-turbo": "cl100k_base",
-        "gpt-4": "cl100k_base",
-        "gpt-3.5-turbo": "cl100k_base",
-        "text-embedding-ada-002": "cl100k_base",
-        "text-embedding-3-small": "cl100k_base",
-        "text-embedding-3-large": "cl100k_base",
-        "text-davinci-002": "p50k_base",
-        "text-davinci-003": "p50k_base",
-        "davinci": "r50k_base",
-        "codex": "p50k_base",
-    }
-    for model_name_substring, encoding_name in substring_to_encoding.items():
-        if model_name_substring == model_name:
-            return tiktoken.get_encoding(encoding_name)
-    for model_name_substring, encoding_name in sorted(
-        substring_to_encoding.items(), key=lambda item: len(item[0]), reverse=True
-    ):
-        if model_name_substring in model_name:
-            return tiktoken.get_encoding(encoding_name)
-    return tiktoken.encoding_for_model(model_name)
+    except KeyError as exc:
+        raise ValueError(
+            "token-throttle could not determine the tiktoken encoding for "
+            f"model {model_name!r}. This usually means the installed "
+            "tiktoken version predates the model; try upgrading it "
+            "(`pip install -U tiktoken`) if this is a newer model, or pass "
+            "an explicit get_encoding_func to OpenAIUsageCounter."
+        ) from exc
 
 
 def count_structured_input_tokens(
