@@ -35,6 +35,12 @@ change below is breaking, so the next release is expected to be a major version.
   token counting must catch `ValueError` instead; upgrade `tiktoken` or pass an
   explicit `get_encoding_func` to `OpenAIUsageCounter` for models it does not
   yet recognize. See [`MIGRATION.md`](MIGRATION.md).
+- **Breaking:** `UsageQuotas` no longer accepts the private
+  `_allow_empty_quotas` constructor keyword; passing it now raises `TypeError`
+  (unknown keyword argument) instead of silently building an empty quota set.
+  `UsageQuotas([])` still raises the same `ValueError` pointing you to
+  `UsageQuotas.unlimited()`, which remains the supported way to build an
+  explicit no-limit quota set. See [`MIGRATION.md`](MIGRATION.md).
 - Fixes Redis `await_for_capacity` / `wait_for_capacity` with a caller
   `timeout`: lock contention now retries acquisition until the caller's
   deadline instead of raising `TimeoutError` after
@@ -86,7 +92,12 @@ change below is breaking, so the next release is expected to be a major version.
   normal exit (warning and conservatively refunding the full reserved usage if
   `set_actual_usage` was never called), and on an exception refunds with an
   optional `usage_on_error` (or conservatively) before re-raising the original
-  exception. See the README's "Reserve capacity around a call" example.
+  exception. If a non-critical `usage_on_error` refund itself fails (for
+  example its metric keys do not match the reservation), the reservation
+  still falls back to the conservative refund instead of leaking as
+  in-flight; the failure is logged, and the caller's original exception
+  still propagates. See the README's "Reserve capacity around a call"
+  example.
 - Fixes `OpenAIUsageCounter` undercounting Responses API requests that use
   `text={"format": {...}}` for structured output: that config is now counted
   by JSON-serializing it like `response_format`/`tools`/`functions`, instead of
@@ -95,6 +106,12 @@ change below is breaking, so the next release is expected to be a major version.
 - Adds a weekly `tokenizer-drift` CI canary (no API key required) that checks
   the OpenAI token counter against the latest unpinned `openai`/`tiktoken`
   releases for newly-unresolvable models or untriaged request parameters.
+- Fixes the Redis ACL command list in [`MIGRATION.md`](MIGRATION.md) and
+  [`docs/operations.md`](docs/operations.md): it was missing `PEXPIRE` (used
+  by redis-py's lock extend/reacquire script) and `MULTI` / `EXEC` /
+  `DISCARD` (used by redis-py's transaction pipelines), so a user provisioned
+  strictly per the old list could pass an initial smoke test but fail under
+  ordinary multi-quota usage.
 - Expands documentation coverage: the Redis ACL command list in
   [`MIGRATION.md`](MIGRATION.md) now includes `PTTL`; its validation-error
   guidance more precisely distinguishes pydantic `ValidationError` from
