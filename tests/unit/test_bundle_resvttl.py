@@ -208,3 +208,29 @@ def test_n09_sync_close_logs_outstanding_reservations_and_blocks_use(
     )
     with pytest.raises(RuntimeError, match="closed"):
         limiter.acquire_capacity({"tokens": 1}, "model")
+
+
+async def test_async_close_no_warning_on_clean_shutdown(
+    caplog: pytest.LogCaptureFixture,
+):
+    limiter = RateLimiter(_limited_config(), backend=MemoryBackendBuilder())
+    reservation = await limiter.acquire_capacity({"tokens": 10}, "model")
+    await limiter.refund_capacity({"tokens": 0}, reservation)
+
+    with caplog.at_level(logging.WARNING, logger="token_throttle"):
+        await limiter.aclose()
+
+    assert "limiter closed" not in caplog.text
+
+
+def test_sync_close_no_warning_on_clean_shutdown(
+    caplog: pytest.LogCaptureFixture,
+):
+    limiter = SyncRateLimiter(_limited_config(), backend=SyncMemoryBackendBuilder())
+    reservation = limiter.acquire_capacity({"tokens": 10}, "model")
+    limiter.refund_capacity({"tokens": 0}, reservation)
+
+    with caplog.at_level(logging.WARNING, logger="token_throttle"):
+        limiter.close()
+
+    assert "limiter closed" not in caplog.text
