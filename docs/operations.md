@@ -54,6 +54,65 @@ with it. Use application-level request tracing or deadline enforcement
 (bound `max_reservation_lifetime_seconds` to a value close to your real
 request timeout) if you need to detect or bound crash-orphaned reservations.
 
+### If Redis loses bucket state (restart, FLUSHALL, eviction)
+
+Each bucket's state lives in two Redis keys. If exactly one of them is missing,
+token-throttle treats the bucket as corrupt and drains it to zero — it fails
+**closed**, and the `on_missing_consumption_data` callback reports the reason
+`"partial_state_drained"`. But if **both** keys are missing, token-throttle
+cannot distinguish a model family it has simply never seen from a bucket whose
+state was lost, so it resets the bucket to full capacity — it fails **open**,
+with the reason `"fresh_start"`.
+
+The practical consequence is the inverse of the fail-closed behavior described
+elsewhere in this guide: a Redis restart without RDB/AOF persistence, a
+`FLUSHALL`, or an eviction wave that drops both keys of a bucket silently resets
+the affected quotas to full. If that reset is unacceptable, run Redis with
+persistence and a `maxmemory-policy` that protects bucket keys. Monitor
+`on_missing_consumption_data`: a single `"fresh_start"` is expected the first
+time a model family is used, but a burst of `"fresh_start"` reasons across many
+already-active model families at once is the signal that bucket-state loss just
+reset live quotas.
+
+## Concurrency model
+
+Create one limiter per process and, for the async API, one limiter per event
+loop. `RateLimiter` and `SyncRateLimiter` own in-process locks, lifecycle
+state, and backend builders; they are not pickleable and should be constructed
+inside each worker process after `fork()` or `spawn()`. For distributed
+deployments construct the `redis_client` (with its connection pool) the same
+way — build it after the fork/spawn point in each child, never once in a
+parent/preload process and shared into children. By default the limiters check
+process affinity on every public method and raise if a limiter is reused in a
+different PID. Pass `pid_check=False` only when you deliberately accept the
+unsupported risk of divergent in-memory state.
+
+Use `RateLimiter` from async code and `SyncRateLimiter` from synchronous code.
+Calling `SyncRateLimiter.acquire_capacity()` while an event loop is running
+blocks that loop; token-throttle emits a `RuntimeWarning` once per process.
+
+Both limiter types can own their close lifecycle through context managers:
+
+```python
+# (fragment — see the README Memory quickstart for standalone context)
+async with RateLimiter(get_config, backend=MemoryBackendBuilder()) as limiter:
+    reservation = await limiter.acquire_capacity({"requests": 1, "tokens": 500}, model="gpt-4.1")
+    await limiter.refund_capacity({"requests": 1, "tokens": 320}, reservation)
+```
+
+```python
+# (fragment — see the README Sync API example for standalone context)
+with SyncRateLimiter(get_config, backend=SyncMemoryBackendBuilder()) as limiter:
+    reservation = limiter.acquire_capacity({"requests": 1, "tokens": 500}, model="gpt-4.1")
+    limiter.refund_capacity({"requests": 1, "tokens": 320}, reservation)
+```
+
+`close()` / `aclose()` drain pending acquires and in-flight refunds before
+releasing backend resources, bounded by `close_drain_timeout_seconds` (default
+5.0s). Size your process's shutdown grace period (for example Kubernetes
+`terminationGracePeriodSeconds`) at or above this value so a rolling deploy does
+not cut off reservations mid-refund.
+
 ## Redis topology support
 
 token-throttle supports standalone Redis and Sentinel-aware clients connected
@@ -171,8 +230,11 @@ memory backends have no Redis lock and never raise `BackendLockContentionError`.
 
 Beyond `BackendLockContentionError` (lock contention, covered above) and
 `TimeoutError` (capacity-wait deadline exceeded, see the
-[README Timeout section](../README.md#timeout)), these are the exceptions an
-application should expect to catch at the acquire/refund call site.
+[README Timeout section](../README.md#timeout)), these are the
+token-throttle-specific exceptions an application should expect at the
+acquire/refund call site. This is not an exhaustive list of everything a call
+can raise — raw backend errors can surface too (see
+[Raw Redis connection errors](#raw-redis-connection-errors) below).
 
 ### `DuplicateRefundError`
 
@@ -252,6 +314,18 @@ Every one of these checks runs before any backend capacity is consumed, so
 is a structural limit, not contention. Raise the relevant constructor cap,
 reduce the cardinality your application generates (fix a `model_family` or
 alias typo, cap distinct metric names), or reduce in-flight concurrency.
+
+### Raw Redis connection errors
+
+token-throttle does not wrap or retry genuine Redis connectivity failures.
+`acquire_capacity()`, `refund_capacity()`, `consume_capacity()`, and
+`set_max_capacity()` (and their sync equivalents) can raise
+`redis.exceptions.ConnectionError`, `redis.exceptions.TimeoutError`, or the base
+`redis.exceptions.RedisError` directly during a Redis outage; these are not
+translated into token-throttle exceptions. Callers building retry or
+circuit-breaker logic should catch `redis.exceptions.RedisError` alongside the
+token-throttle exceptions above and choose their own fail-open or fail-closed
+policy for the outage.
 
 ## Performance and capacity planning
 
