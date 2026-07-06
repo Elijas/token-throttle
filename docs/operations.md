@@ -84,7 +84,10 @@ Redis bucket state expires by default after 7 days of inactivity. Configure
 `bucket_ttl_seconds` on Redis builders or Redis OpenAI factories to choose a
 different positive TTL. The TTL is refreshed whenever bucket state is read or
 written; Redis schema-version registry keys are intentionally long-lived and do
-not expire.
+not expire. `bucket_ttl_seconds` must be at least as long as your longest
+configured quota window (`per_seconds`); backend build time rejects
+configurations where it is shorter, since an idle gap longer than the TTL
+would silently reset a quota that has not actually refilled.
 
 Redis refunds also write a cross-process idempotency key:
 `{key_prefix}:rate_limiting:refund_dedup:{reservation_id}`. The TTL defaults to
