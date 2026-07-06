@@ -185,6 +185,28 @@ async def test_sync_acquire_inside_event_loop_warns_once_per_process() -> None:
     assert len(matching) == 1
 
 
+async def test_sync_acquire_capacity_for_request_inside_event_loop_warns() -> None:
+    sync_rate_limiter_module._sync_in_async_warning_pids.clear()
+    config = PerModelConfig(
+        quotas=UsageQuotas([Quota(metric="tokens", limit=100.0, per_seconds=60)]),
+        model_family=MODEL_FAMILY,
+        usage_counter=lambda **_kwargs: {"tokens": 1},
+    )
+    limiter = SyncRateLimiter(config, backend=SyncMemoryBackendBuilder())
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        limiter.acquire_capacity_for_request(model=MODEL)
+
+    matching = [
+        warning
+        for warning in caught
+        if issubclass(warning.category, RuntimeWarning)
+        and "SyncRateLimiter from inside an event loop" in str(warning.message)
+    ]
+    assert len(matching) == 1
+
+
 def test_sync_pid_guard_triggers_in_thread_with_mutated_pid() -> None:
     limiter = SyncRateLimiter(_config(), backend=SyncMemoryBackendBuilder())
     limiter._pid = -1

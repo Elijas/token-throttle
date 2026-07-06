@@ -674,7 +674,7 @@ class SyncRateLimiter:
         self._pid = os.getpid()
         self._lock = threading.Lock()
         self._lifecycle_lock = threading.Lock()
-        self._validation_lock = threading.Lock()
+        self._validation_lock = threading.RLock()
         callback_timeout = validate_timeout(callback_timeout)
         self._callbacks = callbacks
         self._backend_callbacks = with_sync_callback_timeout(
@@ -1269,6 +1269,7 @@ class SyncRateLimiter:
         configured quotas.
         """
         self._check_public_entry()
+        self._warn_if_running_in_event_loop()
         self._raise_if_closed()
         timeout = validate_timeout(timeout)
         validated_extra_usage = validate_extra_usage(extra_usage)
@@ -2337,6 +2338,8 @@ class SyncRateLimiter:
         # cache happen inside this method, under _validation_lock, so that
         # validate + register is atomic w.r.t. concurrent threads. A separate
         # lock is used (not self._lock) to avoid deadlock with _get_backend.
+        # _validation_lock is an RLock: the user's config_getter runs while the
+        # lock is held (see below), and same-thread re-entry must not deadlock.
         #
         # Steady-state fast path: the cache check runs lock-free. Only the
         # first acquire of a new model (or a signature change) takes the lock.
@@ -2378,9 +2381,10 @@ class SyncRateLimiter:
                 representative = self._model_family_to_model_name.get(model_family)
                 if representative is not None and representative != model:
                     # config_getter runs while _validation_lock is held. If it calls
-                    # back into this limiter (e.g., acquire_capacity), that path also
-                    # calls _validate_shared_model_family_config which tries to re-acquire
-                    # _validation_lock → self-deadlock (threading.Lock is not reentrant).
+                    # back into this limiter (e.g., clear_unused_model_families), that
+                    # path also acquires _validation_lock; since it's an RLock, the
+                    # same thread re-enters without deadlocking (matches the async
+                    # twin's no-await atomicity in _rate_limiter.py).
                     representative_config = self._config_getter(representative)
                     representative_family = self._validated_model_family(
                         representative,
