@@ -16,6 +16,19 @@
   underlying redis error). The aborted operation made no change and is safe to
   retry. See the per-bucket locking section in
   [`docs/operations.md`](docs/operations.md).
+- **Redis backend builders now enforce a TTL/quota invariant:**
+  `RedisBackendBuilder.build()` and `SyncRedisBackendBuilder.build()` raise
+  `ValueError` at build time if any configured quota's `per_seconds` window is
+  longer than `bucket_ttl_seconds`. That combination previously built without
+  error, but Redis silently expired the idle bucket-state keys before the
+  window elapsed, resetting a drained long-window quota back to full capacity.
+  See the key-TTL guidance in [`docs/operations.md`](docs/operations.md).
+- **`get_encoding()` no longer guesses tokenizers for unresolvable models:**
+  `OpenAIUsageCounter` / `get_encoding()` dropped their hardcoded
+  model-family fallback table. A model name the installed `tiktoken` cannot
+  resolve on its own now raises `ValueError` instead of either a possibly
+  wrong guessed encoding or, for names the old table also failed to match, a
+  raw `tiktoken.KeyError`.
 
 ### What you must do
 
@@ -27,6 +40,14 @@ need no change — those calls now absorb contention and keep waiting. Callers o
 should treat `BackendLockContentionError` as a safe-to-retry signal; persistent
 occurrences indicate a hot bucket, so reduce per-bucket concurrency or raise
 `lock_blocking_timeout_seconds`.
+
+Widen `bucket_ttl_seconds` (or shorten the offending quota's `per_seconds`) for
+any Redis backend configuration the new build-time check rejects; the raised
+`ValueError` names the offending metric and window.
+
+Catch `ValueError` (not `KeyError`) around `OpenAIUsageCounter` /
+`get_encoding()` calls for models that might be unresolvable, and upgrade
+`tiktoken` or pass an explicit `get_encoding_func` for any model it raises on.
 
 ## Migrating from v7.x to v8.0.0
 

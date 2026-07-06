@@ -18,6 +18,94 @@ change below is breaking, so the next release is expected to be a major version.
   lock loss. Handlers that caught `redis.exceptions.LockError` must catch
   `BackendLockContentionError` instead; see [`MIGRATION.md`](MIGRATION.md) and
   the per-bucket locking section in [`docs/operations.md`](docs/operations.md).
+- **Breaking:** `RedisBackendBuilder.build()` / `SyncRedisBackendBuilder.build()`
+  now raise `ValueError` at build time when any configured quota's
+  `per_seconds` window is longer than `bucket_ttl_seconds`. That combination
+  previously built without error but silently reset a drained long-window
+  quota back to full capacity once an idle gap outlived the TTL. Widen
+  `bucket_ttl_seconds`, or shorten the offending quota's `per_seconds`, for any
+  configuration the check now rejects; see [`MIGRATION.md`](MIGRATION.md) and
+  the key-TTL guidance in [`docs/operations.md`](docs/operations.md).
+- **Breaking:** `OpenAIUsageCounter` / `get_encoding` no longer guess a
+  tokenizer from a hardcoded model-family fallback table for models the
+  installed `tiktoken` cannot resolve on its own (for example a very new model
+  release). They now raise a `ValueError` with upgrade/workaround guidance
+  instead of either a possibly-wrong guessed encoding or a raw `KeyError`
+  escaping from `tiktoken`. Code that specifically caught `KeyError` around
+  token counting must catch `ValueError` instead; upgrade `tiktoken` or pass an
+  explicit `get_encoding_func` to `OpenAIUsageCounter` for models it does not
+  yet recognize. See [`MIGRATION.md`](MIGRATION.md).
+- Fixes Redis `await_for_capacity` / `wait_for_capacity` with a caller
+  `timeout`: lock contention now retries acquisition until the caller's
+  deadline instead of raising `TimeoutError` after
+  `lock_blocking_timeout_seconds` (default 5s). `timeout=0` still fails fast,
+  and the timeout message now names lock contention as the cause instead of
+  misleading capacity fields. See the per-bucket locking section in
+  [`docs/operations.md`](docs/operations.md).
+- Fixes async `callback_timeout` so it returns at the deadline even when a
+  callback swallows cancellation, including when it is torn down via
+  `GeneratorExit` (for example an async generator that uses the limiter being
+  closed early). Previously such a callback could block `acquire_capacity` /
+  `refund_capacity` for its full runtime and, on a swallowed cancellation,
+  without ever logging the documented "callback exceeded timeout" warning; the
+  async path now abandons the callback the same way the synchronous path
+  already does, logging any error the callback raises afterward. See
+  [docs/observability.md](docs/observability.md#callback-timeouts).
+- Fixes a `SyncRateLimiter` deadlock when a `PerModelConfigGetter` calls back
+  into the limiter (for example `clear_unused_model_families`) while shared
+  model-family validation is in progress; the internal validation lock is now
+  reentrant. `acquire_capacity_for_request` also now emits the same
+  `RuntimeWarning` as `acquire_capacity` when called from inside a running
+  event loop.
+- Fixes a spurious shutdown warning: closing a limiter with zero in-flight
+  reservations no longer logs a "reservations still outstanding" warning.
+- Fixes the Redis backend hard-failing every rate-limit operation whenever the
+  host's local clock lags behind the Redis server clock (for example an NTP
+  outage, a paused/resumed VM, or container clock drift). Refill math already
+  uses Redis server time exclusively, so a lagging local clock is harmless to
+  correctness; the library now detects a genuine server-side clock jump by
+  comparing consecutive Redis `TIME` readings against locally-elapsed
+  monotonic time instead of the local wall clock, and raises only on a real
+  forward jump between readings (the realistic trigger is a Sentinel/managed
+  failover to a clock-skewed primary). A large divergence between the Redis
+  server clock and the local wall clock now logs a one-time warning about
+  possible NTP trouble instead of raising.
+- Fixes two error messages: the `ValueError` raised when usage exceeds a
+  bucket's max capacity during acquire now names the failing quota window
+  (for example "for the 60s window"), disambiguating cases where two windows
+  on the same metric share a limit value; and `set_max_capacity`'s validation
+  now reports a dedicated "must be an int or float" message for wrong-typed
+  inputs instead of misleadingly reusing the finite/positive-value message.
+- Fixes cancellation-path capacity refunds that fail: they now log a warning
+  identifying the affected reservation instead of failing silently; the
+  original cancellation error still propagates and the reserved capacity
+  still recovers through normal refill.
+- Adds `RateLimiter.reserve()` / `SyncRateLimiter.reserve()`: a context
+  manager over the acquire -> call -> refund cycle. It yields a handle with
+  `.reservation` and `.set_actual_usage()`, refunds the unused remainder on
+  normal exit (warning and conservatively refunding the full reserved usage if
+  `set_actual_usage` was never called), and on an exception refunds with an
+  optional `usage_on_error` (or conservatively) before re-raising the original
+  exception. See the README's "Reserve capacity around a call" example.
+- Fixes `OpenAIUsageCounter` undercounting Responses API requests that use
+  `text={"format": {...}}` for structured output: that config is now counted
+  by JSON-serializing it like `response_format`/`tools`/`functions`, instead of
+  being walked as plain text fragments that dropped the JSON structural
+  tokens (previously undercounting affected requests by roughly 62%).
+- Adds a weekly `tokenizer-drift` CI canary (no API key required) that checks
+  the OpenAI token counter against the latest unpinned `openai`/`tiktoken`
+  releases for newly-unresolvable models or untriaged request parameters.
+- Expands documentation coverage: the Redis ACL command list in
+  [`MIGRATION.md`](MIGRATION.md) now includes `PTTL`; its validation-error
+  guidance more precisely distinguishes pydantic `ValidationError` from
+  `CardinalityLimitExceededError`; the README's OpenAI example sets an
+  explicit output-token budget and notes the zero-token refund on error as an
+  approximation; [`docs/configuration.md`](docs/configuration.md) gains a
+  "Choosing reservation sizes" subsection; and
+  [`docs/operations.md`](docs/operations.md) gains an "Application-facing
+  errors" reference section covering `DuplicateRefundError`,
+  `UnknownReservationError`, `AcquireRefundFailedError`, and
+  `CardinalityLimitExceededError`.
 - Adds a test-suite safety gate that refuses to run when `--redis-url` points at
   a non-empty Redis database. The suite flushes that database around every test,
   so it now aborts with an actionable message instead of silently wiping data;

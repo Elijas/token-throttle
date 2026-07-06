@@ -243,6 +243,33 @@ portable credential: don't pickle it or pass it across trust boundaries.
 Durability semantics, config-change behavior, and the v2.0.0 compatibility break
 are covered in [docs/operations.md](docs/operations.md#reservation-lifecycle-and-durability).
 
+### Reserve capacity around a call
+
+`reserve()` (and the sync `SyncRateLimiter.reserve()`) wraps the acquire ->
+call -> refund cycle in a single context manager, so you don't have to
+hand-roll the try/except/refund/raise dance shown in the quickstarts above:
+
+```python
+# (fragment — needs a live Redis + OPENAI_API_KEY; see the OpenAI quickstart for full setup)
+async with limiter.reserve(
+    {"requests": 1, "tokens": 500},
+    model="gpt-4.1",
+    usage_on_error={"requests": 1, "tokens": 0},
+) as handle:
+    response = await client.chat.completions.create(**request)
+    handle.set_actual_usage(
+        {"requests": 1, "tokens": response.usage.total_tokens}
+    )
+# Unused capacity is refunded on exit; on an exception the reservation is
+# refunded with usage_on_error instead, and the exception re-raises either way.
+```
+
+`handle.reservation` exposes the underlying `CapacityReservation` if you need
+it directly. If the block exits without calling `set_actual_usage`, `reserve`
+conservatively refunds the full reserved usage and emits a `RuntimeWarning`.
+Full contract in the `reserve()` / `SyncRateLimiter.reserve()` docstrings and
+[docs/operations.md](docs/operations.md#reservation-lifecycle-and-durability).
+
 ## Configuration
 
 ### Quotas
