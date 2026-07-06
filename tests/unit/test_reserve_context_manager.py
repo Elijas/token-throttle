@@ -11,8 +11,12 @@ runtime behavior on the memory backend for both:
 * exception path (default): conservative close, original exception re-raised,
 * exception path (``usage_on_error``): the override is honored,
 * a refund failure while handling an in-block exception does not mask it,
+* exception path (bad ``usage_on_error``): a non-critical refund failure falls
+  back to the conservative close so the in-flight reservation is never leaked,
 * ``timeout`` passthrough: ``timeout=0`` raises ``TimeoutError`` cleanly.
 """
+
+import logging
 
 import pytest
 
@@ -109,6 +113,33 @@ async def test_async_exception_path_honors_usage_on_error() -> None:
         assert limiter.snapshot_state()["in_flight_reservations"] == 0
         # usage_on_error=30 => 70 returned to the pool.
         await limiter.acquire_capacity({"tokens": 70}, _MODEL, timeout=0)
+        with pytest.raises(TimeoutError):
+            await limiter.acquire_capacity({"tokens": 1}, _MODEL, timeout=0)
+    finally:
+        await limiter.aclose()
+
+
+async def test_async_bad_usage_on_error_falls_back_to_conservative_close(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    limiter = _async_limiter()
+    try:
+        with (
+            caplog.at_level(logging.WARNING, logger="token_throttle"),
+            pytest.raises(ValueError, match="boom"),
+        ):
+            async with limiter.reserve(
+                {"tokens": 100}, _MODEL, usage_on_error={"widgets": 30}
+            ):
+                raise ValueError("boom")
+
+        # usage_on_error keys do not match the reservation, so its refund fails
+        # its key-match validation non-critically. That failure is logged, not
+        # raised: the caller's original exception still propagates.
+        assert "refund failed while handling an in-block exception" in caplog.text
+        # The conservative fallback then closes the reservation: no leak.
+        assert limiter.snapshot_state()["in_flight_reservations"] == 0
+        # Fallback refunded actual == reserved (100), so nothing returns.
         with pytest.raises(TimeoutError):
             await limiter.acquire_capacity({"tokens": 1}, _MODEL, timeout=0)
     finally:
@@ -217,6 +248,31 @@ def test_sync_exception_path_honors_usage_on_error() -> None:
 
         assert limiter.snapshot_state()["in_flight_reservations"] == 0
         limiter.acquire_capacity({"tokens": 70}, _MODEL, timeout=0)
+        with pytest.raises(TimeoutError):
+            limiter.acquire_capacity({"tokens": 1}, _MODEL, timeout=0)
+    finally:
+        limiter.close()
+
+
+def test_sync_bad_usage_on_error_falls_back_to_conservative_close(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    limiter = _sync_limiter()
+    try:
+        with (
+            caplog.at_level(logging.WARNING, logger="token_throttle"),
+            pytest.raises(ValueError, match="boom"),
+            limiter.reserve({"tokens": 100}, _MODEL, usage_on_error={"widgets": 30}),
+        ):
+            raise ValueError("boom")
+
+        # usage_on_error keys do not match the reservation, so its refund fails
+        # its key-match validation non-critically. That failure is logged, not
+        # raised: the caller's original exception still propagates.
+        assert "refund failed while handling an in-block exception" in caplog.text
+        # The conservative fallback then closes the reservation: no leak.
+        assert limiter.snapshot_state()["in_flight_reservations"] == 0
+        # Fallback refunded actual == reserved (100), so nothing returns.
         with pytest.raises(TimeoutError):
             limiter.acquire_capacity({"tokens": 1}, _MODEL, timeout=0)
     finally:

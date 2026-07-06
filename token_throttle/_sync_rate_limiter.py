@@ -2709,12 +2709,17 @@ class _SyncReservationScope:
         reservation = self.reservation
         assert reservation is not None  # noqa: S101 - set in __enter__ before exit
         if exc is not None:
-            refund_usage = (
-                self._usage_on_error
-                if self._usage_on_error is not None
-                else reservation.get_usage()
-            )
-            self._refund_without_masking(refund_usage, reservation)
+            if self._usage_on_error is not None:
+                self._refund_without_masking(
+                    self._usage_on_error,
+                    reservation,
+                    conservative_usage=reservation.get_usage(),
+                )
+            else:
+                self._refund_without_masking(
+                    reservation.get_usage(),
+                    reservation,
+                )
             return False
         if self._actual_usage_set:
             self._limiter.refund_capacity(self._actual_usage, reservation)
@@ -2731,11 +2736,32 @@ class _SyncReservationScope:
         self,
         refund_usage: Usage,
         reservation: CapacityReservation,
+        *,
+        conservative_usage: Usage | None = None,
     ) -> None:
         # Mirror ``_finalize_and_refund_undelivered_acquire``: a refund failure
         # while an in-block exception is propagating must not replace it. Only
         # critical exceptions (cancellation, interpreter shutdown, OOM) are
         # allowed to override the original.
+        #
+        # A non-critical failure of the ``usage_on_error`` refund (e.g. its
+        # metric keys do not match the reservation) would otherwise leak the
+        # in-flight reservation until close. Fall back to the conservative
+        # close — refunding the reservation's own reserved usage, exactly like
+        # the no-``usage_on_error`` path — so the reservation is always closed.
+        if self._try_refund_swallowing_noncritical(refund_usage, reservation):
+            return
+        if conservative_usage is not None:
+            self._try_refund_swallowing_noncritical(conservative_usage, reservation)
+
+    def _try_refund_swallowing_noncritical(
+        self,
+        refund_usage: Usage,
+        reservation: CapacityReservation,
+    ) -> bool:
+        # Returns True when the refund committed, False when a non-critical
+        # failure was logged and swallowed. Critical exceptions always
+        # propagate so they can override the original in-block exception.
         try:
             self._limiter.refund_capacity(refund_usage, reservation)
         except BaseException as refund_error:
@@ -2752,3 +2778,5 @@ class _SyncReservationScope:
                 reservation.reservation_id,
                 exc_info=True,
             )
+            return False
+        return True
