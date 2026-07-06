@@ -336,7 +336,7 @@ def _raise_lock_timeout_error() -> typing.NoReturn:
     raise redis.exceptions.LockError("Unable to acquire lock within the time specified")
 
 
-# Throttle state for the no-timeout lock-contention warning. Shared across all
+# Throttle state for the lock-contention warning. Shared across all
 # backends in the process so a fleet of contending waiters does not spam logs.
 _lock_contention_warned: bool = False
 _lock_contention_last_warning_at: float | None = None
