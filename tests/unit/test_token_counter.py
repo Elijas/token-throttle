@@ -1219,3 +1219,169 @@ class TestResponsesApiStructuredItemCounting:
         json_tokens = len(enc.encode(json.dumps(item)))
 
         assert result["tokens"] == json_tokens
+
+
+class TestChatPredictionCounting:
+    """Chat Predicted Outputs `prediction.content` is real billed token volume
+    and must contribute to the reserve, scaling with the content size.
+    """
+
+    def _messages(self) -> list[dict[str, object]]:
+        return [{"role": "user", "content": "regenerate the file"}]
+
+    def test_prediction_content_string_reserves_more_than_without(self):
+        counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
+        messages = self._messages()
+        base = counter("gpt-4", messages=messages)["tokens"]
+
+        small = counter(
+            "gpt-4",
+            messages=messages,
+            prediction={"type": "content", "content": "x" * 10},
+        )["tokens"]
+        large = counter(
+            "gpt-4",
+            messages=messages,
+            prediction={"type": "content", "content": "x" * 200},
+        )["tokens"]
+
+        assert small > base
+        # Mock encoding is 1 char == 1 token, so the delta must track content
+        # size: the extra 190 chars of prediction content are reserved.
+        assert large - small >= 190
+
+    def test_prediction_content_parts_are_counted(self):
+        counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
+        messages = self._messages()
+        base = counter("gpt-4", messages=messages)["tokens"]
+
+        result = counter(
+            "gpt-4",
+            messages=messages,
+            prediction={
+                "type": "content",
+                "content": [{"type": "text", "text": "y" * 100}],
+            },
+        )["tokens"]
+
+        assert result - base >= 100
+
+    def test_prediction_never_undercounts_billed_content(self):
+        """The reserve must include at least the content's real token count;
+        Predicted-Outputs content is billed (accepted/rejected prediction
+        tokens show up in usage), so under-counting it would leak budget.
+        """
+        tiktoken = pytest.importorskip("tiktoken")
+        counter = OpenAIUsageCounter()
+        enc = tiktoken.encoding_for_model("gpt-4")
+        messages = self._messages()
+
+        content = "def regenerate() -> int:\n    return 42\n" * 5
+        base = counter(model="gpt-4", messages=messages)["tokens"]
+        with_prediction = counter(
+            model="gpt-4",
+            messages=messages,
+            prediction={"type": "content", "content": content},
+        )["tokens"]
+
+        assert with_prediction - base >= len(enc.encode(content))
+
+
+class TestResponsesPromptCounting:
+    """Responses stored-prompt `prompt.variables` carry client-visible text
+    that must be counted; `id`/`version` are opaque references that add nothing.
+    """
+
+    def test_prompt_string_variables_scale_with_size(self):
+        counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
+        base = counter("gpt-4", input="hi")["tokens"]
+
+        small = counter(
+            "gpt-4",
+            input="hi",
+            prompt={"id": "pmpt_abc", "variables": {"topic": "x" * 10}},
+        )["tokens"]
+        large = counter(
+            "gpt-4",
+            input="hi",
+            prompt={"id": "pmpt_abc", "variables": {"topic": "x" * 200}},
+        )["tokens"]
+
+        assert small > base
+        assert large - small >= 190
+
+    def test_prompt_content_part_variables_are_counted(self):
+        counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
+        base = counter("gpt-4", input="hi")["tokens"]
+
+        result = counter(
+            "gpt-4",
+            input="hi",
+            prompt={
+                "id": "pmpt_abc",
+                "variables": {
+                    "detail": {"type": "input_text", "text": "y" * 100},
+                },
+            },
+        )["tokens"]
+
+        assert result - base >= 100
+
+    def test_prompt_id_and_version_alone_add_nothing(self):
+        counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
+
+        vars_only = counter(
+            "gpt-4",
+            input="hi",
+            prompt={"variables": {"topic": "billing"}},
+        )["tokens"]
+        with_id_version = counter(
+            "gpt-4",
+            input="hi",
+            prompt={
+                "id": "pmpt_abc123",
+                "version": "7",
+                "variables": {"topic": "billing"},
+            },
+        )["tokens"]
+
+        # Opaque id/version references are not billed prompt text, so they must
+        # not change the reserve.
+        assert with_id_version == vars_only
+
+    def test_prompt_without_variables_adds_nothing(self):
+        counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
+        base = counter("gpt-4", input="hi")["tokens"]
+
+        result = counter(
+            "gpt-4",
+            input="hi",
+            prompt={"id": "pmpt_abc123", "version": "7"},
+        )["tokens"]
+
+        assert result == base
+
+    def test_prompt_image_variable_is_rejected_not_undercounted(self):
+        """Non-text variable content (an image) must be rejected the same way
+        image content is elsewhere, rather than silently counting a short URL
+        in place of the real vision-token cost.
+        """
+        counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
+        with pytest.raises(ValueError, match="input_image"):
+            counter(
+                "gpt-4",
+                input="hi",
+                prompt={
+                    "variables": {
+                        "pic": {
+                            "type": "input_image",
+                            "image_url": "https://example.com/a.png",
+                        }
+                    }
+                },
+            )
+
+    def test_prompt_non_dict_raises(self):
+        counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
+        with pytest.raises(ValueError, match="prompt"):
+            counter("gpt-4", input="hi", prompt="just a string")

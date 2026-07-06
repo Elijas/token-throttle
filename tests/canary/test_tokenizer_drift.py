@@ -131,17 +131,6 @@ _RESPONSES_NON_TOKEN_BEARING_KEYS = _SHARED_NON_TOKEN_BEARING_KEYS | {
     "max_tool_calls",
 }
 
-# KNOWN UNKNOWN: these top-level params can carry real prompt text but are
-# not yet counted by _REQUEST_CONTEXT_KEYS (chat's `prediction.content` and
-# responses' `prompt.variables` both accept free-form text/content parts).
-# Listed here — rather than folded into the "non-token-bearing" sets above,
-# which would misdescribe them — so the canary stays focused on genuinely
-# *new* drift instead of re-flagging this already-known, deliberately
-# deferred gap on every run. Revisit if usage reports surface a meaningful
-# undercount from either field.
-_CHAT_KNOWN_UNCOUNTED_PAYLOAD_KEYS = frozenset({"prediction"})
-_RESPONSES_KNOWN_UNCOUNTED_PAYLOAD_KEYS = frozenset({"prompt"})
-
 # Model names the openai SDK already ships but tiktoken (0.13.0 as of
 # 2026-07-06) cannot yet resolve. For each of these, get_encoding() raises
 # its designed guided ValueError (upgrade tiktoken / pass get_encoding_func),
@@ -212,11 +201,7 @@ def test_chat_completions_params_are_fully_triaged():
     from openai.types.chat import completion_create_params  # noqa: PLC0415
 
     declared = _declared_param_keys(completion_create_params.CompletionCreateParams)
-    accounted_for = (
-        _known_counted_keys()
-        | _CHAT_NON_TOKEN_BEARING_KEYS
-        | _CHAT_KNOWN_UNCOUNTED_PAYLOAD_KEYS
-    )
+    accounted_for = _known_counted_keys() | _CHAT_NON_TOKEN_BEARING_KEYS
     unknown = declared - accounted_for
     assert not unknown, (
         "openai's chat.completions.create params include untriaged top-level "
@@ -230,11 +215,7 @@ def test_responses_params_are_fully_triaged():
     from openai.types.responses import response_create_params  # noqa: PLC0415
 
     declared = _declared_param_keys(response_create_params.ResponseCreateParams)
-    accounted_for = (
-        _known_counted_keys()
-        | _RESPONSES_NON_TOKEN_BEARING_KEYS
-        | _RESPONSES_KNOWN_UNCOUNTED_PAYLOAD_KEYS
-    )
+    accounted_for = _known_counted_keys() | _RESPONSES_NON_TOKEN_BEARING_KEYS
     unknown = declared - accounted_for
     assert not unknown, (
         "openai's responses.create params include untriaged top-level "
