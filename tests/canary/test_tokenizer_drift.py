@@ -142,6 +142,37 @@ _RESPONSES_NON_TOKEN_BEARING_KEYS = _SHARED_NON_TOKEN_BEARING_KEYS | {
 _CHAT_KNOWN_UNCOUNTED_PAYLOAD_KEYS = frozenset({"prediction"})
 _RESPONSES_KNOWN_UNCOUNTED_PAYLOAD_KEYS = frozenset({"prompt"})
 
+# Model names the openai SDK already ships but tiktoken (0.13.0 as of
+# 2026-07-06) cannot yet resolve. For each of these, get_encoding() raises
+# its designed guided ValueError (upgrade tiktoken / pass get_encoding_func),
+# so the gap is known and handled — re-flagging it weekly would only train
+# alert-blindness. Exact names only, no wildcards: a NEW unresolvable name
+# (even a new date variant of these same families) still fails the canary
+# and must be triaged here deliberately. The resolve test below is
+# self-cleaning in both directions: an entry that starts resolving, or that
+# the SDK no longer lists, fails the canary until it is removed.
+_KNOWN_PENDING_TIKTOKEN_MODELS = frozenset(
+    {
+        "codex-mini-latest",
+        "gpt-5.1",
+        "gpt-5.1-2025-11-13",
+        "gpt-5.1-chat-latest",
+        "gpt-5.1-codex",
+        "gpt-5.1-mini",
+        "gpt-5.2",
+        "gpt-5.2-2025-12-11",
+        "gpt-5.2-chat-latest",
+        "gpt-5.2-pro",
+        "gpt-5.2-pro-2025-12-11",
+        "gpt-5.3-chat-latest",
+        "gpt-5.4",
+        "gpt-5.4-mini",
+        "gpt-5.4-mini-2026-03-17",
+        "gpt-5.4-nano",
+        "gpt-5.4-nano-2026-03-17",
+    }
+)
+
 
 def test_all_current_chat_models_resolve_via_get_encoding():
     from openai.types import ChatModel  # noqa: PLC0415
@@ -156,10 +187,24 @@ def test_all_current_chat_models_resolve_via_get_encoding():
         except ValueError as exc:
             failures[model_name] = str(exc)
 
-    assert not failures, (
+    new_failures = {
+        name: msg
+        for name, msg in failures.items()
+        if name not in _KNOWN_PENDING_TIKTOKEN_MODELS
+    }
+    assert not new_failures, (
         "get_encoding() could not resolve the following current openai "
         "ChatModel name(s) -- tiktoken has fallen behind the installed "
-        f"openai SDK's model list: {sorted(failures)}"
+        "openai SDK's model list. Triage each: add to "
+        "_KNOWN_PENDING_TIKTOKEN_MODELS if get_encoding()'s guided error is "
+        f"the intended behavior for it: {sorted(new_failures)}"
+    )
+
+    now_resolving = sorted(_KNOWN_PENDING_TIKTOKEN_MODELS - set(failures))
+    assert not now_resolving, (
+        "stale _KNOWN_PENDING_TIKTOKEN_MODELS entries: these now resolve "
+        "(tiktoken caught up) or are no longer in the SDK's ChatModel list; "
+        f"remove them: {now_resolving}"
     )
 
 
