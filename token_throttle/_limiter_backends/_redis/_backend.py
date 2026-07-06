@@ -2534,18 +2534,27 @@ class RedisBackend(RateLimiterBackend):
                     # or the lock was lost mid-operation
                     # (BackendLockContentionError from _extend_locks).
                     #
-                    # No caller timeout means "wait as long as it takes": never
-                    # surface contention as an error. Sleep one lock-poll
-                    # interval and retry the acquire loop, warning periodically
-                    # so operators can still see a hot bucket.
-                    if deadline is None:
+                    # Contention is transient, so it must not be surfaced as an
+                    # error while the caller still wants to wait: no timeout means
+                    # "wait as long as it takes", and a caller deadline that has
+                    # not yet expired means "keep retrying until it does". In both
+                    # cases sleep one lock-poll interval (bounded by any remaining
+                    # budget) and retry the acquire loop, warning periodically so
+                    # operators can still see a hot bucket. Only once the caller's
+                    # deadline has actually expired do we surface the timeout — the
+                    # per-attempt lock_blocking_timeout_seconds must never cap the
+                    # caller's overall wait (timeout=0 still fails fast because its
+                    # deadline is already in the past on the first contention).
+                    if deadline is None or time.monotonic() < deadline:
                         _warn_lock_contention_retry(exc)
-                        await asyncio.sleep(self._lock_sleep_seconds)
+                        sleep_for = self._lock_sleep_seconds
+                        if deadline is not None:
+                            sleep_for = min(
+                                sleep_for, max(0.0, deadline - time.monotonic())
+                            )
+                        await asyncio.sleep(sleep_for)
                         continue
-                    # With a deadline, the configured Redis lock blocking
-                    # timeout already bounded the polling; convert to the
-                    # library capacity-timeout error for a uniform contract.
-                    raise self._capacity_timeout_error(usage, frozendict()) from exc
+                    raise self._lock_contention_timeout_error(usage, exc) from exc
                 if available:
                     try:
                         if has_waited:
@@ -2743,6 +2752,20 @@ class RedisBackend(RateLimiterBackend):
             "Timed out waiting for capacity "
             f"(bottleneck={bottleneck_id}, available={available}, "
             f"requested={requested}, computed_sleep={computed_sleep})"
+        )
+
+    def _lock_contention_timeout_error(
+        self,
+        usage: FrozenUsage,
+        exc: BaseException,
+    ) -> TimeoutError:
+        # Distinct from _capacity_timeout_error: the caller's deadline expired
+        # while the per-bucket Redis lock stayed contended, so we never observed
+        # bucket capacity. Name the lock as the cause instead of emitting the
+        # misleading bottleneck=None/available=None capacity fields.
+        return TimeoutError(
+            "Timed out acquiring the per-bucket Redis lock under contention "
+            f"(requested={dict(usage)}, cause={type(exc).__name__}: {exc})"
         )
 
     def _upsert_diagnostic_waiter_locked(  # noqa: PLR0913
