@@ -284,7 +284,8 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
                 if usage_amount > bucket.max_capacity:
                     raise ValueError(
                         f"Usage value for {usage_metric} ({usage_amount}) "
-                        f"exceeds bucket max capacity ({bucket.max_capacity})",
+                        f"exceeds bucket max capacity ({bucket.max_capacity}) "
+                        f"for the {bucket.per_seconds}s window",
                     )
 
         # All-or-nothing: check every bucket for the relevant metric
