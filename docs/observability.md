@@ -49,7 +49,9 @@ stable `reason` attribute where callers need structured error handling.
 User callbacks are bounded separately by `callback_timeout` on `RateLimiter`
 and `SyncRateLimiter` (default: 30 seconds per callback). When a callback
 exceeds that limit, token-throttle logs a warning, skips the callback result,
-and does not fail the acquire/refund call. Pass `callback_timeout=None` to
+and does not fail the acquire/refund call. The callback is abandoned rather than
+cancelled: it may keep running to completion in the background, and any error it
+raises after the deadline is logged. Pass `callback_timeout=None` to
 restore unbounded callback execution. Timeout-wrapped sync callbacks run in a
 helper thread with the caller's `contextvars` context copied into that thread.
 
