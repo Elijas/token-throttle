@@ -258,13 +258,12 @@ class UsageQuotas:
         quotas: Iterable[Quota],
         /,
         *,
-        _allow_empty_quotas: bool = False,
         _freeze: bool = False,
     ) -> None:
         self._frozen = False
         self._metrics: Mapping[str, Mapping[int, Quota]] = defaultdict(dict)
         quotas = self._materialize_quotas(quotas)
-        if not _allow_empty_quotas and not quotas:
+        if not quotas:
             raise ValueError(
                 "Empty quota list provided. No rate limiting will be applied. "
                 "If this is intentional, use UsageQuotas.unlimited() instead."
@@ -275,9 +274,27 @@ class UsageQuotas:
             self._freeze()
 
     @classmethod
+    def _construct_empty(cls, *, _freeze: bool = False) -> Self:
+        """
+        Build the empty (unlimited) quota set without a public escape hatch.
+
+        Internal factory backing ``unlimited()`` and ``frozen_snapshot()``. It
+        bypasses the empty-quota guard in ``__init__`` without exposing a
+        reachable constructor kwarg; the public constructor always rejects an
+        empty quota list. Callers outside this package must use
+        ``UsageQuotas.unlimited()``.
+        """
+        instance = cls.__new__(cls)
+        instance._frozen = False  # noqa: SLF001 - factory seeds its own instance state
+        instance._metrics = defaultdict(dict)  # noqa: SLF001
+        if _freeze:
+            instance._freeze()  # noqa: SLF001
+        return instance
+
+    @classmethod
     def unlimited(cls, *, _freeze: bool = False) -> Self:
         """Return an explicit no-limit quota set for disabled rate limiting."""
-        return cls([], _allow_empty_quotas=True, _freeze=_freeze)
+        return cls._construct_empty(_freeze=_freeze)
 
     @staticmethod
     def _materialize_quotas(quotas: Iterable[Quota]) -> list[Quota]:
@@ -317,12 +334,9 @@ class UsageQuotas:
 
     def frozen_snapshot(self) -> Self:
         """Return a frozen exact-type copy for immutable DTO composition."""
-        quotas = list(self)
-        return type(self)(
-            quotas,
-            _allow_empty_quotas=self.is_unlimited,
-            _freeze=True,
-        )
+        if self.is_unlimited:
+            return self._construct_empty(_freeze=True)
+        return type(self)(list(self), _freeze=True)
 
     @property
     def is_unlimited(self) -> bool:

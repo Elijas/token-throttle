@@ -4,6 +4,7 @@ import pytest
 from frozendict import frozendict
 from pydantic import ValidationError
 
+from token_throttle._interfaces._interfaces import PerModelConfig
 from token_throttle._interfaces._models import (
     CapacityReservation,
     Quota,
@@ -13,6 +14,10 @@ from token_throttle._interfaces._models import (
     _is_bool_like,
     frozen_usage,
 )
+from token_throttle._limiter_backends._memory._sync_backend import (
+    SyncMemoryBackendBuilder,
+)
+from token_throttle._sync_rate_limiter import SyncRateLimiter
 
 
 class TestSecondsIn:
@@ -183,6 +188,56 @@ class TestUsageQuotas:
     def test_rejects_non_quota_entries(self, raw_quota):
         with pytest.raises(ValueError, match="Each quota must be a Quota instance"):
             UsageQuotas([raw_quota])
+
+
+class TestUsageQuotasEmptyConstructionGuard:
+    """Empty quota sets are reachable only through ``UsageQuotas.unlimited()``.
+
+    The formerly private-but-reachable ``UsageQuotas(..., _allow_empty_quotas=True)``
+    constructor kwarg has been removed; these pins keep it from silently
+    reappearing while confirming the supported path still works end to end.
+    """
+
+    def test_allow_empty_quotas_kwarg_rejected_when_empty(self):
+        with pytest.raises(TypeError, match="_allow_empty_quotas"):
+            UsageQuotas([], _allow_empty_quotas=True)  # type: ignore[call-arg]
+
+    def test_allow_empty_quotas_kwarg_rejected_with_quotas(self):
+        with pytest.raises(TypeError, match="_allow_empty_quotas"):
+            UsageQuotas(
+                [Quota(metric="requests", limit=100.0)],
+                _allow_empty_quotas=True,  # type: ignore[call-arg]
+            )
+
+    def test_empty_quotas_still_raises_clear_error(self):
+        with pytest.raises(ValueError, match=r"UsageQuotas\.unlimited"):
+            UsageQuotas([])
+
+    def test_unlimited_frozen_snapshot_stays_unlimited(self):
+        snapshot = UsageQuotas.unlimited().frozen_snapshot()
+        assert snapshot.is_unlimited is True
+        assert snapshot.names == []
+
+    def test_limited_frozen_snapshot_preserves_quotas(self):
+        original = UsageQuotas([Quota(metric="requests", limit=100.0, per_seconds=60)])
+        snapshot = original.frozen_snapshot()
+        assert snapshot.is_unlimited is False
+        assert snapshot.names == ["requests"]
+
+    def test_unlimited_acquire_refund_end_to_end_memory_backend(self):
+        """``unlimited()`` still builds a working limiter after the hatch removal."""
+        config = PerModelConfig(
+            model_family="unlimited",
+            quotas=UsageQuotas.unlimited(),
+        )
+        limiter = SyncRateLimiter(config, backend=SyncMemoryBackendBuilder())
+
+        reservation = limiter.acquire_capacity(usage={}, model="unlimited")
+
+        assert reservation.is_unlimited is True
+        assert reservation.usage == {}
+        # Refunding an unlimited reservation is a no-op but must not error.
+        limiter.refund_capacity(actual_usage={}, reservation=reservation)
 
 
 class TestFrozenUsage:
