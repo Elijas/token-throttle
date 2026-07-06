@@ -51,6 +51,27 @@ from ._bucket import MemoryBucket
 _logger = logging.getLogger("token_throttle")
 
 
+def _log_cancellation_refund_failure(
+    exc: BaseException,
+    *,
+    reservation_id: str | None,
+    usage: FrozenUsage,
+) -> None:
+    """Log a cancellation-path refund that failed instead of silently dropping it."""
+    _logger.warning(
+        "In-memory cancellation-path refund failed; reserved capacity for "
+        "reservation %s may not be returned until natural refill: %s: %s",
+        reservation_id,
+        type(exc).__name__,
+        exc,
+        exc_info=exc,
+        extra={
+            "token_throttle_reservation_id": reservation_id,
+            "token_throttle_usage": dict(usage),
+        },
+    )
+
+
 class MemoryBackendBuilder(RateLimiterBackendBuilderInterface):
     def __init__(
         self,
@@ -604,17 +625,23 @@ class MemoryBackend(RateLimiterBackend):
                     **current_limiter_callback_context(),
                 )
         except BaseException:
-            try:  # noqa: SIM105
+            try:
                 await self._refund_cancelled_consumption(
                     usage,
                     buckets=consumed_buckets,
                     reservation_id=reservation_id,
                 )
-            except BaseException:  # noqa: BLE001, S110
+            except BaseException as refund_exc:  # noqa: BLE001
                 # Best-effort refund: asyncio.shield() inside the refund
-                # ensures the coroutine runs to completion even under re-cancel.
-                # Safe to swallow: the original interrupt is re-raised below.
-                pass
+                # ensures the coroutine runs to completion even under
+                # re-cancel, but the refund itself can still fail (e.g. a
+                # lock/state error). Log it, then swallow so the original
+                # interrupt is re-raised below.
+                _log_cancellation_refund_failure(
+                    refund_exc,
+                    reservation_id=reservation_id,
+                    usage=usage,
+                )
             raise
         return current_time
 

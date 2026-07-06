@@ -51,6 +51,27 @@ from ._bucket import MemoryBucket
 _logger = logging.getLogger("token_throttle")
 
 
+def _log_cancellation_refund_failure(
+    exc: BaseException,
+    *,
+    reservation_id: str | None,
+    usage: FrozenUsage,
+) -> None:
+    """Log a cancellation-path refund that failed instead of silently dropping it."""
+    _logger.warning(
+        "In-memory cancellation-path refund failed; reserved capacity for "
+        "reservation %s may not be returned until natural refill: %s: %s",
+        reservation_id,
+        type(exc).__name__,
+        exc,
+        exc_info=exc,
+        extra={
+            "token_throttle_reservation_id": reservation_id,
+            "token_throttle_usage": dict(usage),
+        },
+    )
+
+
 class SyncMemoryBackendBuilder(SyncRateLimiterBackendBuilderInterface):
     def __init__(
         self,
@@ -576,17 +597,22 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
             # KI/SystemExit are the sync analogue of asyncio.CancelledError:
             # they can interrupt mid-statement and need the same best-effort
             # refund to avoid leaking capacity. Do not narrow to Exception.
-            try:  # noqa: SIM105
+            try:
                 self._refund_cancelled_consumption(
                     usage,
                     buckets=consumed_buckets,
                     reservation_id=reservation_id,
                 )
-            except BaseException:  # noqa: BLE001, S110
+            except BaseException as refund_exc:  # noqa: BLE001
                 # Best-effort refund: in sync code, KI/SystemExit are the
-                # interrupt analogue of asyncio.shield() cancellation cleanup.
-                # Swallow so the original interrupt propagates intact.
-                pass
+                # interrupt analogue of asyncio.shield() cancellation cleanup,
+                # but the refund itself can still fail. Log it, then swallow
+                # so the original interrupt propagates intact.
+                _log_cancellation_refund_failure(
+                    refund_exc,
+                    reservation_id=reservation_id,
+                    usage=usage,
+                )
             raise
         return current_time
 

@@ -10,15 +10,22 @@ Covers: async MemoryBackend.
 """
 
 import asyncio
+import logging
 import time
 
 import pytest
 from frozendict import frozendict
 
-from token_throttle._interfaces._callbacks import RateLimiterCallbacks
+from token_throttle._interfaces._callbacks import (
+    RateLimiterCallbacks,
+    SyncRateLimiterCallbacks,
+)
 from token_throttle._interfaces._interfaces import PerModelConfig
 from token_throttle._interfaces._models import Quota, UsageQuotas
 from token_throttle._limiter_backends._memory._backend import MemoryBackendBuilder
+from token_throttle._limiter_backends._memory._sync_backend import (
+    SyncMemoryBackendBuilder,
+)
 
 # Slow refill so natural recovery is negligible during tests.
 # 100 tokens / 3600s = 0.028 tokens/sec — max ~0.3 tokens in a 10s test window.
@@ -173,11 +180,12 @@ class TestRefundFailurePreservesCancelledError:
 
     async def test_refund_failure_during_cancellation_still_raises_cancelled_error(
         self,
+        caplog,
     ):
-        """Monkeypatch _refund_cancelled_consumption to raise RuntimeError.
+        """Monkeypatch _refund_cancelled_consumption to raise ConnectionError.
 
-        CancelledError must still propagate, not RuntimeError.
-        A RuntimeWarning should be emitted about the refund failure.
+        CancelledError must still propagate, not ConnectionError. A warning
+        must be logged about the refund failure so the swallow is observable.
         """
         gate = asyncio.Event()
         entered_callback = asyncio.Event()
@@ -202,8 +210,8 @@ class TestRefundFailurePreservesCancelledError:
         # Monkeypatch the refund to simulate failure (e.g., Redis down)
         original_refund = backend._refund_cancelled_consumption
 
-        async def failing_refund(_usage):
-            raise RuntimeError("simulated refund failure")
+        async def failing_refund(_usage, **_kwargs):
+            raise ConnectionError("simulated refund failure")
 
         backend._refund_cancelled_consumption = failing_refund
 
@@ -216,9 +224,24 @@ class TestRefundFailurePreservesCancelledError:
         # Cancel during the callback — triggers CancelledError handler
         task.cancel()
 
-        # The critical assertion: CancelledError must propagate, not RuntimeError
-        with pytest.raises(asyncio.CancelledError):
+        # The critical assertion: CancelledError must propagate, not ConnectionError
+        with (
+            caplog.at_level(logging.WARNING, logger="token_throttle"),
+            pytest.raises(asyncio.CancelledError),
+        ):
             await task
+
+        # The refund failure must not be silently swallowed: a warning naming
+        # the failure and the natural-refill fallback must be logged.
+        refund_failure_records = [
+            r
+            for r in caplog.records
+            if "cancellation-path refund failed" in r.getMessage()
+        ]
+        assert len(refund_failure_records) == 1
+        assert "natural refill" in refund_failure_records[0].getMessage()
+        assert refund_failure_records[0].levelno == logging.WARNING
+        assert refund_failure_records[0].exc_info is not None
 
         # Restore original to avoid side effects
         backend._refund_cancelled_consumption = original_refund
@@ -247,7 +270,7 @@ class TestRefundFailurePreservesCancelledError:
         await backend.await_for_capacity(frozendict({"requests": 90.0}))
         gate.set()
 
-        async def refund_raises_cancelled(_usage):
+        async def refund_raises_cancelled(_usage, **_kwargs):
             raise asyncio.CancelledError
 
         backend._refund_cancelled_consumption = refund_raises_cancelled
@@ -260,3 +283,56 @@ class TestRefundFailurePreservesCancelledError:
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
+
+
+class TestSyncRefundFailurePreservesOriginalException:
+    """Sync mirror of TestRefundFailurePreservesCancelledError.
+
+    Sync code has no CancelledError; a critical callback exception
+    (KeyboardInterrupt) plays the same role. If _refund_cancelled_consumption
+    raises, the original KeyboardInterrupt must still propagate, and the
+    refund failure must be logged rather than silently dropped.
+    """
+
+    def test_refund_failure_during_critical_callback_still_raises_original_exception(
+        self,
+        caplog,
+    ):
+        def raising_callback(**_kwargs):
+            raise KeyboardInterrupt("simulated critical callback failure")
+
+        callbacks = SyncRateLimiterCallbacks(on_capacity_consumed=raising_callback)
+        builder = SyncMemoryBackendBuilder()
+        config = _make_config(limit=100)
+        backend = builder.build(config, callbacks=callbacks)
+
+        # Monkeypatch the refund to simulate failure (e.g., Redis down)
+        original_refund = backend._refund_cancelled_consumption
+
+        def failing_refund(_usage, **_kwargs):
+            raise ConnectionError("simulated refund failure")
+
+        backend._refund_cancelled_consumption = failing_refund
+
+        # The critical assertion: KeyboardInterrupt must propagate, not ConnectionError
+        with (
+            caplog.at_level(logging.WARNING, logger="token_throttle"),
+            pytest.raises(
+                KeyboardInterrupt, match="simulated critical callback failure"
+            ),
+        ):
+            backend.wait_for_capacity(frozendict({"requests": 5.0}))
+
+        # The refund failure must not be silently swallowed.
+        refund_failure_records = [
+            r
+            for r in caplog.records
+            if "cancellation-path refund failed" in r.getMessage()
+        ]
+        assert len(refund_failure_records) == 1
+        assert "natural refill" in refund_failure_records[0].getMessage()
+        assert refund_failure_records[0].levelno == logging.WARNING
+        assert refund_failure_records[0].exc_info is not None
+
+        # Restore original to avoid side effects
+        backend._refund_cancelled_consumption = original_refund
