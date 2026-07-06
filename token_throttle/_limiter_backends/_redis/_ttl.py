@@ -1,4 +1,7 @@
 import math
+from collections.abc import Iterable
+
+from token_throttle._interfaces._models import Quota
 
 DEFAULT_BUCKET_TTL_SECONDS = 7 * 24 * 60 * 60
 RESERVATION_LIFETIME_TTL_SAFETY_MARGIN = 2.0
@@ -176,4 +179,35 @@ def validate_reservation_lifetime_ttl_invariant(
             "Redis TTLs must exceed max_reservation_lifetime_seconds * "
             f"{margin:g}; required > {required_ttl:g}s, got "
             f"{', '.join(too_short)}"
+        )
+
+
+def validate_bucket_ttl_covers_quota_windows(
+    *,
+    bucket_ttl_seconds: int,
+    quotas: Iterable[Quota],
+) -> None:
+    """
+    Fail fast when a quota window outlives the bucket state TTL.
+
+    Redis expires idle ``last_checked``/capacity keys after
+    ``bucket_ttl_seconds``. If a quota's ``per_seconds`` window is longer than
+    that, an idle gap between ``bucket_ttl_seconds`` and ``per_seconds``
+    silently expires the bucket state, and the next read re-grants the full
+    ``max_capacity`` instead of the drained state the long window should have
+    preserved. Equality (``per_seconds == bucket_ttl_seconds``) is allowed:
+    the bucket only needs to survive gaps *shorter* than the window itself.
+    """
+    too_long = [
+        f"{quota.metric}: per_seconds={quota.per_seconds}"
+        for quota in quotas
+        if quota.per_seconds > bucket_ttl_seconds
+    ]
+    if too_long:
+        raise ValueError(
+            "bucket_ttl_seconds must be >= every configured quota's "
+            f"per_seconds (got bucket_ttl_seconds={bucket_ttl_seconds}); "
+            f"offending quotas: {', '.join(too_long)}. Raise "
+            "bucket_ttl_seconds to at least the longest quota window, or "
+            "shorten that quota's per_seconds."
         )

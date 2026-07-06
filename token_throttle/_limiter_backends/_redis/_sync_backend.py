@@ -90,6 +90,7 @@ from ._sync_bucket import (
 from ._ttl import (
     DEFAULT_BUCKET_TTL_SECONDS,
     resolve_max_reservation_lifetime_seconds_from_ttls,
+    validate_bucket_ttl_covers_quota_windows,
     validate_redis_ttl_seconds,
     validate_reservation_lifetime_ttl_invariant,
 )
@@ -677,6 +678,10 @@ class SyncRedisBackendBuilder(SyncRateLimiterBackendBuilderInterface):
         cfg = _revalidate_dto(cfg)
         if callbacks is not None:
             _revalidate_dto(callbacks)
+        validate_bucket_ttl_covers_quota_windows(
+            bucket_ttl_seconds=self._bucket_ttl_seconds,
+            quotas=cfg.quotas,
+        )
         redis_buckets = []
         for quota in cfg.quotas:
             b = SyncRedisBucket(

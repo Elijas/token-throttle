@@ -193,3 +193,102 @@ async def test_idle_bucket_state_expires_after_ttl() -> None:
 
     assert await redis_client.ttl(bucket._last_checked_key) == -2
     assert await redis_client.ttl(bucket._capacity_key) == -2
+
+
+def _config_with_window(per_seconds: int) -> PerModelConfig:
+    return PerModelConfig(
+        model_family="test/model",
+        quotas=UsageQuotas(
+            [Quota(metric="tokens", limit=100.0, per_seconds=per_seconds)]
+        ),
+    )
+
+
+def test_async_builder_rejects_quota_window_exceeding_bucket_ttl() -> None:
+    builder = RedisBackendBuilder(
+        _FakeAsyncRedis(),
+        key_prefix="test",
+        bucket_ttl_seconds=2,
+    )
+    with pytest.raises(
+        ValueError, match=r"bucket_ttl_seconds must be >=.*tokens.*3600"
+    ):
+        builder.build(_config_with_window(3600))
+
+
+def test_sync_builder_rejects_quota_window_exceeding_bucket_ttl() -> None:
+    builder = SyncRedisBackendBuilder(
+        _FakeSyncRedis(),
+        key_prefix="test",
+        bucket_ttl_seconds=2,
+    )
+    with pytest.raises(
+        ValueError, match=r"bucket_ttl_seconds must be >=.*tokens.*3600"
+    ):
+        builder.build(_config_with_window(3600))
+
+
+def test_async_builder_allows_quota_window_equal_to_bucket_ttl() -> None:
+    builder = RedisBackendBuilder(
+        _FakeAsyncRedis(),
+        key_prefix="test",
+        bucket_ttl_seconds=60,
+    )
+    backend = builder.build(_config_with_window(60))
+
+    assert len(backend.sorted_buckets) == 1
+
+
+def test_sync_builder_allows_quota_window_equal_to_bucket_ttl() -> None:
+    builder = SyncRedisBackendBuilder(
+        _FakeSyncRedis(),
+        key_prefix="test",
+        bucket_ttl_seconds=60,
+    )
+    backend = builder.build(_config_with_window(60))
+
+    assert len(backend.sorted_buckets) == 1
+
+
+def test_async_builder_allows_quota_window_shorter_than_bucket_ttl() -> None:
+    builder = RedisBackendBuilder(
+        _FakeAsyncRedis(),
+        key_prefix="test",
+        bucket_ttl_seconds=3600,
+    )
+    backend = builder.build(_config_with_window(60))
+
+    assert len(backend.sorted_buckets) == 1
+
+
+def test_sync_builder_allows_quota_window_shorter_than_bucket_ttl() -> None:
+    builder = SyncRedisBackendBuilder(
+        _FakeSyncRedis(),
+        key_prefix="test",
+        bucket_ttl_seconds=3600,
+    )
+    backend = builder.build(_config_with_window(60))
+
+    assert len(backend.sorted_buckets) == 1
+
+
+def test_async_builder_allows_unlimited_config_with_tiny_bucket_ttl() -> None:
+    builder = RedisBackendBuilder(
+        _FakeAsyncRedis(),
+        key_prefix="test",
+        bucket_ttl_seconds=1,
+    )
+    backend = builder.build(PerModelConfig(quotas=UsageQuotas.unlimited()))
+
+    assert backend.sorted_buckets == []
+
+
+def test_sync_builder_allows_unlimited_config_with_tiny_bucket_ttl() -> None:
+    builder = SyncRedisBackendBuilder(
+        _FakeSyncRedis(),
+        key_prefix="test",
+        bucket_ttl_seconds=1,
+    )
+    backend = builder.build(PerModelConfig(quotas=UsageQuotas.unlimited()))
+
+    assert backend.sorted_buckets == []
