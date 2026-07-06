@@ -138,7 +138,13 @@ class PerModelConfigGetter(Protocol):
     """Callable that maps a request model name to ``PerModelConfig``."""
 
     def __call__(self, model_name: str, /) -> PerModelConfig:
-        """model_name: The model identifier used in API requests (e.g., 'gpt-4o')."""
+        """
+        model_name: The model identifier used in API requests (e.g., 'gpt-4o').
+
+        The getter may be invoked while the limiter holds internal locks.
+        Calling back into the same limiter from inside the getter is
+        discouraged, though same-thread re-entry will not deadlock.
+        """
         ...
 
 
