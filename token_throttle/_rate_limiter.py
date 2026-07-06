@@ -1303,6 +1303,45 @@ class RateLimiter(BaseRateLimiter):
         timeout = validate_timeout(timeout)
         return await self._acquire_or_record(usage, model, _block=True, timeout=timeout)
 
+    def reserve(
+        self,
+        usage: Usage,
+        model: str,
+        *,
+        timeout: float | None = None,
+        usage_on_error: Usage | None = None,
+    ) -> "_ReservationScope":
+        """
+        Acquire capacity for a ``with`` block, then refund the unused remainder.
+
+        Returns an async context manager over the acquire -> call -> refund
+        cycle. Entering it waits for capacity like ``acquire_capacity`` and
+        yields a handle whose ``reservation`` attribute is the
+        ``CapacityReservation`` and whose ``set_actual_usage(actual_usage)``
+        records what the request actually consumed.
+
+        On normal exit the unused remainder is refunded. If
+        ``set_actual_usage`` was never called, the block refunds the full
+        reserved usage — nothing returns to the pool, but the in-flight
+        reservation is closed out — and emits a ``RuntimeWarning`` asking you
+        to report actual usage.
+
+        If the block raises, the reservation is refunded with ``usage_on_error``
+        when it is not ``None`` and otherwise with the full reserved usage; the
+        original exception is always re-raised. A refund failure while handling
+        that exception is logged and never masks the original exception.
+
+        ``timeout`` bounds only the capacity wait, exactly as in
+        ``acquire_capacity``; it does not bound the work done inside the block.
+        """
+        return _ReservationScope(
+            self,
+            usage,
+            model,
+            timeout=timeout,
+            usage_on_error=usage_on_error,
+        )
+
     async def record_usage(self, usage: Usage, model: str) -> CapacityReservation:
         """
         Consume capacity immediately without blocking.
@@ -2956,3 +2995,115 @@ class RateLimiter(BaseRateLimiter):
             reservation_snapshots=reservation_snapshots,
             committed_refund_dedup_count=committed_refunds,
         )
+
+
+_RESERVE_FORGOT_ACTUAL_USAGE_WARNING = (
+    "reserve() block exited without set_actual_usage(); refunding the full "
+    "reserved usage (nothing returned to the pool). Call "
+    "handle.set_actual_usage(actual_usage) before the block exits to return "
+    "unused capacity to the pool."
+)
+
+
+class _ReservationScope:
+    """
+    Async context manager returned by ``RateLimiter.reserve``.
+
+    Enter acquires capacity and yields this object as the handle, exposing
+    ``reservation`` and ``set_actual_usage``; exit refunds. See
+    ``RateLimiter.reserve`` for the full acquire/refund contract.
+    """
+
+    __slots__ = (
+        "_actual_usage",
+        "_actual_usage_set",
+        "_limiter",
+        "_model",
+        "_timeout",
+        "_usage",
+        "_usage_on_error",
+        "reservation",
+    )
+
+    def __init__(
+        self,
+        limiter: RateLimiter,
+        usage: Usage,
+        model: str,
+        *,
+        timeout: float | None,
+        usage_on_error: Usage | None,
+    ) -> None:
+        self._limiter = limiter
+        self._usage = usage
+        self._model = model
+        self._timeout = timeout
+        self._usage_on_error = usage_on_error
+        self.reservation: CapacityReservation | None = None
+        self._actual_usage: Usage | None = None
+        self._actual_usage_set = False
+
+    def set_actual_usage(self, actual_usage: Usage) -> None:
+        """
+        Record what the guarded request actually consumed.
+
+        Keys must match the reserved usage; the unused remainder is refunded
+        when the ``reserve`` block exits normally. Calling this more than once
+        keeps the last value.
+        """
+        self._actual_usage = actual_usage
+        self._actual_usage_set = True
+
+    async def __aenter__(self) -> Self:
+        self.reservation = await self._limiter.acquire_capacity(
+            self._usage, self._model, timeout=self._timeout
+        )
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> bool:
+        reservation = self.reservation
+        assert reservation is not None  # noqa: S101 - set in __aenter__ before exit
+        if exc is not None:
+            refund_usage = (
+                self._usage_on_error
+                if self._usage_on_error is not None
+                else reservation.get_usage()
+            )
+            await self._refund_without_masking(refund_usage, reservation)
+            return False
+        if self._actual_usage_set:
+            await self._limiter.refund_capacity(self._actual_usage, reservation)
+            return False
+        warnings.warn(
+            _RESERVE_FORGOT_ACTUAL_USAGE_WARNING,
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        await self._limiter.refund_capacity(reservation.get_usage(), reservation)
+        return False
+
+    async def _refund_without_masking(
+        self,
+        refund_usage: Usage,
+        reservation: CapacityReservation,
+    ) -> None:
+        # Mirror ``_refund_undelivered_acquire_or_deliver``: a refund failure
+        # while an in-block exception is propagating must not replace it. Only
+        # critical exceptions (cancellation, interpreter shutdown, OOM) are
+        # allowed to override the original.
+        try:
+            await self._limiter.refund_capacity(refund_usage, reservation)
+        except BaseException as refund_error:
+            if isinstance(
+                refund_error, LIFECYCLE_CALLBACK_CRITICAL_EXCEPTIONS
+            ) or _exception_group_contains_critical(
+                refund_error,
+                LIFECYCLE_CALLBACK_CRITICAL_EXCEPTIONS,
+            ):
+                raise
+            _logger.warning(
+                "reserve(): refund failed while handling an in-block exception "
+                "for reservation %s; keeping the original exception.",
+                reservation.reservation_id,
+                exc_info=True,
+            )
