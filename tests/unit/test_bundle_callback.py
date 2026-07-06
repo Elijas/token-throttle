@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from token_throttle._interfaces import _callbacks
 from token_throttle._interfaces._callbacks import (
     RateLimiterCallbacks,
     SyncRateLimiterCallbacks,
@@ -61,6 +62,75 @@ def test_sync_hanging_callback_is_bounded_by_callback_timeout(caplog):
 
     assert time.monotonic() - start < 0.5
     assert "callback exceeded" in caplog.text
+
+
+async def test_async_stubborn_callback_swallowing_cancellation_is_bounded(caplog):
+    release = asyncio.Event()
+    started = asyncio.Event()
+    finished = asyncio.Event()
+
+    async def on_capacity_consumed(**_kwargs) -> None:
+        started.set()
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            # Stubborn: swallow the deadline cancellation and keep working.
+            await release.wait()
+        finally:
+            finished.set()
+
+    limiter = RateLimiter(
+        _config(),
+        backend=MemoryBackendBuilder(),
+        callbacks=RateLimiterCallbacks(on_capacity_consumed=on_capacity_consumed),
+        callback_timeout=0.02,
+    )
+
+    start = time.monotonic()
+    await limiter.acquire_capacity({"requests": 1}, model="gpt-test")
+    elapsed = time.monotonic() - start
+
+    # Bounded by callback_timeout, not by the callback's own runtime.
+    assert elapsed < 0.5
+    assert "callback exceeded" in caplog.text
+    # The callback was abandoned, not awaited: it is still running in the
+    # background rather than having blocked the acquire.
+    assert started.is_set()
+    assert not finished.is_set()
+
+    # It completes once unblocked, with no "Task exception was never retrieved".
+    release.set()
+    await asyncio.wait_for(finished.wait(), timeout=1.0)
+    assert "never retrieved" not in caplog.text
+
+
+async def test_async_detached_callback_late_exception_is_logged(caplog):
+    async def on_capacity_consumed(**_kwargs) -> None:
+        await asyncio.sleep(0.05)
+        raise RuntimeError("late callback boom")
+
+    limiter = RateLimiter(
+        _config(),
+        backend=MemoryBackendBuilder(),
+        callbacks=RateLimiterCallbacks(on_capacity_consumed=on_capacity_consumed),
+        callback_timeout=0.01,
+    )
+
+    before = set(_callbacks._DETACHED_CALLBACK_TASKS)
+    await limiter.acquire_capacity({"requests": 1}, model="gpt-test")
+    assert "callback exceeded" in caplog.text
+
+    # The callback was abandoned mid-flight and keeps running in the background.
+    # Wait for that task to finish; its logging done-callback was registered by
+    # the limiter first, so it runs before the one we add here.
+    (task,) = _callbacks._DETACHED_CALLBACK_TASKS - before
+    done = asyncio.Event()
+    task.add_done_callback(lambda _t: done.set())
+    await asyncio.wait_for(done.wait(), timeout=1.0)
+
+    # Its late error is surfaced, not dropped as an unretrieved task exception.
+    assert "late callback boom" in caplog.text
+    assert "never retrieved" not in caplog.text
 
 
 def test_default_callback_timeout_is_thirty_seconds():

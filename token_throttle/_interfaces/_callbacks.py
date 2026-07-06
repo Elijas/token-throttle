@@ -255,6 +255,76 @@ def _invoke_sync_callback_checked(callback, **kwargs) -> None:
         )
 
 
+class _CallbackCriticalCarrierError(Exception):
+    """
+    Carry a callback's ``KeyboardInterrupt``/``SystemExit`` out of its task.
+
+    A task's step re-raises those two exceptions into the event loop rather than
+    the awaiting frame, which would bypass the limiter's inline critical-exception
+    handling (and any acquire/close cleanup). Wrapping them lets the shielded
+    timeout path surface them through the normal ``await`` chain, matching the
+    sync path, whose helper thread captures every ``BaseException`` into a future.
+    """
+
+    def __init__(self, exc: BaseException) -> None:
+        super().__init__()
+        self.exc = exc
+
+
+async def _run_timed_callback(callback, callback_kwargs: dict[str, object]) -> None:
+    try:
+        await callback(**callback_kwargs)
+    except (KeyboardInterrupt, SystemExit) as exc:
+        raise _CallbackCriticalCarrierError(exc) from exc
+
+
+# Strong references to callbacks abandoned after ``callback_timeout``. Without
+# this the event loop only holds a weak reference to a detached task and may
+# garbage-collect it mid-flight. Entries are discarded from the done-callback.
+_DETACHED_CALLBACK_TASKS: set[asyncio.Future[None]] = set()
+
+
+def _log_detached_callback_outcome(
+    task: asyncio.Future[None],
+    *,
+    callback_slot: str | None,
+    kwargs: dict[str, object],
+) -> None:
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is None:
+        return
+    if isinstance(exc, _CallbackCriticalCarrierError):
+        exc = exc.exc
+    _log_late_callback_exception(exc, callback_slot=callback_slot, kwargs=kwargs)
+
+
+def _detach_async_callback(
+    task: asyncio.Future[None],
+    *,
+    callback_slot: str | None,
+    kwargs: dict[str, object],
+) -> None:
+    """
+    Let a timed-out callback finish in the background and log its outcome.
+
+    Mirrors the sync path, which abandons its helper thread after the timeout
+    and only surfaces an exception the callback raises later. ``asyncio.shield``
+    already retrieved the task result, so logging is the only remaining work.
+    """
+    if task.done():
+        _log_detached_callback_outcome(task, callback_slot=callback_slot, kwargs=kwargs)
+        return
+    _DETACHED_CALLBACK_TASKS.add(task)
+
+    def on_done(done: asyncio.Future[None]) -> None:
+        _DETACHED_CALLBACK_TASKS.discard(done)
+        _log_detached_callback_outcome(done, callback_slot=callback_slot, kwargs=kwargs)
+
+    task.add_done_callback(on_done)
+
+
 async def _invoke_async_callback_with_timeout(
     callback,
     callback_timeout: float | None,
@@ -266,14 +336,40 @@ async def _invoke_async_callback_with_timeout(
     if callback_timeout is None:
         await callback(**callback_kwargs)
         return
+    # Run the callback as its own task and shield it from the deadline: awaiting
+    # the raw coroutine via wait_for would, on timeout, cancel it and then block
+    # on its completion, so a callback that swallows CancelledError (or awaits in
+    # cleanup) would stall acquire/refund for its full runtime -- silently, since
+    # a swallowed cancellation makes wait_for return without raising TimeoutError.
+    # Shielding gives a deterministic timeout and lets us abandon the task, the
+    # async analogue of the sync path's abandoned helper thread.
+    task: asyncio.Future[None] = asyncio.ensure_future(
+        _run_timed_callback(callback, callback_kwargs)
+    )
     try:
-        await asyncio.wait_for(callback(**callback_kwargs), timeout=callback_timeout)
+        await asyncio.wait_for(asyncio.shield(task), timeout=callback_timeout)
+    except _CallbackCriticalCarrierError as carrier:
+        raise carrier.exc from None
     except TimeoutError:
         _log_callback_timeout(
             callback_timeout,
             callback_slot=callback_slot,
             kwargs=kwargs,
         )
+        _detach_async_callback(task, callback_slot=callback_slot, kwargs=kwargs)
+    # ast-guard: skip — narrow cancel composition; deadline branch owns cleanup.
+    except asyncio.CancelledError:
+        # Caller cancellation, not the deadline: preserve today's semantics by
+        # cancelling the callback and surfacing whatever it raises while
+        # unwinding (e.g. a critical exception a cleanup handler re-raises).
+        # Awaiting here still blocks on a callback that swallows cancellation,
+        # exactly as before; the deadline branch above is what bounds that case.
+        task.cancel()
+        try:
+            await task
+        except _CallbackCriticalCarrierError as carrier:
+            raise carrier.exc from None
+        raise
 
 
 def _invoke_sync_callback_with_timeout(
