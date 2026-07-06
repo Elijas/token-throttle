@@ -15,9 +15,9 @@
 Works with any LLM provider and any client library — token-throttle limits the _rate_, not the _client_.
 
 ```bash
-pip install "token-throttle[redis,tiktoken]>=9.0.0,<10.0.0"   # OpenAI + Redis (recommended)
-pip install "token-throttle[redis]>=9.0.0,<10.0.0"            # Any provider + Redis
-pip install "token-throttle>=9.0.0,<10.0.0"                   # Any provider + in-memory
+pip install "token-throttle[redis,tiktoken]>=9.1.0,<10.0.0"   # OpenAI + Redis (recommended)
+pip install "token-throttle[redis]>=9.1.0,<10.0.0"            # Any provider + Redis
+pip install "token-throttle>=9.1.0,<10.0.0"                   # Any provider + in-memory
 ```
 
 Requires Python 3.12+. The Redis backend requires Redis 6.2+, standalone or Sentinel only — not Redis Cluster or client-side sharding (see [docs/operations.md](docs/operations.md)).
@@ -90,7 +90,7 @@ a custom `usage_counter`) when you need exact provider-side counts instead.
 Install token-throttle's Redis and tokenizer extras plus the OpenAI client:
 
 ```bash
-pip install "token-throttle[redis,tiktoken]>=9.0.0,<10.0.0" openai
+pip install "token-throttle[redis,tiktoken]>=9.1.0,<10.0.0" openai
 ```
 
 ```python
