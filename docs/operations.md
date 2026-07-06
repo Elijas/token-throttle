@@ -70,8 +70,13 @@ metrics, reservation ids, or other key segments. Public validators reject `{`
 and `}` in Redis key segments, and Cluster support is intentionally unsupported.
 
 Redis backends require Redis server 6.2 or newer and a Redis user that can run
-`GET`, `EXISTS`, `SET`, `DEL`, `EXPIRE`, `PTTL`, `TIME`, and Lua scripting commands
-used by redis-py locks and token-throttle acquire/refund transactions.
+`GET`, `EXISTS`, `SET`, `DEL`, `EXPIRE`, `PEXPIRE`, `PTTL`, `TIME`, `MULTI`,
+`EXEC`, `DISCARD`, and Lua scripting (`EVAL`, `EVALSHA`, `SCRIPT LOAD`).
+`PEXPIRE` is used by redis-py's lock extend/reacquire script, and `MULTI` /
+`EXEC` / `DISCARD` are used by redis-py's transaction pipelines that
+token-throttle uses for atomic acquire/refund transactions; see
+[`MIGRATION.md`](../MIGRATION.md#6-redis-acl-requirements) for the full
+command list and rationale.
 
 Compatibility testing used `fakeredis` for unit tests plus local standalone
 Redis (7.x for the test matrix, 8.4.0 for the benchmarks below); 6.2 or newer is
