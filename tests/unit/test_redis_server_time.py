@@ -3,10 +3,11 @@
 Verifies that:
 1. The server-time helpers correctly convert Redis TIME responses to floats
 2. Redis bucket standalone paths use server time instead of local time.time()
-3. R4 L21 hardening: forward-jump rejection (T01), shape validation (T02),
-   Pipeline rejection (T03)
+3. Hardening: consecutive-reading forward-jump detection, TIME shape
+   validation, and Pipeline-as-client rejection
 """
 
+import logging
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -261,66 +262,178 @@ class TestSyncBucketUsesServerTime:
 
 
 # ---------------------------------------------------------------------------
-# R4 L21 T01 — forward-jump detection (cluster default-node failover guard)
+# Forward-jump detection — consecutive-reading guard against a jumped primary
 # ---------------------------------------------------------------------------
 
 
 class TestForwardJumpDetection:
-    """Reject Redis TIME values that are implausibly far ahead of local clock.
+    """Detect a genuine server-side forward jump between consecutive TIME reads.
 
-    Models a RedisCluster default-node failover where the new primary's clock
-    is grossly skewed forward. Without this guard, ``calculate_capacity`` sees
-    a giant ``time_passed`` and silently over-grants bucket capacity.
+    The rail compares consecutive Redis TIME values against locally-elapsed
+    *monotonic* time (per client), so it fires only on a real server clock jump
+    (e.g. a Sentinel/managed failover to a clock-skewed primary), never on a
+    lagging local wall clock. The first reading only establishes the baseline.
     """
 
-    async def test_async_rejects_jump_just_over_threshold(self, freeze_local_time):
+    @pytest.fixture(autouse=True)
+    def _reset_state(self):
+        """Isolate the per-client clock state between tests."""
+        _server_time._client_states.clear()
+        yield
+        _server_time._client_states.clear()
+
+    @pytest.fixture
+    def monotonic(self, monkeypatch):
+        """Controllable ``time.monotonic()`` for deterministic elapsed intervals."""
+        clock = {"now": 1000.0}
+        monkeypatch.setattr(_server_time.time, "monotonic", lambda: clock["now"])
+        return clock
+
+    # (a) A lagging local wall clock must NOT hard-fail operations.
+    async def test_async_lagging_local_clock_does_not_raise(
+        self, freeze_local_time, monotonic
+    ):
         client = AsyncMock()
-        # 11 seconds ahead of local — past the 10s default
-        client.time.return_value = (int(freeze_local_time) + 11, 0)
-        with pytest.raises(RuntimeError, match="ahead of local wall clock"):
+        # Server is a steady 30s ahead of the frozen (lagging) local wall clock.
+        monotonic["now"] = 1000.0
+        client.time.return_value = (int(freeze_local_time) + 30, 0)
+        assert await async_server_time(client) == pytest.approx(freeze_local_time + 30)
+        # Second reading: 5s later on BOTH the server and the monotonic clock.
+        monotonic["now"] = 1005.0
+        client.time.return_value = (int(freeze_local_time) + 35, 0)
+        assert await async_server_time(client) == pytest.approx(freeze_local_time + 35)
+
+    def test_sync_lagging_local_clock_does_not_raise(
+        self, freeze_local_time, monotonic
+    ):
+        client = MagicMock()
+        monotonic["now"] = 1000.0
+        client.time.return_value = (int(freeze_local_time) + 30, 0)
+        assert sync_server_time(client) == pytest.approx(freeze_local_time + 30)
+        monotonic["now"] = 1005.0
+        client.time.return_value = (int(freeze_local_time) + 35, 0)
+        assert sync_server_time(client) == pytest.approx(freeze_local_time + 35)
+
+    # (b) A genuine server jump between consecutive readings MUST raise.
+    async def test_async_genuine_jump_raises(self, freeze_local_time, monotonic):
+        client = AsyncMock()
+        monotonic["now"] = 1000.0
+        client.time.return_value = (1_700_000_000, 0)  # baseline
+        await async_server_time(client)
+        # 1s of monotonic elapsed, but the server clock leapt 12s → excess 11s.
+        monotonic["now"] = 1001.0
+        client.time.return_value = (1_700_000_012, 0)
+        with pytest.raises(RuntimeError, match="jumped forward"):
             await async_server_time(client)
 
-    def test_sync_rejects_jump_just_over_threshold(self, freeze_local_time):
+    def test_sync_genuine_jump_raises(self, freeze_local_time, monotonic):
         client = MagicMock()
-        client.time.return_value = (int(freeze_local_time) + 11, 0)
-        with pytest.raises(RuntimeError, match="ahead of local wall clock"):
+        monotonic["now"] = 1000.0
+        client.time.return_value = (1_700_000_000, 0)
+        sync_server_time(client)
+        monotonic["now"] = 1001.0
+        client.time.return_value = (1_700_000_012, 0)
+        with pytest.raises(RuntimeError, match="jumped forward"):
             sync_server_time(client)
 
-    async def test_async_accepts_small_forward_skew(self, freeze_local_time):
-        """A few seconds of forward skew is normal NTP slew — must NOT raise."""
+    # (c) The very first reading only establishes the baseline — never raises,
+    #     even when it is implausibly far ahead of the local wall clock.
+    async def test_async_first_reading_never_raises(self, freeze_local_time, monotonic):
         client = AsyncMock()
-        client.time.return_value = (int(freeze_local_time) + 5, 0)
-        result = await async_server_time(client)
-        assert result == pytest.approx(freeze_local_time + 5)
+        monotonic["now"] = 1000.0
+        client.time.return_value = (int(freeze_local_time) + 1_000_000, 0)
+        assert await async_server_time(client) == pytest.approx(
+            freeze_local_time + 1_000_000
+        )
 
-    def test_sync_accepts_small_forward_skew(self, freeze_local_time):
+    def test_sync_first_reading_never_raises(self, freeze_local_time, monotonic):
         client = MagicMock()
-        client.time.return_value = (int(freeze_local_time) + 5, 0)
-        result = sync_server_time(client)
-        assert result == pytest.approx(freeze_local_time + 5)
+        monotonic["now"] = 1000.0
+        client.time.return_value = (int(freeze_local_time) + 1_000_000, 0)
+        assert sync_server_time(client) == pytest.approx(freeze_local_time + 1_000_000)
 
-    async def test_async_accepts_backward_jump(self, freeze_local_time):
-        """Backward direction is already clamped in calculate_capacity — must NOT raise here."""
+    # (d) Backward jumps and small forward skews are fine.
+    async def test_async_backward_jump_does_not_raise(
+        self, freeze_local_time, monotonic
+    ):
         client = AsyncMock()
-        client.time.return_value = (int(freeze_local_time) - 1_000_000, 0)
-        result = await async_server_time(client)
-        assert result == pytest.approx(freeze_local_time - 1_000_000)
+        monotonic["now"] = 1000.0
+        client.time.return_value = (1_700_000_100, 0)
+        await async_server_time(client)
+        monotonic["now"] = 1001.0
+        client.time.return_value = (1_700_000_050, 0)  # server went backward 50s
+        assert await async_server_time(client) == pytest.approx(1_700_000_050.0)
 
-    def test_sync_accepts_backward_jump(self, freeze_local_time):
+    def test_sync_backward_jump_does_not_raise(self, freeze_local_time, monotonic):
         client = MagicMock()
-        client.time.return_value = (int(freeze_local_time) - 1_000_000, 0)
-        result = sync_server_time(client)
-        assert result == pytest.approx(freeze_local_time - 1_000_000)
+        monotonic["now"] = 1000.0
+        client.time.return_value = (1_700_000_100, 0)
+        sync_server_time(client)
+        monotonic["now"] = 1001.0
+        client.time.return_value = (1_700_000_050, 0)
+        assert sync_server_time(client) == pytest.approx(1_700_000_050.0)
 
-    async def test_async_jump_at_threshold_passes(self, freeze_local_time):
+    async def test_async_small_forward_skew_does_not_raise(
+        self, freeze_local_time, monotonic
+    ):
+        client = AsyncMock()
+        monotonic["now"] = 1000.0
+        client.time.return_value = (1_700_000_000, 0)
+        await async_server_time(client)
+        # Server advanced 9s while 1s of monotonic elapsed → excess 8s < 10s.
+        monotonic["now"] = 1001.0
+        client.time.return_value = (1_700_000_009, 0)
+        assert await async_server_time(client) == pytest.approx(1_700_000_009.0)
+
+    def test_sync_small_forward_skew_does_not_raise(self, freeze_local_time, monotonic):
+        client = MagicMock()
+        monotonic["now"] = 1000.0
+        client.time.return_value = (1_700_000_000, 0)
+        sync_server_time(client)
+        monotonic["now"] = 1001.0
+        client.time.return_value = (1_700_000_009, 0)
+        assert sync_server_time(client) == pytest.approx(1_700_000_009.0)
+
+    async def test_async_jump_at_threshold_passes(self, freeze_local_time, monotonic):
         """At exactly MAX_FORWARD_JUMP_SECONDS the check is inclusive (not strict-greater)."""
         client = AsyncMock()
+        monotonic["now"] = 1000.0
+        client.time.return_value = (1_700_000_000, 0)
+        await async_server_time(client)
+        # 1s monotonic elapsed, server advanced 1s + threshold → excess == threshold.
+        monotonic["now"] = 1001.0
         client.time.return_value = (
-            int(freeze_local_time) + int(MAX_FORWARD_JUMP_SECONDS),
+            1_700_000_000 + 1 + int(MAX_FORWARD_JUMP_SECONDS),
             0,
         )
         # Equal to threshold → not "more than" — must not raise.
         await async_server_time(client)
+
+    # The one-time wall-skew warning: a large server-vs-wall divergence is logged
+    # (once per client) but never raises, because refill uses server time only.
+    async def test_async_lagging_clock_warns_once(
+        self, freeze_local_time, monotonic, caplog
+    ):
+        client = AsyncMock()
+        monotonic["now"] = 1000.0
+        client.time.return_value = (int(freeze_local_time) + 30, 0)
+        with caplog.at_level(logging.WARNING, logger="token_throttle"):
+            await async_server_time(client)
+            monotonic["now"] = 1001.0
+            client.time.return_value = (int(freeze_local_time) + 31, 0)
+            await async_server_time(client)
+        assert caplog.text.count("diverges from the local wall clock") == 1
+
+    def test_sync_lagging_clock_warns_once(self, freeze_local_time, monotonic, caplog):
+        client = MagicMock()
+        monotonic["now"] = 1000.0
+        client.time.return_value = (int(freeze_local_time) + 30, 0)
+        with caplog.at_level(logging.WARNING, logger="token_throttle"):
+            sync_server_time(client)
+            monotonic["now"] = 1001.0
+            client.time.return_value = (int(freeze_local_time) + 31, 0)
+            sync_server_time(client)
+        assert caplog.text.count("diverges from the local wall clock") == 1
 
 
 # ---------------------------------------------------------------------------
