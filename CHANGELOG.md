@@ -5,6 +5,24 @@ Notable changes for token-throttle releases. For operator upgrade steps, see
 
 ## Unreleased
 
+- Fixes `OpenAIUsageCounter` under-reserving for two request fields that carry
+  real, billed prompt text but were not yet counted: Chat Completions'
+  `prediction` (Predicted Outputs content, which shows up as accepted/rejected
+  prediction tokens in usage) and the Responses API's `prompt.variables`
+  (the client-supplied values substituted into a stored prompt template).
+  Requests that use either feature now get a larger, more accurate token
+  reservation instead of one that silently under-counts; a stored prompt's
+  server-side template body itself remains unknowable from the client and is
+  documented as a best-effort blind spot.
+- Clarifies the Redis lock-contention warning log message and its docstrings
+  to say "a waiter" instead of "the no-timeout waiter", since deadline-bounded
+  callers also retry through contention as of v9.0.0, not just callers with no
+  timeout. No behavior change.
+- Restructures the README to lead the quickstart with `reserve()` and move
+  operational depth (concurrency model, lifecycle events, bucket-state loss)
+  into `docs/operations.md` and `docs/observability.md`; adds a Requirements
+  line and a strict-semver/migration note. No behavior change.
+
 ## v9.0.0 - 2026-07-06
 
 - **Breaking:** adds the public `BackendLockContentionError` exception and stops
