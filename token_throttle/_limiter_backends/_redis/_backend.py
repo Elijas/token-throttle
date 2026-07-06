@@ -591,6 +591,35 @@ def _log_background_cancellation_refund_result(
         )
 
 
+def _log_cancellation_refund_failure(
+    exc: BaseException,
+    *,
+    reservation_id: str | None,
+    usage: FrozenUsage,
+) -> None:
+    """
+    Log a fast-failing (already-settled) cancellation-path refund.
+
+    Counterpart to `_log_background_cancellation_refund_result`, which
+    covers the case where the refund task outlives the cancel-refund
+    timeout. Here the refund task already settled with an exception by
+    the time we checked it, so there is no background task to attach a
+    done-callback to — log inline instead.
+    """
+    _refund_logger.warning(
+        "Redis cancellation-path refund failed; reserved capacity for "
+        "reservation %s may not be returned until natural refill: %s: %s",
+        reservation_id,
+        type(exc).__name__,
+        exc,
+        exc_info=exc,
+        extra={
+            "token_throttle_reservation_id": reservation_id,
+            "token_throttle_usage": dict(usage),
+        },
+    )
+
+
 async def _release_lock_token_bounded(
     lock: redis.asyncio.lock.Lock,
     token: str,
@@ -2330,16 +2359,23 @@ class RedisBackend(RateLimiterBackend):
                 )
         except BaseException:
             if consumed:
-                try:  # noqa: SIM105
+                try:
                     await self._refund_cancelled_consumption(
                         usage,
                         buckets=buckets,
                         acquired_marker_key=self._acquired_marker_key(reservation_id),
                     )
-                except BaseException:  # noqa: BLE001, S110
-                    # Best-effort: shield ensures background completion.
-                    # Swallow so the original interrupt always propagates.
-                    pass
+                except BaseException as refund_exc:  # noqa: BLE001
+                    # Best-effort: the refund may fail fast (this branch,
+                    # logged inline) or exceed the cancel-refund timeout and
+                    # continue in the background (logged via
+                    # _log_background_cancellation_refund_result). Swallow
+                    # so the original interrupt always propagates.
+                    _log_cancellation_refund_failure(
+                        refund_exc,
+                        reservation_id=reservation_id,
+                        usage=usage,
+                    )
             raise
         return (
             True,
@@ -2588,7 +2624,7 @@ class RedisBackend(RateLimiterBackend):
                                     **current_limiter_callback_context(),
                                 )
                     except BaseException:
-                        try:  # noqa: SIM105
+                        try:
                             await self._refund_cancelled_consumption(
                                 usage,
                                 buckets=buckets,
@@ -2596,11 +2632,20 @@ class RedisBackend(RateLimiterBackend):
                                     reservation_id
                                 ),
                             )
-                        except BaseException:  # noqa: BLE001, S110
-                            # Best-effort: shield ensures background completion.
-                            # Swallow so the original critical callback failure
-                            # propagates without leaking consumed capacity.
-                            pass
+                        except BaseException as refund_exc:  # noqa: BLE001
+                            # Best-effort: the refund may fail fast (this
+                            # branch, logged inline) or exceed the
+                            # cancel-refund timeout and continue in the
+                            # background (logged via
+                            # _log_background_cancellation_refund_result).
+                            # Swallow so the original critical callback
+                            # failure propagates without leaking consumed
+                            # capacity.
+                            _log_cancellation_refund_failure(
+                                refund_exc,
+                                reservation_id=reservation_id,
+                                usage=usage,
+                            )
                         raise
                     return consumed_at_seconds
 

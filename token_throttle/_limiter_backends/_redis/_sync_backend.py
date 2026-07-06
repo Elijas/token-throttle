@@ -368,6 +368,27 @@ def _warn_lock_contention_retry(exc: BaseException) -> None:
     )
 
 
+def _log_cancellation_refund_failure(
+    exc: BaseException,
+    *,
+    reservation_id: str | None,
+    usage: FrozenUsage,
+) -> None:
+    """Log a cancellation-path refund that failed instead of silently dropping it."""
+    _refund_logger.warning(
+        "Redis cancellation-path refund failed; reserved capacity for "
+        "reservation %s may not be returned until natural refill: %s: %s",
+        reservation_id,
+        type(exc).__name__,
+        exc,
+        exc_info=exc,
+        extra={
+            "token_throttle_reservation_id": reservation_id,
+            "token_throttle_usage": dict(usage),
+        },
+    )
+
+
 def _lock_name_hash(lock_name: str | bytes | memoryview) -> str:
     lock_name_bytes = (
         lock_name.encode() if isinstance(lock_name, str) else bytes(lock_name)
@@ -2137,16 +2158,20 @@ class SyncRedisBackend(SyncRateLimiterBackend):
             # they can interrupt mid-statement and need the same best-effort
             # refund to avoid leaking capacity. Do not narrow to Exception.
             if consumed:
-                try:  # noqa: SIM105
+                try:
                     self._refund_cancelled_consumption(
                         usage,
                         buckets=buckets,
                         acquired_marker_key=self._acquired_marker_key(reservation_id),
                     )
-                except BaseException:  # noqa: BLE001, S110
+                except BaseException as refund_exc:  # noqa: BLE001
                     # Best-effort: sync interrupts mirror async cancellation
                     # cleanup. Swallow so the original interrupt propagates.
-                    pass
+                    _log_cancellation_refund_failure(
+                        refund_exc,
+                        reservation_id=reservation_id,
+                        usage=usage,
+                    )
             raise
         return (
             True,
@@ -2363,7 +2388,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                         # KI/SystemExit are the sync analogue of asyncio.CancelledError:
                         # they can interrupt mid-statement and need the same best-effort
                         # refund to avoid leaking capacity. Do not narrow to Exception.
-                        try:  # noqa: SIM105
+                        try:
                             self._refund_cancelled_consumption(
                                 usage,
                                 buckets=buckets,
@@ -2371,10 +2396,14 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                                     reservation_id
                                 ),
                             )
-                        except BaseException:  # noqa: BLE001, S110
+                        except BaseException as refund_exc:  # noqa: BLE001
                             # Best-effort: sync interrupts mirror async cancellation
                             # cleanup. Swallow so the original interrupt propagates.
-                            pass
+                            _log_cancellation_refund_failure(
+                                refund_exc,
+                                reservation_id=reservation_id,
+                                usage=usage,
+                            )
                         raise
                     return consumed_at_seconds
 
