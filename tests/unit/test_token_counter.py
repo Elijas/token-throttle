@@ -624,84 +624,76 @@ class TestGetEncodingImportError:
 
 
 class TestGetEncoding:
-    """Tests for the get_encoding function (model name mapping + prefix stripping)."""
+    """Tests for the get_encoding function.
+
+    get_encoding has no hardcoded model-family fallback table: resolution is
+    delegated entirely to ``tiktoken.encoding_for_model``, with only the
+    ``openai/`` provider-prefix stripping as custom logic. These tests pin
+    that delegation (via tiktoken's own resolution) rather than a bespoke
+    substring-matching table.
+    """
 
     def test_strips_openai_prefix(self):
         tiktoken = pytest.importorskip("tiktoken")
         enc = get_encoding("openai/gpt-4o")
-        # Should resolve to o200k_base after stripping "openai/" prefix
-        expected = tiktoken.get_encoding("o200k_base")
+        expected = tiktoken.encoding_for_model("gpt-4o")
         assert enc.name == expected.name
 
     def test_exact_model_match_with_prefix(self):
         tiktoken = pytest.importorskip("tiktoken")
         enc = get_encoding("openai/gpt-4")
-        expected = tiktoken.get_encoding("cl100k_base")
+        expected = tiktoken.encoding_for_model("gpt-4")
         assert enc.name == expected.name
 
-    def test_substring_model_match_with_prefix(self):
+    def test_dated_model_snapshot_with_prefix(self):
         tiktoken = pytest.importorskip("tiktoken")
-        # "gpt-4o-mini-2024-07-18" contains "gpt-4o-mini" as substring
         enc = get_encoding("openai/gpt-4o-mini-2024-07-18")
-        expected = tiktoken.get_encoding("o200k_base")
+        expected = tiktoken.encoding_for_model("gpt-4o-mini-2024-07-18")
         assert enc.name == expected.name
 
     def test_gpt4_turbo_encoding(self):
         tiktoken = pytest.importorskip("tiktoken")
         enc = get_encoding("openai/gpt-4-turbo")
-        expected = tiktoken.get_encoding("cl100k_base")
+        expected = tiktoken.encoding_for_model("gpt-4-turbo")
         assert enc.name == expected.name
 
     def test_gpt35_turbo_encoding(self):
         tiktoken = pytest.importorskip("tiktoken")
         enc = get_encoding("openai/gpt-3.5-turbo")
-        expected = tiktoken.get_encoding("cl100k_base")
+        expected = tiktoken.encoding_for_model("gpt-3.5-turbo")
         assert enc.name == expected.name
 
     def test_embedding_model(self):
         tiktoken = pytest.importorskip("tiktoken")
         enc = get_encoding("openai/text-embedding-3-small")
-        expected = tiktoken.get_encoding("cl100k_base")
+        expected = tiktoken.encoding_for_model("text-embedding-3-small")
         assert enc.name == expected.name
 
-    def test_exact_match_takes_priority_over_substring(self):
+    def test_gpt4_is_not_confused_with_gpt4o(self):
         tiktoken = pytest.importorskip("tiktoken")
-        # "gpt-4" exact match should use cl100k_base (not o200k_base from "gpt-4o")
+        # "gpt-4" and "gpt-4o" use different encodings; make sure prefix
+        # stripping doesn't accidentally conflate the two.
         enc = get_encoding("openai/gpt-4")
-        expected = tiktoken.get_encoding("cl100k_base")
+        expected = tiktoken.encoding_for_model("gpt-4")
         assert enc.name == expected.name
-
-    def test_openai_prefix_model_mapping(self):
-        """Models with openai/ prefix should map correctly after stripping."""
-        tiktoken = pytest.importorskip("tiktoken")
-        enc = get_encoding("openai/gpt-3.5-turbo")
-        expected = tiktoken.get_encoding("cl100k_base")
-        assert enc.name == expected.name
+        assert enc.name != tiktoken.encoding_for_model("gpt-4o").name
 
     def test_without_openai_prefix_works(self):
         """Bare model names (without openai/ prefix) resolve correctly."""
         tiktoken = pytest.importorskip("tiktoken")
         enc = get_encoding("gpt-4")
-        expected = tiktoken.get_encoding("cl100k_base")
+        expected = tiktoken.encoding_for_model("gpt-4")
         assert enc.name == expected.name
 
     def test_bare_gpt4o_works(self):
-        """Bare gpt-4o resolves to o200k_base."""
         tiktoken = pytest.importorskip("tiktoken")
         enc = get_encoding("gpt-4o")
-        expected = tiktoken.get_encoding("o200k_base")
+        expected = tiktoken.encoding_for_model("gpt-4o")
         assert enc.name == expected.name
 
-    def test_fallback_to_encoding_for_model(self):
-        """Cover line 87: unknown model falls through to tiktoken.encoding_for_model.
-
-        We need a model name that: (1) has no exact match in the substring map,
-        (2) does NOT contain any map key as a substring, (3) tiktoken recognizes.
-        'o1' and 'ada' both satisfy these — neither contains 'gpt-4', 'davinci', etc.
-        """
+    def test_delegates_to_tiktoken_for_models_it_knows(self):
+        """'ada' is resolved directly by tiktoken.encoding_for_model."""
         tiktoken = pytest.importorskip("tiktoken")
-        # 'ada' is known by tiktoken (maps to r50k_base) but is NOT a substring
-        # of any key in our map, and no map key appears in 'ada'.
         enc = get_encoding("ada")
         expected = tiktoken.encoding_for_model("ada")
         assert enc.name == expected.name
@@ -712,6 +704,56 @@ class TestGetEncoding:
             enc = get_encoding(model_name)
             expected = tiktoken.encoding_for_model(model_name)
             assert enc.name == expected.name
+
+
+class TestGetEncodingUnknownModelRaisesGuidedError:
+    """When tiktoken cannot resolve a model, get_encoding must raise a clear,
+    actionable ValueError instead of letting tiktoken's raw KeyError escape.
+
+    Regression coverage for dot-named model releases (e.g. gpt-5.1, gpt-5.2)
+    that the installed tiktoken does not recognize, and for legacy model
+    names that used to be silently (and often incorrectly) resolved by the
+    now-removed hardcoded substring-to-encoding fallback table.
+    """
+
+    def test_unknown_dotted_model_raises_value_error_not_key_error(self):
+        pytest.importorskip("tiktoken")
+        with pytest.raises(ValueError, match="get_encoding_func") as exc_info:
+            get_encoding("gpt-5.1")
+        assert "gpt-5.1" in str(exc_info.value)
+        assert isinstance(exc_info.value.__cause__, KeyError)
+
+    def test_stale_fallback_table_entry_now_raises(self):
+        """'codex' was hardcoded in the deleted fallback table but is not
+        resolvable by tiktoken; it must now raise the guided error instead of
+        silently returning a (possibly wrong) encoding.
+        """
+        pytest.importorskip("tiktoken")
+        with pytest.raises(ValueError, match="get_encoding_func"):
+            get_encoding("codex")
+
+    def test_counter_call_raises_value_error_for_unknown_model(self):
+        """OpenAIUsageCounter()(model, ...) must surface the guided ValueError,
+        not a raw tiktoken KeyError.
+        """
+        pytest.importorskip("tiktoken")
+        counter = OpenAIUsageCounter()
+        with pytest.raises(ValueError, match="get_encoding_func"):
+            counter("gpt-5.1", messages=[{"role": "user", "content": "hi"}])
+
+    async def test_count_request_async_raises_value_error_for_unknown_model(self):
+        pytest.importorskip("tiktoken")
+        counter = OpenAIUsageCounter()
+        with pytest.raises(ValueError, match="get_encoding_func"):
+            await counter.count_request_async(
+                "gpt-5.1", messages=[{"role": "user", "content": "hi"}]
+            )
+
+    async def test_warmup_models_raises_value_error_for_unknown_model(self):
+        pytest.importorskip("tiktoken")
+        counter = OpenAIUsageCounter()
+        with pytest.raises(ValueError, match="get_encoding_func"):
+            await counter.warmup_models(["gpt-5.1"])
 
 
 class TestOpenAIUsageCounterWithRealTiktoken:
@@ -819,6 +861,94 @@ class TestRequestContextJsonSerialization:
 
         assert rf_delta >= json_tokens
         assert rf_delta - json_tokens <= 5
+
+    def test_text_structured_output_delta_matches_json_dumps(self):
+        """Regression: the Responses API's `text={"format": {...}}`
+        structured-output config must be JSON-serialized like
+        `response_format`, not walked as plain text fragments (which drops
+        JSON structural tokens and undercounts by ~62%).
+        """
+        tiktoken = pytest.importorskip("tiktoken")
+        counter = OpenAIUsageCounter()
+        enc = tiktoken.encoding_for_model("gpt-4")
+
+        text_config = {
+            "format": {
+                "type": "json_schema",
+                "name": "answer",
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "summary": {
+                            "type": "string",
+                            "description": "Brief answer",
+                        },
+                        "confidence": {
+                            "type": "number",
+                            "description": "Model confidence 0-1",
+                        },
+                    },
+                    "required": ["summary"],
+                },
+            },
+        }
+        messages = [{"role": "user", "content": "hi"}]
+        base = counter(model="gpt-4", messages=messages)["tokens"]
+        with_text = counter(model="gpt-4", messages=messages, text=text_config)[
+            "tokens"
+        ]
+        text_delta = with_text - base
+        json_tokens = len(enc.encode(json.dumps(text_config)))
+
+        assert text_delta >= json_tokens, (
+            f"counter under-counts text: delta={text_delta}, json={json_tokens}"
+        )
+        assert text_delta - json_tokens <= 5
+
+    def test_text_and_response_format_counts_are_comparable(self):
+        """The same JSON schema delivered via the Responses API `text` field
+        or the Chat Completions `response_format` field must produce
+        comparable token counts. Before the fix, `text` skipped JSON
+        serialization and undercounted the identical schema by ~62%.
+        """
+        pytest.importorskip("tiktoken")
+        counter = OpenAIUsageCounter()
+
+        schema = {
+            "type": "object",
+            "properties": {
+                "summary": {"type": "string", "description": "Brief answer"},
+                "confidence": {
+                    "type": "number",
+                    "description": "Model confidence 0-1",
+                },
+            },
+            "required": ["summary"],
+        }
+        response_format = {
+            "type": "json_schema",
+            "json_schema": {"name": "answer", "schema": schema},
+        }
+        text_config = {
+            "format": {"type": "json_schema", "name": "answer", "schema": schema},
+        }
+
+        messages = [{"role": "user", "content": "hi"}]
+        base = counter(model="gpt-4", messages=messages)["tokens"]
+        rf_delta = (
+            counter(model="gpt-4", messages=messages, response_format=response_format)[
+                "tokens"
+            ]
+            - base
+        )
+        text_delta = (
+            counter(model="gpt-4", messages=messages, text=text_config)["tokens"] - base
+        )
+
+        assert text_delta > 0
+        # Same schema content, just nested one level differently between the
+        # two OpenAI wire shapes — deltas should be close, not off by ~62%.
+        assert abs(rf_delta - text_delta) <= 10
 
     def test_functions_delta_matches_json_dumps(self):
         """'functions' (legacy key) should also be JSON-serialized."""

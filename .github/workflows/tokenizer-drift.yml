@@ -1,0 +1,39 @@
+name: Tokenizer Drift Canary
+
+# Runs the OpenAI token counter's tokenizer/API-surface drift checks
+# (tests/canary/test_tokenizer_drift.py) against the LATEST unpinned openai
+# and tiktoken releases, not the versions pinned in uv.lock. The point is to
+# get a loud, weekly signal the moment tiktoken falls behind the openai
+# SDK's model list, or the SDK grows a new top-level request param this
+# repo hasn't triaged yet -- instead of silently under/over-counting tokens
+# for months. No OpenAI API key is used or required: everything here is
+# local package introspection (encoding lookups, TypedDict field names).
+
+on:
+  schedule:
+    # Wednesday 7 AM UTC. Deliberately offset from the other two recurring
+    # jobs (scheduled.yml: Monday 8 AM UTC, soak.yml: Thursday 9 AM UTC) so
+    # the three never contend for runners.
+    - cron: "0 7 * * 3"
+  workflow_dispatch:
+
+jobs:
+  canary:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+        with:
+          python-version: "3.13"
+      - run: uv sync --group dev
+      # Deliberately bypass uv.lock's pinned openai/tiktoken versions: this
+      # job exists to catch drift against whatever those packages ship next,
+      # not to re-verify the versions already covered by ci.yml.
+      - run: uv pip install --upgrade openai tiktoken
+      # --no-sync: plain `uv run` re-syncs the environment to uv.lock first,
+      # which would silently downgrade the openai upgrade above right back
+      # to the pinned version before the tests even start.
+      - run: uv run --no-sync pytest tests/canary -v
+        env:
+          CANARY: "1"
