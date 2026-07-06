@@ -53,6 +53,18 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: true
+      # A dispatch issued seconds after a push can be pinned to the previous
+      # main commit (ref resolution is eventually consistent). The atomic
+      # push at the end would reject that anyway, but only after the full CI
+      # wait — fail here instead, before any release work starts. This also
+      # catches commits landing on main mid-run.
+      - name: Fail fast if pinned commit is not the live main tip
+        run: |
+          REMOTE_MAIN=$(git ls-remote origin refs/heads/main | cut -f1)
+          if [ "${REMOTE_MAIN}" != "${GITHUB_SHA}" ]; then
+            echo "::error::Run is pinned to ${GITHUB_SHA} but origin/main is at ${REMOTE_MAIN}; re-dispatch the release."
+            exit 1
+          fi
       - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
         with:

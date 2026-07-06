@@ -3,7 +3,7 @@
 Notable changes for token-throttle releases. For operator upgrade steps, see
 [`MIGRATION.md`](MIGRATION.md).
 
-## Unreleased
+## v9.1.0 - 2026-07-07
 
 - Fixes `OpenAIUsageCounter` under-reserving for two request fields that carry
   real, billed prompt text but were not yet counted: Chat Completions'
