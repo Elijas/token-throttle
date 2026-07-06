@@ -1110,10 +1110,11 @@ class RateLimiter(BaseRateLimiter):
             async with self._refund_state_lock:
                 in_flight_count = len(self._in_flight_reservation_ids)
         self._clear_retained_state_after_close()
-        _logger.warning(
-            "limiter closed; %d reservations still in flight may not be refundable.",
-            in_flight_count,
-        )
+        if in_flight_count:
+            _logger.warning(
+                "limiter closed; %d reservations still in flight may not be refundable.",
+                in_flight_count,
+            )
         if interrupted:
             raise asyncio.CancelledError
 
