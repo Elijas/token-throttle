@@ -90,7 +90,7 @@ from token_throttle.migration import (
     validate_config_for_v2_0,
 )
 
-__version__ = "8.0.8"
+__version__ = "9.0.0"
 
 if TYPE_CHECKING:
     from token_throttle._capacity import CalculatedCapacity
