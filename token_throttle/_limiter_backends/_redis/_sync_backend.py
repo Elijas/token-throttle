@@ -2047,7 +2047,8 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                         if usage_amount > bucket.max_capacity:
                             raise ValueError(  # noqa: TRY301
                                 f"Usage value for {usage_metric_name} ({usage_amount}) "
-                                f"exceeds bucket max capacity ({bucket.max_capacity})",
+                                f"exceeds bucket max capacity ({bucket.max_capacity}) "
+                                f"for the {bucket.per_seconds}s window",
                             )
 
                 for usage_metric_name, usage_amount in usage.items():

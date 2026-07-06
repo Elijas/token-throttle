@@ -253,7 +253,7 @@ class TestNumpyBoolCoercionInValidation:
             validate_timeout(FAKE_NP_TRUE)
 
     def test_validate_max_capacity_value_rejects_duck_typed_numpy_bool(self):
-        with pytest.raises(ValueError, match="max_capacity must be finite"):
+        with pytest.raises(ValueError, match="max_capacity must be an int or float"):
             validate_max_capacity_value(FAKE_NP_TRUE)
 
     def test_validate_per_seconds_rejects_non_numeric_duck_typed_numpy_bool(self):

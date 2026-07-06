@@ -119,7 +119,7 @@ def test_m12_compute_sleep_rejects_poisoned_rate_defensively():
     [Decimal("1.5"), Fraction(1, 3), b"5"],
 )
 def test_m18_validate_max_capacity_rejects_non_builtin_numeric(value):
-    with pytest.raises(ValueError, match="max_capacity must be finite"):
+    with pytest.raises(ValueError, match="max_capacity must be an int or float"):
         validate_max_capacity_value(value)
 
 

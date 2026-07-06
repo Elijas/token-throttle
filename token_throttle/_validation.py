@@ -366,7 +366,8 @@ def validate_sleep_interval(sleep_interval: object) -> float | None:
         raise ValueError("sleep_interval must not be a boolean")
     if not isinstance(sleep_interval, (int, float)):
         raise ValueError(  # noqa: TRY004 - public validators raise ValueError.
-            f"sleep_interval must be finite and greater than 0 (got {sleep_interval!r})"
+            "sleep_interval must be an int or float "
+            f"(got {type(sleep_interval).__name__})"
         )
     try:
         sleep_interval_value = float(sleep_interval)
@@ -387,7 +388,7 @@ def validate_max_capacity_value(value: object) -> float:
         raise ValueError("max_capacity must not be a boolean")
     if not isinstance(value, (int, float)):
         raise ValueError(  # noqa: TRY004 - public validators raise ValueError.
-            f"max_capacity must be finite and greater than 0 (got {value!r})"
+            f"max_capacity must be an int or float (got {type(value).__name__})"
         )
     try:
         return _validate_max_capacity_finite_positive(value)

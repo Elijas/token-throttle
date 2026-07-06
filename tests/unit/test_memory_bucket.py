@@ -411,3 +411,49 @@ class TestMaxCapacityGuard:
         backend.set_max_capacity("requests", 1, 20.0)
         # Should succeed — 15 is within the new max of 20
         backend.wait_for_capacity(frozen_usage({"requests": 15}))
+
+    def _make_two_window_async_backend(self, *, limit: float = 10) -> MemoryBackend:
+        """Two windows on the same metric sharing a limit value.
+
+        Without the window in the error message, exceeding either bucket
+        produces an identical "exceeds bucket max capacity (10.0)" message —
+        ambiguous about which of the two windows actually failed.
+        """
+        quota_short = Quota(metric="requests", limit=limit, per_seconds=60)
+        quota_long = Quota(metric="requests", limit=limit, per_seconds=3600)
+        config = PerModelConfig(
+            model_family="test", quotas=UsageQuotas([quota_short, quota_long])
+        )
+        buckets = [
+            make_bucket(limit=limit, per_seconds=60),
+            make_bucket(limit=limit, per_seconds=3600),
+        ]
+        return MemoryBackend(buckets=buckets, limit_config=config)
+
+    def _make_two_window_sync_backend(self, *, limit: float = 10) -> SyncMemoryBackend:
+        quota_short = Quota(metric="requests", limit=limit, per_seconds=60)
+        quota_long = Quota(metric="requests", limit=limit, per_seconds=3600)
+        config = PerModelConfig(
+            model_family="test", quotas=UsageQuotas([quota_short, quota_long])
+        )
+        buckets = [
+            make_bucket(limit=limit, per_seconds=60),
+            make_bucket(limit=limit, per_seconds=3600),
+        ]
+        return SyncMemoryBackend(buckets=buckets, limit_config=config)
+
+    async def test_async_exceeds_capacity_message_names_the_failing_window(self):
+        backend = self._make_two_window_async_backend(limit=10)
+        with pytest.raises(
+            ValueError,
+            match=r"exceeds bucket max capacity \(10\.0\) for the (60|3600)s window",
+        ):
+            await backend.await_for_capacity(frozen_usage({"requests": 15}))
+
+    def test_sync_exceeds_capacity_message_names_the_failing_window(self):
+        backend = self._make_two_window_sync_backend(limit=10)
+        with pytest.raises(
+            ValueError,
+            match=r"exceeds bucket max capacity \(10\.0\) for the (60|3600)s window",
+        ):
+            backend.wait_for_capacity(frozen_usage({"requests": 15}))

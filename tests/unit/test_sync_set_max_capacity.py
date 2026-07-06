@@ -164,6 +164,15 @@ class TestSyncSetMaxCapacityValidation:
         ):
             limiter.set_max_capacity("gpt-4o", "tokens", 60, 0.0)
 
+    @pytest.mark.parametrize("value", ["100", None, []])
+    def test_wrong_type_value_raises_type_specific_message(self, value):
+        limiter = self._make_limiter_with_backend()
+        with pytest.raises(
+            ValueError,
+            match=rf"max_capacity must be an int or float \(got {type(value).__name__}\)",
+        ):
+            limiter.set_max_capacity("gpt-4o", "tokens", 60, value)
+
 
 class TestSyncSetMaxCapacityMetricValidation:
     """set_max_capacity should validate `metric` at the public API boundary."""
@@ -237,7 +246,7 @@ class TestSyncSetMaxCapacityCoercion:
 
         limiter.acquire_capacity({"tokens": 100, "requests": 1}, model="test-model")
 
-        with pytest.raises(ValueError, match="max_capacity must be finite"):
+        with pytest.raises(ValueError, match="max_capacity must be an int or float"):
             limiter.set_max_capacity("test-model", "tokens", 60, Decimal(5000))
 
     def test_int_value_is_coerced_to_float(self):
