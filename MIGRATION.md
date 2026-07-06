@@ -351,9 +351,16 @@ v4.0.0 narrows several public inputs to exact, predictable shapes:
 - bounded string fields enforce public length caps before key construction
 - DTO subclasses remain unsupported at security-sensitive boundaries
 
-These checks are fail-closed and raise `ValueError` or
-`CardinalityLimitExceededError`. Normalize external configuration before
-constructing token-throttle DTOs.
+These checks are fail-closed. Constructing `Quota`, `CapacityReservation`, or
+`PerModelConfig` directly surfaces a pydantic `ValidationError` (a `ValueError`
+subclass) for every violation, including length-cap overruns: pydantic wraps
+the library's internal `CardinalityLimitExceededError` before it reaches the
+caller. `RateLimiter` / `SyncRateLimiter` methods (for example
+`acquire_capacity` rejecting an oversized model alias or too many model
+families) raise `CardinalityLimitExceededError` directly instead. Catch
+`ValueError` to cover both call sites, or catch `CardinalityLimitExceededError`
+specifically where you only reach it through limiter methods. Normalize
+external configuration before constructing token-throttle DTOs.
 
 ### Rolling deploy v3 -> v4
 
@@ -515,8 +522,9 @@ factory functions, or explicit `PerModelConfig` construction before upgrading.
 ## 6. Redis ACL Requirements
 
 Redis backends require Redis server 6.2 or newer. token-throttle uses `GET`,
-`EXISTS`, `SET`, `DEL`, `TIME`, `EXPIRE`, and pipeline operations. No `KEYS`,
-`FLUSHDB`, `FLUSHALL`, `CONFIG`, or Pub/Sub commands are issued by the library.
+`EXISTS`, `SET`, `DEL`, `EXPIRE`, `PTTL`, `TIME`, and pipeline operations. No
+`KEYS`, `FLUSHDB`, `FLUSHALL`, `CONFIG`, or Pub/Sub commands are issued by the
+library.
 
 Redis acquire-marker and refund transactions use Lua `EVAL`. Redis lock release
 and extension (via redis-py) also require `EVALSHA` and `SCRIPT LOAD`. These are

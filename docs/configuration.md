@@ -19,9 +19,10 @@ maintenance that matter for long-lived or dynamic deployments.
 once mandatory in-process caps are reached: by default 10,000 model families,
 100 metrics per family, 10,000 model aliases, and 100,000 in-flight
 reservations. Key-segment length is also capped by default: model families and
-aliases at 256 characters, metrics at 64 characters. Tune these constructor
-arguments lower for tighter deployments and validate model names in your
-application if they come from users or configuration.
+aliases at 256 characters, metrics at 64 characters. Exceeding any of these
+caps raises `CardinalityLimitExceededError`. Tune these constructor arguments
+lower for tighter deployments and validate model names in your application if
+they come from users or configuration.
 
 Long-lived dynamic deployments should periodically call
 `limiter.clear_unused_model_families(unused_for_seconds)` (or the sync method
@@ -70,6 +71,31 @@ not need to accept unrelated kwargs like `model`. Custom counters are trusted
 application code: nested request objects are passed by reference, so counters
 should avoid mutating them. Return a plain `dict` or another well-behaved
 mapping of metric names to finite numeric values.
+
+### Choosing reservation sizes
+
+Reserve the provider-side worst case for each call — the maximum tokens the
+request could consume, including an explicit output budget if you set one.
+Over-reserving is always safe: it costs only in-flight throughput (the
+reserved capacity is unavailable to other callers until you refund), never
+correctness.
+
+Under-reserving is accepted, not rejected. If actual usage exceeds what you
+reserved, `refund_capacity()` emits a `RuntimeWarning` and applies a negative
+refund. That debt is not a separate error state; it recovers through the
+bucket's normal linear refill over the quota window like any other consumed
+capacity. Treat repeated warnings as a tuning signal — a mis-estimated
+reservation size, not a correctness bug — and raise the reserved amount for
+that call shape. Tune reservation sizes from the delta between reserved and
+actual usage; the additive lifecycle callback in
+[docs/observability.md](observability.md) is the recommended way to record
+that delta per request.
+
+`OpenAIUsageCounter` only reserves an explicit output budget when the request
+sets one of the OpenAI output-budget fields: `max_tokens`,
+`max_completion_tokens`, or `max_output_tokens`. Without one of these fields,
+output tokens are not reserved at all, so set one of them for chat and
+completions requests where the provider bills output tokens.
 
 ## Dynamic rate limits
 

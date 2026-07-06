@@ -152,7 +152,7 @@ _EXPECTED_MIGRATION_FRAGMENTS = (
         first_non_empty_code_line="from token_throttle import AcquireRefundFailedError",
     ),
     _ExpectedMigrationFragment(
-        start_line=437,
+        start_line=444,
         reason="requires an operator-provided config mapping",
         heading="## 1. Preflight Config Dictionaries",
         first_non_empty_code_line=(
@@ -160,7 +160,7 @@ _EXPECTED_MIGRATION_FRAGMENTS = (
         ),
     ),
     _ExpectedMigrationFragment(
-        start_line=544,
+        start_line=552,
         reason="requires an operator-supplied Redis client and target deployment prefix",
         heading="## 6a. Clean Up Legacy Redis Bucket Keys",
         first_non_empty_code_line=(
@@ -207,7 +207,7 @@ _EXPECTED_NON_PYTHON_FENCES = (
     ),
     _ExpectedNonPythonFence(
         document_name="README.md",
-        start_line=89,
+        start_line=95,
         language="bash",
         classification=_NON_PYTHON_CLASSIFICATION_SHELL_SYNTAX,
         reason="package installation command; lint syntax-checks but does not execute it",
@@ -293,7 +293,7 @@ _EXPECTED_NON_PYTHON_FENCES = (
     ),
     _ExpectedNonPythonFence(
         document_name="MIGRATION.md",
-        start_line=467,
+        start_line=474,
         language="text",
         classification=_NON_PYTHON_CLASSIFICATION_TEXT,
         reason="canonical migration error text, not an executable command",
@@ -304,7 +304,7 @@ _EXPECTED_NON_PYTHON_FENCES = (
     ),
     _ExpectedNonPythonFence(
         document_name="MIGRATION.md",
-        start_line=592,
+        start_line=600,
         language="text",
         classification=_NON_PYTHON_CLASSIFICATION_TEXT,
         reason="documented Redis bucket key shape",
@@ -313,7 +313,7 @@ _EXPECTED_NON_PYTHON_FENCES = (
     ),
     _ExpectedNonPythonFence(
         document_name="MIGRATION.md",
-        start_line=598,
+        start_line=606,
         language="text",
         classification=_NON_PYTHON_CLASSIFICATION_TEXT,
         reason="documented Redis acquire-marker key shape",
@@ -380,7 +380,7 @@ _EXPECTED_STDOUT_EXAMPLES = (
     ),
     _ExpectedStdoutExample(
         document_name="README.md",
-        start_line=147,
+        start_line=163,
         heading="### Any provider (manual usage)",
         first_non_empty_code_line="import asyncio",
         expected_stdout=(
