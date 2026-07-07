@@ -3,7 +3,7 @@
 Notable changes for token-throttle releases. Each major version's breaking
 changes and upgrade steps are recorded in its entry below.
 
-## Unreleased
+## 10.0.0 - 2026-07-07
 
 - **Breaking:** this library no longer carries pre-v9 upgrade tooling. The
   `token_throttle.migration` module and its four public names —
