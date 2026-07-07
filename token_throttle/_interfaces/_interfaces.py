@@ -352,7 +352,7 @@ class RateLimiterBackend(Protocol):
         Returning ``True`` while inheriting the no-op migration can silently
         reset surviving metrics' consumption state.
 
-        L18 H07 deliberately keeps this default ``False``: flipping it to
+        This default deliberately stays ``False``: flipping it to
         ``True`` would make naive custom backends opt into silent state loss.
         """
         return False
@@ -557,7 +557,7 @@ class SyncRateLimiterBackend(Protocol):
         ``prepare_reconfigured_backend`` can silently reset surviving metrics'
         consumption state.
 
-        L18 H07 deliberately keeps this default ``False``: flipping it to
+        This default deliberately stays ``False``: flipping it to
         ``True`` would make naive custom backends opt into silent state loss.
         """
         return False

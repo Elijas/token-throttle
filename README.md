@@ -459,7 +459,7 @@ are covered in [docs/operations.md](docs/operations.md#concurrency-model).
 - [docs/api.md](docs/api.md) — public constants and type aliases
 - [docs/configuration.md](docs/configuration.md) — per-model caps, unlimited configs, custom usage counters, dynamic limits
 - [docs/operations.md](docs/operations.md) — reservation durability, concurrency model, Redis topology, multi-tenant isolation, capacity planning, application-facing errors
-- [docs/observability.md](docs/observability.md) — logging, lifecycle events, health snapshots, PII surface
+- [docs/observability.md](docs/observability.md) — logging, lifecycle events, health snapshots, `diagnose()` diagnostics, PII surface
 - [docs/custom-backends.md](docs/custom-backends.md) — implement your own backend
 - [MIGRATION.md](MIGRATION.md) — breaking-change upgrade guides
 - [CHANGELOG.md](CHANGELOG.md) — release history

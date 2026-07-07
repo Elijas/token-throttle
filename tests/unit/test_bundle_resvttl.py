@@ -120,9 +120,13 @@ async def test_n03_limited_to_unlimited_flip_rejected_on_refund():
     reservation = await limiter.acquire_capacity({"tokens": 30}, "model")
 
     use_unlimited = True
-    with pytest.raises(ValueError, match=r"limited-to-unlimited.*L13 N03"):
+    with pytest.raises(ValueError, match=r"limited-to-unlimited") as excinfo:
         await limiter.refund_capacity({"tokens": 0}, reservation)
 
+    # No internal audit-codename suffix (e.g. "See L13 N03.") on the message.
+    assert str(excinfo.value).endswith(
+        "refund across a limited-to-unlimited config change is not supported."
+    )
     assert reservation.reservation_id not in limiter._refunded_reservation_ids
 
 
@@ -136,9 +140,11 @@ async def test_n05_model_family_reroute_rejected_on_refund():
     reservation = await limiter.acquire_capacity({"tokens": 30}, "model")
 
     family = "fam-new"
-    with pytest.raises(ValueError, match=r"model_family rerouting.*L13 N05"):
+    with pytest.raises(ValueError, match=r"model_family rerouting") as excinfo:
         await limiter.refund_capacity({"tokens": 0}, reservation)
 
+    # No internal audit-codename suffix (e.g. "See L13 N05.") on the message.
+    assert str(excinfo.value).endswith("model_family rerouting is not supported.")
     assert reservation.reservation_id not in limiter._refunded_reservation_ids
 
 
@@ -153,11 +159,26 @@ async def test_n09_async_close_logs_outstanding_reservations_and_blocks_use(
     with caplog.at_level(logging.WARNING, logger="token_throttle"):
         await limiter.aclose()
 
-    assert "limiter closed; 1 reservations still in flight may not be refundable" in (
+    assert "limiter closed; 1 reservation still in flight may not be refundable" in (
         caplog.text
     )
     with pytest.raises(RuntimeError, match="closed"):
         await limiter.acquire_capacity({"tokens": 1}, "model")
+
+
+async def test_async_close_pluralizes_multiple_outstanding_reservations(
+    caplog: pytest.LogCaptureFixture,
+):
+    limiter = RateLimiter(_limited_config(), backend=MemoryBackendBuilder())
+    await limiter.acquire_capacity({"tokens": 10}, "model")
+    await limiter.acquire_capacity({"tokens": 10}, "model")
+
+    with caplog.at_level(logging.WARNING, logger="token_throttle"):
+        await limiter.aclose()
+
+    assert "limiter closed; 2 reservations still in flight may not be refundable" in (
+        caplog.text
+    )
 
 
 def test_n01_sync_cross_limiter_memory_refund_is_unknown():
@@ -203,11 +224,26 @@ def test_n09_sync_close_logs_outstanding_reservations_and_blocks_use(
     with caplog.at_level(logging.WARNING, logger="token_throttle"):
         limiter.close()
 
-    assert "limiter closed; 1 reservations still in flight may not be refundable" in (
+    assert "limiter closed; 1 reservation still in flight may not be refundable" in (
         caplog.text
     )
     with pytest.raises(RuntimeError, match="closed"):
         limiter.acquire_capacity({"tokens": 1}, "model")
+
+
+def test_sync_close_pluralizes_multiple_outstanding_reservations(
+    caplog: pytest.LogCaptureFixture,
+):
+    limiter = SyncRateLimiter(_limited_config(), backend=SyncMemoryBackendBuilder())
+    limiter.acquire_capacity({"tokens": 10}, "model")
+    limiter.acquire_capacity({"tokens": 10}, "model")
+
+    with caplog.at_level(logging.WARNING, logger="token_throttle"):
+        limiter.close()
+
+    assert "limiter closed; 2 reservations still in flight may not be refundable" in (
+        caplog.text
+    )
 
 
 async def test_async_close_no_warning_on_clean_shutdown(

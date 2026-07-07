@@ -32,6 +32,46 @@ best-effort local estimates from limiter bookkeeping, not a cross-process Redis
 inventory. The snapshot intentionally omits Redis URLs, credentials, and Redis
 key prefixes.
 
+## Diagnostics (`diagnose()`)
+
+`await limiter.diagnose()` (`limiter.diagnose()` on `SyncRateLimiter`) returns
+a `RateLimiterDiagnostic` DTO: a richer, point-in-time snapshot than
+`snapshot_state()`. Unlike `snapshot_state()`, it performs bounded backend I/O
+to reconcile local bookkeeping against backend-reported bucket state; it never
+mutates capacity.
+
+It reports, per model family and bucket: current and effective capacity, the
+configured limit, and any active runtime override with its source (`limiter`,
+`backend`, or `both`); in-flight/pending/delivery-cleanup reservation counts
+grouped by family and metric; current acquire waiters and each one's primary
+capacity bottleneck; backend health for memory, Redis, and custom backends;
+and a severity-sorted `issues` list covering best-effort degradation or
+introspection failures.
+
+Reach for `diagnose()` when investigating a stuck or slow acquire, unexplained
+capacity drift, a suspected override mismatch between limiter and backend
+bookkeeping, or a custom backend that may not support introspection. Reach for
+the lighter `snapshot_state()` for routine health-check polling.
+
+```python
+# (fragment — see the README Any provider example for standalone context)
+diagnostic = await limiter.diagnose()
+for issue in diagnostic.issues:
+    print(issue.severity, issue.component, issue.message)
+if diagnostic.waits.waiters:
+    stuck = diagnostic.waits.waiters[0]
+    print(stuck.model_family, stuck.primary_bottleneck)
+```
+
+The full DTO tree (`RateLimiterDiagnostic`, `BucketDiagnostic`,
+`InFlightReservationsDiagnostic`, `CurrentWaitsDiagnostic`,
+`BackendHealthDiagnostic`, `DiagnosticIssue`, and related types) is importable
+from `token_throttle`; every field carries its own docstring. Custom backends
+can opt into richer per-backend sections by implementing the optional
+`introspect()` method from `BackendIntrospectable` /
+`SyncBackendIntrospectable`; backends that omit it still get a
+`custom_backend` info-level issue rather than a failure.
+
 ## Lifecycle events
 
 Lifecycle events include `event_type`, `reservation_id`, optional `request_id`

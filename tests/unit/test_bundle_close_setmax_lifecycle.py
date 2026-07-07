@@ -62,6 +62,28 @@ async def test_async_backend_close_failure_is_terminal_closed_state() -> None:
         await limiter.acquire_capacity({"tokens": 1}, MODEL)
 
 
+class _AsyncBuilderWithoutCloseHooks:
+    """Minimal builder exposing only build(); aclose()/close() are documented-optional."""
+
+    def __init__(self, inner: MemoryBackendBuilder) -> None:
+        self._inner = inner
+
+    def build(self, cfg, *, callbacks=None):
+        return self._inner.build(cfg, callbacks=callbacks)
+
+
+async def test_async_close_tolerates_builder_without_aclose_hook() -> None:
+    builder = _AsyncBuilderWithoutCloseHooks(MemoryBackendBuilder())
+    assert not hasattr(builder, "aclose")
+    limiter = RateLimiter(_config(), backend=builder)
+    reservation = await limiter.acquire_capacity({"tokens": 1}, MODEL)
+    await limiter.refund_capacity({"tokens": 1}, reservation)
+
+    await limiter.aclose()
+
+    assert limiter._closed is True
+
+
 async def test_async_close_waits_for_in_flight_set_max_before_backend_close() -> None:
     builder = MemoryBackendBuilder()
     limiter = RateLimiter(_config(), backend=builder)
@@ -147,6 +169,28 @@ def test_sync_backend_close_failure_is_terminal_closed_state() -> None:
     assert limiter._closing is False
     with pytest.raises(RuntimeError, match="closed"):
         limiter.acquire_capacity({"tokens": 1}, MODEL)
+
+
+class _SyncBuilderWithoutCloseHook:
+    """Minimal builder exposing only build(); close() is documented-optional."""
+
+    def __init__(self, inner: SyncMemoryBackendBuilder) -> None:
+        self._inner = inner
+
+    def build(self, cfg, *, callbacks=None):
+        return self._inner.build(cfg, callbacks=callbacks)
+
+
+def test_sync_close_tolerates_builder_without_close_hook() -> None:
+    builder = _SyncBuilderWithoutCloseHook(SyncMemoryBackendBuilder())
+    assert not hasattr(builder, "close")
+    limiter = SyncRateLimiter(_config(), backend=builder)
+    reservation = limiter.acquire_capacity({"tokens": 1}, MODEL)
+    limiter.refund_capacity({"tokens": 1}, reservation)
+
+    limiter.close()
+
+    assert limiter._closed is True
 
 
 def test_sync_close_waits_for_in_flight_set_max_before_backend_close() -> None:

@@ -84,7 +84,17 @@ def _scan_mapping(
     path: str,
     issues: list[ConfigMigrationIssue],
 ) -> None:
-    if _looks_like_redis_builder_config(value):
+    # A "redis" key whose value is itself a mapping is a nested builder-options
+    # section (its key_prefix lives inside that nested mapping); any other
+    # redis indicator means this mapping itself is the flat builder config.
+    nested_redis_config = value.get("redis")
+    if isinstance(nested_redis_config, Mapping):
+        _scan_redis_builder_config(
+            nested_redis_config,
+            path=_join_path(path, "redis"),
+            issues=issues,
+        )
+    elif _looks_like_redis_builder_config(value):
         _scan_redis_builder_config(value, path=path or "redis", issues=issues)
 
     if _looks_like_quota(value):
@@ -610,8 +620,22 @@ def _validate_scan_count(value: object) -> int:
     return value
 
 
+# Redis SCAN/KEYS use glob-style matching where `\`, `*`, `?`, `[`, `]` are
+# metacharacters; a key_prefix containing any of them must be escaped so the
+# MATCH pattern targets exactly this deployment's keys, not a wildcard shadow
+# of unrelated ones.
+_REDIS_GLOB_METACHARACTERS = frozenset("\\*?[]")
+
+
+def _escape_redis_glob(value: str) -> str:
+    return "".join(
+        f"\\{char}" if char in _REDIS_GLOB_METACHARACTERS else char for char in value
+    )
+
+
 def _bucket_scan_match(key_prefix: str) -> str:
-    return f"{redis_namespace_key(_validate_key_prefix(key_prefix), 'bucket')}:*"
+    fixed_prefix = redis_namespace_key(_validate_key_prefix(key_prefix), "bucket")
+    return f"{_escape_redis_glob(fixed_prefix)}:*"
 
 
 def _is_legacy_bucket_state_key(key: object) -> bool:
@@ -632,7 +656,8 @@ async def async_cleanup_legacy_buckets(
     count: int = 1000,
 ) -> int:
     """
-    Delete pre-FIX-38 Redis bucket state keys that have no expiry.
+    Delete Redis bucket state keys written before the v2.0.0 bucket-state TTL
+    change that still have no expiry.
 
     Only ``:last_checked`` and ``:capacity`` keys under the configured
     token-throttle bucket namespace are considered, and only when Redis reports
@@ -675,7 +700,8 @@ def cleanup_legacy_buckets(
     count: int = 1000,
 ) -> int:
     """
-    Synchronous cleanup for pre-FIX-38 Redis bucket state keys without expiry.
+    Synchronous cleanup for Redis bucket state keys written before the
+    v2.0.0 bucket-state TTL change that still have no expiry.
 
     Run during a maintenance window after draining in-flight reservations.
     Async Redis clients should use :func:`async_cleanup_legacy_buckets`.

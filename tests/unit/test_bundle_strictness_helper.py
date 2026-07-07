@@ -148,6 +148,29 @@ def test_redis_builder_config_missing_key_prefix_reports_upgrade_step() -> None:
     assert "deployment-scoped" in issue.suggested_fix
 
 
+def test_nested_redis_section_with_valid_key_prefix_reports_nothing() -> None:
+    config = {
+        "model_family": "gpt-4o",
+        "quotas": [{"metric": "requests", "limit": 1000, "per_seconds": 60}],
+        "redis": {"key_prefix": "prod-api"},
+    }
+
+    assert validate_config_for_v2_0(config) == []
+
+
+def test_nested_redis_section_missing_key_prefix_reports_upgrade_step() -> None:
+    config = {
+        "model_family": "gpt-4o",
+        "quotas": [{"metric": "requests", "limit": 1000, "per_seconds": 60}],
+        "redis": {},
+    }
+
+    issue = _issue_by_path(validate_config_for_v2_0(config))["redis.key_prefix"]
+
+    assert issue.value is None
+    assert "key_prefix" in issue.reason
+
+
 def test_legacy_reservation_none_limiter_instance_id_reports_drain_step() -> None:
     reservation = {
         "usage": {"tokens": 1.0},

@@ -1111,9 +1111,11 @@ class RateLimiter(BaseRateLimiter):
                 in_flight_count = len(self._in_flight_reservation_ids)
         self._clear_retained_state_after_close()
         if in_flight_count:
+            noun = "reservation" if in_flight_count == 1 else "reservations"
             _logger.warning(
-                "limiter closed; %d reservations still in flight may not be refundable.",
+                "limiter closed; %d %s still in flight may not be refundable.",
                 in_flight_count,
+                noun,
             )
         if interrupted:
             raise asyncio.CancelledError
@@ -1181,6 +1183,10 @@ class RateLimiter(BaseRateLimiter):
                 lock.release()
 
     async def _close_backend_cancellation_hardened(self) -> bool:
+        # builder.aclose() is a documented-optional cleanup hook; builders that
+        # own no shared resources may omit it entirely.
+        if not hasattr(self._backend, "aclose"):
+            return False
         close_task = asyncio.create_task(self._backend.aclose())
         interrupted = False
         while True:
@@ -2565,7 +2571,7 @@ class RateLimiter(BaseRateLimiter):
                 "Reservation model family "
                 f"{reservation.model_family!r} is now unlimited for model "
                 f"{model_name!r}; refund across a limited-to-unlimited "
-                "config change is not supported. See L13 N03."
+                "config change is not supported."
             )
         current_model_family = limit_config.get_model_family()
         if current_model_family != reservation.model_family:
@@ -2574,7 +2580,7 @@ class RateLimiter(BaseRateLimiter):
                 f"{reservation.model_family!r} no longer matches current "
                 f"config for model {model_name!r} "
                 f"({current_model_family!r}); refund across model_family "
-                "rerouting is not supported. See L13 N05."
+                "rerouting is not supported."
             )
 
         try:
