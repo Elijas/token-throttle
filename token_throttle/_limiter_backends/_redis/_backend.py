@@ -650,6 +650,28 @@ async def _release_lock_token_bounded(
         )
 
 
+async def _release_lock_ignore_lost(lock: redis.asyncio.lock.Lock) -> None:
+    """
+    Release a Redis lock, tolerating a lock already lost mid-operation.
+
+    When the lock's TTL lapsed or another worker stole it, redis-py raises
+    ``LockNotOwnedError`` from ``release()``. On the ``ExitStack`` unwind that
+    follows ``_extend_locks`` detecting the same loss, an un-suppressed release
+    error would replace the in-flight ``BackendLockContentionError`` and callers
+    would see the raw redis error instead of the documented one. Losing the lock
+    means release is expected to fail, so swallow it and let the original
+    exception propagate. Any other release failure still surfaces.
+    """
+    try:
+        await lock.release()
+    except redis.exceptions.LockNotOwnedError:
+        _debug_event(
+            _lock_logger,
+            "redis_lock_release_skipped_lost",
+            lock_name_hash=_lock_name_hash(lock.name),
+        )
+
+
 async def _shielded_lock_release(
     lock: redis.asyncio.lock.Lock,
     *,
@@ -657,7 +679,7 @@ async def _shielded_lock_release(
     reservation_id: str | None,
 ) -> None:
     """Release a Redis lock without letting cancellation hang the caller."""
-    release_task = asyncio.ensure_future(lock.release())
+    release_task = asyncio.ensure_future(_release_lock_ignore_lost(lock))
     release_task.add_done_callback(_log_background_lock_release_result)
     try:
         current_task = asyncio.current_task()

@@ -1390,6 +1390,20 @@ class SyncRedisBackend(SyncRateLimiterBackend):
     ) -> None:
         try:
             lock.release()
+        except redis.exceptions.LockNotOwnedError:
+            # The lock was lost mid-operation (its TTL lapsed or another worker
+            # stole it), so release is expected to fail. Swallow it: on the
+            # ExitStack unwind that follows _extend_locks detecting the same
+            # loss, letting this error propagate would replace the in-flight
+            # BackendLockContentionError with the raw redis error. See the async
+            # _release_lock_ignore_lost twin. Any other release failure surfaces.
+            _debug_event(
+                _lock_logger,
+                "redis_lock_release_skipped_lost",
+                reservation_id=reservation_id,
+                bucket_id=bucket_id,
+                lock_name_hash=_lock_name_hash(lock.name),
+            )
         finally:
             _debug_event(
                 _lock_logger,
