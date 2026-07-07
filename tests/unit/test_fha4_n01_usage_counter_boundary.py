@@ -99,7 +99,7 @@ class _ExplodingFloat(float):
 
 
 class _FakeEncoding:
-    def encode(self, text: str) -> list[int]:
+    def encode(self, text: str, **_kwargs: object) -> list[int]:
         return list(range(len(text)))
 
 
