@@ -3,6 +3,33 @@
 Notable changes for token-throttle releases. For operator upgrade steps, see
 [`MIGRATION.md`](MIGRATION.md).
 
+## Unreleased
+
+- Fixes caller cancellation being silently lost when an async callback's
+  cancellation cleanup raised an ordinary exception: previously that exception
+  replaced the `CancelledError`, was logged and swallowed like any callback
+  error, and the cancelled `acquire_capacity()` returned normally, defeating
+  `asyncio.timeout()` and `TaskGroup` aborts. The callback error is now logged
+  and `CancelledError` is re-raised, so cancellation propagates and reserved
+  capacity is refunded. Applies both with `callback_timeout` wrapping and with
+  `callback_timeout=None`.
+- Fixes a callback that itself raises `TimeoutError` being misreported as
+  exceeding `callback_timeout`, on both the async and sync paths. It is now
+  handled as an ordinary callback error (warning logged, acquire/refund call
+  unaffected) instead of deadline expiry.
+- Fixes an unbounded internal accumulation of timed-out async callbacks whose
+  event loop closed before they finished; stale entries are now pruned, so
+  short-lived event loops are no longer pinned in memory by abandoned
+  callbacks.
+- Fixes "Exception ignored" noise when an in-flight callback invocation is
+  torn down via coroutine `close()` (for example during garbage collection or
+  event-loop shutdown); teardown now propagates plain `GeneratorExit` instead
+  of an internal wrapper exception.
+- Documents in [`docs/observability.md`](docs/observability.md) that an
+  abandoned timed-out async callback that also swallows cancellation can block
+  `asyncio.run()` shutdown, unlike abandoned sync callbacks, which run in
+  daemon helper threads.
+
 ## v9.1.0 - 2026-07-07
 
 - Fixes `OpenAIUsageCounter` under-reserving for two request fields that carry

@@ -1,4 +1,5 @@
 import asyncio
+import sys
 import time
 import warnings
 from unittest.mock import AsyncMock, MagicMock
@@ -131,6 +132,98 @@ async def test_async_detached_callback_late_exception_is_logged(caplog):
     # Its late error is surfaced, not dropped as an unretrieved task exception.
     assert "late callback boom" in caplog.text
     assert "never retrieved" not in caplog.text
+
+
+def test_detached_callback_tasks_do_not_accumulate_across_closed_loops():
+    async def stuck_callback(**_kwargs) -> None:
+        await asyncio.sleep(3600)
+
+    async def invoke() -> None:
+        await _callbacks._invoke_async_callback_with_timeout(
+            stuck_callback,
+            0.01,
+            callback_slot="on_capacity_consumed",
+        )
+
+    before = set(_callbacks._DETACHED_CALLBACK_TASKS)
+    for _ in range(5):
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(invoke())
+        finally:
+            loop.close()
+
+    # Detached tasks whose loop closed before they finished can never run
+    # their done-callback; they must be pruned rather than pinning every
+    # short-lived loop forever. Only the most recent loop's task may linger.
+    leaked = _callbacks._DETACHED_CALLBACK_TASKS - before
+    assert len(leaked) <= 1
+
+
+async def test_async_callback_raising_timeout_error_is_not_deadline_expiry(caplog):
+    async def on_capacity_consumed(**_kwargs) -> None:
+        raise TimeoutError("callback timeout boom")
+
+    limiter = RateLimiter(
+        _config(),
+        backend=MemoryBackendBuilder(),
+        callbacks=RateLimiterCallbacks(on_capacity_consumed=on_capacity_consumed),
+        callback_timeout=30.0,
+    )
+
+    await limiter.acquire_capacity({"requests": 1}, model="gpt-test")
+
+    assert "callback exceeded" not in caplog.text
+    assert "raised TimeoutError" in caplog.text
+    assert "callback timeout boom" in caplog.text
+
+
+def test_sync_callback_raising_timeout_error_is_not_deadline_expiry(caplog):
+    def on_capacity_consumed(**_kwargs) -> None:
+        raise TimeoutError("callback timeout boom")
+
+    limiter = SyncRateLimiter(
+        _config(),
+        backend=SyncMemoryBackendBuilder(),
+        callbacks=SyncRateLimiterCallbacks(on_capacity_consumed=on_capacity_consumed),
+        callback_timeout=30.0,
+    )
+
+    limiter.acquire_capacity({"requests": 1}, model="gpt-test")
+
+    assert "callback exceeded" not in caplog.text
+    assert "raised TimeoutError" in caplog.text
+    assert "callback timeout boom" in caplog.text
+
+
+def test_wrapped_callback_invocation_close_propagates_generator_exit():
+    class _Suspend:
+        def __await__(self):
+            yield
+
+    entered = False
+
+    async def callback(**_kwargs) -> None:
+        nonlocal entered
+        entered = True
+        await _Suspend()
+
+    coro = _callbacks._run_timed_callback(callback, {})
+    coro.send(None)
+    assert entered
+
+    unraisable: list[object] = []
+    previous_hook = sys.unraisablehook
+    sys.unraisablehook = unraisable.append
+    try:
+        # close() must observe plain GeneratorExit; the internal critical
+        # carrier escaping here becomes "Exception ignored" unraisable noise
+        # when teardown happens via GC instead of an explicit close().
+        coro.close()
+    finally:
+        sys.unraisablehook = previous_hook
+
+    assert unraisable == []
 
 
 def test_default_callback_timeout_is_thirty_seconds():

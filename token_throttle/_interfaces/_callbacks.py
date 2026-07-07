@@ -245,6 +245,43 @@ def _log_late_callback_exception(
     _stdlib_logger.warning(msg, extra=_callback_log_extra(callback_slot, kwargs))
 
 
+def _log_callback_error_during_cancellation(
+    exc: BaseException,
+    *,
+    callback_slot: str | None,
+    kwargs: dict[str, object],
+) -> None:
+    msg = (
+        "Rate limiter callback raised while the caller was being cancelled "
+        f"{type(exc).__name__}: {exc}; re-raising CancelledError"
+    )
+    with contextlib.suppress(Warning):
+        warnings.warn(msg, RuntimeWarning, stacklevel=3)
+    _stdlib_logger.warning(msg, extra=_callback_log_extra(callback_slot, kwargs))
+
+
+def _masks_caller_cancellation(exc: BaseException) -> bool:
+    """
+    Return whether ``exc`` would silently replace the caller's CancelledError.
+
+    Once the caller has been cancelled, only exceptions that both safe-dispatch
+    ladders treat as critical may take CancelledError's place: anything else
+    would be logged-and-swallowed by ``safe_invoke_async_callback``, letting a
+    cancelled ``acquire_capacity`` return normally and defeating
+    ``asyncio.timeout()`` / ``TaskGroup`` aborts.
+    """
+    if isinstance(exc, BACKEND_CALLBACK_CRITICAL_EXCEPTIONS):
+        return False
+    return not _exception_group_contains_critical(
+        exc, BACKEND_CALLBACK_CRITICAL_EXCEPTIONS
+    )
+
+
+def _caller_cancellation_pending() -> bool:
+    task = _running_task_or_none()
+    return task is not None and task.cancelling() > 0
+
+
 def _invoke_sync_callback_checked(callback, **kwargs) -> None:
     result = callback(**_accepted_callback_kwargs(callback, kwargs))
     if inspect.isawaitable(result):
@@ -281,17 +318,44 @@ class _CallbackCriticalCarrierError(Exception):
         self.exc = exc
 
 
+def _running_task_or_none() -> asyncio.Task | None:
+    try:
+        return asyncio.current_task()
+    except RuntimeError:  # no running event loop (e.g. GC-driven teardown)
+        return None
+
+
 async def _run_timed_callback(callback, callback_kwargs: dict[str, object]) -> None:
+    own_task = _running_task_or_none()
     try:
         await callback(**callback_kwargs)
-    except (KeyboardInterrupt, SystemExit, GeneratorExit) as exc:
+    except GeneratorExit as exc:
+        # The carrier is only needed while this coroutine runs inside its own
+        # task step (the Task.__wakeup / coro.throw hazard described on the
+        # carrier). When ``coroutine.close()`` tears the invocation down -- GC
+        # of an abandoned detached task, explicit close(), loop shutdown --
+        # GeneratorExit is delivered outside that step and must propagate
+        # unwrapped, or close() surfaces the carrier as "Exception ignored"
+        # unraisable noise.
+        if own_task is None or _running_task_or_none() is not own_task:
+            raise
+        raise _CallbackCriticalCarrierError(exc) from exc
+    except (KeyboardInterrupt, SystemExit) as exc:
         raise _CallbackCriticalCarrierError(exc) from exc
 
 
 # Strong references to callbacks abandoned after ``callback_timeout``. Without
 # this the event loop only holds a weak reference to a detached task and may
-# garbage-collect it mid-flight. Entries are discarded from the done-callback.
+# garbage-collect it mid-flight. Entries are discarded from the done-callback,
+# except tasks whose loop closed before they finished: their done-callback can
+# never run, so they are pruned when the next detachment happens.
 _DETACHED_CALLBACK_TASKS: set[asyncio.Future[None]] = set()
+
+
+def _prune_detached_tasks_on_closed_loops() -> None:
+    for detached in list(_DETACHED_CALLBACK_TASKS):
+        if detached.get_loop().is_closed():
+            _DETACHED_CALLBACK_TASKS.discard(detached)
 
 
 def _log_detached_callback_outcome(
@@ -326,6 +390,7 @@ def _detach_async_callback(
     if task.done():
         _log_detached_callback_outcome(task, callback_slot=callback_slot, kwargs=kwargs)
         return
+    _prune_detached_tasks_on_closed_loops()
     _DETACHED_CALLBACK_TASKS.add(task)
 
     def on_done(done: asyncio.Future[None]) -> None:
@@ -344,7 +409,21 @@ async def _invoke_async_callback_with_timeout(
 ) -> None:
     callback_kwargs = _accepted_callback_kwargs(callback, kwargs)
     if callback_timeout is None:
-        await callback(**callback_kwargs)
+        try:
+            await callback(**callback_kwargs)
+        except BaseException as exc:
+            # The caller's CancelledError is delivered straight into the
+            # callback coroutine here. If its unwind swallowed that into an
+            # ordinary exception, restore CancelledError so cancellation is
+            # never silently lost.
+            if _masks_caller_cancellation(exc) and _caller_cancellation_pending():
+                _log_callback_error_during_cancellation(
+                    exc,
+                    callback_slot=callback_slot,
+                    kwargs=kwargs,
+                )
+                raise asyncio.CancelledError from exc
+            raise
         return
     # Run the callback as its own task and shield it from the deadline: awaiting
     # the raw coroutine via wait_for would, on timeout, cancel it and then block
@@ -361,6 +440,17 @@ async def _invoke_async_callback_with_timeout(
     except _CallbackCriticalCarrierError as carrier:
         raise carrier.exc from None
     except TimeoutError:
+        # ``wait_for`` raising TimeoutError does not always mean the deadline
+        # expired: a callback that itself raises TimeoutError surfaces through
+        # the shield identically. That case is an ordinary callback error for
+        # the safe-dispatch ladder, not deadline expiry.
+        callback_exc = (
+            task.exception() if task.done() and not task.cancelled() else None
+        )
+        if callback_exc is not None:
+            if isinstance(callback_exc, _CallbackCriticalCarrierError):
+                raise callback_exc.exc from None
+            raise callback_exc  # noqa: B904 - the callback's own error, unchanged
         _log_callback_timeout(
             callback_timeout,
             callback_slot=callback_slot,
@@ -369,16 +459,26 @@ async def _invoke_async_callback_with_timeout(
         _detach_async_callback(task, callback_slot=callback_slot, kwargs=kwargs)
     # ast-guard: skip — narrow cancel composition; deadline branch owns cleanup.
     except asyncio.CancelledError:
-        # Caller cancellation, not the deadline: preserve today's semantics by
-        # cancelling the callback and surfacing whatever it raises while
-        # unwinding (e.g. a critical exception a cleanup handler re-raises).
-        # Awaiting here still blocks on a callback that swallows cancellation,
-        # exactly as before; the deadline branch above is what bounds that case.
+        # Caller cancellation, not the deadline: cancel the callback and let
+        # critical exceptions from its unwind surface, but never let an
+        # ordinary unwind error replace the caller's CancelledError -- the
+        # safe-dispatch ladder would swallow it, and a cancelled acquire would
+        # return normally. Awaiting here still blocks on a callback that
+        # swallows cancellation, exactly as before; the deadline branch above
+        # is what bounds that case.
         task.cancel()
         try:
             await task
         except _CallbackCriticalCarrierError as carrier:
             raise carrier.exc from None
+        except BaseException as unwind_exc:
+            if not _masks_caller_cancellation(unwind_exc):
+                raise
+            _log_callback_error_during_cancellation(
+                unwind_exc,
+                callback_slot=callback_slot,
+                kwargs=kwargs,
+            )
         raise
 
 
@@ -424,6 +524,12 @@ def _invoke_sync_callback_with_timeout(
     try:
         future.result(timeout=callback_timeout)
     except concurrent.futures.TimeoutError:
+        # ``concurrent.futures.TimeoutError`` is the builtin TimeoutError, so a
+        # callback that itself raises TimeoutError lands here too. Mirror the
+        # async path: that is an ordinary callback error, not deadline expiry.
+        callback_exc = future.exception() if future.done() else None
+        if callback_exc is not None:
+            raise callback_exc  # noqa: B904 - the callback's own error, unchanged
         _log_callback_timeout(
             callback_timeout,
             callback_slot=callback_slot,
