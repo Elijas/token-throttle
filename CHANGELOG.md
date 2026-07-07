@@ -16,6 +16,22 @@ changes and upgrade steps are recorded in its entry below.
   recorded in the entries below. The Redis ACL command list, the `+@scripting`
   rationale, and the `SCRIPT FLUSH` operational hazard that the guide carried
   now live in [`docs/operations.md`](docs/operations.md).
+- **Breaking:** the logging-callback factories (`create_logging_callbacks` and
+  `create_sync_logging_callbacks`) no longer accept the `TRACE` or `SUCCESS`
+  log-level names. Passing either now raises `ValueError` listing the supported
+  standard level names (`DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`) instead
+  of quietly remapping them to `DEBUG`/`INFO`.
+- **Breaking:** `refund_capacity_from_response` (async and sync) now rejects
+  unknown keyword arguments with `TypeError`. A mistyped keyword — for example
+  `usaage=` instead of `usage=` — used to be silently ignored, which could drop
+  the refund amount you intended. The supported `response=` and `usage=`
+  arguments are unchanged.
+- Removed internal legacy-upgrade code paths that had no effect on current
+  usage: the rejection branch for reservations issued without a limiter
+  instance id, a Redis probe for an old max-capacity key that was only ever
+  logged and never applied, and a write-only Redis schema-version marker key.
+  These changes do not alter behavior for reservations and Redis state produced
+  by this version.
 
 ## v9.1.1 - 2026-07-07
 

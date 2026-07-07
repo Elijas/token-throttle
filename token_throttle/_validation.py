@@ -15,7 +15,8 @@ from token_throttle._interfaces._callable_utils import (
 )
 from token_throttle._interfaces._interfaces import PerModelConfig, PerModelConfigGetter
 from token_throttle._interfaces._models import (
-    _UNLIMITED_FLAG,
+    # Re-exported so the limiters and tests import the flag through this module.
+    _UNLIMITED_FLAG,  # noqa: F401
     MAX_ALIAS_LENGTH,
     MAX_KEY_PREFIX_LENGTH,
     MAX_METRIC_LENGTH,
@@ -35,9 +36,22 @@ from token_throttle._interfaces._models import (
 
 MAX_TOTAL_KEY_LENGTH = 8192
 
-# Re-exported from ``_models`` so external callers that imported
-# ``_UNLIMITED_FLAG`` from this module keep working.
-__all__ = ["_UNLIMITED_FLAG"]
+
+class _UnsetUsage:
+    """
+    Sentinel for an omitted ``usage`` argument to refund_capacity_from_response.
+
+    Shared by both limiter flavors so the parameter default is one object with a
+    stable ``repr`` (keeps the sync/async signatures identical).
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "UNSET_USAGE"
+
+
+_UNSET_USAGE: object = _UnsetUsage()
 
 
 def _revalidate_dto[StrictDTO_T: StrictDTO](instance: StrictDTO_T) -> StrictDTO_T:

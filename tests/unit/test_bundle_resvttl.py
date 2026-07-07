@@ -5,7 +5,7 @@ import pytest
 
 from token_throttle._exceptions import DuplicateRefundError, UnknownReservationError
 from token_throttle._interfaces._interfaces import PerModelConfig
-from token_throttle._interfaces._models import CapacityReservation, Quota, UsageQuotas
+from token_throttle._interfaces._models import Quota, UsageQuotas
 from token_throttle._limiter_backends._memory._backend import MemoryBackendBuilder
 from token_throttle._limiter_backends._memory._sync_backend import (
     SyncMemoryBackendBuilder,
@@ -54,31 +54,6 @@ async def test_n01_async_cross_limiter_memory_refund_is_unknown():
     assert reservation.limiter_instance_id == limiter_a._limiter_instance_id
     assert reservation.reservation_id not in limiter_b._refunded_reservation_ids
     assert await _async_capacity(limiter_b, "fam", "tokens") - before < 1
-
-
-async def test_legacy_reservation_without_limiter_instance_id_is_rejected(
-    caplog: pytest.LogCaptureFixture,
-):
-    limiter = RateLimiter(_limited_config(), backend=MemoryBackendBuilder())
-    await limiter.acquire_capacity({"tokens": 30}, "model")
-    legacy = CapacityReservation(
-        usage={"tokens": 30},
-        model_family="fam",
-        bucket_ids={("tokens", 60)},
-        model="model",
-        limiter_instance_id=limiter._limiter_instance_id,
-    )
-    object.__setattr__(legacy, "limiter_instance_id", None)
-    before = await _async_capacity(limiter, "fam", "tokens")
-
-    with (
-        caplog.at_level(logging.WARNING, logger="token_throttle"),
-        pytest.raises(ValueError, match=r"legacy v1\.4\.x reservations"),
-    ):
-        await limiter.refund_capacity({"tokens": 0}, legacy)
-
-    assert await _async_capacity(limiter, "fam", "tokens") - before < 1
-    assert "legacy v1.4.x reservations are rejected" in caplog.text
 
 
 async def test_n02_empty_projection_commits_dedup_before_return():

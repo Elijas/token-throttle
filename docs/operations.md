@@ -22,10 +22,7 @@ boundaries as proof that a caller was rate-limited. For queue-and-retry
 workflows, reserve immediately before dispatching the external request rather
 than storing reservations in a long-lived queue.
 
-v2.0.0 is a clean break from v1.4.x reservation compatibility. Every
-`CapacityReservation` requires a non-empty `limiter_instance_id`; legacy
-v1.4.x reservations without it are rejected. Drain in-flight reservations
-before upgrading and do not run mixed v1.4.x/v2.0.0 fleets.
+Every `CapacityReservation` requires a non-empty `limiter_instance_id`.
 
 ### If a worker crashes before refunding
 
@@ -185,8 +182,7 @@ because it is usually too small for production traffic.
 Redis bucket state expires by default after 7 days of inactivity. Configure
 `bucket_ttl_seconds` on Redis builders or Redis OpenAI factories to choose a
 different positive TTL. The TTL is refreshed whenever bucket state is read or
-written; Redis schema-version registry keys are intentionally long-lived and do
-not expire. `bucket_ttl_seconds` must be at least as long as your longest
+written. `bucket_ttl_seconds` must be at least as long as your longest
 configured quota window (`per_seconds`); backend build time rejects
 configurations where it is shorter, since an idle gap longer than the TTL
 would silently reset a quota that has not actually refilled.

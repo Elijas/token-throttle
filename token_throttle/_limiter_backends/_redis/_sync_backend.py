@@ -786,7 +786,6 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         self._limit_config = limit_config
         self._usage_metric_names: set[str] = {bucket.usage_metric for bucket in buckets}
         self._local_condition = threading.Condition()
-        self._legacy_override_probe_complete = False
         self._diagnostic_waiters: dict[str, DiagnosticWaiterState] = {}
 
     def add_bucket(self, bucket: SyncRedisBucket) -> None:
@@ -1208,18 +1207,6 @@ class SyncRedisBackend(SyncRateLimiterBackend):
     def _snapshot_buckets(self) -> tuple[SyncRedisBucket, ...]:
         return tuple(self.sorted_buckets)
 
-    def _probe_legacy_override_keys_once(
-        self,
-        buckets: tuple[SyncRedisBucket, ...] | list[SyncRedisBucket] | None = None,
-    ) -> None:
-        if self._legacy_override_probe_complete:
-            return
-        target_buckets = self.sorted_buckets if buckets is None else buckets
-        for bucket in target_buckets:
-            result = self._redis.get(bucket._legacy_max_capacity_key)  # noqa: SLF001
-            bucket.handle_legacy_max_capacity_key(result)
-        self._legacy_override_probe_complete = True
-
     def _runtime_max_capacity_for_reconciliation(
         self,
         metric: str,
@@ -1448,7 +1435,6 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         if pipeline is None:
             pipeline = self._redis.pipeline()
         target_buckets = self.sorted_buckets if buckets is None else buckets
-        self._probe_legacy_override_keys_once(target_buckets)
 
         if current_time is None:
             current_time = sync_server_time(self._redis)
@@ -1457,7 +1443,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
             bucket.get_capacity(pipeline=pipeline, current_time=current_time)
 
         # Include max_capacity in the pipeline to avoid extra round-trips.
-        # Override TTL refresh happens after parsing so invalid legacy payloads
+        # Override TTL refresh happens after parsing so invalid payloads
         # are not kept alive.
         for bucket in target_buckets:
             pipeline.get(bucket._max_capacity_key)  # noqa: SLF001

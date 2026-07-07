@@ -244,10 +244,10 @@ class RedisBucket:
     For example:
     ``prod-us-east:rate_limiting:bucket:gemini/gemini-2.0-flash:requests:1:max_capacity_override``.
 
-    Legacy override formats are intentionally not migrated because they were
-    unanchored and cannot be safely applied after a config change. Era 1
-    ``:max_capacity`` keys and Era 2 bare-numeric / unanchored JSON values are
-    logged and ignored; operators should re-set runtime overrides after upgrade.
+    Runtime overrides are persisted only in the anchored-JSON
+    ``:max_capacity_override`` key. An override whose ``configured_max_capacity``
+    anchor no longer matches the current configured limit is ignored, so a stale
+    override from a previous config cannot be applied after a config change.
 
     Static quota limits come from the current ``PerModelConfig`` in each process.
     Only explicit runtime overrides from ``set_max_capacity()`` are persisted in
@@ -319,13 +319,6 @@ class RedisBucket:
         self._lock_key = redis_key_with_suffix(self.full_redis_key, "lock")
         self._max_capacity_key = redis_key_with_suffix(
             self.full_redis_key, "max_capacity_override"
-        )
-        self._legacy_max_capacity_key = redis_key_with_suffix(
-            self.full_redis_key, "max_capacity"
-        )
-        self._schema_version_key = redis_namespace_key(
-            self.key_prefix,
-            "schema_version",
         )
         self._missing_consumption_data_reason: str | None = None
         self._missing_consumption_data_missing_keys: tuple[str, ...] = ()
@@ -475,34 +468,6 @@ class RedisBucket:
             f"{self.full_redis_key} at key {self._max_capacity_key}: {reason}"
         )
 
-    def _handle_legacy_override(
-        self,
-        era: str,
-        reason: str,
-        *,
-        key: str | None = None,
-        raw_value: object,
-    ) -> None:
-        _logger.warning(
-            "Ignoring legacy Redis max_capacity override for bucket %s at key %s: "
-            "%s format detected (%s, raw=%r). Re-set the override after upgrade "
-            "to write the current anchored format.",
-            self.full_redis_key,
-            key if key is not None else self._max_capacity_key,
-            era,
-            reason,
-            _safe_redis_value_repr(raw_value),
-        )
-
-    def handle_legacy_max_capacity_key(self, raw_value: object) -> None:
-        if raw_value is not None:
-            self._handle_legacy_override(
-                "Era 1",
-                "old :max_capacity key path",
-                key=self._legacy_max_capacity_key,
-                raw_value=raw_value,
-            )
-
     def _deserialize_max_capacity_override(self, raw_value: object) -> float | None:
         if raw_value is None:
             return None
@@ -612,7 +577,6 @@ class RedisBucket:
                 self._OVERRIDE_LIMIT_KEY: value,
             }
         )
-        await self._redis.set(self._schema_version_key, self._SCHEMA_VERSION, nx=True)
         await self._redis.set(
             self._max_capacity_key,
             payload,
@@ -824,4 +788,3 @@ class RedisBucket:
 
     _OVERRIDE_LIMIT_KEY = "override_max_capacity"
     _CONFIGURED_LIMIT_KEY = "configured_max_capacity"
-    _SCHEMA_VERSION = "3"

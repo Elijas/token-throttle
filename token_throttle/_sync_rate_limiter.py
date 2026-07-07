@@ -68,6 +68,7 @@ from token_throttle._limiter_backends._redis._ttl import (
 )
 from token_throttle._validation import (
     _UNLIMITED_FLAG,
+    _UNSET_USAGE,
     _revalidate_dto,
     extract_total_tokens,
     extract_usage_from_response,
@@ -482,13 +483,6 @@ def _warn_refund_refresh_failed(
             "model_family": model_family,
             "model_name": model_name,
         },
-    )
-
-
-def _raise_legacy_reservation_rejected() -> None:
-    raise ValueError(
-        "legacy v1.4.x reservations no longer supported in v2.0.0; "
-        "drain v1.4.x before upgrade"
     )
 
 
@@ -973,43 +967,16 @@ class SyncRateLimiter:
             return reservation
         return snapshot.to_reservation()
 
-    def _verify_reservation_has_limiter_instance(
-        self,
-        reservation: CapacityReservation,
-    ) -> None:
-        if reservation.limiter_instance_id is None:
-            _logger.warning(
-                "Reservation %s has no limiter_instance_id; legacy v1.4.x "
-                "reservations are rejected in v2.0.0.",
-                reservation.reservation_id,
-            )
-            _raise_legacy_reservation_rejected()
-
     def _verify_reservation_bound_to_limiter(
         self,
         reservation: CapacityReservation,
     ) -> None:
-        self._verify_reservation_has_limiter_instance(reservation)
         if reservation.limiter_instance_id != self._limiter_instance_id:
             raise UnknownReservationError(
                 "reservation issued by a different limiter instance",
                 reservation_id=reservation.reservation_id,
                 model_family=reservation.model_family,
             )
-
-    def _reject_legacy_reservation_before_revalidation(
-        self,
-        reservation: object,
-    ) -> None:
-        if type(reservation) is not CapacityReservation:
-            return
-        fields = reservation.__dict__
-        if (
-            "limiter_instance_id" in fields
-            and fields["limiter_instance_id"] is None
-            and "reservation_id" in fields
-        ):
-            self._verify_reservation_has_limiter_instance(reservation)
 
     def close(self) -> None:
         """
@@ -1604,7 +1571,6 @@ class SyncRateLimiter:
             )
         if type(reservation) is not CapacityReservation:
             is_unlimited_reservation(reservation)
-        self._reject_legacy_reservation_before_revalidation(reservation)
         reservation = _revalidate_dto(reservation)
         reservation = self._authoritative_reservation_for_refund(reservation)
         is_unlimited = is_unlimited_reservation(reservation)
@@ -1620,7 +1586,8 @@ class SyncRateLimiter:
         self,
         reservation: CapacityReservation,
         response=None,
-        **kwargs,
+        *,
+        usage: object = _UNSET_USAGE,
     ) -> None:
         """
         Convenience for OpenAI-style responses with ``total_tokens``.
@@ -1628,12 +1595,15 @@ class SyncRateLimiter:
         Requires metric names ``"tokens"`` and ``"requests"`` (as configured by
         ``create_openai_*`` factories).  For custom metric names, use
         :meth:`refund_capacity` directly.
+
+        Provide either a ``response`` object or a ``usage`` mapping/object with
+        ``total_tokens``. Passing any other keyword argument raises
+        ``TypeError``.
         """
         self._check_public_entry()
         self._raise_if_closed()
         if type(reservation) is not CapacityReservation:
             is_unlimited_reservation(reservation)
-        self._reject_legacy_reservation_before_revalidation(reservation)
         reservation = _revalidate_dto(reservation)
         reservation = self._authoritative_reservation_for_refund(reservation)
         is_unlimited = is_unlimited_reservation(reservation)
@@ -1654,14 +1624,13 @@ class SyncRateLimiter:
         if response is not None:
             # Pydantic model (OpenAI SDK v1+), raw response dict, or any object
             # with usage data.
-            usage = extract_usage_from_response(response)
-            total_tokens = extract_total_tokens(usage)
+            total_tokens = extract_total_tokens(extract_usage_from_response(response))
         else:
-            if "usage" not in kwargs:
+            if usage is _UNSET_USAGE:
                 raise ValueError(
                     "Either 'response' or 'usage' keyword argument is required"
                 )
-            total_tokens = extract_total_tokens(kwargs["usage"])
+            total_tokens = extract_total_tokens(usage)
         actual_usage = {"tokens": total_tokens, "requests": 1}
         validate_refund_usage(actual_usage, set(reservation.usage))
         self._refund_capacity(

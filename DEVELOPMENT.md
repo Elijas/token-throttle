@@ -183,8 +183,8 @@ is intentionally matching Python's own call-signature convention.
 stdlib `logging.getLogger("token_throttle")`. There is no `loguru` optional
 extra or loguru-specific callback factory in v8.
 
-`TRACE` and `SUCCESS` are accepted only as compatibility level-name aliases in
-`_STDLIB_LEVEL_MAP`; they map to stdlib `DEBUG` and `INFO`, respectively.
+`_STDLIB_LEVEL_MAP` accepts only the stdlib level names (DEBUG, INFO, WARNING,
+ERROR, CRITICAL); any other level name is rejected with `ValueError`.
 `_models.py` uses `warnings.warn()` for the empty-quota warning.
 
 ### Reservation and serialization trust boundary
@@ -202,12 +202,10 @@ alive. After callable-config changes, refunds are scoped to bucket ids captured
 at acquire time; removed buckets are not credited back into unrelated future
 metrics.
 
-v2.0.0 deliberately breaks v1.4.x reservation compatibility. Drain in-flight
-reservations before upgrading; mixed v1.4.x/v2.0.0 fleets are not supported.
-`CapacityReservation` requires a non-empty `limiter_instance_id`, and refund
-raises `ValueError("legacy v1.4.x reservations no longer supported in v2.0.0; drain v1.4.x before upgrade")`
-if a legacy object with `limiter_instance_id is None` reaches the refund path.
-For Redis backends, successful refunds claim
+`CapacityReservation` requires a non-empty `limiter_instance_id`. The field is
+validated, so a reservation cannot be constructed without one, and refunds from
+a different limiter instance raise `UnknownReservationError` — the intended
+fail-closed behavior. For Redis backends, successful refunds claim
 `{key_prefix}:rate_limiting:refund_dedup:{reservation_id}` with `SET NX EX`;
 the TTL defaults to 7 days and is configurable via
 `refund_dedup_ttl_seconds`. Memory backends have no durable refund dedup and
@@ -351,9 +349,8 @@ Because `last_checked` is reset to `now` before the new rate takes effect, the n
 `_STDLIB_LEVEL_MAP` uses `[]` lookup (not `.get()`). Unknown levels raise
 `KeyError` immediately. This is intentional — `_log()` is a private function
 only called from the `create_*_callbacks()` factories, which only pass
-standard level strings (DEBUG, INFO, WARNING, ERROR, CRITICAL) plus the
-compatibility aliases (TRACE, SUCCESS). Adding a `.get()` fallback would
-silently mask typos in level names.
+standard level strings (DEBUG, INFO, WARNING, ERROR, CRITICAL). Adding a
+`.get()` fallback would silently mask typos in level names.
 
 ### Capacity matching loop and the postconsumption invariant
 
@@ -369,13 +366,11 @@ Redis `_get_capacities_unsafe` batches pipeline commands in a fixed layout:
 each bucket enqueues `GET last_checked`, `GET capacity`, then `EXPIRE` for
 both bucket-state keys to refresh the mandatory bucket TTL. The backend then
 queues one `GET max_capacity_override` for each bucket. Valid override payloads
-refresh `max_capacity_override` TTL after they are parsed, so corrupt or legacy
-payloads are not kept alive by the read path. `_PIPELINE_CMDS_PER_BUCKET`,
+refresh `max_capacity_override` TTL after they are parsed, so corrupt payloads
+are not kept alive by the read path. `_PIPELINE_CMDS_PER_BUCKET`,
 `_PIPELINE_CMDS_PER_OVERRIDE`, and result count assertions enforce this layout.
 If `get_capacity()` or the pipeline structure changes, the assertion catches the
-mismatch immediately rather than silently reading wrong values. The
-`{key_prefix}:rate_limiting:schema_version` key is intentionally exempt from TTL
-because it is a long-lived registry.
+mismatch immediately rather than silently reading wrong values.
 
 ### Over-limit validation lives in the backend, not `validate_acquire_usage`
 

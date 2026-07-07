@@ -117,10 +117,8 @@ def _validate_not_generator_callback(value: object, field_name: str) -> None:
 
 
 _STDLIB_LEVEL_MAP: dict[str, int] = {
-    "TRACE": logging.DEBUG,
     "DEBUG": logging.DEBUG,
     "INFO": logging.INFO,
-    "SUCCESS": logging.INFO,
     "WARNING": logging.WARNING,
     "ERROR": logging.ERROR,
     "CRITICAL": logging.CRITICAL,

@@ -20,7 +20,6 @@ Sentinel ``model_family`` value used by ``_unlimited_reservation``.
 
 Lives in this module (not ``_validation``) so ``CapacityReservation``'s
 ``is_unlimited`` field validator can reference it without an import cycle.
-``_validation`` re-exports it for back-compat with any external imports.
 """
 
 
@@ -483,9 +482,7 @@ class CapacityReservation(StrictDTO):
     cross-process credentials; do not accept serialized reservations across
     trust boundaries as proof that capacity was acquired.
 
-    Reservations require ``limiter_instance_id``. Legacy v1.4.x serialized
-    reservations that omit it are rejected in v2.0.0; drain in-flight
-    reservations before upgrading mixed fleets.
+    Reservations require a non-empty ``limiter_instance_id``.
 
     ``is_unlimited=True`` is a trusted in-process sentinel produced by
     unlimited configs. Refunding such a reservation is a no-op.
@@ -533,8 +530,7 @@ class CapacityReservation(StrictDTO):
         ...,
         description=(
             "UUID of the limiter instance that issued this reservation. "
-            "Required in v2.0.0; legacy v1.4.x reservations without this "
-            "field are no longer accepted."
+            "Required and non-empty."
         ),
     )
     created_at_seconds: float | None = Field(

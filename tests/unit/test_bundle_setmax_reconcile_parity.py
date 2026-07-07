@@ -104,7 +104,7 @@ async def test_async_redis_post_write_readback_failure_does_not_abort_commit(
 
     await bucket.set_max_capacity(50.0)
 
-    assert redis_client.set.call_count == 2
+    assert redis_client.set.call_count == 1
 
 
 @pytest.mark.parametrize(
