@@ -20,17 +20,32 @@ Forward-jump detection
 A server-side clock that jumps forward silently inflates ``time_passed`` in
 ``calculate_capacity`` and over-grants bucket capacity. We detect a genuine
 jump by comparing consecutive TIME readings against locally-elapsed
-*monotonic* time (per Redis client): a raise only fires when the server clock
-advanced more than ``MAX_FORWARD_JUMP_SECONDS`` beyond the monotonic interval
-between two readings. The realistic trigger is a Sentinel/managed failover to
-a clock-skewed primary. The first reading for a client establishes the
-baseline and never raises.
+*monotonic* time (per Redis client): the rail trips only when the server
+clock advanced more than ``MAX_FORWARD_JUMP_SECONDS`` beyond the monotonic
+interval between two readings. Each reading's own round-trip is bounded into
+that interval (the anchor stores the pre-call monotonic reading; elapsed time
+is measured to the post-reply reading), so one slow TIME reply widens the
+tolerance instead of tripping the rail. The first reading for a client
+establishes the baseline and never raises.
 
-A *lagging local wall clock* (NTP outage, paused/resumed VM, container drift)
-is harmless to correctness because refill math uses Redis server time
-exclusively - it must never hard-fail an operation. When server-vs-wall skew
-exceeds the threshold we emit a one-time warning per client, because it often
-points at NTP problems worth investigating, but we never raise on it.
+An anomalous reading has two possible causes, and the local *wall* clock
+discriminates them. A suspended host (paused VM, laptop sleep, live
+migration) stalls the monotonic clock while real time keeps passing, so on
+resume the wall clock corroborates the server's advance: we re-anchor, log a
+warning, and continue, because refill math uses Redis server time exclusively
+and a stalled local clock is harmless to correctness. A genuine server-side
+jump (realistically a Sentinel/managed failover to a clock-skewed primary)
+leaves wall and monotonic in agreement while the server leaps: we raise,
+exactly once per event, because the anchor advances to the jumped reading
+before raising and concurrent callers holding readings from around the same
+event compare against the new baseline instead of re-raising. Readings older than the stored server anchor
+(out-of-order arrivals under concurrency, or a backward server jump, which
+never over-grants) never move the anchor backward.
+
+A *lagging local wall clock* (NTP outage, container drift) never hard-fails
+an operation. When server-vs-wall skew exceeds the threshold we emit a
+one-time warning per client, because it often points at NTP problems worth
+investigating, but we never raise on it.
 
 Bare client only
 ----------------
@@ -39,11 +54,14 @@ Bare client only
 prevents the silent failure where TIME would be queued (not executed) and
 the unpack would receive an empty queued-command list.
 
-Custom-gateway shape contract
------------------------------
-Implementations of ``AbstractRedisGateway`` must return TIME as a
-2-element tuple/list of integer values with ``seconds >= 0`` and
-``0 <= microseconds < 1_000_000``. Off-shape responses raise ``TypeError``
+TIME response shape contract
+----------------------------
+``async_server_time`` / ``sync_server_time`` are called by the Redis backends
+and buckets with the ``redis_client`` the user supplied - a
+``redis.asyncio.Redis`` / ``redis.Redis`` instance or a compatible substitute
+(e.g. fakeredis, test doubles). Whatever that client is, its ``time()`` must
+return TIME as a 2-element tuple/list of integer values with ``seconds >= 0``
+and ``0 <= microseconds < 1_000_000``. Off-shape responses raise ``TypeError``
 or ``ValueError`` instead of producing wrong-but-not-erroring math.
 """
 
@@ -73,9 +91,12 @@ MAX_FORWARD_JUMP_SECONDS = 10.0
 
 Catches a Sentinel/managed failover to a clock-skewed primary: a forward jump
 silently inflates ``time_passed`` in ``calculate_capacity`` and over-grants
-bucket capacity. Compared against locally-elapsed monotonic time, so a lagging
-local wall clock cannot trip it. NTP-disciplined primaries diverge by < 100 ms
-in practice; 10 s is a permissive sanity rail, not a tightness guarantee.
+bucket capacity. Compared against locally-elapsed monotonic time (with each
+reading's round-trip bounded into the interval), so neither a lagging local
+wall clock nor one slow TIME reply can trip it; a suspended/resumed host is
+recognized via the wall clock and re-anchored instead of raising.
+NTP-disciplined primaries diverge by < 100 ms in practice; 10 s is a
+permissive sanity rail, not a tightness guarantee.
 """
 
 # KNOWN UNKNOWN: 10s threshold is set by intuition, not measured P99.9
@@ -87,13 +108,21 @@ _MAX_REDIS_TIME_SECONDS = 253_402_300_799  # 9999-12-31T23:59:59Z
 
 
 class _ClientClockState:
-    """Per-client anchor for consecutive-reading forward-jump detection."""
+    """
+    Per-client anchor for consecutive-reading forward-jump detection.
 
-    __slots__ = ("last_monotonic", "last_server_time", "wall_skew_warned")
+    ``last_monotonic`` / ``last_wall`` hold the local clock readings taken just
+    *before* the anchored TIME command was issued, so the interval measured to
+    a later reading's post-reply clocks is an upper bound on the real time
+    between the two server samplings (both round-trips fall inside it).
+    """
 
-    def __init__(self, server_time: float, monotonic: float) -> None:
+    __slots__ = ("last_monotonic", "last_server_time", "last_wall", "wall_skew_warned")
+
+    def __init__(self, server_time: float, monotonic: float, wall: float) -> None:
         self.last_server_time = server_time
         self.last_monotonic = monotonic
+        self.last_wall = wall
         self.wall_skew_warned = False
 
 
@@ -175,65 +204,112 @@ def _maybe_warn_wall_skew(
     )
 
 
-def _check_forward_jump(client: object, server_time: float) -> None:
+def _check_forward_jump(
+    client: object,
+    server_time: float,
+    monotonic_before: float,
+    wall_before: float,
+) -> None:
     """
     Raise on a genuine server-side forward jump between consecutive readings.
 
-    Detection is relative to locally-elapsed monotonic time, not the wall clock,
-    so a lagging local clock never trips it. The first reading for a client only
-    establishes the baseline.
+    ``monotonic_before`` / ``wall_before`` were read just before the TIME
+    command was issued; the post-reply clocks are read here, inside the lock.
+    Anchors keep the *before* readings while elapsed time is measured to the
+    *after* readings, so each measured interval is an upper bound on the real
+    time between the two server samplings - a slow TIME reply widens the
+    tolerance instead of tripping the rail. The first reading for a client
+    only establishes the baseline.
     """
     with _state_lock:
-        # Read the clocks inside the lock so the monotonic reading is ordered
-        # with respect to the stored anchor (guarantees non-negative elapsed).
+        # Post-reply clocks are read inside the lock, so they are ordered
+        # after the anchored reading's pre-call clocks even under concurrency
+        # (guarantees non-negative monotonic elapsed).
         now_monotonic = time.monotonic()
         wall_now = time.time()
 
         state = _client_states.get(client)
         if state is None:
-            state = _ClientClockState(server_time, now_monotonic)
+            state = _ClientClockState(server_time, monotonic_before, wall_before)
             _client_states[client] = state
             _maybe_warn_wall_skew(state, server_time, wall_now)
             return
 
-        server_elapsed = server_time - state.last_server_time
-        monotonic_elapsed = now_monotonic - state.last_monotonic
-        excess = server_elapsed - monotonic_elapsed
-
-        # Re-anchor to the latest reading regardless of the outcome, so a
-        # one-off jump is reported once and the next reading compares against
-        # the new baseline instead of hard-failing every future operation.
-        state.last_server_time = server_time
-        state.last_monotonic = now_monotonic
-
         _maybe_warn_wall_skew(state, server_time, wall_now)
 
-        if excess > MAX_FORWARD_JUMP_SECONDS:
-            raise RuntimeError(
-                f"Redis server TIME jumped forward {server_elapsed:.1f}s "
-                f"between consecutive readings while only {monotonic_elapsed:.1f}s "
-                f"elapsed on the local monotonic clock (excess {excess:.1f}s > "
-                f"MAX_FORWARD_JUMP_SECONDS={MAX_FORWARD_JUMP_SECONDS}s). A forward "
-                f"jump silently inflates token-bucket refill and over-grants "
-                f"capacity. This typically signals a Sentinel or managed failover "
-                f"to a clock-skewed primary; investigate NTP discipline across "
-                f"your Redis primaries."
+        if server_time < state.last_server_time:
+            # Stale out-of-order reading (a concurrent caller already anchored
+            # a newer one) or a backward server jump, which never over-grants.
+            # Regressing the anchor would make the next in-order reading look
+            # like a fresh forward jump, so keep the anchor where it is.
+            return
+
+        server_elapsed = server_time - state.last_server_time
+        monotonic_elapsed = now_monotonic - state.last_monotonic
+        wall_elapsed = wall_now - state.last_wall
+
+        # Advance the anchor before deciding the outcome so a detected anomaly
+        # is consumed exactly once: concurrent callers holding readings from
+        # around the same event compare against this new baseline instead of
+        # re-reporting the same jump.
+        state.last_server_time = server_time
+        state.last_monotonic = monotonic_before
+        state.last_wall = wall_before
+
+        excess = server_elapsed - monotonic_elapsed
+        if excess <= MAX_FORWARD_JUMP_SECONDS:
+            return
+
+        # The server advanced far beyond locally-elapsed monotonic time. The
+        # local wall clock discriminates the two causes: a suspended/resumed
+        # host stalls the monotonic clock while real time keeps passing, so
+        # the wall clock corroborates the server; a genuine server-side jump
+        # leaves wall and monotonic in agreement while the server leaps.
+        if server_elapsed - wall_elapsed <= MAX_FORWARD_JUMP_SECONDS:
+            _logger.warning(
+                "Redis server TIME advanced %.1fs between consecutive readings "
+                "while only %.1fs elapsed on the local monotonic clock, but the "
+                "local wall clock advanced %.1fs and corroborates the server. "
+                "This is the signature of a suspended/resumed host (paused VM, "
+                "laptop sleep, live migration): the monotonic clock stalls "
+                "while real time keeps passing. Re-anchored the clock baseline "
+                "and continuing; refill math uses Redis server time, so "
+                "correctness is unaffected.",
+                server_elapsed,
+                monotonic_elapsed,
+                wall_elapsed,
             )
+            return
+
+        raise RuntimeError(
+            f"Redis server TIME jumped forward {server_elapsed:.1f}s between "
+            f"consecutive readings while only {monotonic_elapsed:.1f}s elapsed "
+            f"on the local monotonic clock and {wall_elapsed:.1f}s on the local "
+            f"wall clock (excess {excess:.1f}s > MAX_FORWARD_JUMP_SECONDS="
+            f"{MAX_FORWARD_JUMP_SECONDS}s). A forward jump silently inflates "
+            f"token-bucket refill and over-grants capacity. This typically "
+            f"signals a Sentinel or managed failover to a clock-skewed primary; "
+            f"investigate NTP discipline across your Redis primaries."
+        )
 
 
 async def async_server_time(client: redis.asyncio.Redis) -> float:
     """Return the Redis server's current time as a ``time.time()``-compatible float."""
     _reject_pipeline(client)
+    monotonic_before = time.monotonic()
+    wall_before = time.time()
     seconds, microseconds = _parse_time_response(await client.time())
     server_time = _to_float(seconds, microseconds)
-    _check_forward_jump(client, server_time)
+    _check_forward_jump(client, server_time, monotonic_before, wall_before)
     return server_time
 
 
 def sync_server_time(client: redis.Redis) -> float:
     """Return the Redis server's current time as a ``time.time()``-compatible float."""
     _reject_pipeline(client)
+    monotonic_before = time.monotonic()
+    wall_before = time.time()
     seconds, microseconds = _parse_time_response(client.time())
     server_time = _to_float(seconds, microseconds)
-    _check_forward_jump(client, server_time)
+    _check_forward_jump(client, server_time, monotonic_before, wall_before)
     return server_time
