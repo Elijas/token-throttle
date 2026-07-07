@@ -12,11 +12,7 @@ from token_throttle._exceptions import DuplicateRefundError, UnknownReservationE
 from token_throttle._interfaces._interfaces import PerModelConfig
 from token_throttle._interfaces._models import CapacityReservation, Quota, UsageQuotas
 from token_throttle._limiter_backends._memory._backend import MemoryBackendBuilder
-from token_throttle._limiter_backends._memory._sync_backend import (
-    SyncMemoryBackendBuilder,
-)
 from token_throttle._rate_limiter import RateLimiter
-from token_throttle._sync_rate_limiter import SyncRateLimiter
 
 
 def _config() -> PerModelConfig:
@@ -77,27 +73,6 @@ async def test_memory_backend_rejects_cold_restart_refund() -> None:
     restarted_limiter = RateLimiter(_config(), backend=MemoryBackendBuilder())
     with pytest.raises(UnknownReservationError):
         await restarted_limiter.refund_capacity({"tokens": 0}, reservation)
-
-
-async def test_legacy_reservation_rejection_has_sync_async_parity() -> None:
-    async_limiter = RateLimiter(_config(), backend=MemoryBackendBuilder())
-    sync_limiter = SyncRateLimiter(_config(), backend=SyncMemoryBackendBuilder())
-    async_legacy = _reservation()
-    sync_legacy = _reservation()
-    object.__setattr__(async_legacy, "limiter_instance_id", None)
-    object.__setattr__(sync_legacy, "limiter_instance_id", None)
-
-    match = "legacy v1.4.x reservations no longer supported"
-    with pytest.raises(ValueError, match=match) as async_excinfo:
-        await async_limiter.refund_capacity({"tokens": 0}, async_legacy)
-    async_outcome = (type(async_excinfo.value), str(async_excinfo.value))
-
-    with pytest.raises(ValueError, match=match) as sync_excinfo:
-        sync_limiter.refund_capacity({"tokens": 0}, sync_legacy)
-    sync_outcome = (type(sync_excinfo.value), str(sync_excinfo.value))
-
-    assert async_outcome == sync_outcome
-    assert "legacy v1.4.x reservations no longer supported" in async_outcome[1]
 
 
 class _AsyncDedupRedis:

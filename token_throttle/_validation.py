@@ -15,7 +15,8 @@ from token_throttle._interfaces._callable_utils import (
 )
 from token_throttle._interfaces._interfaces import PerModelConfig, PerModelConfigGetter
 from token_throttle._interfaces._models import (
-    _UNLIMITED_FLAG,
+    # Re-exported so the limiters and tests import the flag through this module.
+    _UNLIMITED_FLAG,  # noqa: F401
     MAX_ALIAS_LENGTH,
     MAX_KEY_PREFIX_LENGTH,
     MAX_METRIC_LENGTH,
@@ -35,9 +36,22 @@ from token_throttle._interfaces._models import (
 
 MAX_TOTAL_KEY_LENGTH = 8192
 
-# Re-exported from ``_models`` so external callers that imported
-# ``_UNLIMITED_FLAG`` from this module keep working.
-__all__ = ["_UNLIMITED_FLAG"]
+
+class _UnsetUsage:
+    """
+    Sentinel for an omitted ``usage`` argument to refund_capacity_from_response.
+
+    Shared by both limiter flavors so the parameter default is one object with a
+    stable ``repr`` (keeps the sync/async signatures identical).
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "UNSET_USAGE"
+
+
+_UNSET_USAGE: object = _UnsetUsage()
 
 
 def _revalidate_dto[StrictDTO_T: StrictDTO](instance: StrictDTO_T) -> StrictDTO_T:
@@ -83,11 +97,11 @@ def is_unlimited_reservation(reservation: object) -> bool:
     (``model_family == _UNLIMITED_FLAG``, empty ``usage``,
     ``bucket_ids is None``), so the flag is reliable end-to-end.
 
-    Legacy fallback removed (L05 I10): a reservation with the sentinel
-    ``model_family`` but ``is_unlimited=False`` is no longer treated as
-    unlimited. Hand-constructing the sentinel string was the second
-    bypass vector beyond V05; closing it requires this tightening AND
-    the validator above.
+    The sentinel ``model_family`` no longer implies unlimited on its own: a
+    reservation carrying the sentinel string but ``is_unlimited=False`` is not
+    treated as unlimited. Hand-constructing the sentinel string was a second
+    bypass vector, so closing it requires this tightening AND the validator
+    above.
     """
     if type(reservation) is not CapacityReservation:
         raise ValueError(
@@ -756,9 +770,11 @@ def _call_usage_counter(usage_counter, request: Mapping[str, object]) -> object:
         return _invoke_usage_counter(usage_counter, request)
 
     warnings.warn(
-        "usage_counter without **kwargs uses deprecated signature-filtered "
-        "dispatch; request fields not named in the counter signature are "
-        "not passed to the counter. Add **kwargs to receive the full request.",
+        "usage_counter without **kwargs uses signature-filtered dispatch: "
+        "request fields not named in the counter signature are not passed to "
+        "the counter. Accepting **kwargs is the recommended convention so the "
+        "counter receives the full request payload; a fixed signature is a "
+        "supported convenience.",
         UserWarning,
         stacklevel=2,
     )

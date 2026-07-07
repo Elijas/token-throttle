@@ -83,12 +83,6 @@ from token_throttle.conformance import (
     run_conformance_test_for,
     sync_conformance_test_for,
 )
-from token_throttle.migration import (
-    ConfigMigrationIssue,
-    async_cleanup_legacy_buckets,
-    cleanup_legacy_buckets,
-    validate_config_for_v2_0,
-)
 
 __version__ = "9.1.1"
 
@@ -227,7 +221,6 @@ __all__ = [
     "Capacities",
     "CapacityReservation",
     "CardinalityLimitExceededError",
-    "ConfigMigrationIssue",
     "CurrentWaitsDiagnostic",
     "CustomBackendHealthDiagnostic",
     "DiagnosticBucketKey",
@@ -281,8 +274,6 @@ __all__ = [
     "UsageQuotas",
     "WaitBucketDiagnostic",
     "WaiterDiagnostic",
-    "async_cleanup_legacy_buckets",
-    "cleanup_legacy_buckets",
     "conformance_test_for",
     "count_chat_input_tokens",
     "create_logging_callbacks",
@@ -292,7 +283,6 @@ __all__ = [
     "openai_model_family_getter",
     "run_conformance_test_for",
     "sync_conformance_test_for",
-    "validate_config_for_v2_0",
 ]
 
 if _HAS_REDIS:

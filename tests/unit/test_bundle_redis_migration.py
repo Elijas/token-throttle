@@ -9,7 +9,6 @@ pytest.importorskip("redis", reason="redis package not installed")
 
 from token_throttle._interfaces._interfaces import PerModelConfig
 from token_throttle._interfaces._models import Quota, UsageQuotas
-from token_throttle._limiter_backends._redis._backend import RedisBackend
 from token_throttle._limiter_backends._redis._bucket import (
     MaxCapacityOverrideParseError,
     RedisBucket,
@@ -43,24 +42,6 @@ def _bucket(
         key_prefix="test",
         override_ttl_seconds=override_ttl_seconds,
     )
-
-
-async def test_d01_backend_probe_warns_on_era1_legacy_key(
-    quota: Quota,
-    limit_config: PerModelConfig,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    redis_client = AsyncMock()
-    bucket = _bucket(quota, limit_config, redis_client)
-    backend = RedisBackend([bucket], redis_client, limit_config, key_prefix="test")
-    redis_client.get.return_value = b"85.0"
-
-    with caplog.at_level("WARNING"):
-        await backend._probe_legacy_override_keys_once()
-
-    redis_client.get.assert_awaited_once_with(bucket._legacy_max_capacity_key)
-    assert "Era 1" in caplog.text
-    assert "old :max_capacity key path" in caplog.text
 
 
 @pytest.mark.parametrize(
@@ -141,20 +122,6 @@ async def test_d04_override_ttl_is_applied_when_configured(
 
     await bucket.set_max_capacity(10.0)
 
-    override_call = redis_client.set.await_args_list[1]
+    override_call = redis_client.set.await_args_list[0]
     assert override_call.args[0] == bucket._max_capacity_key
     assert override_call.kwargs == {"ex": 30 * 24 * 60 * 60}
-
-
-async def test_d06_schema_version_key_written_on_first_override_write(
-    quota: Quota,
-    limit_config: PerModelConfig,
-) -> None:
-    redis_client = AsyncMock()
-    bucket = _bucket(quota, limit_config, redis_client)
-
-    await bucket.set_max_capacity(10.0)
-
-    schema_call = redis_client.set.await_args_list[0]
-    assert schema_call.args == (bucket._schema_version_key, bucket._SCHEMA_VERSION)
-    assert schema_call.kwargs == {"nx": True}

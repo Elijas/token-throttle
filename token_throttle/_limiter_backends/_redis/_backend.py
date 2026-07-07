@@ -125,7 +125,7 @@ LOCK_TIMEOUT_SECONDS = 30
 _PIPELINE_CMDS_PER_BUCKET = 4
 
 # Each bucket enqueues 1 command for max-capacity override reads (GET override).
-# Valid overrides have their TTL refreshed after parsing so legacy/corrupt
+# Valid overrides have their TTL refreshed after parsing so corrupt
 # payloads are not kept alive.
 _PIPELINE_CMDS_PER_OVERRIDE = 1
 
@@ -928,7 +928,6 @@ class RedisBackend(RateLimiterBackend):
         self._limit_config = limit_config
         self._usage_metric_names: set[str] = {bucket.usage_metric for bucket in buckets}
         self._local_condition = asyncio.Condition()
-        self._legacy_override_probe_complete = False
         self._diagnostic_waiters: dict[str, DiagnosticWaiterState] = {}
 
     def add_bucket(self, bucket: RedisBucket) -> None:
@@ -1346,20 +1345,6 @@ class RedisBackend(RateLimiterBackend):
             return False
         return await self._bucket_capacity_state_matches(expected_capacities, buckets)
 
-    async def _probe_legacy_override_keys_once(
-        self,
-        buckets: tuple[RedisBucket, ...] | list[RedisBucket] | None = None,
-    ) -> None:
-        if self._legacy_override_probe_complete:
-            return
-        target_buckets = self.sorted_buckets if buckets is None else buckets
-        for bucket in target_buckets:
-            result = self._redis.get(bucket._legacy_max_capacity_key)  # noqa: SLF001
-            if inspect.isawaitable(result):
-                result = await result
-            bucket.handle_legacy_max_capacity_key(result)
-        self._legacy_override_probe_complete = True
-
     def _snapshot_buckets(self) -> tuple[RedisBucket, ...]:
         return tuple(getattr(self, "sorted_buckets", ()))
 
@@ -1596,7 +1581,6 @@ class RedisBackend(RateLimiterBackend):
         if pipeline is None:
             pipeline = self._redis.pipeline()
         target_buckets = self.sorted_buckets if buckets is None else buckets
-        await self._probe_legacy_override_keys_once(target_buckets)
 
         if current_time is None:
             current_time = await async_server_time(self._redis)
@@ -1605,7 +1589,7 @@ class RedisBackend(RateLimiterBackend):
             await bucket.get_capacity(pipeline=pipeline, current_time=current_time)
 
         # Include max_capacity in the pipeline to avoid extra round-trips.
-        # Override TTL refresh happens after parsing so invalid legacy payloads
+        # Override TTL refresh happens after parsing so invalid payloads
         # are not kept alive.
         for bucket in target_buckets:
             pipeline.get(bucket._max_capacity_key)  # noqa: SLF001
@@ -3112,8 +3096,8 @@ class RedisBackend(RateLimiterBackend):
 
             # Extend lock TTL before committing the write, see _extend_locks.
             await self._extend_locks(lock_stack, reservation_id=reservation_id)
-            # Option B from FIX-42: defer the Redis tombstone until the same
-            # pipeline execution as the capacity write. This prevents the
+            # Defer the Redis tombstone until the same pipeline execution as
+            # the capacity write. This prevents the
             # permanent lost-refund failure where SET NX succeeds and the later
             # bucket mutation fails; exact concurrent retries are serialized by
             # the bucket locks, while lock expiry/manual writers can still race.

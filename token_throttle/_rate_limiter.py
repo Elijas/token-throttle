@@ -70,6 +70,7 @@ from token_throttle._limiter_backends._redis._ttl import (
 )
 from token_throttle._validation import (
     _UNLIMITED_FLAG,
+    _UNSET_USAGE,
     _revalidate_dto,
     extract_total_tokens,
     extract_usage_from_response,
@@ -482,13 +483,6 @@ def _warn_refund_refresh_failed(
             "model_family": model_family,
             "model_name": model_name,
         },
-    )
-
-
-def _raise_legacy_reservation_rejected() -> None:
-    raise ValueError(
-        "legacy v1.4.x reservations no longer supported in v2.0.0; "
-        "drain v1.4.x before upgrade"
     )
 
 
@@ -1015,43 +1009,16 @@ class RateLimiter(BaseRateLimiter):
             return reservation
         return snapshot.to_reservation()
 
-    def _verify_reservation_has_limiter_instance(
-        self,
-        reservation: CapacityReservation,
-    ) -> None:
-        if reservation.limiter_instance_id is None:
-            _logger.warning(
-                "Reservation %s has no limiter_instance_id; legacy v1.4.x "
-                "reservations are rejected in v2.0.0.",
-                reservation.reservation_id,
-            )
-            _raise_legacy_reservation_rejected()
-
     def _verify_reservation_bound_to_limiter(
         self,
         reservation: CapacityReservation,
     ) -> None:
-        self._verify_reservation_has_limiter_instance(reservation)
         if reservation.limiter_instance_id != self._limiter_instance_id:
             raise UnknownReservationError(
                 "reservation issued by a different limiter instance",
                 reservation_id=reservation.reservation_id,
                 model_family=reservation.model_family,
             )
-
-    def _reject_legacy_reservation_before_revalidation(
-        self,
-        reservation: object,
-    ) -> None:
-        if type(reservation) is not CapacityReservation:
-            return
-        fields = reservation.__dict__
-        if (
-            "limiter_instance_id" in fields
-            and fields["limiter_instance_id"] is None
-            and "reservation_id" in fields
-        ):
-            self._verify_reservation_has_limiter_instance(reservation)
 
     async def aclose(self) -> None:
         """
@@ -1441,10 +1408,10 @@ class RateLimiter(BaseRateLimiter):
                 limit_config,
                 register=False,
             )
-            # Counter still runs for telemetry consistency (L05 I03);
-            # extra_usage shape is still validated; both results are
-            # discarded because the unlimited reservation always
-            # carries empty usage by construction.
+            # Counter still runs for telemetry consistency; extra_usage
+            # shape is still validated; both results are discarded because
+            # the unlimited reservation always carries empty usage by
+            # construction.
             usage: FrozenUsage = frozendict()
             if limit_config.usage_counter is not None:
                 usage = await _resolve_usage_counter_result_for_model_async(
@@ -1824,7 +1791,6 @@ class RateLimiter(BaseRateLimiter):
             )
         if type(reservation) is not CapacityReservation:
             is_unlimited_reservation(reservation)
-        self._reject_legacy_reservation_before_revalidation(reservation)
         reservation = _revalidate_dto(reservation)
         reservation = self._authoritative_reservation_for_refund(reservation)
         is_unlimited = is_unlimited_reservation(reservation)
@@ -1843,7 +1809,8 @@ class RateLimiter(BaseRateLimiter):
         self,
         reservation: CapacityReservation,
         response=None,
-        **kwargs,
+        *,
+        usage: object = _UNSET_USAGE,
     ) -> None:
         """
         Convenience for OpenAI-style responses with ``total_tokens``.
@@ -1851,12 +1818,15 @@ class RateLimiter(BaseRateLimiter):
         Requires metric names ``"tokens"`` and ``"requests"`` (as configured by
         ``create_openai_*`` factories).  For custom metric names, use
         :meth:`refund_capacity` directly.
+
+        Provide either a ``response`` object or a ``usage`` mapping/object with
+        ``total_tokens``. Passing any other keyword argument raises
+        ``TypeError``.
         """
         self._check_public_entry()
         self._raise_if_closed()
         if type(reservation) is not CapacityReservation:
             is_unlimited_reservation(reservation)
-        self._reject_legacy_reservation_before_revalidation(reservation)
         reservation = _revalidate_dto(reservation)
         reservation = self._authoritative_reservation_for_refund(reservation)
         is_unlimited = is_unlimited_reservation(reservation)
@@ -1877,14 +1847,13 @@ class RateLimiter(BaseRateLimiter):
         if response is not None:
             # Pydantic model (OpenAI SDK v1+), raw response dict, or any object
             # with usage data.
-            usage = extract_usage_from_response(response)
-            total_tokens = extract_total_tokens(usage)
+            total_tokens = extract_total_tokens(extract_usage_from_response(response))
         else:
-            if "usage" not in kwargs:
+            if usage is _UNSET_USAGE:
                 raise ValueError(
                     "Either 'response' or 'usage' keyword argument is required"
                 )
-            total_tokens = extract_total_tokens(kwargs["usage"])
+            total_tokens = extract_total_tokens(usage)
         actual_usage = {"tokens": total_tokens, "requests": 1}
         validate_refund_usage(actual_usage, set(reservation.usage))
         await self._refund_capacity(
@@ -1929,9 +1898,9 @@ class RateLimiter(BaseRateLimiter):
         self._validated_model_family(model, limit_config)
         self._validate_shared_model_family_config(model, limit_config)
         if limit_config.is_unlimited:
-            # Audited 2026-05 (R4 L05:I11): set_max_capacity rejects
-            # unlimited configs before backend lookup, preserving the
-            # semantic "unlimited model" error instead of "no backend".
+            # set_max_capacity rejects unlimited configs before backend
+            # lookup, preserving the semantic "unlimited model" error
+            # instead of "no backend".
             raise ValueError("Cannot set max capacity: model has unlimited quotas")
         model_family = limit_config.get_model_family()
         async with self._lifecycle_lock:
@@ -2361,7 +2330,7 @@ class RateLimiter(BaseRateLimiter):
         bucket_ids: frozenset[BucketId] | None,
     ) -> tuple[tuple[BucketId, object, object], ...] | None:
         # KNOWN UNKNOWN: custom backends do not expose a portable "write landed"
-        # probe. The built-in memory backends do, so this preserves the R4
+        # probe. The built-in memory backends do, so this preserves the
         # post-write-failure idempotency contract without pre-committing failed
         # refunds for opaque backends.
         registry = getattr(backend, "_bucket_registry", None)
@@ -2491,8 +2460,8 @@ class RateLimiter(BaseRateLimiter):
         # never read. The ``CapacityReservation`` field validator
         # requires empty ``usage`` when ``is_unlimited=True``; passing
         # ``frozendict()`` makes the factory the only canonical
-        # producer of unlimited reservations and closes V05/V14/I05
-        # at construction time.
+        # producer of unlimited reservations and closes the
+        # hand-construction bypass at construction time.
         reservation = CapacityReservation(
             usage=frozendict(),
             model_family=_UNLIMITED_FLAG,
@@ -2528,8 +2497,7 @@ class RateLimiter(BaseRateLimiter):
             self._forget_in_flight_reservation(reservation.reservation_id)
             raise ValueError(
                 "Reservation missing created_at_seconds; bounded reservation "
-                "lifetimes require reservations issued by token-throttle v2.1.0 "
-                "or newer."
+                "lifetimes require a reservation carrying an issue timestamp."
             )
         age_seconds = time.time() - reservation.created_at_seconds
         if age_seconds > max_lifetime:
@@ -2863,7 +2831,7 @@ class RateLimiter(BaseRateLimiter):
         # Caller must hold self._lock. All writers to _model_family_to_runtime_max_capacity
         # (this method, _restore_runtime_max_capacity, _commit_runtime_max_capacity)
         # serialize on _lock so config rebuilds and runtime overrides stay coherent.
-        # Dropping that invariant reopens the ghost-override race (R4 L11 B01/B02).
+        # Dropping that invariant reopens the ghost-override race.
         if not bucket_ids:
             return
         overrides = self._model_family_to_runtime_max_capacity.get(model_family)

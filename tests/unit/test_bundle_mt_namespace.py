@@ -89,17 +89,13 @@ def _multi_quota_config(model_family: str, metric_suffix: str) -> PerModelConfig
 
 
 def _redis_keys_for_backend_bucket(bucket) -> set[str]:
-    bucket_keys = {
+    return {
         bucket.full_redis_key,
         bucket._capacity_key,
         bucket._last_checked_key,
         bucket._lock_key,
         bucket._max_capacity_key,
     }
-    legacy_key = getattr(bucket, "_legacy_max_capacity_key", None)
-    if legacy_key is not None:
-        bucket_keys.add(legacy_key)
-    return bucket_keys
 
 
 def _redis_keys_for_backend(backend) -> set[str]:
@@ -238,4 +234,3 @@ def test_sync_builder_uses_the_same_namespaced_bucket_shape() -> None:
     bucket = backend.sorted_buckets[0]
 
     assert bucket.full_redis_key == "tenant-a:rate_limiting:bucket:gpt-4:tokens:60"
-    assert bucket._schema_version_key == "tenant-a:rate_limiting:schema_version"

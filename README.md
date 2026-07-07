@@ -22,7 +22,7 @@ pip install "token-throttle>=9.1.1,<10.0.0"                   # Any provider + i
 
 Requires Python 3.12+. The Redis backend requires Redis 6.2+, standalone or Sentinel only — not Redis Cluster or client-side sharding (see [docs/operations.md](docs/operations.md)).
 
-token-throttle follows strict semver: breaking changes ship only as major versions, and several recent majors were correctness hardening found through fault-injection testing rather than churn. Pin an exact major range (as shown above) and read [MIGRATION.md](MIGRATION.md) before upgrading — see it for the v2/v5/v6/v7/v8/v9 contract changes. Public constants and type aliases: [docs/api.md](docs/api.md).
+token-throttle follows strict semver: breaking changes ship only as major versions, and several recent majors were correctness hardening found through fault-injection testing rather than churn. Pin an exact major range (as shown above) and review the [CHANGELOG](CHANGELOG.md) before upgrading — each major's breaking changes and upgrade steps are recorded there. Public constants and type aliases: [docs/api.md](docs/api.md).
 
 ## Quickstart
 
@@ -233,7 +233,7 @@ Reserve before the call, refund after — on the **same limiter** that issued th
 reservation, immediately around the external request (not from a long-lived
 queue). A `CapacityReservation` is a trusted in-process accounting token, not a
 portable credential: don't pickle it or pass it across trust boundaries.
-Durability semantics, config-change behavior, and the v2.0.0 compatibility break
+Durability semantics and config-change behavior
 are covered in [docs/operations.md](docs/operations.md#reservation-lifecycle-and-durability).
 
 ## Configuration
@@ -461,8 +461,7 @@ are covered in [docs/operations.md](docs/operations.md#concurrency-model).
 - [docs/operations.md](docs/operations.md) — reservation durability, concurrency model, Redis topology, multi-tenant isolation, capacity planning, application-facing errors
 - [docs/observability.md](docs/observability.md) — logging, lifecycle events, health snapshots, `diagnose()` diagnostics, PII surface
 - [docs/custom-backends.md](docs/custom-backends.md) — implement your own backend
-- [MIGRATION.md](MIGRATION.md) — breaking-change upgrade guides
-- [CHANGELOG.md](CHANGELOG.md) — release history
+- [CHANGELOG.md](CHANGELOG.md) — release history, including each major's breaking changes and upgrade steps
 
 ## Links
 

@@ -132,15 +132,15 @@ the GitHub service container for integration and coverage jobs.
 ## Updating doc code fences
 
 `tests/lint/test_readme_standalone_examples.py` actually executes the
-standalone Python code fences in `README.md`, `MIGRATION.md`, `DEVELOPMENT.md`,
-and `CLAUDE.md`, and inventories every other (bash/text/etc.) fence in those
+standalone Python code fences in `README.md`, `DEVELOPMENT.md`, and
+`CLAUDE.md`, and inventories every other (bash/text/etc.) fence in those
 files. It identifies each fence by an explicit `start_line` recorded in that
-test file — in `_EXPECTED_MIGRATION_FRAGMENTS`, `_EXPECTED_NON_PYTHON_FENCES`,
-and `_EXPECTED_NON_README_STANDALONE_IDENTITIES` — plus its heading and first
+test file — in `_EXPECTED_NON_PYTHON_FENCES` and
+`_EXPECTED_NON_README_STANDALONE_IDENTITIES` — plus its heading and first
 code/content line.
 
 If you add, remove, or reflow lines anywhere *before* a fence in one of those
-four files (including in prose, not just other fences), every fence after your
+three files (including in prose, not just other fences), every fence after your
 edit shifts and its recorded `start_line` goes stale, failing the lint with a
 mismatch. To fix: after editing a doc, use your editor's line numbers to find
 each fence's opening line plus one (the first line of code/content inside it)
@@ -177,14 +177,26 @@ Use `RuntimeError` for broken internal invariants that users cannot correct by
 changing their request arguments. Reserve `TypeError` for places where the code
 is intentionally matching Python's own call-signature convention.
 
+### Corrupted Redis values raise a bare `ValueError`
+
+When a Redis-backed bucket holds a value that cannot be parsed into a finite
+capacity number — for example a key that was manually edited or externally
+corrupted — capacity parsing raises a plain `ValueError`. That error does not
+yet include the offending Redis key or namespace, so an operator cannot tell
+from the message alone which key to inspect or clear. Adding key-scoped
+remediation hints would mean threading key context through the lower-level
+decode/parse helpers and belongs with a broader Redis corruption-handling
+taxonomy rather than a one-off patch. This is a known improvement idea, not a
+shipped feature.
+
 ### Logging uses stdlib only
 
 `create_logging_callbacks` and `create_sync_logging_callbacks` emit through
 stdlib `logging.getLogger("token_throttle")`. There is no `loguru` optional
 extra or loguru-specific callback factory in v8.
 
-`TRACE` and `SUCCESS` are accepted only as compatibility level-name aliases in
-`_STDLIB_LEVEL_MAP`; they map to stdlib `DEBUG` and `INFO`, respectively.
+`_STDLIB_LEVEL_MAP` accepts only the stdlib level names (DEBUG, INFO, WARNING,
+ERROR, CRITICAL); any other level name is rejected with `ValueError`.
 `_models.py` uses `warnings.warn()` for the empty-quota warning.
 
 ### Reservation and serialization trust boundary
@@ -202,12 +214,10 @@ alive. After callable-config changes, refunds are scoped to bucket ids captured
 at acquire time; removed buckets are not credited back into unrelated future
 metrics.
 
-v2.0.0 deliberately breaks v1.4.x reservation compatibility. Drain in-flight
-reservations before upgrading; mixed v1.4.x/v2.0.0 fleets are not supported.
-`CapacityReservation` requires a non-empty `limiter_instance_id`, and refund
-raises `ValueError("legacy v1.4.x reservations no longer supported in v2.0.0; drain v1.4.x before upgrade")`
-if a legacy object with `limiter_instance_id is None` reaches the refund path.
-For Redis backends, successful refunds claim
+`CapacityReservation` requires a non-empty `limiter_instance_id`. The field is
+validated, so a reservation cannot be constructed without one, and refunds from
+a different limiter instance raise `UnknownReservationError` — the intended
+fail-closed behavior. For Redis backends, successful refunds claim
 `{key_prefix}:rate_limiting:refund_dedup:{reservation_id}` with `SET NX EX`;
 the TTL defaults to 7 days and is configurable via
 `refund_dedup_ttl_seconds`. Memory backends have no durable refund dedup and
@@ -351,9 +361,8 @@ Because `last_checked` is reset to `now` before the new rate takes effect, the n
 `_STDLIB_LEVEL_MAP` uses `[]` lookup (not `.get()`). Unknown levels raise
 `KeyError` immediately. This is intentional — `_log()` is a private function
 only called from the `create_*_callbacks()` factories, which only pass
-standard level strings (DEBUG, INFO, WARNING, ERROR, CRITICAL) plus the
-compatibility aliases (TRACE, SUCCESS). Adding a `.get()` fallback would
-silently mask typos in level names.
+standard level strings (DEBUG, INFO, WARNING, ERROR, CRITICAL). Adding a
+`.get()` fallback would silently mask typos in level names.
 
 ### Capacity matching loop and the postconsumption invariant
 
@@ -369,13 +378,11 @@ Redis `_get_capacities_unsafe` batches pipeline commands in a fixed layout:
 each bucket enqueues `GET last_checked`, `GET capacity`, then `EXPIRE` for
 both bucket-state keys to refresh the mandatory bucket TTL. The backend then
 queues one `GET max_capacity_override` for each bucket. Valid override payloads
-refresh `max_capacity_override` TTL after they are parsed, so corrupt or legacy
-payloads are not kept alive by the read path. `_PIPELINE_CMDS_PER_BUCKET`,
+refresh `max_capacity_override` TTL after they are parsed, so corrupt payloads
+are not kept alive by the read path. `_PIPELINE_CMDS_PER_BUCKET`,
 `_PIPELINE_CMDS_PER_OVERRIDE`, and result count assertions enforce this layout.
 If `get_capacity()` or the pipeline structure changes, the assertion catches the
-mismatch immediately rather than silently reading wrong values. The
-`{key_prefix}:rate_limiting:schema_version` key is intentionally exempt from TTL
-because it is a long-lived registry.
+mismatch immediately rather than silently reading wrong values.
 
 ### Over-limit validation lives in the backend, not `validate_acquire_usage`
 
@@ -472,10 +479,6 @@ Redis backends require Redis server 6.2 or newer.
 token-throttle does **not** use `KEYS`, `FLUSHDB`, `FLUSHALL`, `CONFIG`, or any
 Pub/Sub command. A restrictive ACL can safely deny those categories.
 
-The migration helper `cleanup_legacy_buckets()` is an operator-run maintenance
-tool, not part of limiter hot paths. It uses `SCAN`, `TTL`, and `DEL` to remove
-pre-FIX-38 bucket `:last_checked` / `:capacity` keys that have no expiry.
-
 **`SCRIPT FLUSH` operational hazard**: `SCRIPT FLUSH` evicts the Lua SHA cache
 used by redis-py's lock release and extend scripts. The next lock operation
 reloads the script, but if scripting commands are denied by ACL, the reload
@@ -502,25 +505,6 @@ This is a user-code contract, not a library bug. The library never calls
 - Return a static or externally-cached `PerModelConfig` without touching the limiter.
 - Call out to an external service or config store.
 - Call into a *different* `SyncRateLimiter` instance.
-
-### R4 documentation audit cross-references
-
-FIX-21 checked and closed the documentation-only R4 audit gaps across L01-L22:
-F03/F05/F11-F14/F24/F31/F32/F34/F41/F43/F45; E08; P02-P06 where still
-applicable; I03/I04/I06/I07/I10/I12; U02/U05/U10/U12-U15; S03/S05/S07;
-X05/X10/X12/X14; Y05/Y08-Y10/Y13/Y14; N03/N07/N09/N11/N14; J06/J09;
-T03/T04/T06; O04. Some lanes were already closed by earlier fix bundles in
-this branch; the status report for FIX-21 records which surfaces were verified
-rather than re-edited.
-
-### R5 documentation audit cross-references
-
-FIX-39 closed the R5 informational findings D16/D18/D19/D20/D32/D33/D34:
-Redis ACL and SCRIPT FLUSH hazard (D16); reservation future-field contract
-(D18); wire-format and Lua continuity v1.4.1–v2.0.0 (D19); callback slot
-compatibility (D20); runtime-override map `_lock` invariant (D32);
-`config_getter` reentrancy under `_validation_lock` (D33); Redis
-`_extend_locks` coverage confirmed clean, lint test added (D34).
 
 ## Thread-leak detection
 

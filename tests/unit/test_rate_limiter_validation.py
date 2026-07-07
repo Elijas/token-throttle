@@ -794,6 +794,19 @@ class TestRefundCapacityFromResponseValidation:
                 reservation, response=FakeResponse()
             )
 
+    async def test_unknown_keyword_argument_raises_type_error(self):
+        builder, _ = make_mock_backend_builder()
+        limiter = RateLimiter(make_limited_config(), backend=builder)
+        reservation = CapacityReservation(
+            usage={"tokens": 100.0, "requests": 1.0},
+            model_family="gpt-4",
+            limiter_instance_id=limiter._limiter_instance_id,
+        )
+        with pytest.raises(TypeError):
+            await limiter.refund_capacity_from_response(
+                reservation, usage={"total_tokens": 0}, typo=1
+            )
+
 
 class TestSetMaxCapacityValidation:
     async def test_set_max_capacity_without_prior_backend_raises(self):

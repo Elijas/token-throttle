@@ -6,7 +6,7 @@ fact in from an internal capsule or finding, it must be restated in user-facing
 register (describe the *change*, not its tracker ID). This test fails CI on any
 leak into the user-facing surface:
 
-    README.md, MIGRATION.md, CHANGELOG.md, docs/*.md
+    README.md, CHANGELOG.md, docs/*.md
 
 Contributor/maintainer docs (DEVELOPMENT.md, CLAUDE.md) are intentionally out of
 scope — they may reference internal IDs. See CLAUDE.md "Documentation
@@ -21,7 +21,6 @@ from pathlib import Path
 _REPO_ROOT = Path(__file__).parent.parent.parent
 _PUBLIC_DOCS = [
     _REPO_ROOT / "README.md",
-    _REPO_ROOT / "MIGRATION.md",
     _REPO_ROOT / "CHANGELOG.md",
     *sorted((_REPO_ROOT / "docs").glob("*.md")),
 ]
@@ -74,6 +73,4 @@ def test_public_docs_have_no_internal_codenames() -> None:
 def test_public_doc_set_is_non_empty() -> None:
     # Guards against the scan silently covering nothing (e.g. a path rename).
     existing = [p.name for p in _PUBLIC_DOCS if p.exists()]
-    assert {"README.md", "MIGRATION.md", "CHANGELOG.md"}.issubset(set(existing)), (
-        existing
-    )
+    assert {"README.md", "CHANGELOG.md"}.issubset(set(existing)), existing

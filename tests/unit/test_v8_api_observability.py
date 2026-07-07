@@ -177,6 +177,12 @@ async def test_create_logging_callbacks_uses_stdlib_even_when_loguru_importable(
     assert "model_family=" in record.getMessage()
 
 
+@pytest.mark.parametrize("level", ["TRACE", "SUCCESS"])
+def test_create_logging_callbacks_rejects_unknown_log_level(level: str) -> None:
+    with pytest.raises(ValueError, match="Unknown log level"):
+        create_logging_callbacks(wait_start=level)
+
+
 async def test_callback_failure_log_includes_slot_and_reservation_context(
     caplog,
 ) -> None:

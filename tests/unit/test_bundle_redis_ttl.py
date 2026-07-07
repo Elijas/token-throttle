@@ -174,13 +174,12 @@ async def test_bucket_read_refreshes_existing_state_ttl() -> None:
     assert await redis_client.ttl(bucket._capacity_key) == 10
 
 
-async def test_schema_version_key_is_exempt_from_ttl() -> None:
+async def test_override_key_has_ttl() -> None:
     redis_client = _FakeAsyncRedis()
     bucket = _bucket(redis_client, ttl=30)
 
     await bucket.set_max_capacity(50.0)
 
-    assert await redis_client.ttl(bucket._schema_version_key) == -1
     assert await redis_client.ttl(bucket._max_capacity_key) == 30
 
 

@@ -20,7 +20,6 @@ Sentinel ``model_family`` value used by ``_unlimited_reservation``.
 
 Lives in this module (not ``_validation``) so ``CapacityReservation``'s
 ``is_unlimited`` field validator can reference it without an import cycle.
-``_validation`` re-exports it for back-compat with any external imports.
 """
 
 
@@ -136,10 +135,10 @@ class Quota(StrictDTO):
     """
     Exact-type immutable rate-limit quota (frozen Pydantic DTO).
 
-    v2.0.0 contract: ``Quota`` is a data-transfer object, not a subclass
-    extension point. Construction, assignment, copy, pickle restore,
-    ``model_copy()``, and ``model_construct()`` all preserve the same
-    validators; ``model_construct()`` is disabled.
+    ``Quota`` is a data-transfer object, not a subclass extension point.
+    Construction, assignment, copy, pickle restore, ``model_copy()``, and
+    ``model_construct()`` all preserve the same validators;
+    ``model_construct()`` is disabled.
 
     ``frozen=True`` prevents mutation via normal attribute assignment.
     Direct ``object.__setattr__`` or ``__dict__`` writes bypass this at
@@ -238,9 +237,9 @@ class UsageQuotas:
     """
     Exact-type collection of per-metric quotas; empty only via ``unlimited()``.
 
-    v2.0.0 contract: ``UsageQuotas`` is a data-transfer collection, not a
-    subclass extension point. Security-sensitive callers accept the exact
-    class and exact ``Quota`` instances only. Iterable inputs are materialized
+    ``UsageQuotas`` is a data-transfer collection, not a subclass extension
+    point. Security-sensitive callers accept the exact class and exact
+    ``Quota`` instances only. Iterable inputs are materialized
     with a hard cap of 1000 entries to prevent unbounded generator consumption
     at validation boundaries.
 
@@ -473,8 +472,8 @@ class CapacityReservation(StrictDTO):
     """
     Exact-type frozen reservation returned by acquire/record operations.
 
-    v2.0.0 contract: ``CapacityReservation`` is a data-transfer object, not a
-    subclass extension point. Construction, assignment, copy, pickle restore,
+    ``CapacityReservation`` is a data-transfer object, not a subclass
+    extension point. Construction, assignment, copy, pickle restore,
     ``model_copy()``, and ``model_construct()`` all preserve the same
     validators; ``model_construct()`` is disabled.
 
@@ -483,9 +482,7 @@ class CapacityReservation(StrictDTO):
     cross-process credentials; do not accept serialized reservations across
     trust boundaries as proof that capacity was acquired.
 
-    Reservations require ``limiter_instance_id``. Legacy v1.4.x serialized
-    reservations that omit it are rejected in v2.0.0; drain in-flight
-    reservations before upgrading mixed fleets.
+    Reservations require a non-empty ``limiter_instance_id``.
 
     ``is_unlimited=True`` is a trusted in-process sentinel produced by
     unlimited configs. Refunding such a reservation is a no-op.
@@ -533,16 +530,17 @@ class CapacityReservation(StrictDTO):
         ...,
         description=(
             "UUID of the limiter instance that issued this reservation. "
-            "Required in v2.0.0; legacy v1.4.x reservations without this "
-            "field are no longer accepted."
+            "Required and non-empty."
         ),
     )
     created_at_seconds: float | None = Field(
         default=None,
         description=(
             "Wall-clock Unix timestamp recorded by the limiter when the "
-            "reservation is issued. None is accepted for backward-compatible "
-            "deserialization, but bounded reservation lifetimes require it."
+            "reservation is issued. None is a valid state — unlimited "
+            "reservations carry None and the async limiter stamps the "
+            "timestamp when it issues a bounded reservation — but bounded "
+            "reservation lifetimes require it."
         ),
     )
 
@@ -606,8 +604,8 @@ class CapacityReservation(StrictDTO):
         Rejects any reservation that flips the unlimited flag without also
         matching the canonical shape produced by the library's
         ``_unlimited_reservation`` factory: sentinel ``model_family``,
-        empty ``usage``, ``bucket_ids is None``. Closes the V05/V10/V14
-        bypass family by failing both ``model_validate`` and
+        empty ``usage``, ``bucket_ids is None``. This closes the
+        forged-flag bypass family by failing both ``model_validate`` and
         ``model_validate_json`` on hand-constructed or forged
         reservations whose flag does not match their shape.
         """

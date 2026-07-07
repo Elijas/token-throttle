@@ -927,6 +927,17 @@ class TestExtractTotalTokensValidation:
         assert isinstance(exc_info.value.__cause__, RuntimeError)
         mock_backend.refund_capacity_for_buckets.assert_not_called()
 
+    def test_unknown_keyword_argument_raises_type_error(self):
+        builder, _ = make_mock_backend_builder()
+        limiter = SyncRateLimiter(make_limited_config(), backend=builder)
+        reservation = limiter.acquire_capacity(
+            {"tokens": 100, "requests": 1}, model="gpt-4"
+        )
+        with pytest.raises(TypeError):
+            limiter.refund_capacity_from_response(
+                reservation, usage={"total_tokens": 0}, typo=1
+            )
+
 
 class TestSetMaxCapacityValidation:
     def test_set_max_capacity_without_prior_backend_raises(self):

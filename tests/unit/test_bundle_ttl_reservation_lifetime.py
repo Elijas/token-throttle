@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import fnmatch
 import math
 import warnings
 
@@ -24,7 +23,6 @@ from token_throttle._limiter_backends._redis._ttl import (
 )
 from token_throttle._rate_limiter import RateLimiter
 from token_throttle._sync_rate_limiter import SyncRateLimiter
-from token_throttle.migration import cleanup_legacy_buckets
 
 
 def _config() -> PerModelConfig:
@@ -245,27 +243,6 @@ def test_default_lifetime_stays_unbounded_when_backend_has_no_ttls() -> None:
     )
 
 
-class _SyncMigrationRedis:
-    def __init__(self) -> None:
-        self.store: dict[str, object] = {}
-        self.ttls: dict[str, int] = {}
-
-    def scan_iter(self, *, match: str, count: int):
-        _ = count
-        for key in list(self.store):
-            if fnmatch.fnmatch(key, match):
-                yield key
-
-    def ttl(self, key: str) -> int:
-        return self.ttls.get(key, -2)
-
-    def delete(self, key: str) -> int:
-        existed = key in self.store
-        self.store.pop(key, None)
-        self.ttls.pop(key, None)
-        return int(existed)
-
-
 async def test_cm03_default_lifetime_rejects_after_bucket_ttl_expiry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -338,41 +315,6 @@ async def test_cm03_expired_reservation_rejected_after_bucket_ttl_expiry(
     with pytest.raises(ValueError, match="Reservation lifetime exceeded"):
         await limiter.refund_capacity({"tokens": 0}, reservation)
     assert builder.backends[0].refund_calls == 0
-
-
-def test_cm04_cleanup_removes_pre_fix38_idle_bucket_state_keys() -> None:
-    redis_client = _SyncMigrationRedis()
-    legacy_capacity = "tenant:rate_limiting:bucket:fam:tokens:60:capacity"
-    legacy_last_checked = "tenant:rate_limiting:bucket:fam:tokens:60:last_checked"
-    live_capacity = "tenant:rate_limiting:bucket:fam:requests:60:capacity"
-    override = "tenant:rate_limiting:bucket:fam:tokens:60:max_capacity_override"
-    foreign = "other:rate_limiting:bucket:fam:tokens:60:capacity"
-    redis_client.store.update(
-        {
-            legacy_capacity: "70",
-            legacy_last_checked: "0",
-            live_capacity: "99",
-            override: "50",
-            foreign: "1",
-        }
-    )
-    redis_client.ttls.update(
-        {
-            legacy_capacity: -1,
-            legacy_last_checked: -1,
-            live_capacity: 30,
-            override: -1,
-            foreign: -1,
-        }
-    )
-
-    assert cleanup_legacy_buckets(redis_client, "tenant") == 2
-
-    assert legacy_capacity not in redis_client.store
-    assert legacy_last_checked not in redis_client.store
-    assert live_capacity in redis_client.store
-    assert override in redis_client.store
-    assert foreign in redis_client.store
 
 
 async def test_lr04_default_lifetime_rejects_after_dedup_ttl_expires(

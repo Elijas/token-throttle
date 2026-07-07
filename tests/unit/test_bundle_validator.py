@@ -30,9 +30,6 @@ from pydantic import ValidationError
 
 from token_throttle._interfaces._interfaces import PerModelConfig
 from token_throttle._interfaces._models import (
-    _UNLIMITED_FLAG as _MODELS_FLAG,
-)
-from token_throttle._interfaces._models import (
     CapacityReservation,
     Quota,
     UsageQuotas,
@@ -79,18 +76,6 @@ def _limited_config() -> PerModelConfig:
         ),
         model_family="real-family",
     )
-
-
-class TestSentinelConstantReExport:
-    """The ``_UNLIMITED_FLAG`` constant lives in ``_models`` after FIX-03.
-
-    ``_validation`` re-exports it for back-compat; both must point at the
-    same string. A regression here would silently misalign the validator
-    and the factory.
-    """
-
-    def test_sentinel_constants_match(self):
-        assert _MODELS_FLAG == _VALIDATION_FLAG == "__rate_limiting_disabled__"
 
 
 class TestV14HandConstructionRejected:

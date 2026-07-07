@@ -117,10 +117,8 @@ def _validate_not_generator_callback(value: object, field_name: str) -> None:
 
 
 _STDLIB_LEVEL_MAP: dict[str, int] = {
-    "TRACE": logging.DEBUG,
     "DEBUG": logging.DEBUG,
     "INFO": logging.INFO,
-    "SUCCESS": logging.INFO,
     "WARNING": logging.WARNING,
     "ERROR": logging.ERROR,
     "CRITICAL": logging.CRITICAL,
@@ -857,9 +855,9 @@ class RateLimiterCallbacks(StrictDTO):
     """
     Exact-type immutable async callback bundle.
 
-    v2.0.0 contract: ``RateLimiterCallbacks`` is a data-transfer object, not
-    a subclass extension point. Construction, assignment, copy, pickle
-    restore, ``model_copy()``, and ``model_construct()`` all preserve the
+    ``RateLimiterCallbacks`` is a data-transfer object, not a subclass
+    extension point. Construction, assignment, copy, pickle restore,
+    ``model_copy()``, and ``model_construct()`` all preserve the
     async-callable validators; ``model_construct()`` is disabled.
     """
 
@@ -1025,9 +1023,9 @@ class SyncRateLimiterCallbacks(StrictDTO):
     """
     Exact-type immutable sync callback bundle.
 
-    v2.0.0 contract: ``SyncRateLimiterCallbacks`` is a data-transfer object,
-    not a subclass extension point. Construction, assignment, copy, pickle
-    restore, ``model_copy()``, and ``model_construct()`` all preserve the
+    ``SyncRateLimiterCallbacks`` is a data-transfer object, not a subclass
+    extension point. Construction, assignment, copy, pickle restore,
+    ``model_copy()``, and ``model_construct()`` all preserve the
     sync-callable validators; ``model_construct()`` is disabled.
     """
 

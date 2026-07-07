@@ -241,9 +241,10 @@ class SyncRedisBucket:
     ``{key_prefix}:rate_limiting:bucket:{model_family}:{metric}:{per_seconds}:...``.
 
     Uses the same key format as the async RedisBucket, so sync and async
-    backends can share the same Redis override state. Legacy Era 1
-    ``:max_capacity`` keys are logged and ignored; operators should re-set
-    runtime overrides after upgrade. Static quota limits come from the current
+    backends can share the same Redis override state. An override whose
+    ``configured_max_capacity`` anchor no longer matches the current configured
+    limit is ignored, so a stale override from a previous config cannot be
+    applied after a config change. Static quota limits come from the current
     ``PerModelConfig`` in each process.
     """
 
@@ -311,13 +312,6 @@ class SyncRedisBucket:
         self._lock_key = redis_key_with_suffix(self.full_redis_key, "lock")
         self._max_capacity_key = redis_key_with_suffix(
             self.full_redis_key, "max_capacity_override"
-        )
-        self._legacy_max_capacity_key = redis_key_with_suffix(
-            self.full_redis_key, "max_capacity"
-        )
-        self._schema_version_key = redis_namespace_key(
-            self.key_prefix,
-            "schema_version",
         )
         self._missing_consumption_data_reason: str | None = None
         self._missing_consumption_data_missing_keys: tuple[str, ...] = ()
@@ -442,34 +436,6 @@ class SyncRedisBucket:
             f"{self.full_redis_key} at key {self._max_capacity_key}: {reason}"
         )
 
-    def _handle_legacy_override(
-        self,
-        era: str,
-        reason: str,
-        *,
-        key: str | None = None,
-        raw_value: object,
-    ) -> None:
-        _logger.warning(
-            "Ignoring legacy Redis max_capacity override for bucket %s at key %s: "
-            "%s format detected (%s, raw=%r). Re-set the override after upgrade "
-            "to write the current anchored format.",
-            self.full_redis_key,
-            key if key is not None else self._max_capacity_key,
-            era,
-            reason,
-            _safe_redis_value_repr(raw_value),
-        )
-
-    def handle_legacy_max_capacity_key(self, raw_value: object) -> None:
-        if raw_value is not None:
-            self._handle_legacy_override(
-                "Era 1",
-                "old :max_capacity key path",
-                key=self._legacy_max_capacity_key,
-                raw_value=raw_value,
-            )
-
     def _deserialize_max_capacity_override(self, raw_value: object) -> float | None:
         if raw_value is None:
             return None
@@ -568,7 +534,6 @@ class SyncRedisBucket:
                 self._OVERRIDE_LIMIT_KEY: value,
             }
         )
-        self._redis.set(self._schema_version_key, self._SCHEMA_VERSION, nx=True)
         self._redis.set(
             self._max_capacity_key,
             payload,
@@ -782,4 +747,3 @@ class SyncRedisBucket:
 
     _OVERRIDE_LIMIT_KEY = "override_max_capacity"
     _CONFIGURED_LIMIT_KEY = "configured_max_capacity"
-    _SCHEMA_VERSION = "3"

@@ -119,26 +119,6 @@ class TestGetMaxCapacity:
         assert result == quota.limit
         assert result == 20.0
 
-    def test_ignores_legacy_max_capacity_key_from_previous_versions(
-        self, bucket, mock_redis, quota
-    ):
-        """Only the dedicated runtime-override key should affect fresh processes."""
-
-        def get_side_effect(key: str):
-            legacy_key = f"{bucket.full_redis_key}:max_capacity"
-            if key == legacy_key:
-                return b"5.0"
-            if key == bucket._max_capacity_key:
-                return None
-            return None
-
-        mock_redis.get.side_effect = get_side_effect
-
-        result = asyncio.run(bucket.get_max_capacity())
-
-        assert result == quota.limit
-        mock_redis.get.assert_called_once_with(bucket._max_capacity_key)
-
     def test_handles_invalid_redis_value(self, bucket, mock_redis):
         """get_max_capacity() surfaces corrupt Redis override values."""
         mock_redis.get.return_value = b"not-a-number"
@@ -168,10 +148,10 @@ class TestSetMaxCapacity:
         """set_max_capacity() stores the value in Redis."""
         asyncio.run(bucket.set_max_capacity(5.0))
 
-        assert mock_redis.set.await_count == 2
-        key, payload = mock_redis.set.await_args_list[1].args
+        assert mock_redis.set.await_count == 1
+        key, payload = mock_redis.set.await_args_list[0].args
         assert key == bucket._max_capacity_key
-        assert mock_redis.set.await_args_list[1].kwargs == {
+        assert mock_redis.set.await_args_list[0].kwargs == {
             "ex": bucket._override_ttl_seconds
         }
         assert json.loads(payload) == {

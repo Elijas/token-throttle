@@ -21,10 +21,10 @@ from token_throttle._interfaces._models import (
 
 _USAGE_COUNTER_DOC = """Synchronous callable that derives a usage mapping from request kwargs.
 
-Counters should accept ``**kwargs`` so they receive the full request payload.
-Fixed-signature counters are still supported for compatibility, but that
-dispatch path is deprecated because request fields not named in the signature
-are filtered out before the counter is called.
+The recommended convention is to accept ``**kwargs`` so the counter receives
+the full request payload. Fixed-signature counters are a supported convenience,
+but they warn because request fields not named in the signature are filtered
+out before the counter is called.
 
 Runtime contract: the callable may return any mapping of metric name to finite
 non-negative ``int`` or ``float`` values. The limiter validates and freezes the
@@ -42,10 +42,10 @@ class PerModelConfig(StrictDTO):
     """
     Configuration for limiting API requests to a model.
 
-    v2.0.0 contract: ``PerModelConfig`` is an exact-type immutable DTO, not
-    a subclass extension point. Construction, assignment, copy, pickle
-    restore, ``model_copy()``, and ``model_construct()`` all preserve the
-    same validators; ``model_construct()`` is disabled.
+    ``PerModelConfig`` is an exact-type immutable DTO, not a subclass
+    extension point. Construction, assignment, copy, pickle restore,
+    ``model_copy()``, and ``model_construct()`` all preserve the same
+    validators; ``model_construct()`` is disabled.
 
     Use ``PerModelConfig(quotas=UsageQuotas.unlimited(), ...)`` to disable
     rate limiting for a model while preserving the normal limiter API.
@@ -62,9 +62,10 @@ class PerModelConfig(StrictDTO):
         default=None,
         description=(
             "Optional synchronous callable that derives usage from request kwargs. "
-            "Counter contract: accept **kwargs to receive the full request payload; "
-            "fixed-signature counters are deprecated because unmatched request "
-            "fields are filtered before invocation. The callable must not be "
+            "Counter contract: accepting **kwargs is the recommended convention so "
+            "the counter receives the full request payload; fixed-signature "
+            "counters are a supported convenience but warn because unmatched "
+            "request fields are filtered before invocation. The callable must not be "
             "async, must not be an async generator, and must return a usage "
             "mapping, preferably a plain dict. Custom counters are trusted "
             "application code and receive request objects by reference, so they "
@@ -103,7 +104,7 @@ class PerModelConfig(StrictDTO):
             raise ValueError(
                 f"quotas must be a UsageQuotas instance (got {type(value).__name__})"
             )
-        # KNOWN UNKNOWN: UsageQuotas remains externally mutable in v2.0.0, so
+        # KNOWN UNKNOWN: UsageQuotas remains externally mutable, so
         # PerModelConfig stores a frozen exact-type snapshot instead of taking
         # ownership of the caller's object.
         return value.frozen_snapshot()
@@ -498,7 +499,8 @@ class SyncRateLimiterBackend(Protocol):
         Synchronous counterpart of ``refund_capacity_for_buckets``.
 
         The default falls back to ``refund_capacity()`` and returns ``True``
-        for backwards compatibility with custom backends.
+        after applying the refund — a safe default for simple backends that
+        do not track per-bucket refund scope.
         """
         _ = reservation_model_family, reservation_bucket_ids, reservation_reserved_usage
         self.refund_capacity(reserved_usage, actual_usage)
@@ -537,8 +539,8 @@ class SyncRateLimiterBackend(Protocol):
         """
         Synchronous counterpart of ``apply_configured_max_capacity``.
 
-        The default falls back to ``set_max_capacity()`` for backwards
-        compatibility with custom backends.
+        The default delegates to ``set_max_capacity()`` — a safe default for
+        simple backends that do not need separate persistence semantics.
         """
         self.set_max_capacity(metric, per_seconds, value)
 

@@ -172,12 +172,6 @@ def test_callback_dto_field_parity() -> None:
 # (async_name, sync_name): each pair must be present in ``__all__`` together or
 # absent together. Redis-flavored pairs are absent without the redis extra; the
 # present/absent parity assertion handles that automatically.
-#
-# NOTE: ``cleanup_legacy_buckets`` (sync, unprefixed) /
-# ``async_cleanup_legacy_buckets`` (async, prefixed) is deliberately NOT listed.
-# Its naming is inverted relative to every other pair, but renaming either is a
-# public-API break (finding §Out-of-lane), and a mechanical Sync-prefix rule
-# would wrongly flag it. Excluded by design, not by oversight.
 _EXPORT_PAIRS: tuple[tuple[str, str], ...] = (
     ("RateLimiter", "SyncRateLimiter"),
     ("RateLimiterCallbacks", "SyncRateLimiterCallbacks"),
