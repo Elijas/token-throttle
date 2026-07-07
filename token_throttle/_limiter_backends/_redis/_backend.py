@@ -125,7 +125,7 @@ LOCK_TIMEOUT_SECONDS = 30
 _PIPELINE_CMDS_PER_BUCKET = 4
 
 # Each bucket enqueues 1 command for max-capacity override reads (GET override).
-# Valid overrides have their TTL refreshed after parsing so legacy/corrupt
+# Valid overrides have their TTL refreshed after parsing so corrupt
 # payloads are not kept alive.
 _PIPELINE_CMDS_PER_OVERRIDE = 1
 
@@ -3096,8 +3096,8 @@ class RedisBackend(RateLimiterBackend):
 
             # Extend lock TTL before committing the write, see _extend_locks.
             await self._extend_locks(lock_stack, reservation_id=reservation_id)
-            # Option B from FIX-42: defer the Redis tombstone until the same
-            # pipeline execution as the capacity write. This prevents the
+            # Defer the Redis tombstone until the same pipeline execution as
+            # the capacity write. This prevents the
             # permanent lost-refund failure where SET NX succeeds and the later
             # bucket mutation fails; exact concurrent retries are serialized by
             # the bucket locks, while lock expiry/manual writers can still race.

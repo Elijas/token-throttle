@@ -233,7 +233,7 @@ Reserve before the call, refund after — on the **same limiter** that issued th
 reservation, immediately around the external request (not from a long-lived
 queue). A `CapacityReservation` is a trusted in-process accounting token, not a
 portable credential: don't pickle it or pass it across trust boundaries.
-Durability semantics, config-change behavior, and the v2.0.0 compatibility break
+Durability semantics and config-change behavior
 are covered in [docs/operations.md](docs/operations.md#reservation-lifecycle-and-durability).
 
 ## Configuration
