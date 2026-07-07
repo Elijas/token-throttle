@@ -8,15 +8,21 @@ runtime behavior on the memory backend for both:
 
 * happy path: ``set_actual_usage`` returns the unused remainder to the pool,
 * forgot-to-set path: a ``RuntimeWarning`` fires and no capacity is fabricated,
+* forgot-to-set under ``-W error``: the reservation is refunded *before* the
+  warning fires, so the warning-turned-exception cannot leak it,
 * exception path (default): conservative close, original exception re-raised,
 * exception path (``usage_on_error``): the override is honored,
 * a refund failure while handling an in-block exception does not mask it,
 * exception path (bad ``usage_on_error``): a non-critical refund failure falls
   back to the conservative close so the in-flight reservation is never leaked,
+* normal-exit path (bad ``set_actual_usage``): the malformed-usage error still
+  surfaces to the caller, but only after a conservative close so nothing leaks,
+* single-use scopes: re-entering an exited or still-active scope raises,
 * ``timeout`` passthrough: ``timeout=0`` raises ``TimeoutError`` cleanly.
 """
 
 import logging
+import warnings
 
 import pytest
 
@@ -167,6 +173,80 @@ async def test_async_refund_failure_does_not_mask_original_exception() -> None:
         await limiter.aclose()
 
 
+async def test_async_forgot_set_actual_usage_refunds_before_warning() -> None:
+    limiter = _async_limiter()
+    try:
+        # Under ``-W error`` the forgot-path warning becomes an exception. The
+        # refund must already have run before the warning fires, or the
+        # reservation leaks in flight.
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            with pytest.raises(RuntimeWarning, match="set_actual_usage"):
+                async with limiter.reserve({"tokens": 100}, _MODEL):
+                    pass
+
+        assert limiter.snapshot_state()["in_flight_reservations"] == 0
+    finally:
+        await limiter.aclose()
+
+
+async def test_async_bad_actual_usage_closes_before_surfacing(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    limiter = _async_limiter()
+    try:
+        with (
+            caplog.at_level(logging.WARNING, logger="token_throttle"),
+            pytest.raises(ValueError, match="Usage keys do not match"),
+        ):
+            async with limiter.reserve({"tokens": 100}, _MODEL) as handle:
+                # Keys do not match the reservation: refund_capacity validates
+                # before it forgets the in-flight reservation, so the error must
+                # not be allowed to leak the reservation.
+                handle.set_actual_usage({"widgets": 40})
+
+        # The malformed usage still surfaces, but only after a conservative
+        # close: no leak.
+        assert limiter.snapshot_state()["in_flight_reservations"] == 0
+        assert "actual-usage refund failed" in caplog.text
+        # The fallback refunded actual == reserved (100), so nothing returns.
+        with pytest.raises(TimeoutError):
+            await limiter.acquire_capacity({"tokens": 1}, _MODEL, timeout=0)
+    finally:
+        await limiter.aclose()
+
+
+async def test_async_scope_is_single_use_after_exit() -> None:
+    limiter = _async_limiter()
+    try:
+        scope = limiter.reserve({"tokens": 10}, _MODEL)
+        async with scope as handle:
+            handle.set_actual_usage({"tokens": 10})
+
+        with pytest.raises(RuntimeError, match="single-use"):
+            async with scope:
+                pytest.fail("re-entering an exited reserve() scope must not run")
+
+        assert limiter.snapshot_state()["in_flight_reservations"] == 0
+    finally:
+        await limiter.aclose()
+
+
+async def test_async_scope_rejects_nested_reentry() -> None:
+    limiter = _async_limiter()
+    try:
+        scope = limiter.reserve({"tokens": 10}, _MODEL)
+        async with scope as handle:
+            handle.set_actual_usage({"tokens": 10})
+            with pytest.raises(RuntimeError, match="single-use"):
+                async with scope:
+                    pytest.fail("re-entering an active reserve() scope must not run")
+
+        assert limiter.snapshot_state()["in_flight_reservations"] == 0
+    finally:
+        await limiter.aclose()
+
+
 async def test_async_timeout_zero_raises_cleanly_without_leaking() -> None:
     limiter = _async_limiter()
     try:
@@ -296,6 +376,71 @@ def test_sync_refund_failure_does_not_mask_original_exception() -> None:
             raise ValueError("original")
 
         assert captured["rid"] in limiter._in_flight_reservation_ids
+    finally:
+        limiter.close()
+
+
+def test_sync_forgot_set_actual_usage_refunds_before_warning() -> None:
+    limiter = _sync_limiter()
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            with (
+                pytest.raises(RuntimeWarning, match="set_actual_usage"),
+                limiter.reserve({"tokens": 100}, _MODEL),
+            ):
+                pass
+
+        assert limiter.snapshot_state()["in_flight_reservations"] == 0
+    finally:
+        limiter.close()
+
+
+def test_sync_bad_actual_usage_closes_before_surfacing(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    limiter = _sync_limiter()
+    try:
+        with (
+            caplog.at_level(logging.WARNING, logger="token_throttle"),
+            pytest.raises(ValueError, match="Usage keys do not match"),
+            limiter.reserve({"tokens": 100}, _MODEL) as handle,
+        ):
+            handle.set_actual_usage({"widgets": 40})
+
+        assert limiter.snapshot_state()["in_flight_reservations"] == 0
+        assert "actual-usage refund failed" in caplog.text
+        with pytest.raises(TimeoutError):
+            limiter.acquire_capacity({"tokens": 1}, _MODEL, timeout=0)
+    finally:
+        limiter.close()
+
+
+def test_sync_scope_is_single_use_after_exit() -> None:
+    limiter = _sync_limiter()
+    try:
+        scope = limiter.reserve({"tokens": 10}, _MODEL)
+        with scope as handle:
+            handle.set_actual_usage({"tokens": 10})
+
+        with pytest.raises(RuntimeError, match="single-use"), scope:
+            pytest.fail("re-entering an exited reserve() scope must not run")
+
+        assert limiter.snapshot_state()["in_flight_reservations"] == 0
+    finally:
+        limiter.close()
+
+
+def test_sync_scope_rejects_nested_reentry() -> None:
+    limiter = _sync_limiter()
+    try:
+        scope = limiter.reserve({"tokens": 10}, _MODEL)
+        with scope as handle:
+            handle.set_actual_usage({"tokens": 10})
+            with pytest.raises(RuntimeError, match="single-use"), scope:
+                pytest.fail("re-entering an active reserve() scope must not run")
+
+        assert limiter.snapshot_state()["in_flight_reservations"] == 0
     finally:
         limiter.close()
 

@@ -1318,7 +1318,10 @@ class RateLimiter(BaseRateLimiter):
         cycle. Entering it waits for capacity like ``acquire_capacity`` and
         yields a handle whose ``reservation`` attribute is the
         ``CapacityReservation`` and whose ``set_actual_usage(actual_usage)``
-        records what the request actually consumed.
+        records what the request actually consumed. The returned scope is
+        single-use: re-entering it, whether after it has exited or while it is
+        still active, raises ``RuntimeError`` — call ``reserve`` again for
+        another attempt.
 
         On normal exit the unused remainder is refunded. If
         ``set_actual_usage`` was never called, the block refunds the full
@@ -3017,6 +3020,7 @@ class _ReservationScope:
     __slots__ = (
         "_actual_usage",
         "_actual_usage_set",
+        "_entered",
         "_limiter",
         "_model",
         "_timeout",
@@ -3042,6 +3046,7 @@ class _ReservationScope:
         self.reservation: CapacityReservation | None = None
         self._actual_usage: Usage | None = None
         self._actual_usage_set = False
+        self._entered = False
 
     def set_actual_usage(self, actual_usage: Usage) -> None:
         """
@@ -3055,6 +3060,15 @@ class _ReservationScope:
         self._actual_usage_set = True
 
     async def __aenter__(self) -> Self:
+        # Scopes are single-use: each carries per-use accounting state
+        # (``_actual_usage``/``_actual_usage_set``). Re-entering — whether the
+        # first use has exited or is still active — would acquire a second
+        # reservation while stale state from the first fabricates its refund.
+        if self._entered:
+            raise RuntimeError(
+                "reserve() scopes are single-use; call limiter.reserve(...) again"
+            )
+        self._entered = True
         self.reservation = await self._limiter.acquire_capacity(
             self._usage, self._model, timeout=self._timeout
         )
@@ -3078,15 +3092,55 @@ class _ReservationScope:
             return False
         if self._actual_usage_set:
             assert self._actual_usage is not None  # noqa: S101 - set with the flag
-            await self._limiter.refund_capacity(self._actual_usage, reservation)
+            await self._refund_actual_or_conservative_close(
+                self._actual_usage, reservation
+            )
             return False
+        # Refund the full reserved usage before warning: under ``-W error`` the
+        # warning becomes an exception, so warning first would skip the refund
+        # and leak the in-flight reservation.
+        await self._limiter.refund_capacity(reservation.get_usage(), reservation)
         warnings.warn(
             _RESERVE_FORGOT_ACTUAL_USAGE_WARNING,
             RuntimeWarning,
             stacklevel=2,
         )
-        await self._limiter.refund_capacity(reservation.get_usage(), reservation)
         return False
+
+    async def _refund_actual_or_conservative_close(
+        self,
+        actual_usage: Usage,
+        reservation: CapacityReservation,
+    ) -> None:
+        # Normal-exit refund. Unlike the error path, no in-block exception is
+        # being masked, so a bad ``actual_usage`` (e.g. metric keys that do not
+        # match the reservation) must surface to the caller. But
+        # ``refund_capacity`` validates usage before it forgets the in-flight
+        # reservation, so letting the error propagate untouched would leak the
+        # reservation. Close conservatively first — refund the reservation's own
+        # reserved usage, mirroring the error path's fallback — then re-raise so
+        # the original error still reaches the caller.
+        try:
+            await self._limiter.refund_capacity(actual_usage, reservation)
+        except BaseException as refund_error:
+            if isinstance(
+                refund_error, LIFECYCLE_CALLBACK_CRITICAL_EXCEPTIONS
+            ) or _exception_group_contains_critical(
+                refund_error,
+                LIFECYCLE_CALLBACK_CRITICAL_EXCEPTIONS,
+            ):
+                raise
+            _logger.warning(
+                "reserve(): actual-usage refund failed for reservation %s on "
+                "normal exit; closing conservatively with the reserved usage "
+                "before re-raising.",
+                reservation.reservation_id,
+                exc_info=True,
+            )
+            await self._try_refund_swallowing_noncritical(
+                reservation.get_usage(), reservation
+            )
+            raise
 
     async def _refund_without_masking(
         self,

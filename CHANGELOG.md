@@ -3,6 +3,25 @@
 Notable changes for token-throttle releases. For operator upgrade steps, see
 [`MIGRATION.md`](MIGRATION.md).
 
+## Unreleased
+
+- Hardens the `reserve()` context manager against three edge cases that could
+  leak an in-flight reservation or fabricate capacity accounting:
+  - The scope returned by `reserve()` is now single-use. Re-entering the same
+    scope — whether after it has exited or while it is still active — raises
+    `RuntimeError` instead of silently acquiring a second reservation while
+    reusing the first block's recorded actual usage. Call `reserve()` again for
+    each attempt.
+  - When a `reserve()` block exits without calling `set_actual_usage()`, the
+    reservation is refunded before the "forgot to report actual usage"
+    `RuntimeWarning` is emitted, so running under `-W error` (warnings promoted
+    to exceptions) can no longer skip the refund and leak the reservation.
+  - When a `reserve()` block exits normally but the recorded actual usage is
+    malformed (for example its metric keys do not match the reservation), the
+    reservation is conservatively closed before the resulting `ValueError` is
+    re-raised, so the bad-usage error still surfaces to the caller without
+    leaking the in-flight reservation.
+
 ## v9.1.0 - 2026-07-07
 
 - Fixes `OpenAIUsageCounter` under-reserving for two request fields that carry
