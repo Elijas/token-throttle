@@ -52,7 +52,6 @@ async def main() -> None:
     async with limiter.reserve(
         {"requests": 1, "tokens": 1_000},
         model="demo-model",
-        usage_on_error={"requests": 1, "tokens": 0},
     ) as handle:
         # Replace this block with your provider call.
         handle.set_actual_usage({"requests": 1, "tokens": 425})
@@ -136,6 +135,8 @@ async def main() -> None:
 
 asyncio.run(main())
 ```
+
+This uses the manual acquire/refund pattern instead of `reserve()`: `refund_capacity_from_response` already inspects the OpenAI response to compute actual usage and refund it, so it does the bookkeeping `reserve()` would otherwise provide.
 
 `OpenAIUsageCounter` counts text-only OpenAI payloads (`input` or `messages`,
 plus chat/tool/schema/output overhead via `tiktoken`). The plural `inputs` field
