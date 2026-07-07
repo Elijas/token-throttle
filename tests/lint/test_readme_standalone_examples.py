@@ -14,20 +14,11 @@ import pytest
 
 _REPO_ROOT = Path(__file__).parent.parent.parent
 _README = _REPO_ROOT / "README.md"
-_MIGRATION = _REPO_ROOT / "MIGRATION.md"
 _DEVELOPMENT = _REPO_ROOT / "DEVELOPMENT.md"
 _CLAUDE = _REPO_ROOT / "CLAUDE.md"
 _TASKFILE = _REPO_ROOT / "Taskfile.yml"
 _RELEASE_WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "release.yml"
-_DOCS_WITH_STANDALONE_EXAMPLES = (_README, _MIGRATION, _DEVELOPMENT, _CLAUDE)
-
-
-@dataclass(frozen=True)
-class _ExpectedMigrationFragment:
-    start_line: int
-    reason: str
-    heading: str
-    first_non_empty_code_line: str
+_DOCS_WITH_STANDALONE_EXAMPLES = (_README, _DEVELOPMENT, _CLAUDE)
 
 
 @dataclass(frozen=True)
@@ -108,76 +99,6 @@ class _ExpectedTaskfileReleaseDispatch:
     bump: str
 
 
-_EXPECTED_MIGRATION_FRAGMENTS = (
-    _ExpectedMigrationFragment(
-        start_line=158,
-        reason="illustrates unsafe cross-limiter refund with undefined limiters",
-        heading="### What changed",
-        first_non_empty_code_line="reservation = await limiter_a.acquire_capacity(",
-    ),
-    _ExpectedMigrationFragment(
-        start_line=168,
-        reason="requires a live async limiter and provider call",
-        heading="### What changed",
-        first_non_empty_code_line="reservation = await limiter.acquire_capacity(",
-    ),
-    _ExpectedMigrationFragment(
-        start_line=252,
-        reason="uses illustrative recovery hook and limiter variables",
-        heading="### What changed",
-        first_non_empty_code_line="from token_throttle import AcquireRefundFailedError",
-    ),
-    _ExpectedMigrationFragment(
-        start_line=264,
-        reason="uses illustrative recovery hook and limiter variables",
-        heading="### What changed",
-        first_non_empty_code_line="from token_throttle import AcquireRefundFailedError",
-    ),
-    _ExpectedMigrationFragment(
-        start_line=312,
-        reason="illustrates callback behavior with undefined limiter and reservation",
-        heading="### What changed",
-        first_non_empty_code_line="async def on_capacity_refunded(**kwargs) -> None:",
-    ),
-    _ExpectedMigrationFragment(
-        start_line=358,
-        reason="requires a caller-provided backend builder",
-        heading="### What changed",
-        first_non_empty_code_line="from token_throttle import run_conformance_test_for",
-    ),
-    _ExpectedMigrationFragment(
-        start_line=395,
-        reason="uses illustrative model and recovery flow variables",
-        heading="### AcquireRefundFailedError base class",
-        first_non_empty_code_line="from token_throttle import AcquireRefundFailedError",
-    ),
-    _ExpectedMigrationFragment(
-        start_line=537,
-        reason="requires an operator-provided config mapping",
-        heading="## 1. Preflight Config Dictionaries",
-        first_non_empty_code_line=(
-            "from token_throttle.migration import validate_config_for_v2_0"
-        ),
-    ),
-    _ExpectedMigrationFragment(
-        start_line=654,
-        reason="requires an operator-supplied Redis client and target deployment prefix",
-        heading="## 6a. Clean Up Legacy Redis Bucket Keys",
-        first_non_empty_code_line=(
-            "from token_throttle.migration import cleanup_legacy_buckets"
-        ),
-    ),
-)
-_EXPECTED_MIGRATION_FRAGMENT_START_LINES = frozenset(
-    fragment.start_line for fragment in _EXPECTED_MIGRATION_FRAGMENTS
-)
-_EXPECTED_MIGRATION_REDIS_CLEANUP_SCAN_PATTERN = "`{key_prefix}:rate_limiting:bucket:*`"
-_EXPECTED_MIGRATION_REDIS_BUCKET_KEY_SHAPE = (
-    "{key_prefix}:rate_limiting:bucket:{model_family}:{metric}:{per_seconds}:{suffix}"
-)
-_EXPECTED_MIGRATION_REDIS_ACQUIRED_KEY_SHAPE = (
-    "{key_prefix}:rate_limiting:acquired:{reservation_id}"
-)
 _NON_PYTHON_CLASSIFICATION_SHELL_SYNTAX = "syntax-checkable shell command block"
 _NON_PYTHON_CLASSIFICATION_MANUAL = "intentionally non-executable/manual command block"
 _NON_PYTHON_CLASSIFICATION_TEXT = "non-executable text/output/config/key-shape block"
@@ -323,35 +244,6 @@ _EXPECTED_NON_PYTHON_FENCES = (
             "uv run mypy",
         ),
     ),
-    _ExpectedNonPythonFence(
-        document_name="MIGRATION.md",
-        start_line=567,
-        language="text",
-        classification=_NON_PYTHON_CLASSIFICATION_TEXT,
-        reason="canonical migration error text, not an executable command",
-        heading="## 2. Drain Reservations",
-        non_empty_content_lines=(
-            "legacy v1.4.x reservations no longer supported in v2.0.0; drain v1.4.x before upgrade",
-        ),
-    ),
-    _ExpectedNonPythonFence(
-        document_name="MIGRATION.md",
-        start_line=702,
-        language="text",
-        classification=_NON_PYTHON_CLASSIFICATION_TEXT,
-        reason="documented Redis bucket key shape",
-        heading="### 7b. Redis key format and Lua compatibility",
-        non_empty_content_lines=(_EXPECTED_MIGRATION_REDIS_BUCKET_KEY_SHAPE,),
-    ),
-    _ExpectedNonPythonFence(
-        document_name="MIGRATION.md",
-        start_line=708,
-        language="text",
-        classification=_NON_PYTHON_CLASSIFICATION_TEXT,
-        reason="documented Redis acquire-marker key shape",
-        heading="### 7b. Redis key format and Lua compatibility",
-        non_empty_content_lines=(_EXPECTED_MIGRATION_REDIS_ACQUIRED_KEY_SHAPE,),
-    ),
 )
 _EXPECTED_TASKFILE_RELEASE_DISPATCHES = (
     _ExpectedTaskfileReleaseDispatch(
@@ -367,41 +259,12 @@ _EXPECTED_TASKFILE_RELEASE_DISPATCHES = (
 )
 _EXPECTED_NON_README_STANDALONE_IDENTITIES = (
     _StandaloneExampleIdentity(
-        document_name="MIGRATION.md",
-        start_line=182,
-        heading="### What changed",
-        first_non_empty_code_line=(
-            "from token_throttle import create_logging_callbacks"
-        ),
-    ),
-    _StandaloneExampleIdentity(
-        document_name="MIGRATION.md",
-        start_line=191,
-        heading="### What changed",
-        first_non_empty_code_line="import logging",
-    ),
-    _StandaloneExampleIdentity(
-        document_name="MIGRATION.md",
-        start_line=303,
-        heading="### What changed",
-        first_non_empty_code_line="async def on_capacity_refunded(**kwargs) -> None:",
-    ),
-    _StandaloneExampleIdentity(
-        document_name="MIGRATION.md",
-        start_line=347,
-        heading="### What changed",
-        first_non_empty_code_line="from token_throttle import RateLimiterBackend",
-    ),
-    _StandaloneExampleIdentity(
         document_name="DEVELOPMENT.md",
         start_line=431,
         heading="### Redis connection pool sizing",
         first_non_empty_code_line="import redis.asyncio as aioredis",
     ),
 )
-_EXPLICIT_FRAGMENT_START_LINES_BY_DOCUMENT = {
-    "MIGRATION.md": _EXPECTED_MIGRATION_FRAGMENT_START_LINES,
-}
 _EXPECTED_STDOUT_EXAMPLES = (
     _ExpectedStdoutExample(
         document_name="README.md",
@@ -963,10 +826,6 @@ def _is_python_fence(block: _MarkdownFenceBlock) -> bool:
     return False
 
 
-def _explicit_fragment_start_lines(document_name: str) -> frozenset[int]:
-    return _EXPLICIT_FRAGMENT_START_LINES_BY_DOCUMENT.get(document_name, frozenset())
-
-
 def _markdown_fence_blocks(
     markdown: str,
     *,
@@ -1018,7 +877,6 @@ def _python_blocks(
     document_name: str = _README.name,
 ) -> list[_MarkdownPythonBlock]:
     blocks: list[_MarkdownPythonBlock] = []
-    explicit_fragment_start_lines = _explicit_fragment_start_lines(document_name)
     for fence in _markdown_fence_blocks(markdown, document_name=document_name):
         if not _is_python_fence(fence):
             continue
@@ -1028,10 +886,7 @@ def _python_blocks(
                 heading=fence.heading,
                 code=fence.code,
                 start_line=fence.start_line,
-                classified_as_fragment=(
-                    _is_fragment_python_block(fence.code)
-                    or fence.start_line in explicit_fragment_start_lines
-                ),
+                classified_as_fragment=_is_fragment_python_block(fence.code),
             )
         )
     return blocks
@@ -1094,28 +949,6 @@ def _run_docs_example(
         capture_output=True,
         check=True,
     )
-
-
-def _assert_migration_fragment_expectations(
-    blocks: list[_MarkdownPythonBlock],
-) -> None:
-    fragments_by_start_line = {
-        block.start_line: block for block in blocks if block.classified_as_fragment
-    }
-
-    assert (
-        frozenset(fragments_by_start_line) == _EXPECTED_MIGRATION_FRAGMENT_START_LINES
-    )
-    for expected in _EXPECTED_MIGRATION_FRAGMENTS:
-        block = fragments_by_start_line[expected.start_line]
-        actual = _ExpectedMigrationFragment(
-            start_line=block.start_line,
-            reason=expected.reason,
-            heading=block.heading,
-            first_non_empty_code_line=_first_non_empty_code_line(block.code),
-        )
-        assert actual == expected
-        assert expected.reason.strip()
 
 
 def _non_python_fence_key(block: _MarkdownFenceBlock) -> _NonPythonFenceKey:
@@ -1264,10 +1097,6 @@ _STANDALONE_DOC_EXAMPLES = [
     for path in _DOCS_WITH_STANDALONE_EXAMPLES
     for block in _standalone_python_blocks_from_document(path)
 ]
-_MIGRATION_PYTHON_BLOCKS = _python_blocks(
-    _MIGRATION.read_text(encoding="utf-8"),
-    document_name=_MIGRATION.name,
-)
 _NON_PYTHON_FENCE_BLOCKS = [
     block
     for path in _DOCS_WITH_STANDALONE_EXAMPLES
@@ -1398,20 +1227,6 @@ def test_unsupported_development_python_like_fence_reports_fence_line() -> None:
         document_name="DEVELOPMENT.md",
         fence_info="py2",
         fence_line=3,
-    )
-
-
-def test_unsupported_migration_python_like_fence_reports_fence_line() -> None:
-    fence_info = 'IPython title="probe.py"'
-    markdown = (
-        f'# Migration\n\nSome prose.\n\n```{fence_info}\nprint("not linted")\n```\n'
-    )
-
-    _assert_unsupported_python_like_fence_reports_line(
-        markdown,
-        document_name="MIGRATION.md",
-        fence_info=fence_info,
-        fence_line=5,
     )
 
 
@@ -1772,18 +1587,6 @@ def test_shell_like_non_python_fences_are_bash_syntax_checked() -> None:
         checked_keys.add(key)
 
     assert checked_keys == syntax_checked_keys
-
-
-def test_migration_fragments_are_classified_intentionally() -> None:
-    _assert_migration_fragment_expectations(_MIGRATION_PYTHON_BLOCKS)
-
-
-def test_migration_redis_key_shapes_are_guarded() -> None:
-    migration = _MIGRATION.read_text(encoding="utf-8")
-
-    assert _EXPECTED_MIGRATION_REDIS_CLEANUP_SCAN_PATTERN in migration
-    assert _EXPECTED_MIGRATION_REDIS_BUCKET_KEY_SHAPE in migration
-    assert _EXPECTED_MIGRATION_REDIS_ACQUIRED_KEY_SHAPE in migration
 
 
 def test_expected_stdout_examples_match_current_docs_identity() -> None:

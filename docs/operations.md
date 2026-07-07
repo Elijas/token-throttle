@@ -25,9 +25,7 @@ than storing reservations in a long-lived queue.
 v2.0.0 is a clean break from v1.4.x reservation compatibility. Every
 `CapacityReservation` requires a non-empty `limiter_instance_id`; legacy
 v1.4.x reservations without it are rejected. Drain in-flight reservations
-before upgrading and do not run mixed v1.4.x/v2.0.0 fleets. See
-[`MIGRATION.md`](../MIGRATION.md#migrating-from-v14x-to-v200) for the full
-upgrade procedure.
+before upgrading and do not run mixed v1.4.x/v2.0.0 fleets.
 
 ### If a worker crashes before refunding
 
@@ -133,9 +131,26 @@ Redis backends require Redis server 6.2 or newer and a Redis user that can run
 `EXEC`, `DISCARD`, and Lua scripting (`EVAL`, `EVALSHA`, `SCRIPT LOAD`).
 `PEXPIRE` is used by redis-py's lock extend/reacquire script, and `MULTI` /
 `EXEC` / `DISCARD` are used by redis-py's transaction pipelines that
-token-throttle uses for atomic acquire/refund transactions; see
-[`MIGRATION.md`](../MIGRATION.md#6-redis-acl-requirements) for the full
-command list and rationale.
+token-throttle uses for atomic acquire/refund transactions. token-throttle's own
+code never issues `PEXPIRE` or `MULTI` / `EXEC` / `DISCARD` by name, so they are
+easy to omit from a hand-written ACL: a user provisioned with only
+`GET` / `EXISTS` / `SET` / `DEL` / `EXPIRE` / `PTTL` / `TIME` plus scripting can
+pass an initial smoke test but fail during ordinary multi-quota usage as soon as
+a lock needs to extend or a pipelined transaction is discarded. Lua scripting
+access (`EVAL`, `EVALSHA`, `SCRIPT LOAD`) is typically covered by the
+`+@scripting` ACL category; if your managed Redis restricts scripting, ensure
+that category — or the three individual commands — is allowed for the
+token-throttle connection user. No `KEYS`, `FLUSHDB`, `FLUSHALL`, `CONFIG`, or
+Pub/Sub commands are issued by the library.
+
+**`SCRIPT FLUSH` operational hazard**: avoid running `SCRIPT FLUSH` on a Redis
+instance shared with token-throttle. It evicts the cached Lua SHA for redis-py's
+lock release/extend scripts; the next lock operation reloads the script via
+`SCRIPT LOAD`, which adds a round-trip and, if that command is also blocked by an
+ACL, permanently breaks lock release until the process restarts. Schedule
+`SCRIPT FLUSH` only during planned maintenance windows when token-throttle is not
+running, or use a dedicated Redis DB that is not shared with other services that
+flush the script cache.
 
 Compatibility testing used `fakeredis` for unit tests plus local standalone
 Redis (7.x for the test matrix, 8.4.0 for the benchmarks below); 6.2 or newer is
@@ -158,8 +173,6 @@ tenant on shared Redis can starve benign tenants by exhausting connections,
 memory, CPU, or Lua scheduling. For hostile-tenant scenarios, use separate
 Redis instances per tenant, or place Redis behind infrastructure that enforces
 hardware-level CPU, memory, connection, and network quotas per tenant.
-If you are upgrading from a pre-v4 deployment, see [`MIGRATION.md`](../MIGRATION.md)
-for the multi-tenant isolation change.
 
 ## Connection pooling and key TTLs
 
@@ -267,8 +280,7 @@ backend has no record that this reservation was ever acquired: its acquire
 marker already expired (`max_reservation_lifetime_seconds`,
 `bucket_ttl_seconds`, or `refund_dedup_ttl_seconds` elapsed — see
 [If a worker crashes before refunding](#if-a-worker-crashes-before-refunding)
-above), it was issued by a different limiter instance (see
-[`MIGRATION.md`](../MIGRATION.md#migrating-from-v7x-to-v800)), or it is a
+above), it was issued by a different limiter instance, or it is a
 forged or deserialized reservation. This fails closed: **capacity is not
 credited**. Retrying the identical refund keeps failing — there is no
 transient condition to wait out. Refund through the same limiter instance
@@ -308,8 +320,8 @@ per family, model aliases, or in-flight reservations, see
 [docs/configuration.md](configuration.md#per-model-configuration) — or when a
 DTO length cap is exceeded while constructing `Quota`, `CapacityReservation`,
 or `PerModelConfig` directly (surfaced there as a pydantic `ValidationError`
-instead; see [`MIGRATION.md`](../MIGRATION.md#stricter-public-input-validation)).
-Every one of these checks runs before any backend capacity is consumed, so
+instead). Every one of these checks runs before any backend capacity is
+consumed, so
 **no capacity state changed**. Retrying the identical call keeps failing; it
 is a structural limit, not contention. Raise the relevant constructor cap,
 reduce the cardinality your application generates (fix a `model_family` or

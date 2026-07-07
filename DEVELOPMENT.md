@@ -132,15 +132,15 @@ the GitHub service container for integration and coverage jobs.
 ## Updating doc code fences
 
 `tests/lint/test_readme_standalone_examples.py` actually executes the
-standalone Python code fences in `README.md`, `MIGRATION.md`, `DEVELOPMENT.md`,
-and `CLAUDE.md`, and inventories every other (bash/text/etc.) fence in those
+standalone Python code fences in `README.md`, `DEVELOPMENT.md`, and
+`CLAUDE.md`, and inventories every other (bash/text/etc.) fence in those
 files. It identifies each fence by an explicit `start_line` recorded in that
-test file — in `_EXPECTED_MIGRATION_FRAGMENTS`, `_EXPECTED_NON_PYTHON_FENCES`,
-and `_EXPECTED_NON_README_STANDALONE_IDENTITIES` — plus its heading and first
+test file — in `_EXPECTED_NON_PYTHON_FENCES` and
+`_EXPECTED_NON_README_STANDALONE_IDENTITIES` — plus its heading and first
 code/content line.
 
 If you add, remove, or reflow lines anywhere *before* a fence in one of those
-four files (including in prose, not just other fences), every fence after your
+three files (including in prose, not just other fences), every fence after your
 edit shifts and its recorded `start_line` goes stale, failing the lint with a
 mismatch. To fix: after editing a doc, use your editor's line numbers to find
 each fence's opening line plus one (the first line of code/content inside it)
@@ -471,10 +471,6 @@ Redis backends require Redis server 6.2 or newer.
 
 token-throttle does **not** use `KEYS`, `FLUSHDB`, `FLUSHALL`, `CONFIG`, or any
 Pub/Sub command. A restrictive ACL can safely deny those categories.
-
-The migration helper `cleanup_legacy_buckets()` is an operator-run maintenance
-tool, not part of limiter hot paths. It uses `SCAN`, `TTL`, and `DEL` to remove
-pre-FIX-38 bucket `:last_checked` / `:capacity` keys that have no expiry.
 
 **`SCRIPT FLUSH` operational hazard**: `SCRIPT FLUSH` evicts the Lua SHA cache
 used by redis-py's lock release and extend scripts. The next lock operation

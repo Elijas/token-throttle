@@ -67,7 +67,7 @@ conventions.
 
 ## Documentation conventions
 
-Public docs — `README.md`, `docs/*.md`, `MIGRATION.md`, `CHANGELOG.md` — must read in
+Public docs — `README.md`, `docs/*.md`, `CHANGELOG.md` — must read in
 **user-facing register**: describe behavior and changes in terms a user can act on, never
 internal development codenames (audit-round IDs like `R7`, lane IDs like `L38`, finding IDs
 like `PF03`/`AD-31`, `FIX-NN` tracker IDs, or capsule date-codenames). A user cannot look

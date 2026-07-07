@@ -16,9 +16,7 @@ from token_throttle._limiter_backends._redis._keys import (
 )
 from token_throttle._validation import (
     MAX_TOTAL_KEY_LENGTH,
-    _validate_key_prefix,
 )
-from token_throttle.migration import validate_config_for_v2_0
 
 
 def test_key_prefix_rejects_megabyte_scale_value() -> None:
@@ -61,48 +59,6 @@ def test_refund_dedup_key_revalidates_reservation_id_boundary() -> None:
         match=f"reservation_id must be at most {MAX_RESERVATION_ID_LENGTH} characters",
     ):
         redis_refund_dedup_key("tenant", reservation_id)
-
-
-@pytest.mark.parametrize(
-    "key_prefix",
-    [
-        "",
-        " ",
-        "bad prefix",
-        "bad:prefix",
-        "{bad}",
-        "control\x00char",
-        "a" * (MAX_KEY_PREFIX_LENGTH + 1),
-    ],
-)
-def test_migration_rejects_same_key_prefix_patterns_as_runtime(
-    key_prefix: object,
-) -> None:
-    with pytest.raises(ValueError, match="key_prefix") as canonical_error:
-        _validate_key_prefix(key_prefix)
-
-    issues = validate_config_for_v2_0({"backend": "redis", "key_prefix": key_prefix})
-
-    assert [issue.field_path for issue in issues] == ["redis.key_prefix"]
-    assert issues[0].reason == str(canonical_error.value)
-
-
-@pytest.mark.parametrize(
-    "key_prefix",
-    [
-        "prod-tenant-abc-123-deployment-v2",
-        "a" * MAX_KEY_PREFIX_LENGTH,
-        "tenant_europe.1",
-    ],
-)
-def test_migration_accepts_same_key_prefix_patterns_as_runtime(
-    key_prefix: str,
-) -> None:
-    assert _validate_key_prefix(key_prefix) == key_prefix
-
-    assert (
-        validate_config_for_v2_0({"backend": "redis", "key_prefix": key_prefix}) == []
-    )
 
 
 def test_total_key_length_rejects_valid_segments_that_exceed_global_cap() -> None:

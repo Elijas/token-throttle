@@ -1,7 +1,21 @@
 # Changelog
 
-Notable changes for token-throttle releases. For operator upgrade steps, see
-[`MIGRATION.md`](MIGRATION.md).
+Notable changes for token-throttle releases. Each major version's breaking
+changes and upgrade steps are recorded in its entry below.
+
+## Unreleased
+
+- **Breaking:** this library no longer carries pre-v9 upgrade tooling. The
+  `token_throttle.migration` module and its four public names —
+  `validate_config_for_v2_0`, `cleanup_legacy_buckets`,
+  `async_cleanup_legacy_buckets`, and `ConfigMigrationIssue` — have been
+  removed, along with the standalone migration guide. Those helpers existed to
+  pre-flight a configuration migration for the v1.4.x-to-v2.0.0 upgrade and are
+  not part of the package any longer. Current documentation describes current
+  behavior only; each major version's breaking changes and upgrade steps remain
+  recorded in the entries below. The Redis ACL command list, the `+@scripting`
+  rationale, and the `SCRIPT FLUSH` operational hazard that the guide carried
+  now live in [`docs/operations.md`](docs/operations.md).
 
 ## v9.1.1 - 2026-07-07
 
@@ -81,13 +95,13 @@ Notable changes for token-throttle releases. For operator upgrade steps, see
   Such text is now counted as the ordinary request text it is on the wire
   instead of crashing the acquire.
 - Fixes `cleanup_legacy_buckets` / `async_cleanup_legacy_buckets` in
-  [`token_throttle/migration.py`](token_throttle/migration.py) not escaping
+  `token_throttle/migration.py` not escaping
   Redis glob metacharacters (`*`, `?`, `[`, `]`, `\`) in a configured
   `key_prefix` before building its cleanup scan pattern, so a prefix
   containing one of those characters could match and delete a sibling
   deployment's keys instead of only its own.
 - Fixes `validate_config_for_v2_0` in
-  [`token_throttle/migration.py`](token_throttle/migration.py) reporting a
+  `token_throttle/migration.py` reporting a
   false-positive "Redis builders require key_prefix" issue for configs where
   the Redis builder options, including `key_prefix`, live in a nested `redis`
   section rather than at the top level.
@@ -140,7 +154,7 @@ Notable changes for token-throttle releases. For operator upgrade steps, see
   `set_max_capacity`, and reconfiguration raise `BackendLockContentionError`
   (chained from the underlying redis error) on lock starvation or mid-operation
   lock loss. Handlers that caught `redis.exceptions.LockError` must catch
-  `BackendLockContentionError` instead; see [`MIGRATION.md`](MIGRATION.md) and
+  `BackendLockContentionError` instead; see `MIGRATION.md` and
   the per-bucket locking section in [`docs/operations.md`](docs/operations.md).
 - **Breaking:** `RedisBackendBuilder.build()` / `SyncRedisBackendBuilder.build()`
   now raise `ValueError` at build time when any configured quota's
@@ -148,7 +162,7 @@ Notable changes for token-throttle releases. For operator upgrade steps, see
   previously built without error but silently reset a drained long-window
   quota back to full capacity once an idle gap outlived the TTL. Widen
   `bucket_ttl_seconds`, or shorten the offending quota's `per_seconds`, for any
-  configuration the check now rejects; see [`MIGRATION.md`](MIGRATION.md) and
+  configuration the check now rejects; see `MIGRATION.md` and
   the key-TTL guidance in [`docs/operations.md`](docs/operations.md).
 - **Breaking:** `OpenAIUsageCounter` / `get_encoding` no longer guess a
   tokenizer from a hardcoded model-family fallback table for models the
@@ -158,13 +172,13 @@ Notable changes for token-throttle releases. For operator upgrade steps, see
   escaping from `tiktoken`. Code that specifically caught `KeyError` around
   token counting must catch `ValueError` instead; upgrade `tiktoken` or pass an
   explicit `get_encoding_func` to `OpenAIUsageCounter` for models it does not
-  yet recognize. See [`MIGRATION.md`](MIGRATION.md).
+  yet recognize. See `MIGRATION.md`.
 - **Breaking:** `UsageQuotas` no longer accepts the private
   `_allow_empty_quotas` constructor keyword; passing it now raises `TypeError`
   (unknown keyword argument) instead of silently building an empty quota set.
   `UsageQuotas([])` still raises the same `ValueError` pointing you to
   `UsageQuotas.unlimited()`, which remains the supported way to build an
-  explicit no-limit quota set. See [`MIGRATION.md`](MIGRATION.md).
+  explicit no-limit quota set. See `MIGRATION.md`.
 - Fixes Redis `await_for_capacity` / `wait_for_capacity` with a caller
   `timeout`: lock contention now retries acquisition until the caller's
   deadline instead of raising `TimeoutError` after
@@ -230,14 +244,14 @@ Notable changes for token-throttle releases. For operator upgrade steps, see
 - Adds a weekly `tokenizer-drift` CI canary (no API key required) that checks
   the OpenAI token counter against the latest unpinned `openai`/`tiktoken`
   releases for newly-unresolvable models or untriaged request parameters.
-- Fixes the Redis ACL command list in [`MIGRATION.md`](MIGRATION.md) and
+- Fixes the Redis ACL command list in `MIGRATION.md` and
   [`docs/operations.md`](docs/operations.md): it was missing `PEXPIRE` (used
   by redis-py's lock extend/reacquire script) and `MULTI` / `EXEC` /
   `DISCARD` (used by redis-py's transaction pipelines), so a user provisioned
   strictly per the old list could pass an initial smoke test but fail under
   ordinary multi-quota usage.
 - Expands documentation coverage: the Redis ACL command list in
-  [`MIGRATION.md`](MIGRATION.md) now includes `PTTL`; its validation-error
+  `MIGRATION.md` now includes `PTTL`; its validation-error
   guidance more precisely distinguishes pydantic `ValidationError` from
   `CardinalityLimitExceededError`; the README's OpenAI example sets an
   explicit output-token budget and notes the zero-token refund on error as an
