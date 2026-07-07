@@ -3,6 +3,21 @@
 Notable changes for token-throttle releases. For operator upgrade steps, see
 [`MIGRATION.md`](MIGRATION.md).
 
+## Unreleased
+
+These changes are on `main` and not yet in a tagged release.
+
+- Fixes a Redis lock-loss error that surfaced the wrong exception. When a
+  per-bucket lock was lost mid-operation (its TTL lapsed or another worker stole
+  it), non-waiting ops such as `consume_capacity`, `refund_capacity`, and
+  `set_max_capacity` were documented to raise `BackendLockContentionError`, but
+  the lock-release cleanup on the way out hit the same lost lock and leaked a raw
+  `redis.exceptions.LockNotOwnedError` that replaced it. The release cleanup now
+  tolerates an already-lost lock, so callers reliably see
+  `BackendLockContentionError` (safe to retry) as promised in
+  [`docs/operations.md`](docs/operations.md). Applies to both the async and sync
+  Redis backends.
+
 ## v9.1.0 - 2026-07-07
 
 - Fixes `OpenAIUsageCounter` under-reserving for two request fields that carry
