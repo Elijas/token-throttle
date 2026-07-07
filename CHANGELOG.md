@@ -3,9 +3,7 @@
 Notable changes for token-throttle releases. For operator upgrade steps, see
 [`MIGRATION.md`](MIGRATION.md).
 
-## Unreleased
-
-These changes are on `main` and not yet in a tagged release.
+## v9.1.1 - 2026-07-07
 
 - Fixes a Redis lock-loss error that surfaced the wrong exception. When a
   per-bucket lock was lost mid-operation (its TTL lapsed or another worker stole
