@@ -113,7 +113,7 @@ source = ["token_throttle"]
 branch = true
 
 [tool.coverage.report]
-omit = ["notebooks/*", "*/deprecated/*", "tests/*"]
+omit = ["tests/*"]
 exclude_also = [
     "@(abc\\.)?abstractmethod",
     "if TYPE_CHECKING:",
@@ -198,9 +198,6 @@ lint.unfixable = []
 lint.dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
 
 exclude = [
-    "deprecated",
-    "notebooks",
-
     ".bzr",
     ".direnv",
     ".eggs",

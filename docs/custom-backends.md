@@ -1,8 +1,8 @@
 # Custom Backend Contract
 
-token-throttle v5 and later treat custom backends as structural protocols. A
-backend no longer needs nominal inheritance for type checking, but it must
-satisfy the full `RateLimiterBackend` or `SyncRateLimiterBackend` protocol.
+token-throttle treats custom backends as structural protocols. A backend does
+not need nominal inheritance for type checking, but it must satisfy the full
+`RateLimiterBackend` or `SyncRateLimiterBackend` protocol.
 Subclassing the published protocol remains useful because it provides
 conservative default implementations for optional hooks.
 
@@ -263,7 +263,7 @@ application exception instead of `GeneratorExit` for callback control flow.
 process-health or programming failures (out-of-memory or runaway recursion) that
 should not be hidden behind callback warning suppression.
 
-## Backend Method Critical Exceptions (v7.0.0)
+## Backend Method Critical Exceptions
 
 Backend methods that raise lifecycle-critical exceptions propagate those
 exceptions raw to callers. This applies to `await_for_capacity()`,
@@ -280,9 +280,9 @@ caused by `asyncio.CancelledError`, `concurrent.futures.CancelledError`,
 layers, symmetric with the callback contract above.
 
 `AcquireRefundFailedError` remains the recovery envelope for ordinary
-`Exception` subclasses that are not lifecycle-critical. This is a v7.0.0
-breaking change from v6.x, where interrupted-acquire cleanup could wrap
-critical-tuple backend failures in `AcquireRefundFailedError`.
+`Exception` subclasses that are not lifecycle-critical. Interrupted-acquire
+cleanup does not wrap critical-tuple backend failures in
+`AcquireRefundFailedError`.
 
 Durable shared-state backends should also emit structured `DEBUG` logs under
 the same logger families used by Redis:
@@ -331,7 +331,7 @@ a redacted health surface, not a backend inventory API.
 
 ## Conformance Scope
 
-As of v7/v8, the bundled helpers check:
+The bundled helpers check:
 
 - structural protocol shape for async and sync builders/backends
 - per-build isolation and runtime checking of every build result
@@ -353,19 +353,19 @@ As of v7/v8, the bundled helpers check:
 - the `AcquireRefundFailedError` shape exposed by public limiters, including
   `.reservation`, `.interrupted_by`, `.refund_error`, and exception chaining
 - conformance-harness handling for the canonical lifecycle-critical exception
-  taxonomy, including `MemoryError` and `RecursionError` added in v6.0.0
+  taxonomy, including `MemoryError` and `RecursionError`
 
 The helpers do not check:
 
 - performance regressions beyond bounded helper deadlines
 - structured `token_throttle_event` `DEBUG` log emission
 - third-party storage durability or write-ahead guarantees
-- every v6.0.0 callback severe-exception path in your backend implementation;
+- every callback severe-exception path in your backend implementation;
   manually test that callback dispatch propagates `asyncio.CancelledError`,
   `concurrent.futures.CancelledError`, `KeyboardInterrupt`, `SystemExit`,
   `GeneratorExit`, `MemoryError`, `RecursionError`, and backend callback
   `AcquireRefundFailedError`
-- every v7.0.0 backend-method severe-exception path; manually inject those
+- every backend-method severe-exception path; manually inject those
   exceptions into `await_for_capacity()` / `wait_for_capacity()`,
   `consume_capacity()`, `refund_capacity()`, `refund_capacity_for_buckets()`,
   `set_max_capacity()`, and configured max-capacity hooks, including

@@ -19,29 +19,15 @@ def _replace_install_lines(content: str, version: str) -> str:
     return new_content
 
 
-def _replace_version_badge(content: str, version: str) -> str:
-    # README uses a dynamic PyPI shield (img.shields.io/pypi/v/...) since v4;
-    # the legacy static badge is replaced when present and otherwise skipped.
-    badge_pattern = re.compile(
-        r"(https://img\.shields\.io/badge/v)(\d+\.\d+\.\d+)(-version\?)"
-    )
-    new_content, _ = badge_pattern.subn(
-        rf"\g<1>{version}\g<3>",
-        content,
-    )
-    return new_content
-
-
 def update_readme(readme_path: Path, version: str) -> None:
     content = readme_path.read_text(encoding="utf-8")
     content = _replace_install_lines(content, version)
-    content = _replace_version_badge(content, version)
     readme_path.write_text(content, encoding="utf-8")
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Update pip install line and version badge in README.md"
+        description="Update the pip install version bounds in README.md"
     )
     parser.add_argument(
         "version", type=str, help="The version string to use (e.g., 0.6.0)"

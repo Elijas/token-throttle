@@ -97,11 +97,11 @@ def is_unlimited_reservation(reservation: object) -> bool:
     (``model_family == _UNLIMITED_FLAG``, empty ``usage``,
     ``bucket_ids is None``), so the flag is reliable end-to-end.
 
-    Legacy fallback removed (L05 I10): a reservation with the sentinel
-    ``model_family`` but ``is_unlimited=False`` is no longer treated as
-    unlimited. Hand-constructing the sentinel string was the second
-    bypass vector beyond V05; closing it requires this tightening AND
-    the validator above.
+    The sentinel ``model_family`` no longer implies unlimited on its own: a
+    reservation carrying the sentinel string but ``is_unlimited=False`` is not
+    treated as unlimited. Hand-constructing the sentinel string was a second
+    bypass vector, so closing it requires this tightening AND the validator
+    above.
     """
     if type(reservation) is not CapacityReservation:
         raise ValueError(
@@ -770,9 +770,11 @@ def _call_usage_counter(usage_counter, request: Mapping[str, object]) -> object:
         return _invoke_usage_counter(usage_counter, request)
 
     warnings.warn(
-        "usage_counter without **kwargs uses deprecated signature-filtered "
-        "dispatch; request fields not named in the counter signature are "
-        "not passed to the counter. Add **kwargs to receive the full request.",
+        "usage_counter without **kwargs uses signature-filtered dispatch: "
+        "request fields not named in the counter signature are not passed to "
+        "the counter. Accepting **kwargs is the recommended convention so the "
+        "counter receives the full request payload; a fixed signature is a "
+        "supported convenience.",
         UserWarning,
         stacklevel=2,
     )

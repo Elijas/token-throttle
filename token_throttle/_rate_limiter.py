@@ -1408,10 +1408,10 @@ class RateLimiter(BaseRateLimiter):
                 limit_config,
                 register=False,
             )
-            # Counter still runs for telemetry consistency (L05 I03);
-            # extra_usage shape is still validated; both results are
-            # discarded because the unlimited reservation always
-            # carries empty usage by construction.
+            # Counter still runs for telemetry consistency; extra_usage
+            # shape is still validated; both results are discarded because
+            # the unlimited reservation always carries empty usage by
+            # construction.
             usage: FrozenUsage = frozendict()
             if limit_config.usage_counter is not None:
                 usage = await _resolve_usage_counter_result_for_model_async(
@@ -1898,9 +1898,9 @@ class RateLimiter(BaseRateLimiter):
         self._validated_model_family(model, limit_config)
         self._validate_shared_model_family_config(model, limit_config)
         if limit_config.is_unlimited:
-            # Audited 2026-05 (R4 L05:I11): set_max_capacity rejects
-            # unlimited configs before backend lookup, preserving the
-            # semantic "unlimited model" error instead of "no backend".
+            # set_max_capacity rejects unlimited configs before backend
+            # lookup, preserving the semantic "unlimited model" error
+            # instead of "no backend".
             raise ValueError("Cannot set max capacity: model has unlimited quotas")
         model_family = limit_config.get_model_family()
         async with self._lifecycle_lock:
@@ -2330,7 +2330,7 @@ class RateLimiter(BaseRateLimiter):
         bucket_ids: frozenset[BucketId] | None,
     ) -> tuple[tuple[BucketId, object, object], ...] | None:
         # KNOWN UNKNOWN: custom backends do not expose a portable "write landed"
-        # probe. The built-in memory backends do, so this preserves the R4
+        # probe. The built-in memory backends do, so this preserves the
         # post-write-failure idempotency contract without pre-committing failed
         # refunds for opaque backends.
         registry = getattr(backend, "_bucket_registry", None)
@@ -2460,8 +2460,8 @@ class RateLimiter(BaseRateLimiter):
         # never read. The ``CapacityReservation`` field validator
         # requires empty ``usage`` when ``is_unlimited=True``; passing
         # ``frozendict()`` makes the factory the only canonical
-        # producer of unlimited reservations and closes V05/V14/I05
-        # at construction time.
+        # producer of unlimited reservations and closes the
+        # hand-construction bypass at construction time.
         reservation = CapacityReservation(
             usage=frozendict(),
             model_family=_UNLIMITED_FLAG,
@@ -2497,8 +2497,7 @@ class RateLimiter(BaseRateLimiter):
             self._forget_in_flight_reservation(reservation.reservation_id)
             raise ValueError(
                 "Reservation missing created_at_seconds; bounded reservation "
-                "lifetimes require reservations issued by token-throttle v2.1.0 "
-                "or newer."
+                "lifetimes require a reservation carrying an issue timestamp."
             )
         age_seconds = time.time() - reservation.created_at_seconds
         if age_seconds > max_lifetime:
@@ -2832,7 +2831,7 @@ class RateLimiter(BaseRateLimiter):
         # Caller must hold self._lock. All writers to _model_family_to_runtime_max_capacity
         # (this method, _restore_runtime_max_capacity, _commit_runtime_max_capacity)
         # serialize on _lock so config rebuilds and runtime overrides stay coherent.
-        # Dropping that invariant reopens the ghost-override race (R4 L11 B01/B02).
+        # Dropping that invariant reopens the ghost-override race.
         if not bucket_ids:
             return
         overrides = self._model_family_to_runtime_max_capacity.get(model_family)

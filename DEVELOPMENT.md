@@ -177,6 +177,18 @@ Use `RuntimeError` for broken internal invariants that users cannot correct by
 changing their request arguments. Reserve `TypeError` for places where the code
 is intentionally matching Python's own call-signature convention.
 
+### Corrupted Redis values raise a bare `ValueError`
+
+When a Redis-backed bucket holds a value that cannot be parsed into a finite
+capacity number — for example a key that was manually edited or externally
+corrupted — capacity parsing raises a plain `ValueError`. That error does not
+yet include the offending Redis key or namespace, so an operator cannot tell
+from the message alone which key to inspect or clear. Adding key-scoped
+remediation hints would mean threading key context through the lower-level
+decode/parse helpers and belongs with a broader Redis corruption-handling
+taxonomy rather than a one-off patch. This is a known improvement idea, not a
+shipped feature.
+
 ### Logging uses stdlib only
 
 `create_logging_callbacks` and `create_sync_logging_callbacks` emit through
@@ -493,25 +505,6 @@ This is a user-code contract, not a library bug. The library never calls
 - Return a static or externally-cached `PerModelConfig` without touching the limiter.
 - Call out to an external service or config store.
 - Call into a *different* `SyncRateLimiter` instance.
-
-### R4 documentation audit cross-references
-
-FIX-21 checked and closed the documentation-only R4 audit gaps across L01-L22:
-F03/F05/F11-F14/F24/F31/F32/F34/F41/F43/F45; E08; P02-P06 where still
-applicable; I03/I04/I06/I07/I10/I12; U02/U05/U10/U12-U15; S03/S05/S07;
-X05/X10/X12/X14; Y05/Y08-Y10/Y13/Y14; N03/N07/N09/N11/N14; J06/J09;
-T03/T04/T06; O04. Some lanes were already closed by earlier fix bundles in
-this branch; the status report for FIX-21 records which surfaces were verified
-rather than re-edited.
-
-### R5 documentation audit cross-references
-
-FIX-39 closed the R5 informational findings D16/D18/D19/D20/D32/D33/D34:
-Redis ACL and SCRIPT FLUSH hazard (D16); reservation future-field contract
-(D18); wire-format and Lua continuity v1.4.1–v2.0.0 (D19); callback slot
-compatibility (D20); runtime-override map `_lock` invariant (D32);
-`config_getter` reentrancy under `_validation_lock` (D33); Redis
-`_extend_locks` coverage confirmed clean, lint test added (D34).
 
 ## Thread-leak detection
 

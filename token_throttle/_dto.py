@@ -74,7 +74,7 @@ class StrictDTO(BaseModel):
     @classmethod
     def model_construct(cls, *_args: object, **_kwargs: object) -> Self:
         raise TypeError(
-            f"{cls.__name__}.model_construct is disabled in v2.0.0; use model_validate."
+            f"{cls.__name__}.model_construct is disabled; use model_validate."
         )
 
     @staticmethod

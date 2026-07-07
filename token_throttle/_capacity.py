@@ -37,10 +37,10 @@ class CalculatedCapacity(StrictDTO):
     """
     Result of a token-bucket capacity calculation.
 
-    v2.0.0 contract: ``CalculatedCapacity`` is an exact-type immutable DTO,
-    not a subclass extension point. Construction, assignment, copy, pickle
-    restore, ``model_copy()``, and ``model_construct()`` all preserve finite
-    capacity validation; ``model_construct()`` is disabled.
+    ``CalculatedCapacity`` is an exact-type immutable DTO, not a subclass
+    extension point. Construction, assignment, copy, pickle restore,
+    ``model_copy()``, and ``model_construct()`` all preserve finite capacity
+    validation; ``model_construct()`` is disabled.
 
     ``is_fresh_start`` is True when no prior capacity data exists
     (``last_checked`` or ``outdated_capacity`` is None).  Backends use

@@ -295,10 +295,10 @@ def _matches_allowed_exception(
 
 
 # Derived from the canonical critical-exception set so this harness cannot
-# drift behind it. These were hand-maintained literals before v7.0.1 and
-# silently lagged the canonical set (RecursionError joined it in v6.0.0 but
-# was missing here until v7.0.0; the group set still omitted
-# concurrent.futures.CancelledError).
+# drift behind it. This was previously a hand-maintained literal that silently
+# lagged the canonical set (for example, RecursionError was added to the
+# canonical set but left missing here, and the group set omitted
+# concurrent.futures.CancelledError), so it is now derived instead.
 #
 # Both CancelledError types are filtered out of the non-group set — but their
 # actual non-group treatment differs, because their MROs differ:

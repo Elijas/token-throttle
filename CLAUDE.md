@@ -16,7 +16,7 @@ gh workflow run release.yml --ref main -f bump=major   # 0.6.0 -> 1.0.0
 
 1. Verifies manual dispatch is running from `refs/heads/main` with a non-empty `bump` input, then runs full CI test suite (`.github/workflows/ci.yml`)
 2. `bump-my-version bump <patch|minor|major>` — updates version in `pyproject.toml` and `token_throttle/__init__.py`, creates a commit
-3. `devtools/bump_readme_version.py` — updates pip install version bounds and badge in README.md
+3. `devtools/bump_readme_version.py` — updates pip install version bounds in README.md
 4. `uv lock` — syncs `uv.lock` with the new version
 5. `ruff check --fix`, `ruff format`, then `ruff check` — applies safe lint autofixes, formats, and fails if issues remain
 6. Creates a second commit with lockfile/formatting changes (if any)

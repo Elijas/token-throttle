@@ -32,6 +32,13 @@ changes and upgrade steps are recorded in its entry below.
   logged and never applied, and a write-only Redis schema-version marker key.
   These changes do not alter behavior for reservations and Redis state produced
   by this version.
+- Reworded the warning emitted when a `usage_counter` is defined without
+  `**kwargs`. It now presents accepting `**kwargs` as the recommended
+  convention and a fixed signature as a supported convenience, rather than
+  labeling the fixed-signature path "deprecated". Behavior is unchanged: fixed-
+  signature counters still work and still warn that request fields not named in
+  the signature are filtered out before the counter is called. The warning text
+  still contains "without \*\*kwargs" if you match on it.
 
 ## v9.1.1 - 2026-07-07
 
