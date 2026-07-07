@@ -70,6 +70,73 @@ async def test_async_lifecycle_callback_cancellation_propagates_and_refunds() ->
     await limiter.refund_capacity({"tokens": 0}, reservation)
 
 
+async def test_async_callback_cancel_unwind_error_does_not_mask_cancellation() -> None:
+    callback_entered = asyncio.Event()
+    block_next_consumed = True
+
+    async def on_lifecycle_event(*, event) -> None:
+        nonlocal block_next_consumed
+        if event.event_type != "capacity_consumed" or not block_next_consumed:
+            return
+        block_next_consumed = False
+        callback_entered.set()
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            raise ValueError("cleanup failed") from None
+
+    limiter = RateLimiter(
+        _config(),
+        backend=MemoryBackendBuilder(),
+        callbacks=RateLimiterCallbacks(on_lifecycle_event=on_lifecycle_event),
+    )
+
+    task = asyncio.create_task(limiter.acquire_capacity({"tokens": 10}, MODEL))
+    await asyncio.wait_for(callback_entered.wait(), timeout=1.0)
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=1.0)
+
+    assert limiter.snapshot_state()["in_flight_reservations"] == 0
+    reservation = await limiter.acquire_capacity({"tokens": 10}, MODEL, timeout=0)
+    await limiter.refund_capacity({"tokens": 0}, reservation)
+
+
+async def test_async_callback_cancel_unwind_error_without_timeout_wrapping() -> None:
+    callback_entered = asyncio.Event()
+    block_next_consumed = True
+
+    async def on_lifecycle_event(*, event) -> None:
+        nonlocal block_next_consumed
+        if event.event_type != "capacity_consumed" or not block_next_consumed:
+            return
+        block_next_consumed = False
+        callback_entered.set()
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            raise ValueError("cleanup failed") from None
+
+    limiter = RateLimiter(
+        _config(),
+        backend=MemoryBackendBuilder(),
+        callbacks=RateLimiterCallbacks(on_lifecycle_event=on_lifecycle_event),
+        callback_timeout=None,
+    )
+
+    task = asyncio.create_task(limiter.acquire_capacity({"tokens": 10}, MODEL))
+    await asyncio.wait_for(callback_entered.wait(), timeout=1.0)
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=1.0)
+
+    assert limiter.snapshot_state()["in_flight_reservations"] == 0
+    reservation = await limiter.acquire_capacity({"tokens": 10}, MODEL, timeout=0)
+    await limiter.refund_capacity({"tokens": 0}, reservation)
+
+
 async def test_async_lifecycle_callback_grouped_cancellation_propagates() -> None:
     async def on_lifecycle_event(*, event) -> None:
         if event.event_type == "capacity_consumed":

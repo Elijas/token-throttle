@@ -78,6 +78,12 @@ raises after the deadline is logged. Pass `callback_timeout=None` to
 restore unbounded callback execution. Timeout-wrapped sync callbacks run in a
 helper thread with the caller's `contextvars` context copied into that thread.
 
+The two paths differ at shutdown. An abandoned async callback is still a real
+task, and `asyncio.run()` cancels leftover tasks at shutdown and then waits for
+them, so a timed-out callback that also swallows cancellation can block event
+loop shutdown indefinitely. Abandoned sync callbacks run in daemon helper
+threads and never block interpreter exit.
+
 ## PII surface
 
 - User-controlled fields: request `model`, lifecycle `model_alias`, optional
