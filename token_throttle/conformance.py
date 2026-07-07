@@ -1192,7 +1192,7 @@ class _SyncRefundFailureBuilder(SyncRateLimiterBackendBuilderInterface):
 
 
 class _SyncAcquireInterruptedError(Exception):
-    """Internal sync interruption exception for the FIX-50 probe."""
+    """Internal sync interruption exception for the acquire-refund-failed probe."""
 
 
 def _check_async_claims(backend: RateLimiterBackend) -> None:
@@ -2783,7 +2783,7 @@ async def _check_async_acquire_refund_failed_error(
         try:
             started_at = time.time()
             await _run_async_step(
-                "RateLimiter.acquire_capacity(FIX-50 refund failure)",
+                "RateLimiter.acquire_capacity(acquire-refund-failed probe)",
                 lambda: limiter.acquire_capacity(
                     usage,
                     _PUBLIC_MODEL_NAME,
@@ -2841,9 +2841,12 @@ async def conformance_test_for(
     slow runners. When ``timing=`` is passed, the env var is ignored; set every
     desired field on the dataclass.
 
-    The helper calls builder ``aclose()`` and ``close()`` hooks in cleanup when
-    those methods exist. Builders that need to manage cleanup elsewhere can
-    expose a wrapper without those methods.
+    Unlike ``RateLimiter``, which tolerates a builder that omits ``aclose()``/
+    ``close()`` entirely, this helper requires the builder to satisfy the full
+    ``RateLimiterBackendBuilderInterface`` protocol — including those two
+    hooks — since it type-checks the builder before running any test. Subclass
+    the interface (it provides no-op defaults) or otherwise define both
+    methods; the helper then calls them during cleanup.
 
     KNOWN LIMITATION: if a synchronous backend call hangs in its worker thread,
     Python cannot safely kill that thread; the helper reports the hang and
@@ -3919,7 +3922,7 @@ def _check_sync_acquire_refund_failed_error(
         try:
             started_at = time.time()
             _run_sync_step(
-                "SyncRateLimiter.acquire_capacity(FIX-50 refund failure)",
+                "SyncRateLimiter.acquire_capacity(acquire-refund-failed probe)",
                 lambda: limiter.acquire_capacity(
                     usage,
                     _PUBLIC_MODEL_NAME,
@@ -3976,9 +3979,12 @@ def sync_conformance_test_for(
     slow runners. When ``timing=`` is passed, the env var is ignored; set every
     desired field on the dataclass.
 
-    The helper calls builder ``close()`` in cleanup when that method exists.
-    Builders that need to manage cleanup elsewhere can expose a wrapper without
-    ``close``.
+    Unlike ``SyncRateLimiter``, which tolerates a builder that omits
+    ``close()`` entirely, this helper requires the builder to satisfy the full
+    ``SyncRateLimiterBackendBuilderInterface`` protocol — including that hook
+    — since it type-checks the builder before running any test. Subclass the
+    interface (it provides a no-op default) or otherwise define ``close()``;
+    the helper then calls it during cleanup.
 
     KNOWN LIMITATION: if a synchronous backend call hangs in its worker thread,
     Python cannot safely kill that thread; the helper reports the hang and

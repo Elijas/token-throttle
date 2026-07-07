@@ -1053,7 +1053,10 @@ class SyncRateLimiter:
                         self._closing = False
                 if not already_closed:
                     in_flight_count = self._wait_for_refund_lock_drain()
-                    self._backend.close()
+                    # builder.close() is a documented-optional cleanup hook;
+                    # builders that own no shared resources may omit it entirely.
+                    if hasattr(self._backend, "close"):
+                        self._backend.close()
         except BaseException:
             with self._acquire_guard:
                 self._closed = True
@@ -1065,9 +1068,11 @@ class SyncRateLimiter:
                 in_flight_count = len(self._in_flight_reservation_ids)
         self._clear_retained_state_after_close()
         if in_flight_count:
+            noun = "reservation" if in_flight_count == 1 else "reservations"
             _logger.warning(
-                "limiter closed; %d reservations still in flight may not be refundable.",
+                "limiter closed; %d %s still in flight may not be refundable.",
                 in_flight_count,
+                noun,
             )
 
     def _terminalize_close_after_drain_timeout(self) -> None:
@@ -2194,7 +2199,7 @@ class SyncRateLimiter:
                 "Reservation model family "
                 f"{reservation.model_family!r} is now unlimited for model "
                 f"{model_name!r}; refund across a limited-to-unlimited "
-                "config change is not supported. See L13 N03."
+                "config change is not supported."
             )
         current_model_family = limit_config.get_model_family()
         if current_model_family != reservation.model_family:
@@ -2203,7 +2208,7 @@ class SyncRateLimiter:
                 f"{reservation.model_family!r} no longer matches current "
                 f"config for model {model_name!r} "
                 f"({current_model_family!r}); refund across model_family "
-                "rerouting is not supported. See L13 N05."
+                "rerouting is not supported."
             )
 
         try:
