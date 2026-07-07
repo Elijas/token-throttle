@@ -71,6 +71,39 @@ These changes are on `main` and not yet in a tagged release.
   abandoned timed-out async callback that also swallows cancellation can block
   `asyncio.run()` shutdown, unlike abandoned sync callbacks, which run in
   daemon helper threads.
+- Fixes the two `OpenAIUsageCounter` regressions disclosed in the v9.1.0 entry
+  below: a stored-prompt-only Responses request (`prompt={"id": ...}` with no
+  `input`) is counted instead of rejected, and `prompt.variables` values that
+  are images or files are accepted again (counted as 0 tokens, with a
+  once-per-process warning naming the variable and the best-effort tradeoff),
+  restoring v9.0.0 behavior.
+- Fixes `OpenAIUsageCounter` raising an error while counting request text that
+  contains a `tiktoken` special-token literal (for example `<|endoftext|>`,
+  which can show up verbatim in text copied from LLM documentation or output).
+  Such text is now counted as the ordinary request text it is on the wire
+  instead of crashing the acquire.
+- Fixes `cleanup_legacy_buckets` / `async_cleanup_legacy_buckets` in
+  [`token_throttle/migration.py`](token_throttle/migration.py) not escaping
+  Redis glob metacharacters (`*`, `?`, `[`, `]`, `\`) in a configured
+  `key_prefix` before building its cleanup scan pattern, so a prefix
+  containing one of those characters could match and delete a sibling
+  deployment's keys instead of only its own.
+- Fixes `validate_config_for_v2_0` in
+  [`token_throttle/migration.py`](token_throttle/migration.py) reporting a
+  false-positive "Redis builders require key_prefix" issue for configs where
+  the Redis builder options, including `key_prefix`, live in a nested `redis`
+  section rather than at the top level.
+- Fixes `RateLimiter.aclose()` / `SyncRateLimiter.close()` raising
+  `AttributeError` when closing a custom backend builder that omits the
+  documented-optional `aclose()` / `close()` cleanup hook; the hook is now
+  called only when the backend defines it.
+- Fixes the limiter-close warning misreporting "1 reservations still in
+  flight" (instead of "1 reservation") when exactly one reservation is
+  outstanding at close. No behavior change.
+- Documents `diagnose()`'s `RateLimiterDiagnostic` return type in
+  [`docs/observability.md`](docs/observability.md), including when to reach
+  for it over the lighter `snapshot_state()`; this API surface previously
+  shipped without documentation. No behavior change.
 
 ## v9.1.0 - 2026-07-07
 
