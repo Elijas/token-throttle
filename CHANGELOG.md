@@ -17,6 +17,20 @@ These changes are on `main` and not yet in a tagged release.
   `BackendLockContentionError` (safe to retry) as promised in
   [`docs/operations.md`](docs/operations.md). Applies to both the async and sync
   Redis backends.
+- Fixes the Redis backend's server-clock sanity rail raising a spurious
+  `RuntimeError` after a host suspend/resume (paused VM, laptop sleep, live
+  migration) or after a single slow Redis `TIME` reply. The rail compares
+  consecutive `TIME` readings against locally-elapsed monotonic time, and a
+  suspended host stalls the monotonic clock while real time keeps passing -
+  which previously looked identical to a server-side clock jump. The local
+  wall clock now discriminates the two cases: when it corroborates the
+  server's advance, the backend re-anchors its baseline and logs a warning
+  instead of raising. Each reading's own round-trip is also now bounded into
+  the detection tolerance, so one delayed reply cannot trip the rail. A
+  genuine server-side forward jump (for example a Sentinel or managed
+  failover to a clock-skewed primary) still raises, and is now reported
+  exactly once per event: out-of-order readings from concurrent callers no
+  longer regress the detection baseline and re-raise for the same jump.
 
 ## v9.1.0 - 2026-07-07
 

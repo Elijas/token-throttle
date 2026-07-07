@@ -37,6 +37,17 @@ def freeze_local_time(monkeypatch):
     return fixed
 
 
+def test_module_docstring_references_real_entry_points():
+    """The TIME shape contract must be documented against the real helpers,
+    not a nonexistent gateway abstraction a reader cannot find.
+    """
+    doc = _server_time.__doc__
+    assert doc is not None
+    assert "AbstractRedisGateway" not in doc
+    assert "async_server_time" in doc
+    assert "sync_server_time" in doc
+
+
 # ---------------------------------------------------------------------------
 # Helper function tests
 # ---------------------------------------------------------------------------
@@ -270,9 +281,14 @@ class TestForwardJumpDetection:
     """Detect a genuine server-side forward jump between consecutive TIME reads.
 
     The rail compares consecutive Redis TIME values against locally-elapsed
-    *monotonic* time (per client), so it fires only on a real server clock jump
-    (e.g. a Sentinel/managed failover to a clock-skewed primary), never on a
-    lagging local wall clock. The first reading only establishes the baseline.
+    *monotonic* time (per client) with each reading's round-trip bounded into
+    the tolerance, so it fires only on a real server clock jump (e.g. a
+    Sentinel/managed failover to a clock-skewed primary) - never on a lagging
+    local wall clock, a slow TIME reply, or a suspended/resumed host (where
+    the local *wall* clock corroborates the server's advance and the rail
+    re-anchors with a warning instead). The first reading only establishes
+    the baseline, and a detected jump re-anchors exactly once so stale
+    out-of-order readings cannot re-arm it.
     """
 
     @pytest.fixture(autouse=True)
@@ -287,6 +303,13 @@ class TestForwardJumpDetection:
         """Controllable ``time.monotonic()`` for deterministic elapsed intervals."""
         clock = {"now": 1000.0}
         monkeypatch.setattr(_server_time.time, "monotonic", lambda: clock["now"])
+        return clock
+
+    @pytest.fixture
+    def wall(self, monkeypatch):
+        """Controllable ``time.time()`` for suspend-vs-jump discrimination tests."""
+        clock = {"now": 1_700_000_000.0}
+        monkeypatch.setattr(_server_time.time, "time", lambda: clock["now"])
         return clock
 
     # (a) A lagging local wall clock must NOT hard-fail operations.
@@ -408,6 +431,166 @@ class TestForwardJumpDetection:
         )
         # Equal to threshold → not "more than" — must not raise.
         await async_server_time(client)
+
+    # (e) Host suspend/VM pause: the server and wall clocks advance while the
+    #     monotonic clock stalls. The wall clock corroborates the server, so
+    #     the rail re-anchors with a warning instead of hard-failing.
+    async def test_async_host_suspend_reanchors_instead_of_raising(
+        self, monotonic, wall, caplog
+    ):
+        client = AsyncMock()
+        monotonic["now"] = 1000.0
+        wall["now"] = 1_700_000_000.0
+        client.time.return_value = (1_700_000_000, 0)
+        await async_server_time(client)
+        # Host suspends for 300s: server and wall advance, monotonic stalls.
+        monotonic["now"] = 1000.1
+        wall["now"] = 1_700_000_300.0
+        client.time.return_value = (1_700_000_300, 0)
+        with caplog.at_level(logging.WARNING, logger="token_throttle"):
+            result = await async_server_time(client)
+        assert result == pytest.approx(1_700_000_300.0)
+        assert "suspended/resumed host" in caplog.text
+        # The rail keeps working from the re-anchored baseline.
+        monotonic["now"] = 1001.1
+        wall["now"] = 1_700_000_301.0
+        client.time.return_value = (1_700_000_301, 0)
+        assert await async_server_time(client) == pytest.approx(1_700_000_301.0)
+
+    def test_sync_host_suspend_reanchors_instead_of_raising(
+        self, monotonic, wall, caplog
+    ):
+        client = MagicMock()
+        monotonic["now"] = 1000.0
+        wall["now"] = 1_700_000_000.0
+        client.time.return_value = (1_700_000_000, 0)
+        sync_server_time(client)
+        monotonic["now"] = 1000.1
+        wall["now"] = 1_700_000_300.0
+        client.time.return_value = (1_700_000_300, 0)
+        with caplog.at_level(logging.WARNING, logger="token_throttle"):
+            result = sync_server_time(client)
+        assert result == pytest.approx(1_700_000_300.0)
+        assert "suspended/resumed host" in caplog.text
+        monotonic["now"] = 1001.1
+        wall["now"] = 1_700_000_301.0
+        client.time.return_value = (1_700_000_301, 0)
+        assert sync_server_time(client) == pytest.approx(1_700_000_301.0)
+
+    # (f) A genuine server jump: wall and monotonic agree that little time
+    #     passed while the server leapt - the raise must survive the
+    #     wall-clock discriminator.
+    async def test_async_genuine_jump_with_agreeing_wall_raises(self, monotonic, wall):
+        client = AsyncMock()
+        monotonic["now"] = 1000.0
+        wall["now"] = 1_700_000_000.0
+        client.time.return_value = (1_700_000_000, 0)
+        await async_server_time(client)
+        # Wall and monotonic both advance 1s; the server leaps 20s.
+        monotonic["now"] = 1001.0
+        wall["now"] = 1_700_000_001.0
+        client.time.return_value = (1_700_000_020, 0)
+        with pytest.raises(RuntimeError, match="jumped forward"):
+            await async_server_time(client)
+
+    def test_sync_genuine_jump_with_agreeing_wall_raises(self, monotonic, wall):
+        client = MagicMock()
+        monotonic["now"] = 1000.0
+        wall["now"] = 1_700_000_000.0
+        client.time.return_value = (1_700_000_000, 0)
+        sync_server_time(client)
+        monotonic["now"] = 1001.0
+        wall["now"] = 1_700_000_001.0
+        client.time.return_value = (1_700_000_020, 0)
+        with pytest.raises(RuntimeError, match="jumped forward"):
+            sync_server_time(client)
+
+    # (g) One slow TIME reply must not trip the rail: the reading's own
+    #     round-trip is bounded into the tolerance because the anchor keeps
+    #     the pre-call monotonic reading.
+    async def test_async_slow_time_reply_does_not_raise(self, monotonic, wall):
+        client = AsyncMock()
+        monotonic["now"] = 1000.0
+        wall["now"] = 1_700_000_000.0
+
+        def slow_then_prompt_reply():
+            if client.time.call_count == 1:
+                # The server samples TIME at send time, but the reply takes
+                # 12s to arrive; local clocks tick on during the transit.
+                monotonic["now"] = 1012.0
+                wall["now"] = 1_700_000_012.0
+                return (1_700_000_000, 0)
+            return (1_700_000_012, 500_000)
+
+        client.time.side_effect = slow_then_prompt_reply
+        await async_server_time(client)
+        # A prompt reading 0.5s later: the server clock kept ticking during
+        # the previous reply's 12s transit.
+        monotonic["now"] = 1012.5
+        wall["now"] = 1_700_000_012.5
+        assert await async_server_time(client) == pytest.approx(1_700_000_012.5)
+
+    def test_sync_slow_time_reply_does_not_raise(self, monotonic, wall):
+        client = MagicMock()
+        monotonic["now"] = 1000.0
+        wall["now"] = 1_700_000_000.0
+
+        def slow_then_prompt_reply():
+            if client.time.call_count == 1:
+                monotonic["now"] = 1012.0
+                wall["now"] = 1_700_000_012.0
+                return (1_700_000_000, 0)
+            return (1_700_000_012, 500_000)
+
+        client.time.side_effect = slow_then_prompt_reply
+        sync_server_time(client)
+        monotonic["now"] = 1012.5
+        wall["now"] = 1_700_000_012.5
+        assert sync_server_time(client) == pytest.approx(1_700_000_012.5)
+
+    # (h) A detected jump re-anchors exactly once: a stale pre-jump reading
+    #     arriving out of order (a concurrent caller) must neither raise nor
+    #     regress the anchor, so the same jump is never reported twice.
+    async def test_async_out_of_order_reading_does_not_rearm_the_rail(
+        self, freeze_local_time, monotonic
+    ):
+        client = AsyncMock()
+        monotonic["now"] = 1000.0
+        client.time.return_value = (1_700_000_000, 0)
+        await async_server_time(client)
+        # A genuine 50s jump raises once and re-anchors to the jumped reading.
+        monotonic["now"] = 1001.0
+        client.time.return_value = (1_700_000_050, 0)
+        with pytest.raises(RuntimeError, match="jumped forward"):
+            await async_server_time(client)
+        # A stale pre-jump reading arrives out of order: no raise, no anchor
+        # regression.
+        monotonic["now"] = 1002.0
+        client.time.return_value = (1_700_000_001, 0)
+        assert await async_server_time(client) == pytest.approx(1_700_000_001.0)
+        # A later post-jump reading compares against the jumped baseline -
+        # the same event must not raise a second time.
+        monotonic["now"] = 1003.0
+        client.time.return_value = (1_700_000_052, 0)
+        assert await async_server_time(client) == pytest.approx(1_700_000_052.0)
+
+    def test_sync_out_of_order_reading_does_not_rearm_the_rail(
+        self, freeze_local_time, monotonic
+    ):
+        client = MagicMock()
+        monotonic["now"] = 1000.0
+        client.time.return_value = (1_700_000_000, 0)
+        sync_server_time(client)
+        monotonic["now"] = 1001.0
+        client.time.return_value = (1_700_000_050, 0)
+        with pytest.raises(RuntimeError, match="jumped forward"):
+            sync_server_time(client)
+        monotonic["now"] = 1002.0
+        client.time.return_value = (1_700_000_001, 0)
+        assert sync_server_time(client) == pytest.approx(1_700_000_001.0)
+        monotonic["now"] = 1003.0
+        client.time.return_value = (1_700_000_052, 0)
+        assert sync_server_time(client) == pytest.approx(1_700_000_052.0)
 
     # The one-time wall-skew warning: a large server-vs-wall divergence is logged
     # (once per client) but never raises, because refill uses server time only.
