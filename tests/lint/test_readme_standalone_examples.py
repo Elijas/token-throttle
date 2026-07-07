@@ -207,7 +207,7 @@ _EXPECTED_NON_PYTHON_FENCES = (
     ),
     _ExpectedNonPythonFence(
         document_name="README.md",
-        start_line=93,
+        start_line=92,
         language="bash",
         classification=_NON_PYTHON_CLASSIFICATION_SHELL_SYNTAX,
         reason="package installation command; lint syntax-checks but does not execute it",
@@ -227,13 +227,22 @@ _EXPECTED_NON_PYTHON_FENCES = (
     ),
     _ExpectedNonPythonFence(
         document_name="DEVELOPMENT.md",
-        start_line=12,
+        start_line=18,
+        language="bash",
+        classification=_NON_PYTHON_CLASSIFICATION_SHELL_SYNTAX,
+        reason="pre-commit hook install command; lint syntax-checks but does not execute it",
+        heading="### Pre-commit hooks",
+        non_empty_content_lines=("prek install",),
+    ),
+    _ExpectedNonPythonFence(
+        document_name="DEVELOPMENT.md",
+        start_line=29,
         language="bash",
         classification=_NON_PYTHON_CLASSIFICATION_SHELL_SYNTAX,
         reason="test commands include the Redis full suite; lint syntax-checks but does not execute them",
         heading="## Running tests",
         non_empty_content_lines=(
-            "# Unit tests only (no Redis required)",
+            "# Unit tests: Redis is not required, they skip gracefully without one",
             "uv run pytest tests/unit -v",
             "# Full suite (requires Redis on localhost:6379)",
             "uv run pytest tests/ -v --redis-url redis://localhost:6379",
@@ -241,7 +250,7 @@ _EXPECTED_NON_PYTHON_FENCES = (
     ),
     _ExpectedNonPythonFence(
         document_name="DEVELOPMENT.md",
-        start_line=43,
+        start_line=70,
         language="bash",
         classification=_NON_PYTHON_CLASSIFICATION_SHELL_SYNTAX,
         reason="Redis flush-gate examples; lint syntax-checks but does not execute them",
@@ -255,7 +264,7 @@ _EXPECTED_NON_PYTHON_FENCES = (
     ),
     _ExpectedNonPythonFence(
         document_name="DEVELOPMENT.md",
-        start_line=58,
+        start_line=95,
         language="bash",
         classification=_NON_PYTHON_CLASSIFICATION_SHELL_SYNTAX,
         reason="setup and type-check commands; lint syntax-checks but does not execute them",
@@ -287,8 +296,31 @@ _EXPECTED_NON_PYTHON_FENCES = (
         heading="## Development",
         non_empty_content_lines=(
             "uv sync --group dev",
-            "uv run pytest",
+            "uv run pytest tests/unit",
             "uv run ruff check .",
+        ),
+    ),
+    _ExpectedNonPythonFence(
+        document_name="CLAUDE.md",
+        start_line=52,
+        language="bash",
+        classification=_NON_PYTHON_CLASSIFICATION_SHELL_SYNTAX,
+        reason="Redis flush-gate escape command; lint syntax-checks but does not execute it",
+        heading="## Development",
+        non_empty_content_lines=(
+            "uv run pytest --redis-url redis://localhost:6379/13",
+        ),
+    ),
+    _ExpectedNonPythonFence(
+        document_name="CLAUDE.md",
+        start_line=60,
+        language="bash",
+        classification=_NON_PYTHON_CLASSIFICATION_SHELL_SYNTAX,
+        reason="type-check setup commands; lint syntax-checks but does not execute them",
+        heading="## Development",
+        non_empty_content_lines=(
+            "uv sync --all-extras --group dev",
+            "uv run mypy",
         ),
     ),
     _ExpectedNonPythonFence(
@@ -362,7 +394,7 @@ _EXPECTED_NON_README_STANDALONE_IDENTITIES = (
     ),
     _StandaloneExampleIdentity(
         document_name="DEVELOPMENT.md",
-        start_line=373,
+        start_line=431,
         heading="### Redis connection pool sizing",
         first_non_empty_code_line="import redis.asyncio as aioredis",
     ),
@@ -380,7 +412,7 @@ _EXPECTED_STDOUT_EXAMPLES = (
     ),
     _ExpectedStdoutExample(
         document_name="README.md",
-        start_line=153,
+        start_line=154,
         heading="### Any provider (manual usage)",
         first_non_empty_code_line="import asyncio",
         expected_stdout=(

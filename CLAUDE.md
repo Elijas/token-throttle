@@ -37,9 +37,33 @@ Both are updated automatically by `bump-my-version`. Do not edit these manually.
 
 ```bash
 uv sync --group dev
-uv run pytest
+uv run pytest tests/unit
 uv run ruff check .
 ```
+
+`tests/unit` doesn't require Redis — but its default `--redis-url` is
+`redis://localhost:6379`, so tests that talk to a real Redis will use one if
+it's reachable there, and some of those flush the database around every test.
+The suite refuses to run (aborts the whole session) against a non-empty
+database unless you opt in. Point at a dedicated, empty DB index instead of a
+shared one:
+
+```bash
+uv run pytest --redis-url redis://localhost:6379/13
+```
+
+Type checking is a hard release gate and needs the optional extras installed,
+because the checked package includes the Redis, OpenAI, and tokenizer
+integration modules:
+
+```bash
+uv sync --all-extras --group dev
+uv run mypy
+```
+
+See [DEVELOPMENT.md](DEVELOPMENT.md) for the full test/CI breakdown, the
+pre-commit hook setup, doc-lint fixture maintenance, and test-naming
+conventions.
 
 ## Documentation conventions
 

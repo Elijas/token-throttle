@@ -6,15 +6,42 @@
 uv sync --all-extras --group dev
 ```
 
+### Pre-commit hooks
+
+`.pre-commit-config.yaml` runs `ruff check --fix` then `ruff format` on
+staged files, pinned to the same ruff version as `uv.lock`. It uses
+[prek](https://github.com/j178/prek) (a Rust reimplementation of the
+`pre-commit` CLI), not `pip install pre-commit`. Install the git hook once per
+clone:
+
+```bash
+prek install
+```
+
+Without this the hooks don't run at all — nothing enforces them until CI's
+`lint` job. If you skip `prek install`, expect `ruff` to rewrite your changes
+during the release workflow's own fix-and-format step instead of at commit
+time. Run all hooks on demand with `prek run --all-files`.
+
 ## Running tests
 
 ```bash
-# Unit tests only (no Redis required)
+# Unit tests: Redis is not required, they skip gracefully without one
 uv run pytest tests/unit -v
 
 # Full suite (requires Redis on localhost:6379)
 uv run pytest tests/ -v --redis-url redis://localhost:6379
 ```
+
+`tests/unit` does not *require* Redis, but it is not Redis-free either: a
+handful of files (for example `test_tc2_001_redis_after_wait_critical_refund.py`
+and `test_redis_deadline_lock_contention.py`) talk to a real Redis server and
+default to `--redis-url redis://localhost:6379`, same as the integration
+suite. If nothing is listening there, they call `pytest.skip()` per test and
+the run stays green. If a real Redis *is* listening there — a common local dev
+setup — those tests use it for real, and at least one of them flushes it
+around every test, so it goes through the same non-empty-database gate
+described below.
 
 ### Redis flush safety gate
 
@@ -51,6 +78,16 @@ Every `flushdb` call site (the shared async/sync client fixtures plus the
 property and Redis-close tests that build their own clients) routes through
 `ensure_flush_allowed()`, so the gate runs even when only those files are
 selected.
+
+### Test naming
+
+`tests/unit` accumulated ad hoc file-naming conventions across many rounds of
+bug-hunting (`test_bundle_*.py`, `test_fix_NN_*.py`, `test_tc2_NNN_*.py`, and
+similar tracker-id prefixes). Those are historical and not a pattern to copy.
+
+Name **new** test files `test_<area>_<behavior>.py` (e.g.
+`test_reservation_refund_dedup.py`), describing what is under test rather than
+which bug-tracker item introduced it.
 
 ## Type checking
 
@@ -91,6 +128,27 @@ every operating system. Redis integration tests stay Linux-only because GitHub
 Actions service containers are Linux-oriented and this project targets Redis
 behavior rather than OS-specific Redis packaging. Redis 7 (alpine) is used as
 the GitHub service container for integration and coverage jobs.
+
+## Updating doc code fences
+
+`tests/lint/test_readme_standalone_examples.py` actually executes the
+standalone Python code fences in `README.md`, `MIGRATION.md`, `DEVELOPMENT.md`,
+and `CLAUDE.md`, and inventories every other (bash/text/etc.) fence in those
+files. It identifies each fence by an explicit `start_line` recorded in that
+test file — in `_EXPECTED_MIGRATION_FRAGMENTS`, `_EXPECTED_NON_PYTHON_FENCES`,
+and `_EXPECTED_NON_README_STANDALONE_IDENTITIES` — plus its heading and first
+code/content line.
+
+If you add, remove, or reflow lines anywhere *before* a fence in one of those
+four files (including in prose, not just other fences), every fence after your
+edit shifts and its recorded `start_line` goes stale, failing the lint with a
+mismatch. To fix: after editing a doc, use your editor's line numbers to find
+each fence's opening line plus one (the first line of code/content inside it)
+and update the corresponding `start_line` values — and
+`first_non_empty_code_line`/`non_empty_content_lines`, if the fence content
+itself changed — in the dataclass instances above. Run
+`uv run pytest tests/lint/test_readme_standalone_examples.py -q` after every
+doc edit to catch drift immediately rather than discovering it in CI.
 
 ## Known constraints and assumptions
 
