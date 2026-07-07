@@ -31,6 +31,22 @@ These changes are on `main` and not yet in a tagged release.
   failover to a clock-skewed primary) still raises, and is now reported
   exactly once per event: out-of-order readings from concurrent callers no
   longer regress the detection baseline and re-raise for the same jump.
+- Hardens the `reserve()` context manager against three edge cases that could
+  leak an in-flight reservation or fabricate capacity accounting:
+  - The scope returned by `reserve()` is now single-use. Re-entering the same
+    scope — whether after it has exited or while it is still active — raises
+    `RuntimeError` instead of silently acquiring a second reservation while
+    reusing the first block's recorded actual usage. Call `reserve()` again for
+    each attempt.
+  - When a `reserve()` block exits without calling `set_actual_usage()`, the
+    reservation is refunded before the "forgot to report actual usage"
+    `RuntimeWarning` is emitted, so running under `-W error` (warnings promoted
+    to exceptions) can no longer skip the refund and leak the reservation.
+  - When a `reserve()` block exits normally but the recorded actual usage is
+    malformed (for example its metric keys do not match the reservation), the
+    reservation is conservatively closed before the resulting `ValueError` is
+    re-raised, so the bad-usage error still surfaces to the caller without
+    leaking the in-flight reservation.
 
 ## v9.1.0 - 2026-07-07
 
