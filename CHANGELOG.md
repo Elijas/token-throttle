@@ -58,7 +58,14 @@ These changes are on `main` and not yet in a tagged release.
   Requests that use either feature now get a larger, more accurate token
   reservation instead of one that silently under-counts; a stored prompt's
   server-side template body itself remains unknowable from the client and is
-  documented as a best-effort blind spot.
+  documented as a best-effort blind spot. **Known issues as released:** this
+  change also made `OpenAIUsageCounter` raise `ValueError` at acquire time
+  for `prompt.variables` values containing non-text content parts (images or
+  files) — requests that v9.0.0 accepted — and a stored-prompt-only request
+  (`prompt={"id": ...}` with no `input`), a valid Responses API shape, was
+  still rejected rather than counted. Both are fixed in the next release:
+  non-text variable parts count as 0 tokens with a warning, and
+  stored-prompt-only requests are accepted.
 - Clarifies the Redis lock-contention warning log message and its docstrings
   to say "a waiter" instead of "the no-timeout waiter", since deadline-bounded
   callers also retry through contention as of v9.0.0, not just callers with no

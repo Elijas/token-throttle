@@ -35,7 +35,7 @@ def _make_backend_builder():
 
 def _make_counter() -> OpenAIUsageCounter:
     encoding = MagicMock()
-    encoding.encode.side_effect = lambda text: list(range(len(text)))
+    encoding.encode.side_effect = lambda text, **_kwargs: list(range(len(text)))
     return OpenAIUsageCounter(get_encoding_func=lambda _model: encoding)
 
 

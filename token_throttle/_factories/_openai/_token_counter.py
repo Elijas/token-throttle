@@ -9,24 +9,33 @@ Known best-effort blind spot: a Responses ``prompt`` template reference is
 counted only by its client-visible ``variables``. The stored, server-side
 template body those variables expand into is not visible from the client, so
 its tokens are not included; reserved tokens for such requests understate the
-real prompt by the hidden template's size.
+real prompt by the hidden template's size. Non-text ``variables`` values
+(images, files) are likewise counted as 0 tokens with a once-per-process
+warning, because their token cost cannot be inferred locally.
 """
 
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
+import logging
 import math
 import threading
 import typing
+import warnings
 from typing import Protocol, cast, runtime_checkable
 
 if typing.TYPE_CHECKING:
+    from collections.abc import Callable
+
     from tiktoken import Encoding
 
 from frozendict import frozendict
 
 from token_throttle._interfaces._models import FrozenUsage, _is_bool_like
+
+_logger = logging.getLogger("token_throttle")
 
 _OUTPUT_BUDGET_KEYS = (
     "max_output_tokens",
@@ -85,6 +94,11 @@ _UNSUPPORTED_CONTENT_FIELDS = (
     "image",
     "image_url",
 )
+# Once-per-process registry of stored-prompt variable part types already
+# warned about as counted-at-0; bounded by the unsupported type/field
+# vocabularies above.
+_warned_uncounted_prompt_parts: set[str] = set()
+_warned_uncounted_prompt_parts_lock = threading.Lock()
 
 
 @runtime_checkable
@@ -107,9 +121,11 @@ class OpenAIUsageCounter:
     content parts such as ``{"type": "input_text", "text": "..."}``, and
     JSON-serializable ``tool_calls`` / ``function_call`` payloads. Non-text
     image, file, and audio content is rejected because token cost cannot be
-    inferred locally. Request payloads must use the OpenAI fields ``input`` or
-    ``messages``; plural ``inputs`` is rejected because it is not an OpenAI API
-    request field.
+    inferred locally, except inside a stored-prompt ``prompt.variables`` value,
+    where non-text parts count as 0 tokens with a once-per-process warning.
+    Request payloads must use the OpenAI fields ``input`` or ``messages``, or
+    reference a stored prompt via ``prompt`` alone (Responses API); plural
+    ``inputs`` is rejected because it is not an OpenAI API request field.
     """
 
     def __init__(self, get_encoding_func: EncodingGetter | None = None):
@@ -182,11 +198,17 @@ class OpenAIUsageCounter:
         payload_key = _get_request_payload_key(request)
         request_context_tokens = _count_request_context_tokens(encoding, request)
 
+        if payload_key is None:
+            # Stored-prompt-only Responses request (prompt={"id": ...} with no
+            # input): every client-visible token lives in the request context.
+            tokens = request_context_tokens + reserved_output_tokens
+            return frozendict({"tokens": tokens, "requests": 1})
+
         if payload_key == "input":
             input_ = request["input"]
             if isinstance(input_, str):
                 tokens = (
-                    len(encoding.encode(input_))
+                    _encode_len(encoding, input_)
                     + request_context_tokens
                     + reserved_output_tokens
                 )
@@ -194,7 +216,7 @@ class OpenAIUsageCounter:
             # List of strings — valid for OpenAI Embeddings API (e.g. input=["hello", "world"]).
             if isinstance(input_, list) and all(isinstance(i, str) for i in input_):
                 tokens = (
-                    sum(len(encoding.encode(i)) for i in input_)
+                    sum(_encode_len(encoding, i) for i in input_)
                     + request_context_tokens
                     + reserved_output_tokens
                 )
@@ -238,7 +260,7 @@ class OpenAIUsageCounter:
             )
             return frozendict({"tokens": tokens, "requests": 1})
 
-        raise ValueError("Request must contain 'input' or 'messages'")
+        raise ValueError("Request must contain 'input', 'messages', or 'prompt'")
 
     @staticmethod
     def _validate_model(model: object) -> None:
@@ -250,13 +272,17 @@ class OpenAIUsageCounter:
             raise ValueError("model must be a non-empty string")
 
 
-def _get_request_payload_key(request: dict[str, object]) -> str:
+def _get_request_payload_key(request: dict[str, object]) -> str | None:
     payload_keys = [key for key in _REQUEST_PAYLOAD_KEYS if key in request]
-    if not payload_keys:
-        raise ValueError("Request must contain 'input' or 'messages'")
     if len(payload_keys) > 1:
         raise ValueError("Exactly one of 'input' or 'messages' must be provided")
-    return payload_keys[0]
+    if payload_keys:
+        return payload_keys[0]
+    if request.get("prompt") is not None:
+        # Stored-prompt-only Responses request: `input` is optional when a
+        # stored `prompt` reference is supplied, so there is no payload key.
+        return None
+    raise ValueError("Request must contain 'input', 'messages', or 'prompt'")
 
 
 def get_encoding(model_name: str) -> Encoding:
@@ -293,6 +319,19 @@ def get_encoding(model_name: str) -> Encoding:
             "(`pip install -U tiktoken`) if this is a newer model, or pass "
             "an explicit get_encoding_func to OpenAIUsageCounter."
         ) from exc
+
+
+def _encode_len(encoding: Encoding, text: str) -> int:
+    """
+    Token length of ``text``, counting special-token literals as plain text.
+
+    tiktoken's ``encode`` defaults to ``disallowed_special="all"`` and raises
+    on text containing a special-token literal (e.g. ``<|endoftext|>`` pasted
+    from LLM docs). The OpenAI API treats such request text as ordinary
+    characters, so the counter must count it instead of failing the acquire.
+    Every encode in this module must go through this helper.
+    """
+    return len(encoding.encode(text, disallowed_special=()))
 
 
 def count_structured_input_tokens(
@@ -436,8 +475,9 @@ def _count_prompt_variable_tokens(
     template; ``id`` and ``version`` are opaque references, and the server-side
     template body they expand into is unknowable here (see the module
     docstring's best-effort caveat). Variable values reuse the shared
-    content-part counter so non-text parts (images, files) are rejected rather
-    than silently under-counted, exactly as they are inside chat/input content.
+    content-part counter, but non-text parts (images, files) count as 0 tokens
+    with a once-per-process warning instead of being rejected: the OpenAI API
+    accepts them here, so failing the acquire would break valid requests.
     """
     if not isinstance(value, dict) or not all(isinstance(key, str) for key in value):
         raise ValueError(invalid_error)
@@ -454,9 +494,30 @@ def _count_prompt_variable_tokens(
             variable_value,
             invalid_error=invalid_error,
             content_part_context=True,
+            on_unsupported_part=functools.partial(
+                _warn_uncounted_prompt_variable_part, name
+            ),
         )
-        for variable_value in variables.values()
+        for name, variable_value in variables.items()
     )
+
+
+def _warn_uncounted_prompt_variable_part(variable_name: str, part_name: str) -> None:
+    """Warn (once per process per part type) that a variable counts as 0."""
+    with _warned_uncounted_prompt_parts_lock:
+        if part_name in _warned_uncounted_prompt_parts:
+            return
+        _warned_uncounted_prompt_parts.add(part_name)
+    message = (
+        f"OpenAI stored-prompt variable {variable_name!r} contains non-text "
+        f"content ({part_name!r}) whose token cost cannot be inferred "
+        "locally; counting it as 0 tokens. This is a best-effort estimate: "
+        "reserved tokens understate the request's real cost. Pass usage "
+        "manually if the non-text cost matters. Further warnings for this "
+        "content type are suppressed for this process."
+    )
+    warnings.warn(message, UserWarning, stacklevel=2)
+    _logger.warning(message)
 
 
 def _count_json_serialized_tokens(
@@ -469,7 +530,7 @@ def _count_json_serialized_tokens(
         serialized = json.dumps(value)
     except TypeError as exc:
         raise ValueError(invalid_error) from exc
-    return len(encoding.encode(serialized))
+    return _encode_len(encoding, serialized)
 
 
 def _count_request_context_fragments(
@@ -481,14 +542,14 @@ def _count_request_context_fragments(
     if value is None:
         return 0
     if _is_bool_like(value):
-        return len(encoding.encode(str(bool(value)).lower()))
+        return _encode_len(encoding, str(bool(value)).lower())
     if isinstance(value, str):
-        return len(encoding.encode(value))
+        return _encode_len(encoding, value)
     if isinstance(value, int | float):
         parsed = float(value)
         if not math.isfinite(parsed):
             raise ValueError(invalid_error)
-        return len(encoding.encode(str(value)))
+        return _encode_len(encoding, str(value))
     if isinstance(value, list):
         return sum(
             _count_request_context_fragments(
@@ -502,7 +563,7 @@ def _count_request_context_fragments(
         if not all(isinstance(key, str) for key in value):
             raise ValueError(invalid_error)
         return sum(
-            len(encoding.encode(key))
+            _encode_len(encoding, key)
             + _count_request_context_fragments(
                 encoding,
                 nested_value,
@@ -583,22 +644,23 @@ def _check_nested_unsupported_content(value: object) -> str | None:
     return None
 
 
-def _count_text_fragments(
+def _count_text_fragments(  # noqa: PLR0913
     encoding: Encoding,
     value: object,
     *,
     invalid_error: str,
     content_part_context: bool = False,
     coerce_scalars: bool = False,
+    on_unsupported_part: Callable[[str], None] | None = None,
 ) -> int:
     if value is None:
         return 0
     if isinstance(value, str):
-        return len(encoding.encode(value))
+        return _encode_len(encoding, value)
     if coerce_scalars and _is_bool_like(value):
-        return len(encoding.encode(str(bool(value)).lower()))
+        return _encode_len(encoding, str(bool(value)).lower())
     if coerce_scalars and isinstance(value, int | float):
-        return len(encoding.encode(str(value)))
+        return _encode_len(encoding, str(value))
     if isinstance(value, list):
         return sum(
             _count_text_fragments(
@@ -607,6 +669,7 @@ def _count_text_fragments(
                 invalid_error=invalid_error,
                 content_part_context=content_part_context,
                 coerce_scalars=coerce_scalars,
+                on_unsupported_part=on_unsupported_part,
             )
             for item in value
         )
@@ -616,6 +679,9 @@ def _count_text_fragments(
         if content_part_context:
             unsupported_part_name = _get_unsupported_content_part_name(value)
             if unsupported_part_name is not None:
+                if on_unsupported_part is not None:
+                    on_unsupported_part(unsupported_part_name)
+                    return 0
                 raise _unsupported_content_part_error(unsupported_part_name)
         part_type = value.get("type")
         if isinstance(part_type, str):
@@ -623,7 +689,7 @@ def _count_text_fragments(
                 text = value["text"]
                 if not isinstance(text, str):
                     raise ValueError(invalid_error)
-                return len(encoding.encode(text))
+                return _encode_len(encoding, text)
             if "content" in value:
                 return _count_text_fragments(
                     encoding,
@@ -631,6 +697,7 @@ def _count_text_fragments(
                     invalid_error=invalid_error,
                     content_part_context=content_part_context,
                     coerce_scalars=coerce_scalars,
+                    on_unsupported_part=on_unsupported_part,
                 )
             return sum(
                 _count_text_fragments(
@@ -640,6 +707,7 @@ def _count_text_fragments(
                     content_part_context=content_part_context
                     and nested_key == "content",
                     coerce_scalars=coerce_scalars and nested_key != "content",
+                    on_unsupported_part=on_unsupported_part,
                 )
                 for nested_key, nested_value in value.items()
             )

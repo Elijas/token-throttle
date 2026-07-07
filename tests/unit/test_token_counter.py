@@ -6,11 +6,13 @@ Source: token_throttle/_factories/_openai/_token_counter.py
 
 import json
 import sys
+import warnings
 from unittest.mock import MagicMock, patch
 
 import pytest
 from frozendict import frozendict
 
+from token_throttle._factories._openai import _token_counter as _token_counter_module
 from token_throttle._factories._openai._token_counter import (
     OpenAIUsageCounter,
     count_chat_input_tokens,
@@ -21,7 +23,9 @@ from token_throttle._factories._openai._token_counter import (
 def _make_mock_encoding(chars_per_token: int = 1) -> MagicMock:
     """Create a mock encoding where each `chars_per_token` characters = 1 token."""
     mock_enc = MagicMock()
-    mock_enc.encode.side_effect = lambda text: list(range(len(text) // chars_per_token))
+    mock_enc.encode.side_effect = lambda text, **_kwargs: list(
+        range(len(text) // chars_per_token)
+    )
     return mock_enc
 
 
@@ -224,7 +228,9 @@ class TestOpenAIUsageCounterRejectsInputsPlural:
 
     def test_inputs_alone_rejected(self):
         counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
-        with pytest.raises(ValueError, match="must contain 'input' or 'messages'"):
+        with pytest.raises(
+            ValueError, match="must contain 'input', 'messages', or 'prompt'"
+        ):
             counter("gpt-4", inputs=["hello", "world"])
 
 
@@ -452,21 +458,29 @@ class TestOpenAIUsageCounterMissingKeys:
     def test_no_input_or_messages_raises(self):
         counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
         with pytest.raises(
-            ValueError, match="Request must contain 'input' or 'messages'"
+            ValueError, match="Request must contain 'input', 'messages', or 'prompt'"
         ):
             counter("gpt-4", something_else="foo")
 
     def test_empty_request_raises(self):
         counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
         with pytest.raises(
-            ValueError, match="Request must contain 'input' or 'messages'"
+            ValueError, match="Request must contain 'input', 'messages', or 'prompt'"
         ):
             counter("gpt-4")
+
+    def test_prompt_none_alone_still_raises(self):
+        """prompt=None does not make a request a stored-prompt-only request."""
+        counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
+        with pytest.raises(
+            ValueError, match="Request must contain 'input', 'messages', or 'prompt'"
+        ):
+            counter("gpt-4", prompt=None)
 
     def test_inputs_plural_not_recognised(self):
         counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
         with pytest.raises(
-            ValueError, match="Request must contain 'input' or 'messages'"
+            ValueError, match="Request must contain 'input', 'messages', or 'prompt'"
         ):
             counter("gpt-4", inputs=["hello", "world"])
 
@@ -773,7 +787,9 @@ class TestOpenAIUsageCounterWithRealTiktoken:
     def test_real_encoding_inputs_plural_rejected(self):
         pytest.importorskip("tiktoken")
         counter = OpenAIUsageCounter()
-        with pytest.raises(ValueError, match="must contain 'input' or 'messages'"):
+        with pytest.raises(
+            ValueError, match="must contain 'input', 'messages', or 'prompt'"
+        ):
             counter("openai/gpt-4", inputs=["hello", "world"])
 
     def test_real_encoding_messages(self):
@@ -1361,13 +1377,128 @@ class TestResponsesPromptCounting:
 
         assert result == base
 
-    def test_prompt_image_variable_is_rejected_not_undercounted(self):
-        """Non-text variable content (an image) must be rejected the same way
-        image content is elsewhere, rather than silently counting a short URL
-        in place of the real vision-token cost.
-        """
+    def test_prompt_non_dict_raises(self):
         counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
-        with pytest.raises(ValueError, match="input_image"):
+        with pytest.raises(ValueError, match="prompt"):
+            counter("gpt-4", input="hi", prompt="just a string")
+
+
+class TestStoredPromptOnlyRequests:
+    """The Responses API accepts `prompt={"id": ...}` with no `input`; the
+    counter must accept the same shape instead of failing the acquire.
+    """
+
+    def test_prompt_only_with_id_counts_zero_payload_tokens(self):
+        counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
+        result = counter("gpt-4", prompt={"id": "pmpt_abc123"})
+        assert result == frozendict({"tokens": 0, "requests": 1})
+
+    def test_prompt_only_with_id_and_version_counts_zero_payload_tokens(self):
+        counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
+        result = counter("gpt-4", prompt={"id": "pmpt_abc123", "version": "7"})
+        assert result == frozendict({"tokens": 0, "requests": 1})
+
+    def test_prompt_only_variables_are_counted(self):
+        counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
+        result = counter(
+            "gpt-4",
+            prompt={"id": "pmpt_abc", "variables": {"topic": "x" * 40}},
+        )
+        assert result == frozendict({"tokens": 40, "requests": 1})
+
+    def test_prompt_only_reserves_output_budget(self):
+        counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
+        result = counter("gpt-4", prompt={"id": "pmpt_abc"}, max_output_tokens=50)
+        assert result == frozendict({"tokens": 50, "requests": 1})
+
+    def test_prompt_only_counts_other_request_context(self):
+        counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
+        instructions = "be brief"
+        result = counter(
+            "gpt-4",
+            prompt={"id": "pmpt_abc"},
+            instructions=instructions,
+        )
+        assert result == frozendict({"tokens": len(instructions), "requests": 1})
+
+    def test_prompt_only_invalid_prompt_type_still_raises(self):
+        counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
+        with pytest.raises(ValueError, match="prompt"):
+            counter("gpt-4", prompt="pmpt_abc123")
+
+    def test_prompt_alongside_input_and_messages_still_ambiguous(self):
+        counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
+        with pytest.raises(
+            ValueError,
+            match="Exactly one of 'input' or 'messages' must be provided",
+        ):
+            counter(
+                "gpt-4",
+                input="hi",
+                messages=[{"role": "user", "content": "hello"}],
+                prompt={"id": "pmpt_abc"},
+            )
+
+    async def test_prompt_only_async_parity(self):
+        counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
+        result = await counter.count_request_async(
+            "gpt-4", prompt={"id": "pmpt_abc123"}
+        )
+        assert result == frozendict({"tokens": 0, "requests": 1})
+
+
+class TestPromptNonTextVariables:
+    """Non-text prompt variable values (images, files) are valid OpenAI
+    requests. They count as 0 tokens with a once-per-process warning instead
+    of failing the acquire; chat/input content keeps rejecting them.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _fresh_warning_registry(self, monkeypatch):
+        monkeypatch.setattr(
+            _token_counter_module, "_warned_uncounted_prompt_parts", set()
+        )
+
+    def test_image_variable_counts_zero_and_warns(self):
+        counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
+        base = counter("gpt-4", input="hi")["tokens"]
+
+        with pytest.warns(UserWarning, match=r"'pic'.*'input_image'"):
+            result = counter(
+                "gpt-4",
+                input="hi",
+                prompt={
+                    "id": "pmpt_abc",
+                    "variables": {
+                        "pic": {
+                            "type": "input_image",
+                            "image_url": "https://example.com/a.png",
+                        }
+                    },
+                },
+            )
+
+        assert result == frozendict({"tokens": base, "requests": 1})
+
+    def test_file_variable_counts_zero_and_warns(self):
+        counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
+        base = counter("gpt-4", input="hi")["tokens"]
+
+        with pytest.warns(UserWarning, match=r"'doc'.*'input_file'"):
+            result = counter(
+                "gpt-4",
+                input="hi",
+                prompt={
+                    "id": "pmpt_abc",
+                    "variables": {"doc": {"type": "input_file", "file_id": "file-123"}},
+                },
+            )
+
+        assert result == frozendict({"tokens": base, "requests": 1})
+
+    def test_warning_names_best_effort_contract(self):
+        counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
+        with pytest.warns(UserWarning, match="best-effort"):
             counter(
                 "gpt-4",
                 input="hi",
@@ -1381,7 +1512,235 @@ class TestResponsesPromptCounting:
                 },
             )
 
-    def test_prompt_non_dict_raises(self):
+    def test_warning_is_emitted_once_per_process_per_part_type(self):
         counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
-        with pytest.raises(ValueError, match="prompt"):
-            counter("gpt-4", input="hi", prompt="just a string")
+        image_prompt = {
+            "variables": {
+                "pic": {
+                    "type": "input_image",
+                    "image_url": "https://example.com/a.png",
+                }
+            }
+        }
+
+        with pytest.warns(UserWarning, match="input_image"):
+            counter("gpt-4", input="hi", prompt=image_prompt)
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            counter("gpt-4", input="hi", prompt=image_prompt)
+        assert not [w for w in caught if issubclass(w.category, UserWarning)]
+
+    def test_text_variables_still_counted_alongside_image_variable(self):
+        counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
+        base = counter("gpt-4", input="hi")["tokens"]
+
+        with pytest.warns(UserWarning, match="input_image"):
+            result = counter(
+                "gpt-4",
+                input="hi",
+                prompt={
+                    "id": "pmpt_abc",
+                    "variables": {
+                        "pic": {
+                            "type": "input_image",
+                            "image_url": "https://example.com/a.png",
+                        },
+                        "topic": "y" * 30,
+                    },
+                },
+            )
+
+        assert result == frozendict({"tokens": base + 30, "requests": 1})
+
+    def test_chat_content_images_still_rejected(self):
+        """The prompt-variable leniency must not leak into chat content."""
+        counter = OpenAIUsageCounter(get_encoding_func=_make_mock_get_encoding())
+        with pytest.raises(ValueError, match="input_image"):
+            counter(
+                "gpt-4",
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_image",
+                                "image_url": "https://example.com/a",
+                            }
+                        ],
+                    }
+                ],
+            )
+
+
+_SPECIAL_TOKEN_TEXT = "docs snippet: <|endoftext|> is a special token"  # noqa: S105 — tokenizer special-token literal, not a credential
+
+
+def _make_special_token_strict_get_encoding():
+    """Mimic tiktoken's default behavior: `encode` raises on special-token
+    literals unless the caller opts out via `disallowed_special=()`.
+    """
+    mock_enc = MagicMock()
+
+    def encode(text, *, disallowed_special="all"):
+        if disallowed_special == "all" and "<|endoftext|>" in text:
+            raise ValueError(
+                "Encountered text corresponding to disallowed special token "
+                "'<|endoftext|>'."
+            )
+        return list(range(len(text)))
+
+    mock_enc.encode.side_effect = encode
+    return lambda _model_name: mock_enc
+
+
+class TestSpecialTokenLiterals:
+    """Text containing tiktoken special-token literals (e.g. pasted from LLM
+    docs) is ordinary request text and must count instead of crashing the
+    acquire, on every encode path in the counter.
+    """
+
+    def test_special_token_in_input_string(self):
+        counter = OpenAIUsageCounter(
+            get_encoding_func=_make_special_token_strict_get_encoding()
+        )
+        result = counter("gpt-4", input=_SPECIAL_TOKEN_TEXT)
+        assert result["tokens"] == len(_SPECIAL_TOKEN_TEXT)
+
+    def test_special_token_in_input_string_list(self):
+        counter = OpenAIUsageCounter(
+            get_encoding_func=_make_special_token_strict_get_encoding()
+        )
+        result = counter("gpt-4", input=[_SPECIAL_TOKEN_TEXT, "plain"])
+        assert result["tokens"] == len(_SPECIAL_TOKEN_TEXT) + len("plain")
+
+    def test_special_token_in_messages(self):
+        counter = OpenAIUsageCounter(
+            get_encoding_func=_make_special_token_strict_get_encoding()
+        )
+        result = counter(
+            "gpt-4",
+            messages=[{"role": "user", "content": _SPECIAL_TOKEN_TEXT}],
+        )
+        assert result["tokens"] > len(_SPECIAL_TOKEN_TEXT)
+
+    def test_special_token_in_message_content_parts(self):
+        counter = OpenAIUsageCounter(
+            get_encoding_func=_make_special_token_strict_get_encoding()
+        )
+        result = counter(
+            "gpt-4",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [{"type": "text", "text": _SPECIAL_TOKEN_TEXT}],
+                }
+            ],
+        )
+        assert result["tokens"] > len(_SPECIAL_TOKEN_TEXT)
+
+    def test_special_token_in_tools_json_path(self):
+        counter = OpenAIUsageCounter(
+            get_encoding_func=_make_special_token_strict_get_encoding()
+        )
+        result = counter(
+            "gpt-4",
+            messages=[{"role": "user", "content": "hi"}],
+            tools=[
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "explain",
+                        "description": _SPECIAL_TOKEN_TEXT,
+                    },
+                }
+            ],
+        )
+        assert result["tokens"] > len(_SPECIAL_TOKEN_TEXT)
+
+    def test_special_token_in_tool_calls_json_path(self):
+        counter = OpenAIUsageCounter(
+            get_encoding_func=_make_special_token_strict_get_encoding()
+        )
+        result = counter(
+            "gpt-4",
+            messages=[
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {
+                                "name": "explain",
+                                "arguments": json.dumps({"text": _SPECIAL_TOKEN_TEXT}),
+                            },
+                        }
+                    ],
+                }
+            ],
+        )
+        assert result["tokens"] > len(_SPECIAL_TOKEN_TEXT)
+
+    def test_special_token_in_instructions_fragment_walk(self):
+        counter = OpenAIUsageCounter(
+            get_encoding_func=_make_special_token_strict_get_encoding()
+        )
+        result = counter("gpt-4", input="hi", instructions=_SPECIAL_TOKEN_TEXT)
+        assert result["tokens"] == len("hi") + len(_SPECIAL_TOKEN_TEXT)
+
+    def test_special_token_in_prediction(self):
+        counter = OpenAIUsageCounter(
+            get_encoding_func=_make_special_token_strict_get_encoding()
+        )
+        result = counter(
+            "gpt-4",
+            messages=[{"role": "user", "content": "hi"}],
+            prediction={"type": "content", "content": _SPECIAL_TOKEN_TEXT},
+        )
+        assert result["tokens"] > len(_SPECIAL_TOKEN_TEXT)
+
+    def test_special_token_in_prompt_variables(self):
+        counter = OpenAIUsageCounter(
+            get_encoding_func=_make_special_token_strict_get_encoding()
+        )
+        result = counter(
+            "gpt-4",
+            input="hi",
+            prompt={"id": "pmpt_abc", "variables": {"topic": _SPECIAL_TOKEN_TEXT}},
+        )
+        assert result["tokens"] == len("hi") + len(_SPECIAL_TOKEN_TEXT)
+
+    def test_special_token_in_structured_input_json_path(self):
+        counter = OpenAIUsageCounter(
+            get_encoding_func=_make_special_token_strict_get_encoding()
+        )
+        result = counter(
+            "gpt-4",
+            input=[
+                {
+                    "type": "function_call_output",
+                    "call_id": "abc",
+                    "output": _SPECIAL_TOKEN_TEXT,
+                }
+            ],
+        )
+        assert result["tokens"] > len(_SPECIAL_TOKEN_TEXT)
+
+    def test_special_token_with_real_tiktoken(self):
+        pytest.importorskip("tiktoken")
+        counter = OpenAIUsageCounter()
+        result = counter(
+            "gpt-4",
+            messages=[{"role": "user", "content": _SPECIAL_TOKEN_TEXT}],
+            tools=[
+                {
+                    "type": "function",
+                    "function": {"name": "f", "description": _SPECIAL_TOKEN_TEXT},
+                }
+            ],
+            prediction={"type": "content", "content": _SPECIAL_TOKEN_TEXT},
+            prompt={"id": "pmpt_abc", "variables": {"topic": _SPECIAL_TOKEN_TEXT}},
+        )
+        assert result["requests"] == 1
+        assert result["tokens"] > 0
