@@ -3,6 +3,19 @@
 Notable changes for token-throttle releases. Each major version's breaking
 changes and upgrade steps are recorded in its entry below.
 
+## Unreleased
+
+- Adds a runnable Anthropic Messages example with independent RPM, ITPM, and
+  OTPM buckets; server-side pre-flight token counting; prompt-cache prewarming;
+  cache-aware input refunds; observed-p99 output reservations; raw rate-limit
+  header logging; and conservative cleanup on every response/error path.
+- Clarifies in the README that the high major-version sequence reflects strict
+  semver during rapid beta development, rather than implying ten generations
+  of product maturity.
+- Restores the missing v2.0.0-v4.0.0 history from the archived migration guide
+  and adds explicit upgrade actions to the terse v5.0.0-v8.0.0 entries, so the
+  changelog's major-version migration claim is complete and auditable.
+
 ## 10.0.0 - 2026-07-07
 
 - **Breaking:** this library no longer carries pre-v9 upgrade tooling. The
@@ -337,6 +350,10 @@ changes and upgrade steps are recorded in its entry below.
 - Raises dependency floors to `pydantic>=2.12.0` and `tiktoken>=0.10.0`.
 - Retains Python 3.14 support after fixing the conformance harness behavior.
 - Refreshes README, migration, custom-backend, and public docstring coverage.
+- **Upgrade:** drain Redis-backed in-flight reservations before deploying v8,
+  route refunds through the limiter lifetime that issued each reservation,
+  replace implicit loguru routing with explicit stdlib/application callbacks,
+  and update the dependency floors above.
 
 ## v7.0.1 - 2026-05-22
 
@@ -353,12 +370,18 @@ changes and upgrade steps are recorded in its entry below.
 - Closed the critical exception-propagation contracts.
 - Added conformance AST guards for cancellation-composition reachability.
 - Skipped Redis-specific critical-propagation tests when the Redis optional dependency is absent.
+- **Upgrade:** custom backends and callers must allow lifecycle-critical
+  exceptions to propagate raw instead of wrapping them in ordinary cleanup
+  errors; rerun the appropriate backend conformance helper before deployment.
 
 ## v6.0.0 - 2026-05-20
 
 - Breaking: user callbacks now propagate `MemoryError` and `RecursionError`
   instead of treating them as ordinary warning-only failures.
 - Updated callback critical-exception handling and release metadata.
+- **Upgrade:** audit callbacks and tests that assumed every callback failure was
+  warning-only; ordinary exceptions remain best-effort, but process-health
+  exceptions must escape.
 
 ## v5.2.2 - 2026-05-20
 
@@ -400,3 +423,55 @@ changes and upgrade steps are recorded in its entry below.
 - Documented deferred production items around proxy validation, topology,
   capacity sizing, OpenAI counter accuracy, tenant isolation, and Redis Cluster
   redesign.
+- **Upgrade:** third-party backends must implement the complete protocol surface
+  and pass `conformance_test_for(...)`, `run_conformance_test_for(...)`, or
+  `sync_conformance_test_for(...)` before moving from v4.
+
+## v4.0.0 - 2026-05-16
+
+- **Breaking:** `CapacityReservation` became an opaque handle backed by the
+  issuing limiter's internal snapshot. Copying or mutating a returned DTO no
+  longer redirects or resizes a refund; pass actual usage to the refund API.
+- **Breaking:** `AcquireRefundFailedError` stopped inheriting from
+  `asyncio.CancelledError` and instead exposes the original interruption through
+  `.interrupted_by`. Catch `AcquireRefundFailedError` directly when recovering
+  a delivered reservation whose automatic cleanup failed.
+- **Breaking:** Redis builders reject Redis Cluster, and public DTO/key inputs
+  gained stricter exact-type, character, and length validation.
+- **Upgrade:** v3 and v4 reservation/refund authority is intentionally not
+  wire-compatible. Stop new v3 work, drain or expire in-flight reservations,
+  then deploy v4; do not run a mixed fleet on one Redis prefix. Canary with an
+  isolated prefix if a drained cutover is not possible.
+
+## v3.0.0 - 2026-05-15
+
+- **Breaking:** Redis acquires now write a durable acquire marker, and refunds
+  must consume that marker before capacity is credited. This prevents forged or
+  pre-v3 reservations from fabricating capacity.
+- Duplicate refunds continue to fail closed with `DuplicateRefundError`; an
+  unprovable reservation fails with `UnknownReservationError` and is not
+  credited.
+- **Upgrade:** drain or refund every v2 reservation before deploying v3. Mixed
+  v2/v3 Redis fleets on the same prefix are unsupported because v2 does not
+  write the markers v3 requires.
+
+## v2.1.0 - 2026-05-15
+
+- Adds optional `max_reservation_lifetime_seconds`; Redis backends derive a
+  bounded default from their TTL configuration when it is omitted.
+- Hardens durable refund outcomes, capacity-setting reconciliation, close
+  transactions, cardinality accounting, DTO trust boundaries, and Redis key
+  prefix invariants without a further public migration break.
+
+## v2.0.0 - 2026-05-13
+
+- **Breaking:** Redis builders require an explicit tenant `key_prefix`, legacy
+  v1.4 reservations without modern limiter identity are rejected, and bucket
+  state gains expiration plus refund de-duplication.
+- Configuration, DTO, key-segment, callback, close, and in-process cardinality
+  boundaries became fail-closed; OpenAI factory callback defaults are merged by
+  slot rather than replacing an entire caller bundle.
+- **Upgrade:** preflight configuration against the stricter shapes, drain v1.4
+  reservations, assign stable per-tenant Redis prefixes, clean up legacy Redis
+  bucket keys only after the old fleet is stopped, and audit DTO subclasses and
+  partial callback construction before deploying v2.

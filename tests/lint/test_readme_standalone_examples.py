@@ -275,7 +275,7 @@ _EXPECTED_STDOUT_EXAMPLES = (
     ),
     _ExpectedStdoutExample(
         document_name="README.md",
-        start_line=154,
+        start_line=158,
         heading="### Any provider (manual usage)",
         first_non_empty_code_line="import asyncio",
         expected_stdout=(

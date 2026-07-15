@@ -40,6 +40,7 @@ Issues = "https://github.com/Elijas/token-throttle/issues"
 
 [dependency-groups]
 dev = [
+    "anthropic>=0.116.0",
     "bump-my-version>=1.1.2",
     "hypothesis>=6.100.0",
     "mypy>=1.10",

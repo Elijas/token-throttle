@@ -22,7 +22,7 @@ pip install "token-throttle>=10.0.0,<11.0.0"                   # Any provider + 
 
 Requires Python 3.12+. The Redis backend requires Redis 6.2+, standalone or Sentinel only — not Redis Cluster or client-side sharding (see [docs/operations.md](docs/operations.md)).
 
-token-throttle follows strict semver: breaking changes ship only as major versions, and several recent majors were correctness hardening found through fault-injection testing rather than churn. Pin an exact major range (as shown above) and review the [CHANGELOG](CHANGELOG.md) before upgrading — each major's breaking changes and upgrade steps are recorded there. Public constants and type aliases: [docs/api.md](docs/api.md).
+token-throttle is beta and follows strict semver. The recent major-version sequence reflects rapid beta development, with each incompatible API or correctness change released as a major. Pin an exact major range (as shown above) and review the [CHANGELOG](CHANGELOG.md) before upgrading — each major's breaking changes and upgrade steps are recorded there. Public constants and type aliases: [docs/api.md](docs/api.md).
 
 ## Quickstart
 
@@ -145,6 +145,10 @@ Unrecognized model names raise a clear error directing you to pass a custom
 `get_encoding_func`. Estimates are best-effort and not reconciled against live
 billing, so compare reserved tokens with actual usage periodically. Full
 contract: [docs/configuration.md](docs/configuration.md#usage-counters).
+
+### Anthropic (worked example)
+
+Anthropic's Messages API enforces RPM, input tokens/minute (ITPM), and output tokens/minute (OTPM) independently; most current models exclude cache reads from ITPM, while OTPM counts actual output rather than `max_tokens`. The runnable [Anthropic prompt-caching example](examples/anthropic_prompt_caching.py) uses the Anthropic SDK's server-side token count, reserves ITPM and an observed output p99 separately, pre-warms a cache entry, refunds from the response's actual usage, and logs the two remaining-token headers. Supply the real limits from Claude Console (Settings > Limits) or the Rate Limits API instead of copying a tier table. Provider contracts: [rate limits](https://platform.claude.com/docs/en/api/rate-limits), [token counting](https://platform.claude.com/docs/en/build-with-claude/token-counting), and [prompt caching](https://platform.claude.com/docs/en/build-with-claude/prompt-caching).
 
 ### Any provider (manual usage)
 
