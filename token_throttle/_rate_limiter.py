@@ -1297,15 +1297,17 @@ class RateLimiter(BaseRateLimiter):
         another attempt.
 
         On normal exit the unused remainder is refunded. If
-        ``set_actual_usage`` was never called, the block refunds the full
-        reserved usage — nothing returns to the pool, but the in-flight
-        reservation is closed out — and emits a ``RuntimeWarning`` asking you
-        to report actual usage.
+        ``set_actual_usage`` was never called, the block treats the full
+        reservation as consumed — nothing returns to the pool, but the
+        in-flight reservation is closed out — and emits a ``RuntimeWarning``
+        asking you to report actual usage.
 
-        If the block raises, the reservation is refunded with ``usage_on_error``
-        when it is not ``None`` and otherwise with the full reserved usage; the
-        original exception is always re-raised. A refund failure while handling
-        that exception is logged and never masks the original exception.
+        If the block raises, ``usage_on_error`` is treated as actual usage and
+        the unused difference (reserved minus actual) is refunded. When it is
+        ``None``, the full reservation is treated as consumed and no capacity
+        returns to the pool. The original exception is always re-raised. A
+        refund failure while handling that exception is logged and never masks
+        the original exception.
 
         ``timeout`` bounds only the capacity wait, exactly as in
         ``acquire_capacity``; it does not bound the work done inside the block.

@@ -69,11 +69,12 @@ asyncio.run(main())
 ```
 
 `reserve()` (and `SyncRateLimiter.reserve()`) is the recommended wrapper over
-the acquire -> call -> refund cycle. It refunds the unused remainder on exit; on
-an exception it refunds `usage_on_error` (or, if omitted, the full reservation)
-and re-raises. `handle.reservation` exposes the underlying `CapacityReservation`;
-if the block exits without `set_actual_usage` it conservatively refunds the full
-reserved usage and emits a `RuntimeWarning`. Full contract: the `reserve()`
+the acquire -> call -> refund cycle. It treats `usage_on_error` as actual usage
+and refunds `reserved - actual` when an exception escapes; if omitted, it treats
+the full reservation as consumed and returns no capacity. The exception is then
+re-raised. `handle.reservation` exposes the underlying `CapacityReservation`;
+if the block exits without `set_actual_usage`, it likewise closes the reservation
+as fully consumed and emits a `RuntimeWarning`. Full contract: the `reserve()`
 docstring and [docs/operations.md](docs/operations.md#reservation-lifecycle-and-durability).
 For explicit acquire/refund control, see the [Any-provider quickstart](#any-provider-manual-usage)
 below.

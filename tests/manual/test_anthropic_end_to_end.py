@@ -9,8 +9,12 @@ environment variables consumed by the example.
 from __future__ import annotations
 
 import ast
+import asyncio
+import logging
 import os
+import re
 from pathlib import Path
+from typing import Self
 
 import pytest
 from anthropic.types import Message, Usage
@@ -57,15 +61,21 @@ def _message(*, usage: Usage, stop_reason: str = "end_turn") -> Message:
     )
 
 
-def _limiter() -> RateLimiter:
+def _limiter(*, output_token_limit: int = 10_000, per_seconds: int = 60) -> RateLimiter:
     return RateLimiter(
         PerModelConfig(
             model_family=example.MODEL_FAMILY,
             quotas=UsageQuotas(
                 [
-                    Quota(metric="requests", limit=100, per_seconds=60),
-                    Quota(metric="input_tokens", limit=100_000, per_seconds=60),
-                    Quota(metric="output_tokens", limit=10_000, per_seconds=60),
+                    Quota(metric="requests", limit=100, per_seconds=per_seconds),
+                    Quota(
+                        metric="input_tokens", limit=100_000, per_seconds=per_seconds
+                    ),
+                    Quota(
+                        metric="output_tokens",
+                        limit=output_token_limit,
+                        per_seconds=per_seconds,
+                    ),
                 ]
             ),
         ),
@@ -118,6 +128,42 @@ class _Client:
         self, *, message: Message | None = None, error: Exception | None = None
     ):
         self.messages = _Messages(message=message, error=error)
+
+
+class _ConcurrentRawMessages:
+    def __init__(self, messages: list[Message]) -> None:
+        self._messages = messages
+        self.create_kwargs: list[dict[str, object]] = []
+
+    async def create(self, **kwargs: object) -> _RawResponse:
+        call_index = len(self.create_kwargs)
+        self.create_kwargs.append(kwargs)
+        if call_index:
+            # Keep each admitted cache-hit request in flight long enough for
+            # the other gathered tasks to reach the deliberately small bucket.
+            await asyncio.sleep(0.01)
+        return _RawResponse(self._messages[call_index])
+
+
+class _ConcurrentMessages:
+    def __init__(self, messages: list[Message]) -> None:
+        self.with_raw_response = _ConcurrentRawMessages(messages)
+        self.count_calls = 0
+
+    async def count_tokens(self, **_kwargs: object) -> _TokenCount:
+        self.count_calls += 1
+        return _TokenCount()
+
+
+class _ConcurrentClient:
+    def __init__(self, messages: list[Message]) -> None:
+        self.messages = _ConcurrentMessages(messages)
+
+    async def __aenter__(self) -> Self:
+        return self
+
+    async def __aexit__(self, *_args: object) -> None:
+        return None
 
 
 def test_usage_counter_maps_cache_creation_and_ignores_current_model_cache_reads():
@@ -176,6 +222,7 @@ async def test_refusal_response_reconciles_actual_usage_and_closes_reservation()
             limiter=limiter,
             system=[],
             messages=[],
+            counted_input_tokens=5_050,
             max_tokens=512,
             reserved_output_tokens=128,
             label="refusal-test",
@@ -188,7 +235,7 @@ async def test_refusal_response_reconciles_actual_usage_and_closes_reservation()
 
 @pytest.mark.asyncio
 async def test_sdk_error_closes_reservation_conservatively():
-    limiter = _limiter()
+    limiter = _limiter(output_token_limit=128, per_seconds=3_600)
     client = _Client(error=RuntimeError("sdk failed"))
     try:
         with pytest.raises(RuntimeError, match="sdk failed"):
@@ -197,13 +244,66 @@ async def test_sdk_error_closes_reservation_conservatively():
                 limiter=limiter,
                 system=[],
                 messages=[],
+                counted_input_tokens=5_050,
                 max_tokens=512,
                 reserved_output_tokens=128,
                 label="error-test",
             )
         assert limiter.snapshot_state()["in_flight_reservations"] == 0
+        # usage_on_error is actual usage. Passing the full reservation returns
+        # no output capacity, so another full reservation cannot start.
+        with pytest.raises(TimeoutError):
+            await limiter.acquire_capacity(
+                {"requests": 0, "input_tokens": 0, "output_tokens": 128},
+                model=example.MODEL,
+                timeout=0,
+            )
     finally:
         await limiter.aclose()
+
+
+@pytest.mark.asyncio
+async def test_main_uses_legal_prewarm_and_refunds_waiting_concurrent_tasks(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+):
+    messages = [
+        _message(usage=_usage(cache_creation_input_tokens=5_000, output_tokens=1)),
+        *[
+            _message(usage=_usage(cache_read_input_tokens=5_000, output_tokens=1))
+            for _ in range(example.CONCURRENT_CACHE_HITS * 2)
+        ],
+    ]
+    client = _ConcurrentClient(messages)
+    monkeypatch.setattr(example, "AsyncAnthropic", lambda **_kwargs: client)
+    monkeypatch.setenv("ANTHROPIC_RPM", "100")
+    monkeypatch.setenv("ANTHROPIC_ITPM", "100000")
+    monkeypatch.setenv("ANTHROPIC_OTPM", "10000")
+    monkeypatch.setattr(example, "DEMO_OUTPUT_WINDOW_SECONDS", 1)
+
+    with caplog.at_level(logging.INFO, logger="anthropic_prompt_caching"):
+        await example.main()
+
+    create_kwargs = client.messages.with_raw_response.create_kwargs
+    assert [kwargs["max_tokens"] for kwargs in create_kwargs] == [
+        example.PREWARM_MAX_TOKENS,
+        *([example.MAX_TOKENS] * example.CONCURRENT_CACHE_HITS * 2),
+    ]
+    assert client.messages.count_calls == 2
+    assert "prewarm OTPM reserved=16 actual=1 refunded=15" in caplog.text
+    assert "with-refunds wait-start #3" in caplog.text
+    assert "with-refunds wait-end #3" in caplog.text
+    assert "without-refunds wait-start #3" in caplog.text
+    assert "without-refunds wait-end #3" in caplog.text
+    assert "with-refunds summary: completed=4/4" in caplog.text
+    assert "without-refunds summary: completed=4/4" in caplog.text
+    comparison = re.search(
+        r"Measured A/B: with-refunds=([0-9.]+)s "
+        r"without-refunds=([0-9.]+)s",
+        caplog.text,
+    )
+    assert comparison is not None
+    assert float(comparison.group(2)) > float(comparison.group(1))
 
 
 def test_example_structure_is_anthropic_native():
@@ -213,6 +313,14 @@ def test_example_structure_is_anthropic_native():
     assert "tik" + "token" not in source
     assert ".messages.count_tokens(" in source
     assert ".messages.with_raw_response.create(" in source
+    assert ".reserve(" in source
+    assert ".acquire_capacity(" not in source
+    assert ".refund_capacity(" not in source
+    assert "asyncio.gather(" in source
+    assert "refund_unused=False" in source
+    assert "Measured A/B:" in source
+    assert "**_unused" in source
+    assert "count_cache_reads_for_itpm" in source
     assert "anthropic-ratelimit-input-tokens-remaining" in source
     assert "anthropic-ratelimit-output-tokens-remaining" in source
     assert any(isinstance(node, ast.Try) and node.finalbody for node in ast.walk(tree))
@@ -255,5 +363,5 @@ _live_enabled = bool(
 )
 @pytest.mark.asyncio
 async def test_live_prompt_cache_reservation_and_refund():
-    """Run the complete example; it asserts cache creation and the second hit."""
+    """Run the complete example; it asserts cache creation and concurrent hits."""
     await example.main()

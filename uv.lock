@@ -1125,7 +1125,7 @@ provides-extras = ["redis", "tiktoken"]
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "anthropic", specifier = ">=0.116.0" },
+    { name = "anthropic", specifier = ">=0.51.0" },
     { name = "bump-my-version", specifier = ">=1.1.2" },
     { name = "hypothesis", specifier = ">=6.100.0" },
     { name = "mypy", specifier = ">=1.10" },
