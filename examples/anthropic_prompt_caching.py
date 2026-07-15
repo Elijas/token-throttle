@@ -88,6 +88,12 @@ _INPUT_REMAINING = "anthropic-ratelimit-input-tokens-remaining"
 _OUTPUT_REMAINING = "anthropic-ratelimit-output-tokens-remaining"
 
 
+def _demo_equivalent_otpm() -> int:
+    return (
+        DEMO_OUTPUT_TOKEN_LIMIT * 60 + DEMO_OUTPUT_WINDOW_SECONDS - 1
+    ) // DEMO_OUTPUT_WINDOW_SECONDS
+
+
 def anthropic_usage_counter(
     *,
     input_tokens: int,
@@ -149,9 +155,7 @@ def _build_limiter(*, callbacks: RateLimiterCallbacks | None = None) -> RateLimi
     rpm = _positive_limit_from_env("ANTHROPIC_RPM")
     itpm = _positive_limit_from_env("ANTHROPIC_ITPM")
     provider_otpm = _positive_limit_from_env("ANTHROPIC_OTPM")
-    equivalent_demo_otpm = (
-        DEMO_OUTPUT_TOKEN_LIMIT * 60 + DEMO_OUTPUT_WINDOW_SECONDS - 1
-    ) // DEMO_OUTPUT_WINDOW_SECONDS
+    equivalent_demo_otpm = _demo_equivalent_otpm()
     if provider_otpm < equivalent_demo_otpm:
         raise RuntimeError(
             f"ANTHROPIC_OTPM must be at least {equivalent_demo_otpm} for this "
@@ -474,8 +478,12 @@ async def main() -> None:
             )
 
             _LOGGER.info(
-                "Measured A/B: with-refunds=%.3fs without-refunds=%.3fs "
-                "recovered=%.3fs speedup=%.2fx",
+                "Synthetic-window A/B (%d tokens/%ds, equivalent OTPM=%d): "
+                "with-refunds=%.3fs without-refunds=%.3fs recovered=%.3fs "
+                "speedup=%.2fx",
+                DEMO_OUTPUT_TOKEN_LIMIT,
+                DEMO_OUTPUT_WINDOW_SECONDS,
+                _demo_equivalent_otpm(),
                 with_refund_wall,
                 without_refund_wall,
                 without_refund_wall - with_refund_wall,

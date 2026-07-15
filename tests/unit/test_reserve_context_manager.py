@@ -85,7 +85,7 @@ async def test_async_forgot_set_actual_usage_warns_and_fabricates_nothing() -> N
                 pass
 
         assert limiter.snapshot_state()["in_flight_reservations"] == 0
-        # Full reserved usage was refunded: nothing returns to the pool.
+        # Reserved usage was treated as actual, so zero capacity was returned.
         with pytest.raises(TimeoutError):
             await limiter.acquire_capacity({"tokens": 1}, _MODEL, timeout=0)
     finally:
@@ -295,6 +295,7 @@ def test_sync_forgot_set_actual_usage_warns_and_fabricates_nothing() -> None:
             pass
 
         assert limiter.snapshot_state()["in_flight_reservations"] == 0
+        # Reserved usage was treated as actual, so zero capacity was returned.
         with pytest.raises(TimeoutError):
             limiter.acquire_capacity({"tokens": 1}, _MODEL, timeout=0)
     finally:

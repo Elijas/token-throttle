@@ -298,7 +298,8 @@ async def test_main_uses_legal_prewarm_and_refunds_waiting_concurrent_tasks(
     assert "with-refunds summary: completed=4/4" in caplog.text
     assert "without-refunds summary: completed=4/4" in caplog.text
     comparison = re.search(
-        r"Measured A/B: with-refunds=([0-9.]+)s "
+        r"Synthetic-window A/B \(144 tokens/1s, equivalent OTPM=8640\): "
+        r"with-refunds=([0-9.]+)s "
         r"without-refunds=([0-9.]+)s",
         caplog.text,
     )
@@ -318,7 +319,7 @@ def test_example_structure_is_anthropic_native():
     assert ".refund_capacity(" not in source
     assert "asyncio.gather(" in source
     assert "refund_unused=False" in source
-    assert "Measured A/B:" in source
+    assert "Synthetic-window A/B" in source
     assert "**_unused" in source
     assert "count_cache_reads_for_itpm" in source
     assert "anthropic-ratelimit-input-tokens-remaining" in source
