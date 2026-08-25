@@ -257,6 +257,21 @@ quotas = UsageQuotas([
 
 `per_seconds` accepts integer seconds. Use `SecondsIn.MINUTE` (60), `SecondsIn.HOUR` (3600), `SecondsIn.DAY` (86400), or any integer.
 
+Quotas on the same metric compose: every one must allow the call, so the binding constraint wins at each moment. Above, `requests` is capped per minute *and* per day.
+
+#### Minimum spacing between calls
+
+A quota with `limit=1` makes its window a minimum interval, so pacing needs no separate mechanism. Providers outside the LLM space often publish limits in exactly this shape — "1 request per 3 seconds, 20 per minute":
+
+```python
+quotas = UsageQuotas([
+    Quota(metric="requests", limit=1, per_seconds=3),                    # spacing
+    Quota(metric="requests", limit=20, per_seconds=SecondsIn.MINUTE),    # ceiling
+])
+```
+
+Consecutive calls are then spaced 3 seconds apart, and the twenty-first within a minute waits for the window to release rather than for the spacing quota. Both are enforced together; neither supersedes the other.
+
 ### Per-model configuration
 
 ```python
