@@ -99,7 +99,9 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - run: uv sync --all-extras --group dev
-      - run: uv run pytest tests/integration -v --redis-url redis://localhost:6379
+      - run: uv run pytest tests/integration tests/multiprocess -v --redis-url redis://localhost:6379/13
+        env:
+          TOKEN_THROTTLE_MULTIPROCESS_TIMING_SCALE: "2"
 
   test-min-deps:
     runs-on: ubuntu-latest
