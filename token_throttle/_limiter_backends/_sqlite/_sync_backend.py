@@ -6,12 +6,23 @@ import os
 import random
 import threading
 import time
+import uuid
 import warnings
 from typing import TYPE_CHECKING, ClassVar
 
 from frozendict import frozendict
 
 from token_throttle._capacity import _validate_max_capacity_finite_positive
+from token_throttle._diagnostic import (
+    BackendBucketLimit,
+    BackendIntrospectionDiagnostic,
+    DiagnosticIssue,
+    DiagnosticWaiterState,
+    backend_type_for_object,
+    make_bucket_diagnostic,
+    wait_bucket_diagnostics,
+    waiter_diagnostic_from_state,
+)
 from token_throttle._exceptions import BackendLockContentionError
 from token_throttle._interfaces._callbacks import (
     BACKEND_CALLBACK_CRITICAL_EXCEPTIONS,
@@ -163,6 +174,7 @@ class SyncSqliteBackendBuilder(SyncRateLimiterBackendBuilderInterface):
         sleep_interval: float | None = None,
         bucket_ttl_seconds: int = DEFAULT_BUCKET_TTL_SECONDS,
         refund_dedup_ttl_seconds: int = DEFAULT_REFUND_DEDUP_TTL_SECONDS,
+        override_ttl_seconds: int | None = None,
         max_reservation_lifetime_seconds: float | None = None,
         busy_timeout_ms: int = DEFAULT_BUSY_TIMEOUT_MS,
         prune_batch_size: int = DEFAULT_PRUNE_BATCH_SIZE,
@@ -178,6 +190,14 @@ class SyncSqliteBackendBuilder(SyncRateLimiterBackendBuilderInterface):
         self._refund_dedup_ttl_seconds = validate_sqlite_ttl_seconds(
             refund_dedup_ttl_seconds,
             name="refund_dedup_ttl_seconds",
+        )
+        self._override_ttl_seconds = validate_sqlite_ttl_seconds(
+            (
+                self._bucket_ttl_seconds
+                if override_ttl_seconds is None
+                else override_ttl_seconds
+            ),
+            name="override_ttl_seconds",
         )
         self._max_reservation_lifetime_seconds = (
             resolve_max_reservation_lifetime_seconds_from_ttls(
@@ -250,6 +270,7 @@ class SyncSqliteBackendBuilder(SyncRateLimiterBackendBuilderInterface):
             ),
             bucket_ttl_seconds=self._bucket_ttl_seconds,
             refund_dedup_ttl_seconds=self._refund_dedup_ttl_seconds,
+            override_ttl_seconds=self._override_ttl_seconds,
             max_reservation_lifetime_seconds=(self._max_reservation_lifetime_seconds),
             busy_timeout_ms=self._busy_timeout_ms,
             prune_batch_size=self._prune_batch_size,
@@ -295,6 +316,8 @@ class SyncSqliteBackend(SyncRateLimiterBackend):
         if callbacks is not None:
             _revalidate_dto(callbacks)
         self._callbacks = callbacks
+        self._diagnostic_waiters: dict[str, DiagnosticWaiterState] = {}
+        self._diagnostic_lock = threading.Lock()
         validated_sleep = validate_sleep_interval(sleep_interval)
         self._sleep_interval = (
             self.DEFAULT_SLEEP_INTERVAL if validated_sleep is None else validated_sleep
@@ -309,10 +332,63 @@ class SyncSqliteBackend(SyncRateLimiterBackend):
     def supports_acquire_marker_authority(self) -> bool:
         return True
 
+    def introspect(self) -> BackendIntrospectionDiagnostic:
+        as_of_monotonic = time.monotonic()
+        issues: list[DiagnosticIssue] = []
+        snapshots, counts = self._engine.inspect_snapshot(current_time=time.time())
+        buckets = tuple(
+            make_bucket_diagnostic(
+                model_family=self._engine.model_family,
+                metric=snapshot.spec.metric,
+                per_seconds=snapshot.spec.per_seconds,
+                backend_type=backend_type_for_object(self),
+                current_capacity=snapshot.current_capacity,
+                configured_limit=snapshot.spec.configured_max_capacity,
+                effective_max_capacity=snapshot.effective_max_capacity,
+                override_source=("backend" if snapshot.override_active else "none"),
+                status="fresh_start" if snapshot.is_fresh_start else "ok",
+                as_of_monotonic=as_of_monotonic,
+            )
+            for snapshot in snapshots
+        )
+        # Diagnostic schema v1 has no SQLite health DTO. Preserve the first-party
+        # backend's honest "custom" classification and surface exact durable counts
+        # in its existing structured issue channel until a schema revision exists.
+        issues.append(
+            DiagnosticIssue(
+                severity="info",
+                component="sqlite_backend",
+                message=(
+                    "durable rows: "
+                    f"acquire_markers={counts['acquire_markers']}, "
+                    f"refund_tombstones={counts['refund_tombstones']}"
+                ),
+                model_family=self._engine.model_family,
+            )
+        )
+        with self._diagnostic_lock:
+            waiters = tuple(
+                waiter_diagnostic_from_state(state, as_of_monotonic=as_of_monotonic)
+                for state in sorted(
+                    self._diagnostic_waiters.values(),
+                    key=lambda item: (item.wait_started_monotonic, item.waiter_id),
+                )
+            )
+        return BackendIntrospectionDiagnostic(
+            model_family=self._engine.model_family,
+            backend_type=backend_type_for_object(self),
+            as_of_monotonic=as_of_monotonic,
+            buckets=buckets,
+            waits=waiters,
+            memory_health=None,
+            redis_health=None,
+            issues=tuple(issues),
+        )
+
     def prepare_reconfigured_backend(
         self,
         new_backend: SyncRateLimiterBackend,
-        _cfg: PerModelConfig,
+        cfg: PerModelConfig,
     ) -> SyncRateLimiterBackend:
         if not isinstance(new_backend, SyncSqliteBackend):
             raise TypeError(
@@ -325,6 +401,25 @@ class SyncSqliteBackend(SyncRateLimiterBackend):
             raise ValueError(
                 "SQLite reconfiguration requires the same db_path and key_prefix"
             )
+        old_ids = self._engine.bucket_ids
+        new_ids = new_backend._engine.bucket_ids  # noqa: SLF001
+        changed_ids = frozenset(
+            (quota.metric, int(quota.per_seconds))
+            for quota in cfg.quotas
+            if (quota.metric, int(quota.per_seconds)) in old_ids
+            and not math.isclose(
+                self._engine.configured_max_capacity(
+                    quota.metric, int(quota.per_seconds)
+                ),
+                float(quota.limit),
+                rel_tol=1e-12,
+                abs_tol=0.0,
+            )
+        )
+        self._engine.clear_max_capacity_overrides(
+            frozenset(old_ids - new_ids) | changed_ids,
+            current_time=time.time(),
+        )
         return new_backend
 
     def consume_capacity(
@@ -346,13 +441,35 @@ class SyncSqliteBackend(SyncRateLimiterBackend):
         self._emit_consumed_callbacks(usage, result)
         return result.current_time
 
-    def wait_for_capacity(  # noqa: PLR0915
+    def wait_for_capacity(
         self,
         usage: FrozenUsage,
         *,
         timeout: float | None = None,
         reservation_id: str | None = None,
         reservation_lifetime_seconds: float | None = None,
+    ) -> float | None:
+        waiter_key = uuid.uuid4().hex
+        try:
+            return self._wait_for_capacity_impl(
+                usage,
+                timeout=timeout,
+                reservation_id=reservation_id,
+                reservation_lifetime_seconds=reservation_lifetime_seconds,
+                waiter_key=waiter_key,
+            )
+        finally:
+            with self._diagnostic_lock:
+                self._diagnostic_waiters.pop(waiter_key, None)
+
+    def _wait_for_capacity_impl(  # noqa: PLR0915
+        self,
+        usage: FrozenUsage,
+        *,
+        timeout: float | None,
+        reservation_id: str | None,
+        reservation_lifetime_seconds: float | None,
+        waiter_key: str,
     ) -> float | None:
         validate_backend_usage(usage, self._engine.metric_names)
         timeout = validate_timeout(timeout)
@@ -366,11 +483,14 @@ class SyncSqliteBackend(SyncRateLimiterBackend):
 
         while True:
             try:
+                busy_timeout_ms, timeout_on_busy = self._wait_busy_timeout(deadline)
                 attempt = self._engine.try_consume(
                     usage,
                     current_time=time.time(),
                     reservation_id=reservation_id,
                     reservation_lifetime_seconds=reservation_lifetime_seconds,
+                    busy_timeout_ms=busy_timeout_ms,
+                    timeout_on_busy=timeout_on_busy,
                 )
             except BackendLockContentionError as exc:
                 if deadline is not None and time.monotonic() >= deadline:
@@ -389,6 +509,15 @@ class SyncSqliteBackend(SyncRateLimiterBackend):
             result = attempt.result
             if attempt.available:
                 break
+            self._upsert_diagnostic_waiter(
+                waiter_key,
+                reservation_id=reservation_id,
+                usage=usage,
+                capacities=result.pre_capacities,
+                max_capacities=result.max_capacities,
+                deadline=deadline,
+                wait_started_at=wait_started_at,
+            )
             if deadline is not None and time.monotonic() >= deadline:
                 raise self._capacity_timeout_error(
                     usage,
@@ -474,6 +603,54 @@ class SyncSqliteBackend(SyncRateLimiterBackend):
                 )
             raise
         return result.current_time
+
+    def _wait_busy_timeout(self, deadline: float | None) -> tuple[int, bool]:
+        if deadline is None:
+            return self._engine.busy_timeout_ms, False
+        remaining = max(0.0, deadline - time.monotonic())
+        timeout_ms = min(
+            self._engine.busy_timeout_ms,
+            max(0, math.ceil(remaining * 1000.0)),
+        )
+        return timeout_ms, timeout_ms == 0
+
+    def _upsert_diagnostic_waiter(  # noqa: PLR0913
+        self,
+        waiter_key: str,
+        *,
+        reservation_id: str | None,
+        usage: FrozenUsage,
+        capacities: Capacities,
+        max_capacities: Capacities,
+        deadline: float | None,
+        wait_started_at: float | None,
+    ) -> None:
+        limits = {
+            bucket_id: BackendBucketLimit(
+                effective_max_capacity=float(maximum),
+                refill_rate_per_second=float(maximum) / bucket_id[1],
+            )
+            for bucket_id, maximum in max_capacities.items()
+        }
+        state = DiagnosticWaiterState(
+            waiter_id=waiter_key,
+            reservation_id=reservation_id,
+            model_family=self._engine.model_family,
+            model=None,
+            request_id=None,
+            state="waiting_for_capacity",
+            usage=usage,
+            wait_started_monotonic=wait_started_at or time.monotonic(),
+            timeout_deadline_monotonic=deadline,
+            blocked_buckets=wait_bucket_diagnostics(
+                model_family=self._engine.model_family,
+                usage=usage,
+                capacities=dict(capacities),
+                limits=limits,
+            ),
+        )
+        with self._diagnostic_lock:
+            self._diagnostic_waiters[waiter_key] = state
 
     def refund_capacity(
         self,
@@ -568,6 +745,20 @@ class SyncSqliteBackend(SyncRateLimiterBackend):
     ) -> None:
         value = _validate_max_capacity_finite_positive(value)
         self._engine.set_max_capacity(
+            metric,
+            per_seconds,
+            value,
+            current_time=time.time(),
+        )
+
+    def apply_configured_max_capacity(
+        self,
+        metric: str,
+        per_seconds: int,
+        value: float,
+    ) -> None:
+        value = _validate_max_capacity_finite_positive(value)
+        self._engine.apply_configured_max_capacity(
             metric,
             per_seconds,
             value,

@@ -20,6 +20,8 @@ from token_throttle import (
     UsageQuotas,
     frozen_usage,
 )
+from token_throttle import _capacity as capacity_module
+from token_throttle._capacity import calculate_capacity
 from token_throttle._limiter_backends._sqlite import _engine as engine_module
 from token_throttle._limiter_backends._sqlite._engine import (
     SCHEMA_VERSION,
@@ -56,6 +58,7 @@ def _engine(  # noqa: PLR0913
     bucket_ttl_seconds: int = 100,
     refund_dedup_ttl_seconds: int = 100,
     max_reservation_lifetime_seconds: float = 20.0,
+    override_ttl_seconds: int = 100,
     prune_batch_size: int = 256,
     initialized_at: float = 100.0,
 ) -> SqliteEngine:
@@ -72,6 +75,7 @@ def _engine(  # noqa: PLR0913
         ),
         bucket_ttl_seconds=bucket_ttl_seconds,
         refund_dedup_ttl_seconds=refund_dedup_ttl_seconds,
+        override_ttl_seconds=override_ttl_seconds,
         max_reservation_lifetime_seconds=max_reservation_lifetime_seconds,
         prune_batch_size=prune_batch_size,
     )
@@ -470,6 +474,238 @@ def test_sqlite_set_max_capacity_anchors_elapsed_time_at_old_rate(
         assert refilled.result.pre_capacities[("requests", 10)] == 15.0
     finally:
         engine.close()
+
+
+def test_sqlite_configured_limits_remain_process_local(tmp_path: Path) -> None:
+    db_path = tmp_path / "local-config.sqlite3"
+    first = _engine(db_path, limit=10.0)
+    second = _engine(db_path, limit=20.0)
+    try:
+        first_result = first.try_consume(
+            frozen_usage({"requests": 0}),
+            current_time=100.0,
+            reservation_id=None,
+            reservation_lifetime_seconds=None,
+        )
+        second_result = second.try_consume(
+            frozen_usage({"requests": 0}),
+            current_time=100.0,
+            reservation_id=None,
+            reservation_lifetime_seconds=None,
+        )
+        first_again = first.try_consume(
+            frozen_usage({"requests": 0}),
+            current_time=100.0,
+            reservation_id=None,
+            reservation_lifetime_seconds=None,
+        )
+        assert first_result.result.max_capacities[("requests", 10)] == 10.0
+        assert second_result.result.max_capacities[("requests", 10)] == 20.0
+        assert first_again.result.max_capacities[("requests", 10)] == 10.0
+        with sqlite3.connect(db_path) as connection:
+            columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(buckets)")
+            }
+        assert "max_capacity" not in columns
+        assert {"override_value", "override_expires_at"} <= columns
+    finally:
+        first.close()
+        second.close()
+
+
+def test_sqlite_override_is_cross_process_and_expires_to_local_config(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "override.sqlite3"
+    first = _engine(db_path, limit=10.0, override_ttl_seconds=2)
+    second = _engine(db_path, limit=20.0, override_ttl_seconds=2)
+    try:
+        first.set_max_capacity("requests", 10, 15.0, current_time=100.0)
+        active = second.try_consume(
+            frozen_usage({"requests": 0}),
+            current_time=101.0,
+            reservation_id=None,
+            reservation_lifetime_seconds=None,
+        )
+        expired = second.try_consume(
+            frozen_usage({"requests": 0}),
+            current_time=102.0,
+            reservation_id=None,
+            reservation_lifetime_seconds=None,
+        )
+        assert active.result.max_capacities[("requests", 10)] == 15.0
+        assert expired.result.max_capacities[("requests", 10)] == 20.0
+        with sqlite3.connect(db_path) as connection:
+            override = connection.execute(
+                "SELECT override_value, override_expires_at FROM buckets"
+            ).fetchone()
+        assert override == (None, None)
+    finally:
+        first.close()
+        second.close()
+
+
+def test_sqlite_config_after_restart_applies_without_rewriting_state(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "restart-config.sqlite3"
+    first = _engine(db_path, limit=10.0)
+    first.consume(
+        frozen_usage({"requests": 5}),
+        current_time=100.0,
+        reservation_id=None,
+        reservation_lifetime_seconds=None,
+    )
+    first.close()
+
+    restarted = _engine(db_path, limit=20.0, initialized_at=101.0)
+    try:
+        result = restarted.try_consume(
+            frozen_usage({"requests": 0}),
+            current_time=101.0,
+            reservation_id=None,
+            reservation_lifetime_seconds=None,
+        )
+        assert result.result.max_capacities[("requests", 10)] == 20.0
+        assert result.result.pre_capacities[("requests", 10)] == pytest.approx(7.0)
+    finally:
+        restarted.close()
+
+
+def test_sqlite_apply_configured_max_clears_override_and_anchors_state(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path / "apply-config.sqlite3")
+    try:
+        engine.consume(
+            frozen_usage({"requests": 10}),
+            current_time=100.0,
+            reservation_id=None,
+            reservation_lifetime_seconds=None,
+        )
+        engine.set_max_capacity("requests", 10, 20.0, current_time=105.0)
+        engine.apply_configured_max_capacity("requests", 10, 30.0, current_time=107.0)
+        result = engine.try_consume(
+            frozen_usage({"requests": 0}),
+            current_time=107.0,
+            reservation_id=None,
+            reservation_lifetime_seconds=None,
+        )
+        assert result.result.pre_capacities[("requests", 10)] == pytest.approx(9.0)
+        assert result.result.max_capacities[("requests", 10)] == 30.0
+        assert engine._connection.execute(
+            "SELECT override_value, override_expires_at FROM buckets"
+        ).fetchone() == (None, None)
+    finally:
+        engine.close()
+
+
+def test_sqlite_repairs_far_future_last_checked_on_failed_attempt(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path / "future-clock.sqlite3", bucket_ttl_seconds=10)
+    try:
+        engine._connection.execute(
+            "UPDATE buckets SET capacity = 0, last_checked = 1000, updated_at = 1000"
+        )
+        with pytest.warns(RuntimeWarning, match="Negative time_passed"):
+            failed = engine.try_consume(
+                frozen_usage({"requests": 1}),
+                current_time=200.0,
+                reservation_id=None,
+                reservation_lifetime_seconds=None,
+            )
+        assert failed.available is False
+        assert engine._connection.execute(
+            "SELECT capacity, last_checked, updated_at FROM buckets"
+        ).fetchone() == (0.0, 200.0, 200.0)
+        snapshots, _ = engine.inspect_snapshot(current_time=205.0)
+        assert snapshots[0].current_capacity == 5.0
+        pruned = engine.try_consume(
+            frozen_usage({"requests": 0}),
+            current_time=211.0,
+            reservation_id=None,
+            reservation_lifetime_seconds=None,
+        )
+        assert pruned.result.fresh_bucket_ids == (("requests", 10),)
+    finally:
+        engine.close()
+
+
+def test_sqlite_operation_sets_deadline_derived_busy_timeout(tmp_path: Path) -> None:
+    engine = _engine(tmp_path / "busy-timeout.sqlite3")
+    try:
+        engine.try_consume(
+            frozen_usage({"requests": 0}),
+            current_time=100.0,
+            reservation_id=None,
+            reservation_lifetime_seconds=None,
+            busy_timeout_ms=123,
+        )
+        assert engine._connection.execute("PRAGMA busy_timeout").fetchone() == (123,)
+        engine.consume(
+            frozen_usage({"requests": 0}),
+            current_time=100.0,
+            reservation_id=None,
+            reservation_lifetime_seconds=None,
+        )
+        assert engine._connection.execute("PRAGMA busy_timeout").fetchone() == (5000,)
+    finally:
+        engine.close()
+
+
+def test_sqlite_clock_warning_includes_family_and_metric(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setattr(capacity_module, "_backward_clock_warned", False)
+    monkeypatch.setattr(capacity_module, "_backward_clock_last_warning_at", None)
+    with pytest.warns(RuntimeWarning, match="Negative time_passed"):
+        calculate_capacity(
+            last_checked=101.0,
+            outdated_capacity=0.0,
+            current_time=100.0,
+            max_capacity=10.0,
+            rate_per_sec=1.0,
+            bucket_id="sqlite:clock-family:requests:10",
+        )
+    record = next(
+        record for record in caplog.records if "Negative time_passed" in record.message
+    )
+    assert record.token_throttle_model_family == "clock-family"  # noqa: S105
+    assert record.token_throttle_metric == "requests"  # noqa: S105
+
+
+def test_sync_sqlite_introspection_reports_live_state_and_durable_counts(
+    tmp_path: Path,
+) -> None:
+    builder = SyncSqliteBackendBuilder(
+        tmp_path / "introspection.sqlite3",
+        key_prefix="introspection",
+    )
+    backend = builder.build(_config(limit=10.0))
+    try:
+        usage = frozen_usage({"requests": 4})
+        backend.consume_capacity(
+            usage,
+            reservation_id="introspection-marker",
+            reservation_lifetime_seconds=20.0,
+        )
+        backend.set_max_capacity("requests", 10, 15.0)
+        diagnostic = backend.introspect()
+        assert diagnostic.backend_type == "custom"
+        assert len(diagnostic.buckets) == 1
+        bucket = diagnostic.buckets[0]
+        assert bucket.metric == "requests"
+        assert bucket.configured_limit == 10.0
+        assert bucket.effective_max_capacity == 15.0
+        assert bucket.override_source == "backend"
+        assert bucket.current_capacity is not None
+        assert bucket.current_capacity < 10.0
+        assert diagnostic.waits == ()
+        assert any("acquire_markers=1" in issue.message for issue in diagnostic.issues)
+    finally:
+        builder.close()
 
 
 def test_sqlite_key_prefixes_isolate_capacity_in_one_database(
