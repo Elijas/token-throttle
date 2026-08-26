@@ -124,6 +124,10 @@ if TYPE_CHECKING:
         SyncRedisBackendBuilder,
     )
     from token_throttle._limiter_backends._redis._sync_bucket import SyncRedisBucket
+    from token_throttle._limiter_backends._sqlite._backend import (
+        SqliteBackend,
+        SqliteBackendBuilder,
+    )
     from token_throttle._limiter_backends._sqlite._sync_backend import (
         SyncSqliteBackend,
         SyncSqliteBackendBuilder,
@@ -157,6 +161,9 @@ _LAZY_IMPORTS: dict[str, str] = {
     # sync SQLite backend
     "SyncSqliteBackend": "token_throttle._limiter_backends._sqlite._sync_backend",
     "SyncSqliteBackendBuilder": "token_throttle._limiter_backends._sqlite._sync_backend",
+    # async SQLite backend
+    "SqliteBackend": "token_throttle._limiter_backends._sqlite._backend",
+    "SqliteBackendBuilder": "token_throttle._limiter_backends._sqlite._backend",
     # sync redis backend
     "SyncRedisBackend": "token_throttle._limiter_backends._redis._sync_backend",
     "SyncRedisBackendBuilder": "token_throttle._limiter_backends._redis._sync_backend",
@@ -262,6 +269,8 @@ __all__ = [
     "ReservationGroupDiagnostic",
     "RuntimeOverrideDiagnostic",
     "SecondsIn",
+    "SqliteBackend",
+    "SqliteBackendBuilder",
     "SyncBackendIntrospectable",
     "SyncMemoryBackend",
     "SyncMemoryBackendBuilder",
