@@ -925,13 +925,13 @@ def test_sync_sqlite_introspection_tracks_and_removes_waiters(tmp_path: Path) ->
     outcome: list[str] = []
 
     def wait() -> None:
-        backend.wait_for_capacity(usage, timeout=2)
+        backend.wait_for_capacity(usage, timeout=10)
         outcome.append("acquired")
 
     thread = threading.Thread(target=wait)
     thread.start()
     try:
-        deadline = time.monotonic() + 1
+        deadline = time.monotonic() + 5
         diagnostic = backend.introspect()
         while not diagnostic.waits and time.monotonic() < deadline:
             time.sleep(0.01)
@@ -940,13 +940,19 @@ def test_sync_sqlite_introspection_tracks_and_removes_waiters(tmp_path: Path) ->
         assert diagnostic.waits[0].state == "waiting_for_capacity"
         assert diagnostic.waits[0].blocked_buckets[0].metric == "requests"
         backend.refund_capacity(usage, frozen_usage({"requests": 0}))
-        thread.join(timeout=1)
+        # The waiter polls on a deficit-driven sleep capped at the 1s
+        # cross-worker interval, so its wake-up after the refund can land a
+        # full second later; give slow CI runners several poll periods.
+        acquired_deadline = time.monotonic() + 5
+        while not outcome and time.monotonic() < acquired_deadline:
+            time.sleep(0.02)
+        thread.join(timeout=5)
         assert outcome == ["acquired"]
         assert backend.introspect().waits == ()
     finally:
         if thread.is_alive():
             backend.refund_capacity(usage, frozen_usage({"requests": 0}))
-            thread.join(timeout=1)
+            thread.join(timeout=5)
         builder.close()
 
 
