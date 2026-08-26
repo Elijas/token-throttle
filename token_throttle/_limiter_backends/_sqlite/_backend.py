@@ -218,10 +218,15 @@ class SqliteBackendBuilder(RateLimiterBackendBuilderInterface):
             callbacks=callbacks,
             limit_config=cfg,
             sleep_interval=self._sleep_interval,
+            on_close=lambda: self._discard_backend(backend),
         )
         with self._lock:
             self._backends.append(backend)
         return backend
+
+    def _discard_backend(self, backend: SqliteBackend) -> None:
+        with self._lock:
+            self._backends = [item for item in self._backends if item is not backend]
 
     async def aclose(self) -> None:
         with self._lock:
@@ -243,7 +248,7 @@ class SqliteBackend(RateLimiterBackend):
     MAX_CROSS_WORKER_POLL: ClassVar[float] = 1.0
     WAIT_JITTER_RATIO: ClassVar[float] = 0.2
 
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         *,
         engine: SqliteEngine,
@@ -251,6 +256,7 @@ class SqliteBackend(RateLimiterBackend):
         limit_config: PerModelConfig,
         sleep_interval: float | None = None,
         callbacks: RateLimiterCallbacks | None = None,
+        on_close: Callable[[], None] | None = None,
     ) -> None:
         super().__init__()
         self._engine = engine
@@ -266,6 +272,7 @@ class SqliteBackend(RateLimiterBackend):
         self._diagnostic_waiters: dict[str, DiagnosticWaiterState] = {}
         self._close_lock = threading.Lock()
         self._closed = False
+        self._on_close = on_close
 
     def supports_metric_set_change(self) -> bool:
         return True
@@ -437,6 +444,7 @@ class SqliteBackend(RateLimiterBackend):
                 current_time=time.time(),
             )
         )
+        await self.aclose()
         return new_backend
 
     async def consume_capacity(
@@ -933,6 +941,8 @@ class SqliteBackend(RateLimiterBackend):
             raise
         finally:
             self._executor.shutdown(wait=True, cancel_futures=True)
+            if self._on_close is not None:
+                self._on_close()
 
     def close(self) -> None:
         if not self._begin_close():
@@ -941,3 +951,5 @@ class SqliteBackend(RateLimiterBackend):
             self._executor.submit(self._engine.close).result()
         finally:
             self._executor.shutdown(wait=True, cancel_futures=True)
+            if self._on_close is not None:
+                self._on_close()

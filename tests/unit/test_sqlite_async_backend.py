@@ -18,10 +18,12 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
-def _config(*, limit: float = 10.0, per_seconds: int = 10) -> PerModelConfig:
+def _config(
+    *, metric: str = "requests", limit: float = 10.0, per_seconds: int = 10
+) -> PerModelConfig:
     return PerModelConfig(
         quotas=UsageQuotas(
-            [Quota(metric="requests", limit=limit, per_seconds=per_seconds)]
+            [Quota(metric=metric, limit=limit, per_seconds=per_seconds)]
         ),
         model_family="async-sqlite-tests",
     )
@@ -115,3 +117,30 @@ async def test_async_sqlite_builder_aclose_is_idempotent(tmp_path: Path) -> None
     builder.build(_config())
     await builder.aclose()
     await builder.aclose()
+
+
+async def test_async_sqlite_metric_rebuilds_bound_worker_threads_and_registry(
+    tmp_path: Path,
+) -> None:
+    builder = SqliteBackendBuilder(
+        tmp_path / "async-rebuild-lifecycle.sqlite3",
+        key_prefix="rebuilds",
+    )
+    current = builder.build(_config(metric="requests"))
+    baseline_workers = sum(
+        thread.name.startswith("token-throttle-sqlite")
+        for thread in threading.enumerate()
+    )
+    try:
+        for index in range(10):
+            cfg = _config(metric="tokens" if index % 2 == 0 else "requests")
+            replacement = builder.build(cfg)
+            current = await current.prepare_reconfigured_backend(replacement, cfg)
+            assert len(builder._backends) == 1
+            live_workers = sum(
+                thread.name.startswith("token-throttle-sqlite")
+                for thread in threading.enumerate()
+            )
+            assert live_workers <= baseline_workers + 1
+    finally:
+        await builder.aclose()

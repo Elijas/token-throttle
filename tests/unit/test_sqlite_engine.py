@@ -39,12 +39,13 @@ from token_throttle._limiter_backends._sqlite._ttl import (
 def _config(
     model_family: str = "sqlite-tests",
     *,
+    metric: str = "requests",
     limit: float = 10.0,
     per_seconds: int = 10,
 ) -> PerModelConfig:
     return PerModelConfig(
         quotas=UsageQuotas(
-            [Quota(metric="requests", limit=limit, per_seconds=per_seconds)]
+            [Quota(metric=metric, limit=limit, per_seconds=per_seconds)]
         ),
         model_family=model_family,
     )
@@ -752,6 +753,29 @@ def test_sync_sqlite_introspection_tracks_and_removes_waiters(tmp_path: Path) ->
         if thread.is_alive():
             backend.refund_capacity(usage, frozen_usage({"requests": 0}))
             thread.join(timeout=1)
+        builder.close()
+
+
+def test_sync_sqlite_metric_rebuilds_close_and_deregister_old_engines(
+    tmp_path: Path,
+) -> None:
+    builder = SyncSqliteBackendBuilder(
+        tmp_path / "sync-rebuild-lifecycle.sqlite3",
+        key_prefix="rebuilds",
+    )
+    current = builder.build(_config(metric="requests"))
+    replaced_engines = []
+    try:
+        for index in range(10):
+            cfg = _config(metric="tokens" if index % 2 == 0 else "requests")
+            replacement = builder.build(cfg)
+            replaced_engines.append(current._engine)
+            current = current.prepare_reconfigured_backend(replacement, cfg)
+            assert len(builder._engines) == 1
+        for engine in replaced_engines:
+            with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
+                engine.inspect_counts()
+    finally:
         builder.close()
 
 

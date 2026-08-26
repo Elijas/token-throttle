@@ -61,6 +61,8 @@ from ._ttl import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from token_throttle._interfaces._models import BucketId, Capacities, FrozenUsage
 
 _logger = logging.getLogger("token_throttle")
@@ -282,12 +284,21 @@ class SyncSqliteBackendBuilder(SyncRateLimiterBackendBuilderInterface):
             raise
         with self._lock:
             self._engines.append(engine)
+
+        def deregister_engine() -> None:
+            self._discard_engine(engine)
+
         return SyncSqliteBackend(
             engine=engine,
             callbacks=callbacks,
             limit_config=cfg,
             sleep_interval=self._sleep_interval,
+            on_close=deregister_engine,
         )
+
+    def _discard_engine(self, engine: SqliteEngine) -> None:
+        with self._lock:
+            self._engines = [item for item in self._engines if item is not engine]
 
     def close(self) -> None:
         with self._lock:
@@ -309,6 +320,7 @@ class SyncSqliteBackend(SyncRateLimiterBackend):
         limit_config: PerModelConfig,
         sleep_interval: float | None = None,
         callbacks: SyncRateLimiterCallbacks | None = None,
+        on_close: Callable[[], None] | None = None,
     ) -> None:
         super().__init__()
         self._engine = engine
@@ -318,6 +330,9 @@ class SyncSqliteBackend(SyncRateLimiterBackend):
         self._callbacks = callbacks
         self._diagnostic_waiters: dict[str, DiagnosticWaiterState] = {}
         self._diagnostic_lock = threading.Lock()
+        self._close_lock = threading.Lock()
+        self._closed = False
+        self._on_close = on_close
         validated_sleep = validate_sleep_interval(sleep_interval)
         self._sleep_interval = (
             self.DEFAULT_SLEEP_INTERVAL if validated_sleep is None else validated_sleep
@@ -420,7 +435,19 @@ class SyncSqliteBackend(SyncRateLimiterBackend):
             frozenset(old_ids - new_ids) | changed_ids,
             current_time=time.time(),
         )
+        self.close()
         return new_backend
+
+    def close(self) -> None:
+        with self._close_lock:
+            if self._closed:
+                return
+            self._closed = True
+        try:
+            self._engine.close()
+        finally:
+            if self._on_close is not None:
+                self._on_close()
 
     def consume_capacity(
         self,

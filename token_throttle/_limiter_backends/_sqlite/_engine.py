@@ -197,6 +197,7 @@ class SqliteEngine:
         self._busy_timeout_ms = busy_timeout_ms
         self._prune_batch_size = prune_batch_size
         self._lock = threading.RLock()
+        self._closed = False
         try:
             self._connection = sqlite3.connect(
                 db_path,
@@ -232,6 +233,9 @@ class SqliteEngine:
 
     def close(self) -> None:
         with self._lock:
+            if self._closed:
+                return
+            self._closed = True
             self._connection.close()
 
     def _configure_connection(self, busy_timeout_ms: int) -> None:
