@@ -124,6 +124,10 @@ if TYPE_CHECKING:
         SyncRedisBackendBuilder,
     )
     from token_throttle._limiter_backends._redis._sync_bucket import SyncRedisBucket
+    from token_throttle._limiter_backends._sqlite._sync_backend import (
+        SyncSqliteBackend,
+        SyncSqliteBackendBuilder,
+    )
 
     _STATIC_LAZY_EXPORTS = (
         LOCK_TIMEOUT_SECONDS,
@@ -150,6 +154,9 @@ _LAZY_IMPORTS: dict[str, str] = {
     # sync memory backend
     "SyncMemoryBackend": "token_throttle._limiter_backends._memory._sync_backend",
     "SyncMemoryBackendBuilder": "token_throttle._limiter_backends._memory._sync_backend",
+    # sync SQLite backend
+    "SyncSqliteBackend": "token_throttle._limiter_backends._sqlite._sync_backend",
+    "SyncSqliteBackendBuilder": "token_throttle._limiter_backends._sqlite._sync_backend",
     # sync redis backend
     "SyncRedisBackend": "token_throttle._limiter_backends._redis._sync_backend",
     "SyncRedisBackendBuilder": "token_throttle._limiter_backends._redis._sync_backend",
@@ -268,6 +275,8 @@ __all__ = [
     "SyncRateLimiterBackend",
     "SyncRateLimiterBackendBuilderInterface",
     "SyncRateLimiterCallbacks",
+    "SyncSqliteBackend",
+    "SyncSqliteBackendBuilder",
     "UnknownReservationError",
     "Usage",
     "UsageCounter",
