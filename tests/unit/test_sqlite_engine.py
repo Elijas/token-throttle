@@ -604,9 +604,12 @@ def test_sqlite_apply_configured_max_clears_override_and_anchors_state(
 
 def test_sqlite_repairs_far_future_last_checked_on_failed_attempt(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     engine = _engine(tmp_path / "future-clock.sqlite3", bucket_ttl_seconds=10)
     try:
+        monkeypatch.setattr(capacity_module, "_backward_clock_warned", False)
+        monkeypatch.setattr(capacity_module, "_backward_clock_last_warning_at", None)
         engine._connection.execute(
             "UPDATE buckets SET capacity = 0, last_checked = 1000, updated_at = 1000"
         )

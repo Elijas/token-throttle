@@ -287,6 +287,7 @@ class SqliteBackend(RateLimiterBackend):
         while not future.done():
             try:
                 await asyncio.shield(future)
+            # ast-guard: skip — outcome observer; callers own operation cleanup
             except asyncio.CancelledError:
                 continue
             except Exception:  # noqa: BLE001
@@ -297,7 +298,7 @@ class SqliteBackend(RateLimiterBackend):
         future = self._submit(callable_)
         try:
             return await asyncio.shield(future)
-        except asyncio.CancelledError:
+        except BaseException:
             await self._wait_for_future_while_cancelled(future)
             raise
 
@@ -324,7 +325,7 @@ class SqliteBackend(RateLimiterBackend):
         )
         try:
             return await asyncio.shield(future)
-        except asyncio.CancelledError:
+        except BaseException:
             settled_successfully = await self._wait_for_future_while_cancelled(future)
             if settled_successfully:
                 attempt = future.result()
@@ -340,8 +341,9 @@ class SqliteBackend(RateLimiterBackend):
                     )
                     cleanup_ok = await self._wait_for_future_while_cancelled(cleanup)
                     if not cleanup_ok and cleanup.done() and not cleanup.cancelled():
-                        exc = cleanup.exception()
-                        if exc is not None:
+                        try:
+                            cleanup.result()
+                        except BaseException as exc:  # noqa: BLE001
                             _log_cancellation_refund_failure(
                                 exc,
                                 reservation_id=reservation_id,
@@ -926,7 +928,7 @@ class SqliteBackend(RateLimiterBackend):
         future = self._submit(self._engine.close)
         try:
             await asyncio.shield(future)
-        except asyncio.CancelledError:
+        except BaseException:
             await self._wait_for_future_while_cancelled(future)
             raise
         finally:
