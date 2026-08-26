@@ -65,7 +65,8 @@ def test_sqlite_try_acquire_returns_promptly_while_writer_holds_lock(
             terminate_children(children)
 
     prompt_bound = scaled(1)
-    assert all(
-        result["outcome"] in {"acquired", "TimeoutError"} for result in results
-    ), results
+    # The holder's write lock is confirmed held (write_locked event), so a probe
+    # that "acquired" would mean broken setup passing silently; only a prompt
+    # TimeoutError proves the try-acquire contract under contention.
+    assert all(result["outcome"] == "TimeoutError" for result in results), results
     assert all(float(result["elapsed"]) < prompt_bound for result in results), results
