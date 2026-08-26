@@ -914,6 +914,26 @@ def test_sync_sqlite_limiter_reports_first_class_health_and_local_estimates(
         assert refunded_health.refund_tombstone_count == 1
 
 
+def test_sync_sqlite_unknown_reservation_refund_releases_in_flight_count(
+    tmp_path: Path,
+) -> None:
+    """A fail-closed refund must still drop the reservation, as Redis does."""
+    db_path = tmp_path / "unknown-refund-in-flight.sqlite3"
+    builder = SyncSqliteBackendBuilder(db_path, key_prefix="unknown-refund")
+    with SyncRateLimiter(_config(), backend=builder) as limiter:
+        reservation = limiter.acquire_capacity({"requests": 1}, model="sqlite-model")
+        assert limiter.snapshot_state()["in_flight_reservations"] == 1
+
+        # Drop the acquire marker the way TTL expiry would.
+        with sqlite3.connect(db_path) as connection:
+            connection.execute("DELETE FROM acquire_markers")
+
+        with pytest.raises(UnknownReservationError):
+            limiter.refund_capacity({"requests": 1}, reservation)
+
+        assert limiter.snapshot_state()["in_flight_reservations"] == 0
+
+
 def test_sync_sqlite_introspection_tracks_and_removes_waiters(tmp_path: Path) -> None:
     builder = SyncSqliteBackendBuilder(
         tmp_path / "waiter-introspection.sqlite3",
