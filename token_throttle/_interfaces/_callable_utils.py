@@ -26,7 +26,7 @@ def suppress_current_task_cancellation() -> None:
     ---------------------------------
     ``consume_capacity`` / ``record_usage`` record work that has *already
     happened* (tokens the provider actually billed, requests already sent).
-    Once the Redis write has landed or the in-memory state has mutated, the
+    Once the backend write has landed or the in-memory state has mutated, the
     recorded consumption is the correct reading of the speedometer. If a
     ``CancelledError`` then arrives while callbacks fire or while we
     observe the shielded write, refunding would roll back a measurement
