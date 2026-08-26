@@ -139,7 +139,10 @@ def test_killed_reservation_recovers_only_by_refill(shared_backend_case) -> None
     replay_spec = LimiterSpec(
         limit=limit,
         per_seconds=per_seconds,
-        max_reservation_lifetime_seconds=5.0 * timing_scale(),
+        # The acquiring child alone controls the short marker TTL. Give replay
+        # children a much wider public-API lifetime so slow process startup
+        # cannot reject by age before Redis gets to report the missing marker.
+        max_reservation_lifetime_seconds=30.0 * timing_scale(),
     )
     holder = spawn_child(
         "hold_until_killed",

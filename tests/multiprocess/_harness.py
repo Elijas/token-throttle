@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import math
 import multiprocessing
 import os
 import threading
@@ -68,11 +69,11 @@ def timing_scale() -> float:
         scale = float(raw)
     except ValueError as exc:
         raise ValueError(
-            "TOKEN_THROTTLE_MULTIPROCESS_TIMING_SCALE must be a positive number"
+            "TOKEN_THROTTLE_MULTIPROCESS_TIMING_SCALE must be a finite number >= 1"
         ) from exc
-    if scale <= 0:
+    if not math.isfinite(scale) or scale < 1:
         raise ValueError(
-            "TOKEN_THROTTLE_MULTIPROCESS_TIMING_SCALE must be a positive number"
+            "TOKEN_THROTTLE_MULTIPROCESS_TIMING_SCALE must be a finite number >= 1"
         )
     return scale
 
