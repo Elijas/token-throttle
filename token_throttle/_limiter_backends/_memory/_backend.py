@@ -786,7 +786,7 @@ class MemoryBackend(RateLimiterBackend):
             refund_bucket_ids,
             backend_bucket_ids,
         )
-        if not refund_bucket_ids:
+        if not refund_bucket_ids and reservation_id is None:
             return True
         # Calculate refund amounts per metric
         refund_usage_: dict[str, float] = {}
@@ -849,6 +849,11 @@ class MemoryBackend(RateLimiterBackend):
                     reservation_id=reservation_id,
                     model_family=self._limit_config.get_model_family(),
                 )
+            if not refund_bucket_ids:
+                assert reservation_id is not None  # noqa: S101
+                self._acquired_reservation_ids.remove(reservation_id)
+                self._remember_refunded_reservation_id(reservation_id)
+                return True
             current_time = time.time()
             prerefund_capacities, fresh_start_buckets = self._get_capacities(
                 current_time,
