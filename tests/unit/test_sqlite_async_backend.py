@@ -10,8 +10,10 @@ from token_throttle import (
     DuplicateRefundError,
     PerModelConfig,
     Quota,
+    RateLimiter,
     RateLimiterCallbacks,
     SqliteBackendBuilder,
+    SqliteBackendHealthDiagnostic,
     UsageQuotas,
     frozen_usage,
 )
@@ -104,7 +106,8 @@ async def test_async_sqlite_cancelled_committed_acquire_is_refunded(
             await task
 
         diagnostic = await backend.introspect()
-        assert any("acquire_markers=0" in issue.message for issue in diagnostic.issues)
+        assert diagnostic.sqlite_health is not None
+        assert diagnostic.sqlite_health.acquire_marker_count == 0
         assert await backend.await_for_capacity(usage, timeout=0) is not None
     finally:
         release_result.set()
@@ -382,6 +385,45 @@ async def test_async_sqlite_waiter_is_visible_before_wait_callback(
         assert seen_waiter_keys != ["visible-reservation"]
     finally:
         await builder.aclose()
+
+
+async def test_async_sqlite_limiter_reports_first_class_health_and_local_estimates(
+    tmp_path: Path,
+) -> None:
+    builder = SqliteBackendBuilder(
+        tmp_path / "limiter-diagnostics.sqlite3",
+        key_prefix="limiter-diagnostics",
+    )
+    async with RateLimiter(_config(), backend=builder) as limiter:
+        reservation = await limiter.acquire_capacity(
+            {"requests": 1},
+            model="sqlite-model",
+        )
+
+        assert limiter.snapshot_state() == {
+            "in_flight_reservations": 1,
+            "model_families": 1,
+            "backend_type": "sqlite",
+            "marker_count_estimate": 1,
+            "refund_dedup_count_estimate": 0,
+        }
+        diagnostic = await limiter.diagnose()
+        assert diagnostic.backend_type == "sqlite"
+        assert diagnostic.backend_health.sqlite == SqliteBackendHealthDiagnostic(
+            model_family_count=1,
+            bucket_count=1,
+            acquire_marker_count=1,
+            refund_tombstone_count=0,
+        )
+        assert diagnostic.backend_health.custom is None
+
+        await limiter.refund_capacity({"requests": 1}, reservation)
+        assert limiter.snapshot_state()["marker_count_estimate"] == 0
+        assert limiter.snapshot_state()["refund_dedup_count_estimate"] == 1
+        refunded_health = (await limiter.diagnose()).backend_health.sqlite
+        assert refunded_health is not None
+        assert refunded_health.acquire_marker_count == 0
+        assert refunded_health.refund_tombstone_count == 1
 
 
 async def test_async_sqlite_builder_aclose_is_idempotent(tmp_path: Path) -> None:

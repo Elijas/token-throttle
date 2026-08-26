@@ -17,7 +17,7 @@ from token_throttle._interfaces._models import (  # noqa: TC001
     ReservationAuthoritySnapshot,
 )
 
-DiagnosticBackendType = Literal["memory", "redis", "custom", "unknown"]
+DiagnosticBackendType = Literal["memory", "redis", "sqlite", "custom", "unknown"]
 DiagnosticConsistency = Literal["eventually_consistent"]
 DiagnosticIssueSeverity = Literal["info", "warning", "error"]
 DiagnosticBucketStatus = Literal[
@@ -47,7 +47,8 @@ class DiagnosticIssue(StrictDTO):
     component: str = Field(
         description=(
             "Component that produced the issue, for example 'limiter', "
-            "'memory_backend', 'redis_backend', or 'custom_backend'."
+            "'memory_backend', 'redis_backend', 'sqlite_backend', or "
+            "'custom_backend'."
         )
     )
     message: str = Field(
@@ -330,6 +331,19 @@ class RedisBackendHealthDiagnostic(StrictDTO):
     )
 
 
+class SqliteBackendHealthDiagnostic(StrictDTO):
+    model_family_count: int = Field(
+        description="Known model families using SQLite backends."
+    )
+    bucket_count: int = Field(description="Known SQLite buckets for these families.")
+    acquire_marker_count: int = Field(
+        description="Exact acquire-marker row count in this SQLite namespace."
+    )
+    refund_tombstone_count: int = Field(
+        description="Exact refund-tombstone row count in this SQLite namespace."
+    )
+
+
 class CustomBackendHealthDiagnostic(StrictDTO):
     introspection_supported: bool = Field(
         description="Whether the custom backend supplied backend introspection."
@@ -343,6 +357,7 @@ class BackendHealthDiagnostic(StrictDTO):
     backend_type: DiagnosticBackendType = Field(description="Primary backend kind.")
     memory: MemoryBackendHealthDiagnostic | None = Field(default=None)
     redis: RedisBackendHealthDiagnostic | None = Field(default=None)
+    sqlite: SqliteBackendHealthDiagnostic | None = Field(default=None)
     custom: CustomBackendHealthDiagnostic | None = Field(default=None)
 
 
@@ -408,6 +423,7 @@ class BackendIntrospectionDiagnostic(StrictDTO):
     )
     memory_health: MemoryBackendHealthDiagnostic | None = Field(default=None)
     redis_health: RedisBackendHealthDiagnostic | None = Field(default=None)
+    sqlite_health: SqliteBackendHealthDiagnostic | None = Field(default=None)
     issues: tuple[DiagnosticIssue, ...] = Field(default=())
 
 
@@ -932,10 +948,12 @@ def build_backend_health(
 ) -> BackendHealthDiagnostic:
     memory_health = _aggregate_memory_health(backend_results)
     redis_health = _aggregate_redis_health(snapshot, backend_results)
+    sqlite_health = _aggregate_sqlite_health(backend_results)
     custom_health = None
     if unsupported_backend_class_names or snapshot.backend_type not in {
         "memory",
         "redis",
+        "sqlite",
     }:
         custom_health = CustomBackendHealthDiagnostic(
             introspection_supported=not unsupported_backend_class_names,
@@ -950,6 +968,7 @@ def build_backend_health(
         backend_type=snapshot.backend_type,
         memory=memory_health,
         redis=redis_health,
+        sqlite=sqlite_health,
         custom=custom_health,
     )
 
@@ -998,6 +1017,24 @@ def _aggregate_redis_health(
         ),
         local_marker_count_estimate=marker_estimate,
         local_refund_dedup_count_estimate=snapshot.committed_refund_dedup_count,
+    )
+
+
+def _aggregate_sqlite_health(
+    backend_results: list[BackendIntrospectionDiagnostic],
+) -> SqliteBackendHealthDiagnostic | None:
+    healths = [
+        result.sqlite_health for result in backend_results if result.sqlite_health
+    ]
+    if not healths:
+        return None
+    # Each per-family backend reads the same database namespace, so durable row
+    # counts repeat across results rather than partitioning by model family.
+    return SqliteBackendHealthDiagnostic(
+        model_family_count=sum(health.model_family_count for health in healths),
+        bucket_count=sum(health.bucket_count for health in healths),
+        acquire_marker_count=max(health.acquire_marker_count for health in healths),
+        refund_tombstone_count=max(health.refund_tombstone_count for health in healths),
     )
 
 
@@ -1061,7 +1098,7 @@ def build_rate_limiter_diagnostic(
 
 
 def backend_type_from_name(value: object) -> DiagnosticBackendType:
-    if value in {"memory", "redis", "custom", "unknown"}:
+    if value in {"memory", "redis", "sqlite", "custom", "unknown"}:
         return cast("DiagnosticBackendType", value)
     return "unknown"
 
@@ -1072,6 +1109,8 @@ def backend_type_for_object(value: object) -> DiagnosticBackendType:
         return "memory"
     if "._redis." in module:
         return "redis"
+    if "._sqlite." in module:
+        return "sqlite"
     if value is None:
         return "unknown"
     return "custom"

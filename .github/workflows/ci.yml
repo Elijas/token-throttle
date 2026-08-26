@@ -99,7 +99,9 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - run: uv sync --all-extras --group dev
-      - run: uv run pytest tests/integration -v --redis-url redis://localhost:6379
+      - run: uv run pytest tests/integration tests/multiprocess -v --redis-url redis://localhost:6379/13
+        env:
+          TOKEN_THROTTLE_MULTIPROCESS_TIMING_SCALE: "2"
 
   test-min-deps:
     runs-on: ubuntu-latest
@@ -146,7 +148,9 @@ jobs:
         with:
           python-version: "3.13"
       - run: uv sync --all-extras --group dev
-      - run: uv run pytest --cov --cov-report=xml --junitxml=junit.xml -o junit_family=legacy --redis-url redis://localhost:6379
+      - run: uv run pytest --cov --cov-report=xml --junitxml=junit.xml -o junit_family=legacy --redis-url redis://localhost:6379/13
+        env:
+          TOKEN_THROTTLE_MULTIPROCESS_TIMING_SCALE: "2"
       - uses: codecov/codecov-action@e79a6962e0d4c0c17b229090214935d2e33f8354 # v6
         with:
           files: coverage.xml

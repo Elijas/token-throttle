@@ -18,6 +18,8 @@ from token_throttle import (
     DuplicateRefundError,
     PerModelConfig,
     Quota,
+    SqliteBackendHealthDiagnostic,
+    SyncRateLimiter,
     SyncSqliteBackendBuilder,
     UnknownReservationError,
     UsageQuotas,
@@ -851,7 +853,7 @@ def test_sync_sqlite_introspection_reports_live_state_and_durable_counts(
         )
         backend.set_max_capacity("requests", 10, 15.0)
         diagnostic = backend.introspect()
-        assert diagnostic.backend_type == "custom"
+        assert diagnostic.backend_type == "sqlite"
         assert len(diagnostic.buckets) == 1
         bucket = diagnostic.buckets[0]
         assert bucket.metric == "requests"
@@ -861,9 +863,54 @@ def test_sync_sqlite_introspection_reports_live_state_and_durable_counts(
         assert bucket.current_capacity is not None
         assert bucket.current_capacity < 10.0
         assert diagnostic.waits == ()
-        assert any("acquire_markers=1" in issue.message for issue in diagnostic.issues)
+        assert diagnostic.sqlite_health == SqliteBackendHealthDiagnostic(
+            model_family_count=1,
+            bucket_count=1,
+            acquire_marker_count=1,
+            refund_tombstone_count=0,
+        )
+        assert diagnostic.issues == ()
     finally:
         builder.close()
+
+
+def test_sync_sqlite_limiter_reports_first_class_health_and_local_estimates(
+    tmp_path: Path,
+) -> None:
+    builder = SyncSqliteBackendBuilder(
+        tmp_path / "limiter-diagnostics.sqlite3",
+        key_prefix="limiter-diagnostics",
+    )
+    with SyncRateLimiter(_config(), backend=builder) as limiter:
+        reservation = limiter.acquire_capacity(
+            {"requests": 1},
+            model="sqlite-model",
+        )
+
+        assert limiter.snapshot_state() == {
+            "in_flight_reservations": 1,
+            "model_families": 1,
+            "backend_type": "sqlite",
+            "marker_count_estimate": 1,
+            "refund_dedup_count_estimate": 0,
+        }
+        diagnostic = limiter.diagnose()
+        assert diagnostic.backend_type == "sqlite"
+        assert diagnostic.backend_health.sqlite == SqliteBackendHealthDiagnostic(
+            model_family_count=1,
+            bucket_count=1,
+            acquire_marker_count=1,
+            refund_tombstone_count=0,
+        )
+        assert diagnostic.backend_health.custom is None
+
+        limiter.refund_capacity({"requests": 1}, reservation)
+        assert limiter.snapshot_state()["marker_count_estimate"] == 0
+        assert limiter.snapshot_state()["refund_dedup_count_estimate"] == 1
+        refunded_health = limiter.diagnose().backend_health.sqlite
+        assert refunded_health is not None
+        assert refunded_health.acquire_marker_count == 0
+        assert refunded_health.refund_tombstone_count == 1
 
 
 def test_sync_sqlite_introspection_tracks_and_removes_waiters(tmp_path: Path) -> None:

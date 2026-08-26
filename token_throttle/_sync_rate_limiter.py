@@ -131,6 +131,8 @@ def _backend_type_name(backend: object) -> str:
     backend_module = type(backend).__module__
     if "._redis." in backend_module:
         return "redis"
+    if "._sqlite." in backend_module:
+        return "sqlite"
     if "._memory." in backend_module:
         return "memory"
     return "custom"
@@ -763,9 +765,9 @@ class SyncRateLimiter:
         """
         Return a redacted point-in-time limiter health snapshot.
 
-        The snapshot intentionally omits backend connection strings and Redis
-        key prefixes. Redis marker/refund counts are local best-effort
-        estimates derived from limiter bookkeeping, not a cross-process SCAN.
+        The snapshot intentionally omits backend connection strings and key
+        prefixes. Durable marker/refund counts are local best-effort estimates
+        derived from limiter bookkeeping, not a cross-process datastore scan.
         """
         in_flight_reservations = len(
             self._in_flight_reservation_ids | self._pending_acquire_reservations
@@ -775,7 +777,7 @@ class SyncRateLimiter:
             "model_families": len(self._model_family_to_backend),
             "backend_type": _backend_type_name(self._backend),
         }
-        if state["backend_type"] == "redis":
+        if state["backend_type"] in {"redis", "sqlite"}:
             state["marker_count_estimate"] = in_flight_reservations
             state["refund_dedup_count_estimate"] = sum(
                 1

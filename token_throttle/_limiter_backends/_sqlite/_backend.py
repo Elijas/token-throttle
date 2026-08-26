@@ -18,8 +18,8 @@ from token_throttle._capacity import _validate_max_capacity_finite_positive
 from token_throttle._diagnostic import (
     BackendBucketLimit,
     BackendIntrospectionDiagnostic,
-    DiagnosticIssue,
     DiagnosticWaiterState,
+    SqliteBackendHealthDiagnostic,
     backend_type_for_object,
     make_bucket_diagnostic,
     wait_bucket_diagnostics,
@@ -382,16 +382,6 @@ class SqliteBackend(RateLimiterBackend):
                 key=lambda item: (item.wait_started_monotonic, item.waiter_id),
             )
         )
-        issue = DiagnosticIssue(
-            severity="info",
-            component="sqlite_backend",
-            message=(
-                "durable rows: "
-                f"acquire_markers={counts['acquire_markers']}, "
-                f"refund_tombstones={counts['refund_tombstones']}"
-            ),
-            model_family=self._engine.model_family,
-        )
         return BackendIntrospectionDiagnostic(
             model_family=self._engine.model_family,
             backend_type=backend_type_for_object(self),
@@ -400,7 +390,13 @@ class SqliteBackend(RateLimiterBackend):
             waits=waiters,
             memory_health=None,
             redis_health=None,
-            issues=(issue,),
+            sqlite_health=SqliteBackendHealthDiagnostic(
+                model_family_count=1,
+                bucket_count=len(buckets),
+                acquire_marker_count=counts["acquire_markers"],
+                refund_tombstone_count=counts["refund_tombstones"],
+            ),
+            issues=(),
         )
 
     async def prepare_reconfigured_backend(
