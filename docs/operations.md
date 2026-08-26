@@ -195,7 +195,13 @@ Redis refunds also write a cross-process idempotency key:
 builders or Redis OpenAI factories. Memory backends keep only process-local
 refund dedup state and cannot safely refund reservations after a cold restart.
 
-## Per-bucket locking and contention
+## Shared-storage locking and contention
+
+Redis serializes each bucket with a distributed lock. SQLite instead serializes
+transactions through the database-wide writer lock and uses
+`busy_timeout_ms` as the analogue of Redis's
+`lock_blocking_timeout_seconds`. Both backends keep multi-bucket writes atomic;
+their tuning and throughput ceilings differ.
 
 The Redis backend serializes every mutation of a given bucket through a
 short-lived per-bucket lock, so concurrent workers never race on the same

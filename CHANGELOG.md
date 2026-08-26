@@ -7,6 +7,8 @@ changes and upgrade steps are recorded in its entry below.
 
 - Adds stdlib-only synchronous and asynchronous SQLite backends for persistent,
   multi-process rate-limit coordination on one host without a separate server.
+  The four new public exports are `SqliteBackend`, `SqliteBackendBuilder`,
+  `SyncSqliteBackend`, and `SyncSqliteBackendBuilder`.
   Use memory for one process, SQLite for multiple processes on one local
   filesystem, and Redis when a budget must span machines. SQLite state uses WAL
   transactions, durable acquire/refund bookkeeping, expiring runtime

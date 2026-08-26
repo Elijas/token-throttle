@@ -13,24 +13,26 @@ lifecycle event fields, callback timeouts, and the full PII surface.
 Every `RateLimiter` and `SyncRateLimiter` logs the `token_throttle` package
 version at `INFO` during initialization. Existing callback loggers use the
 `token_throttle` logger by default through `create_logging_callbacks()` and
-`create_sync_logging_callbacks()`. Redis internals also emit structured
+`create_sync_logging_callbacks()`. Redis and SQLite internals also emit structured
 `DEBUG` records under:
 
 - `token_throttle.acquire` for acquire marker reads/writes/deletes.
 - `token_throttle.refund` for refund marker GET/DEL and refund-dedup writes.
-- `token_throttle.lock` for Redis lock acquire, release, and extension events.
+- `token_throttle.lock` for Redis lock acquire, release, and extension events;
+  SQLite has no event family here because it uses the database writer lock.
 
-Redis debug records include a `token_throttle_event` logging attribute with
+Redis and SQLite debug records include a `token_throttle_event` logging attribute with
 `event_type`, `reservation_id`, `bucket_id`, and operation-specific fields. For
 example, a stdlib handler can read `record.token_throttle_event` and turn it
 into counters or spans.
 
 ## Health snapshot
 
-For Redis backends, marker and refund-dedup counts from `snapshot_state()` are
-best-effort local estimates from limiter bookkeeping, not a cross-process Redis
-inventory. The snapshot intentionally omits Redis URLs, credentials, and Redis
-key prefixes.
+For Redis and SQLite backends, `marker_count_estimate` and
+`refund_dedup_count_estimate` from `snapshot_state()` are best-effort local
+estimates from limiter bookkeeping, not a cross-process datastore inventory.
+The snapshot intentionally omits Redis URLs, credentials, SQLite paths, and
+backend key prefixes.
 
 ## Diagnostics (`diagnose()`)
 
@@ -44,9 +46,10 @@ It reports, per model family and bucket: current and effective capacity, the
 configured limit, and any active runtime override with its source (`limiter`,
 `backend`, or `both`); in-flight/pending/delivery-cleanup reservation counts
 grouped by family and metric; current acquire waiters and each one's primary
-capacity bottleneck; backend health for memory, Redis, and custom backends;
-and a severity-sorted `issues` list covering best-effort degradation or
-introspection failures.
+capacity bottleneck; backend health for memory, Redis, SQLite, and custom
+backends; and a severity-sorted `issues` list covering best-effort degradation
+or introspection failures. SQLite health includes exact namespace-scoped
+acquire-marker and refund-tombstone row counts.
 
 Reach for `diagnose()` when investigating a stuck or slow acquire, unexplained
 capacity drift, a suspected override mismatch between limiter and backend
@@ -128,13 +131,13 @@ threads and never block interpreter exit.
 
 - User-controlled fields: request `model`, lifecycle `model_alias`, optional
   `request_id`, custom usage metric names, `model_family` when supplied by your
-  config, and Redis `key_prefix` configured by the application.
+  config, and backend `key_prefix` configured by the application.
 - Potentially sensitive fields: `request_id` if it contains customer or trace
   identifiers; `model_alias` and `model_family` if your naming scheme embeds
   tenant, deployment, or account data; usage values if request size is
   sensitive in your environment.
 - Not logged or returned by `snapshot_state()`: Redis URLs, credentials, Redis
-  client objects, and plaintext key prefixes.
+  client objects, SQLite database paths, and plaintext key prefixes.
 - Never included by token-throttle observability surfaces: prompt text,
   messages, responses, API keys, or request payload bodies. A custom
   `usage_counter` or your own callback code may log those separately, so audit

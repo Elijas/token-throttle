@@ -34,10 +34,10 @@ filesystem:
   same `key_prefix`. The builder resolves the path with `realpath`; prefer one
   absolute path rather than relying on different processes' working
   directories.
-- Do not place the database on NFS, SMB, a distributed filesystem, or any
-  other network-mounted filesystem. SQLite WAL locking is not the contract for
-  cross-host coordination, and token-throttle does not try to detect network
-  mounts.
+- Do not place the database on NFS, SMB, overlayfs, a distributed filesystem,
+  or any other network/overlay-mounted filesystem. Those filesystems are
+  unsupported for this backend and are the most likely way to break its WAL
+  locking assumptions. token-throttle does not try to detect the mount type.
 - Containers work only when they run on the same host, share the same local
   volume, and share the host's clock. A container-local path that is not
   mounted into every cooperating container creates separate budgets.
@@ -107,6 +107,14 @@ still enforced when a specific marker or tombstone is addressed.
 | `refund_dedup_ttl_seconds` | 604800 (7 days) | How long a completed refund remains recognizable as a duplicate. |
 | `max_reservation_lifetime_seconds` | Derived | Maximum age at which an acquire marker remains refundable. When omitted, it is just below half of the shorter bucket/refund TTL. |
 | `override_ttl_seconds` | `bucket_ttl_seconds` | Fixed lifetime of a shared `set_max_capacity()` override, measured from the call that writes it. Ordinary bucket activity does not extend it. |
+| `busy_timeout_ms` | 5000 | Maximum SQLite writer-lock wait for ordinary operations. A finite acquire deadline can reduce it, and a try-acquire uses zero. |
+| `prune_batch_size` | 256 | Maximum expired rows pruned from each durable table by one cleanup pass. |
+
+All three SQLite TTL options require a positive, finite integer number of
+seconds (at most `2**31 - 1`). `None` is not a supported "never expire" value,
+including for bucket or refund-dedup state. This release intentionally keeps
+all durable bookkeeping bounded; choose a sufficiently long finite TTL when
+you need a long idle or refund window.
 
 The builder enforces both safety inequalities:
 
@@ -183,6 +191,19 @@ If write-lock waits are common, tail latency matters, or traffic is growing
 beyond this envelope, move the shared budget to Redis. Do not split one logical
 budget across multiple SQLite files to gain throughput; that creates
 independent limits.
+
+## Observability
+
+For SQLite, `snapshot_state()` includes `marker_count_estimate` and
+`refund_dedup_count_estimate`. They are cheap, process-local estimates from the
+limiter's own bookkeeping, not database-wide counts. This keeps routine health
+polling free of SQLite I/O.
+
+Use `diagnose()` when you need backend state. Its first-class SQLite health
+section reports exact acquire-marker and refund-tombstone row counts for the
+database namespace, along with per-bucket capacity and active override data.
+Because `diagnose()` reads SQLite, it can wait up to `busy_timeout_ms` for a
+writer and can degrade to a warning if introspection cannot complete.
 
 ## Troubleshooting
 
