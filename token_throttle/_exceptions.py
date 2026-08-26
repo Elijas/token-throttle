@@ -95,24 +95,25 @@ class BackendConformanceError(Exception):
 
 class BackendLockContentionError(Exception):
     """
-    Raised when a backend cannot acquire (or loses) its internal per-bucket lock.
+    Raised when a backend cannot acquire or retain required mutation ownership.
 
-    The Redis backend serializes every bucket mutation through a short-lived
-    per-bucket lock. Two situations surface as this exception:
+    Backends use different coordination mechanisms: Redis uses short-lived
+    per-bucket locks, while SQLite uses database write locks. Two broad
+    situations surface as this exception:
 
     * **Acquisition starvation** — the lock could not be acquired within the
-      configured ``lock_blocking_timeout_seconds`` because other workers held
-      it for the whole window. Retry, raise ``lock_blocking_timeout_seconds``,
-      or reduce contention (fewer concurrent callers, smaller bucket fan-out).
+      configured wait because other workers held it for the whole window.
+      Retry, raise the backend's contention timeout
+      (``lock_blocking_timeout_seconds`` for Redis or ``busy_timeout_ms`` for
+      SQLite), or reduce concurrency.
     * **Mid-operation loss** — the lock expired or was stolen by another worker
       between the read and the write, so the in-progress write was aborted to
       avoid clobbering another worker's state. The operation made no change and
       is safe to retry.
 
-    ``wait_for_capacity`` / ``await_for_capacity`` with no caller timeout absorb
-    this internally and keep waiting, so callers normally see it only from
-    ``consume_capacity``, ``refund_capacity``, ``set_max_capacity``, and
-    reconfiguration. It always chains the underlying cause via ``__cause__``.
+    Waiting capacity operations may absorb this internally and keep polling.
+    Non-waiting mutations surface it after their configured contention window.
+    It always chains the underlying cause via ``__cause__``.
     """
 
     reason = "backend_lock_contention"

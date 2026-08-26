@@ -210,16 +210,16 @@ asyncio.run(main())
 
 **The solution:** Reserve before you call, refund after. Actual usage is tracked, not estimated maximums.
 
-Why not a semaphore or a generic rate limiter? Those cap request count or assume a fixed worst-case token cost and never return unused capacity, so you either overprovision (crawl at half throughput) or underprovision (429s). token-throttle reserves your declared maximum, then refunds the delta from actual usage — across multiple simultaneous resources (requests, tokens, input/output), coordinated across processes via Redis.
+Why not a semaphore or a generic rate limiter? Those cap request count or assume a fixed worst-case token cost and never return unused capacity, so you either overprovision (crawl at half throughput) or underprovision (429s). token-throttle reserves your declared maximum, then refunds the delta from actual usage — across multiple simultaneous resources (requests, tokens, input/output), coordinated across processes via SQLite on one host or Redis across machines.
 
 | Feature | Details |
 |---------|---------|
 | **Multi-resource limits** | Limit requests, tokens, input/output tokens — simultaneously, each with its own quota |
 | **Multiple time windows** | e.g., 1,000 req/min AND 10,000 req/day on the same resource |
 | **Reserve & refund** | Reserve max expected usage upfront, refund the difference after the call completes |
-| **Distributed** | Redis backend with atomic locks — safe across workers and processes |
+| **Shared budgets** | SQLite coordinates processes on one host; Redis coordinates services across machines |
 | **Per-model quotas** | Different limits per model via `model_family`; the built-in OpenAI helper auto-groups date-suffixed variants (e.g. gpt-4o-20241203 → gpt-4o) |
-| **Pluggable** | Bring your own backend (ships with Redis and in-memory). Sync and async APIs |
+| **Pluggable** | Bring your own backend (ships with memory, SQLite, and Redis). Sync and async APIs |
 | **Observability** | Callbacks for wait-start, wait-end, consume, refund, and missing-state events |
 
 ## How it works
@@ -305,18 +305,41 @@ See [docs/configuration.md](docs/configuration.md#per-model-configuration).
 
 ### Backends
 
+Choose the backend from the scope of the budget:
+
+1. **One process:** use memory. SQLite and Redis also work here; SQLite adds
+   persistence across ordinary process restarts.
+2. **Multiple processes on one host, with no server:** use SQLite with one
+   shared database path and key prefix.
+3. **Multiple machines:** use Redis with one shared deployment-scoped key
+   prefix.
+
+**SQLite needs no install extra or external service; it uses Python's stdlib
+`sqlite3`.** It is limited to one host and a local filesystem — never NFS or
+another network filesystem. See the [SQLite backend guide](docs/sqlite-backend.md)
+for its clock, persistence, TTL, contention, and crash contracts.
+
 ```python
 # (fragment — see Memory quickstart for standalone context)
-# Distributed (multiple workers/processes)
+# Multiple machines
 from token_throttle import RedisBackendBuilder
 backend = RedisBackendBuilder(redis_client, key_prefix="my-service-prod")
 
-# Single process (no Redis needed)
+# Multiple processes on one host; stdlib only
+from token_throttle import SqliteBackendBuilder
+backend = SqliteBackendBuilder(
+    "/var/lib/my-service/rate-limits.sqlite3",
+    key_prefix="my-service-prod",
+)
+
+# One process
 from token_throttle import MemoryBackendBuilder
 backend = MemoryBackendBuilder()
 ```
 
-Both backends are available in sync (`SyncRedisBackendBuilder`, `SyncMemoryBackendBuilder`) and async variants.
+All three backends have async builders shown above and sync variants:
+`SyncMemoryBackendBuilder`, `SyncSqliteBackendBuilder`, and
+`SyncRedisBackendBuilder`.
 
 Custom backends implement `RateLimiterBackend` or `SyncRateLimiterBackend`. See
 [docs/custom-backends.md](docs/custom-backends.md) for the protocol contract and
@@ -354,11 +377,13 @@ await limiter.set_max_capacity(
 )
 ```
 
-For Redis backends the new limit is written to Redis, so all processes
-sharing the same Redis see the change within ~1 second.
+For SQLite and Redis backends the new limit is written to shared storage, so
+cooperating processes see the change on their next backend operation (within
+about one second for a waiting SQLite process). SQLite overrides expire after
+`override_ttl_seconds` unless they are set again.
 
-Runtime-override semantics — Redis propagation, remove-and-readd behavior, and
-ordering against concurrent config rotations — are covered in
+Runtime-override semantics — cross-process propagation, expiration,
+remove-and-readd behavior, and ordering against config rotations — are covered in
 [docs/configuration.md](docs/configuration.md#dynamic-rate-limits).
 
 ### Timeout
@@ -480,6 +505,7 @@ are covered in [docs/operations.md](docs/operations.md#concurrency-model).
 
 - [docs/api.md](docs/api.md) — public constants and type aliases
 - [docs/configuration.md](docs/configuration.md) — per-model caps, unlimited configs, custom usage counters, dynamic limits
+- [docs/sqlite-backend.md](docs/sqlite-backend.md) — single-host persistence, scope, clock, TTL, contention, crash behavior, troubleshooting
 - [docs/operations.md](docs/operations.md) — reservation durability, concurrency model, Redis topology, multi-tenant isolation, capacity planning, application-facing errors
 - [docs/observability.md](docs/observability.md) — logging, lifecycle events, health snapshots, `diagnose()` diagnostics, PII surface
 - [docs/custom-backends.md](docs/custom-backends.md) — implement your own backend

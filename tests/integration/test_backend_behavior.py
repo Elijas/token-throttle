@@ -358,8 +358,14 @@ async def test_refill_capped_at_max_capacity(backend_builder):
     elapsed = time.monotonic() - start
     assert elapsed < 1.0
 
-    # But 1 more should require waiting (we just consumed 5 of 5).
-    start = time.monotonic()
+    # But 1 more should require waiting (we just consumed 5 of 5). The 0.2s
+    # refill window is timed from the drain's *commit*, which happens inside
+    # the call above; any anchor taken after that call subtracts the
+    # commit-to-return path (callback dispatch, instrumentation) from the
+    # window and can deflate the wait below the floor. Anchor before the
+    # drain call instead: the measured window then strictly contains the
+    # backend-enforced commit-to-grant interval, so client-side overhead can
+    # only inflate it.
     await backend.await_for_capacity(frozen_usage({"requests": 1}))
     elapsed = time.monotonic() - start
     assert elapsed >= 0.1

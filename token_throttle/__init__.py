@@ -16,6 +16,7 @@ from token_throttle._diagnostic import (
     RedisBackendHealthDiagnostic,
     ReservationGroupDiagnostic,
     RuntimeOverrideDiagnostic,
+    SqliteBackendHealthDiagnostic,
     WaitBucketDiagnostic,
     WaiterDiagnostic,
 )
@@ -124,6 +125,14 @@ if TYPE_CHECKING:
         SyncRedisBackendBuilder,
     )
     from token_throttle._limiter_backends._redis._sync_bucket import SyncRedisBucket
+    from token_throttle._limiter_backends._sqlite._backend import (
+        SqliteBackend,
+        SqliteBackendBuilder,
+    )
+    from token_throttle._limiter_backends._sqlite._sync_backend import (
+        SyncSqliteBackend,
+        SyncSqliteBackendBuilder,
+    )
 
     _STATIC_LAZY_EXPORTS = (
         LOCK_TIMEOUT_SECONDS,
@@ -150,6 +159,12 @@ _LAZY_IMPORTS: dict[str, str] = {
     # sync memory backend
     "SyncMemoryBackend": "token_throttle._limiter_backends._memory._sync_backend",
     "SyncMemoryBackendBuilder": "token_throttle._limiter_backends._memory._sync_backend",
+    # sync SQLite backend
+    "SyncSqliteBackend": "token_throttle._limiter_backends._sqlite._sync_backend",
+    "SyncSqliteBackendBuilder": "token_throttle._limiter_backends._sqlite._sync_backend",
+    # async SQLite backend
+    "SqliteBackend": "token_throttle._limiter_backends._sqlite._backend",
+    "SqliteBackendBuilder": "token_throttle._limiter_backends._sqlite._backend",
     # sync redis backend
     "SyncRedisBackend": "token_throttle._limiter_backends._redis._sync_backend",
     "SyncRedisBackendBuilder": "token_throttle._limiter_backends._redis._sync_backend",
@@ -255,6 +270,9 @@ __all__ = [
     "ReservationGroupDiagnostic",
     "RuntimeOverrideDiagnostic",
     "SecondsIn",
+    "SqliteBackend",
+    "SqliteBackendBuilder",
+    "SqliteBackendHealthDiagnostic",
     "SyncBackendIntrospectable",
     "SyncMemoryBackend",
     "SyncMemoryBackendBuilder",
@@ -268,6 +286,8 @@ __all__ = [
     "SyncRateLimiterBackend",
     "SyncRateLimiterBackendBuilderInterface",
     "SyncRateLimiterCallbacks",
+    "SyncSqliteBackend",
+    "SyncSqliteBackendBuilder",
     "UnknownReservationError",
     "Usage",
     "UsageCounter",

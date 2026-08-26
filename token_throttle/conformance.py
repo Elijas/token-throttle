@@ -1040,6 +1040,26 @@ class _AsyncRefundFailureBuilder(RateLimiterBackendBuilderInterface):
     def __getattr__(self, name: str) -> object:
         return getattr(self._builder, name)
 
+    def resolve_max_reservation_lifetime_seconds(
+        self,
+        value: float | None,
+    ) -> float | None:
+        resolver = getattr(
+            self._builder,
+            "resolve_max_reservation_lifetime_seconds",
+            None,
+        )
+        return resolver(value) if callable(resolver) else value
+
+    def validate_reservation_lifetime_seconds(self, value: float | None) -> None:
+        validator = getattr(
+            self._builder,
+            "validate_reservation_lifetime_seconds",
+            None,
+        )
+        if callable(validator):
+            validator(value)
+
     async def aclose(self) -> None:
         await self._builder.aclose()
 
@@ -1186,6 +1206,26 @@ class _SyncRefundFailureBuilder(SyncRateLimiterBackendBuilderInterface):
 
     def __getattr__(self, name: str) -> object:
         return getattr(self._builder, name)
+
+    def resolve_max_reservation_lifetime_seconds(
+        self,
+        value: float | None,
+    ) -> float | None:
+        resolver = getattr(
+            self._builder,
+            "resolve_max_reservation_lifetime_seconds",
+            None,
+        )
+        return resolver(value) if callable(resolver) else value
+
+    def validate_reservation_lifetime_seconds(self, value: float | None) -> None:
+        validator = getattr(
+            self._builder,
+            "validate_reservation_lifetime_seconds",
+            None,
+        )
+        if callable(validator):
+            validator(value)
 
     def close(self) -> None:
         self._builder.close()

@@ -16,6 +16,7 @@ MIN_MAX_CAPACITY = 1e-9
 _logger = logging.getLogger("token_throttle")
 _acquire_logger = logging.getLogger("token_throttle.acquire")
 _MEMORY_BUCKET_ID_PARTS = 4
+_SQLITE_BUCKET_ID_PARTS = 4
 _REDIS_BUCKET_ID_PARTS = 6
 
 
@@ -23,6 +24,8 @@ def _bucket_context_from_bucket_id(bucket_id: str) -> tuple[str, str]:
     """Best-effort extraction for memory and Redis bucket key formats."""
     parts = bucket_id.split(":")
     if len(parts) >= _MEMORY_BUCKET_ID_PARTS and parts[0] == "memory":
+        return parts[1], parts[2]
+    if len(parts) >= _SQLITE_BUCKET_ID_PARTS and parts[0] == "sqlite":
         return parts[1], parts[2]
     if (
         len(parts) >= _REDIS_BUCKET_ID_PARTS
