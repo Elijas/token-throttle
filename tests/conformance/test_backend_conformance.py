@@ -7,6 +7,7 @@ import pytest
 
 from token_throttle import (
     BackendConformanceError,
+    SyncSqliteBackendBuilder,
     conformance_test_for,
     sync_conformance_test_for,
 )
@@ -30,6 +31,16 @@ async def test_async_memory_backend_passes_public_conformance_suite() -> None:
 
 def test_sync_memory_backend_passes_public_conformance_suite() -> None:
     sync_conformance_test_for(SyncMemoryBackendBuilder(sleep_interval=0.01))
+
+
+def test_sync_sqlite_backend_passes_public_conformance_suite(tmp_path) -> None:
+    sync_conformance_test_for(
+        SyncSqliteBackendBuilder(
+            tmp_path / "conformance.sqlite3",
+            key_prefix="sync-sqlite-conformance",
+            sleep_interval=0.01,
+        )
+    )
 
 
 class _MarkerLiarAsyncBackend(RateLimiterBackend):
