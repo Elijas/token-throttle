@@ -358,10 +358,13 @@ async def test_refill_capped_at_max_capacity(backend_builder):
     elapsed = time.monotonic() - start
     assert elapsed < 1.0
 
-    # But 1 more should require waiting (we just consumed 5 of 5).
-    start = time.monotonic()
+    # But 1 more should require waiting (we just consumed 5 of 5). Refill
+    # accrues from the drain's commit, so anchor there: measuring only around
+    # the next call lets client-side overhead (coverage tracing, round trips)
+    # eat into the 0.2s refill window and deflate the wait below the floor.
+    drained_at = time.monotonic()
     await backend.await_for_capacity(frozen_usage({"requests": 1}))
-    elapsed = time.monotonic() - start
+    elapsed = time.monotonic() - drained_at
     assert elapsed >= 0.1
 
 
