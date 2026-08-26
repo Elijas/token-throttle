@@ -327,7 +327,7 @@ class SqliteEngine:
         fresh: list[BucketId] = []
         for spec in self._buckets:
             row = connection.execute(
-                "SELECT capacity, last_checked, max_capacity FROM buckets "
+                "SELECT capacity, last_checked, max_capacity, updated_at FROM buckets "
                 "WHERE key_prefix = ? AND model_family = ? AND metric = ? "
                 "AND per_seconds = ?",
                 (
@@ -337,6 +337,20 @@ class SqliteEngine:
                     spec.per_seconds,
                 ),
             ).fetchone()
+            if row is not None and float(row[3]) <= (
+                current_time - self._bucket_ttl_seconds
+            ):
+                connection.execute(
+                    "DELETE FROM buckets WHERE key_prefix = ? AND model_family = ? "
+                    "AND metric = ? AND per_seconds = ?",
+                    (
+                        self.key_prefix,
+                        self.model_family,
+                        spec.metric,
+                        spec.per_seconds,
+                    ),
+                )
+                row = None
             if row is None:
                 max_capacity = _validate_max_capacity_finite_positive(
                     spec.configured_max_capacity
@@ -447,18 +461,34 @@ class SqliteEngine:
         self,
         connection: sqlite3.Connection,
         reservation_id: str | None,
+        current_time: float,
     ) -> None:
         if reservation_id is None:
             return
         marker = connection.execute(
-            "SELECT 1 FROM acquire_markers WHERE key_prefix = ? AND reservation_id = ?",
-            (self.key_prefix, reservation_id),
-        ).fetchone()
-        tombstone = connection.execute(
-            "SELECT 1 FROM refund_tombstones WHERE key_prefix = ? "
+            "SELECT expires_at FROM acquire_markers WHERE key_prefix = ? "
             "AND reservation_id = ?",
             (self.key_prefix, reservation_id),
         ).fetchone()
+        tombstone = connection.execute(
+            "SELECT expires_at FROM refund_tombstones WHERE key_prefix = ? "
+            "AND reservation_id = ?",
+            (self.key_prefix, reservation_id),
+        ).fetchone()
+        if marker is not None and float(marker[0]) <= current_time:
+            connection.execute(
+                "DELETE FROM acquire_markers WHERE key_prefix = ? "
+                "AND reservation_id = ?",
+                (self.key_prefix, reservation_id),
+            )
+            marker = None
+        if tombstone is not None and float(tombstone[0]) <= current_time:
+            connection.execute(
+                "DELETE FROM refund_tombstones WHERE key_prefix = ? "
+                "AND reservation_id = ?",
+                (self.key_prefix, reservation_id),
+            )
+            tombstone = None
         _debug_event(
             _acquire_logger,
             "sqlite_acquire_marker_read",
@@ -530,7 +560,11 @@ class SqliteEngine:
     ) -> TryConsumeResult:
         with self._transaction() as connection:
             self._prune(connection, current_time)
-            self._raise_if_duplicate_acquire(connection, reservation_id)
+            self._raise_if_duplicate_acquire(
+                connection,
+                reservation_id,
+                current_time,
+            )
             states, fresh = self._load_states(connection, current_time)
             pre = self._capacities(states)
             max_capacities = frozendict(
@@ -594,7 +628,11 @@ class SqliteEngine:
     ) -> CapacityResult:
         with self._transaction() as connection:
             self._prune(connection, current_time)
-            self._raise_if_duplicate_acquire(connection, reservation_id)
+            self._raise_if_duplicate_acquire(
+                connection,
+                reservation_id,
+                current_time,
+            )
             states, fresh = self._load_states(connection, current_time)
             pre = self._capacities(states)
             max_capacities = frozendict(
@@ -625,7 +663,7 @@ class SqliteEngine:
                 fresh_bucket_ids=fresh,
             )
 
-    def _verify_marker(
+    def _verify_marker(  # noqa: PLR0913
         self,
         connection: sqlite3.Connection,
         *,
@@ -633,12 +671,20 @@ class SqliteEngine:
         reservation_model_family: str,
         reservation_bucket_ids: frozenset[BucketId],
         reservation_reserved_usage: FrozenUsage,
+        current_time: float,
     ) -> None:
         tombstone = connection.execute(
-            "SELECT 1 FROM refund_tombstones WHERE key_prefix = ? "
+            "SELECT expires_at FROM refund_tombstones WHERE key_prefix = ? "
             "AND reservation_id = ?",
             (self.key_prefix, reservation_id),
         ).fetchone()
+        if tombstone is not None and float(tombstone[0]) <= current_time:
+            connection.execute(
+                "DELETE FROM refund_tombstones WHERE key_prefix = ? "
+                "AND reservation_id = ?",
+                (self.key_prefix, reservation_id),
+            )
+            tombstone = None
         if tombstone is not None:
             raise DuplicateRefundError(
                 "reservation already refunded",
@@ -647,10 +693,17 @@ class SqliteEngine:
                 model_family=reservation_model_family,
             )
         marker = connection.execute(
-            "SELECT model_family, bucket_ids_json, reserved_usage_json "
+            "SELECT model_family, bucket_ids_json, reserved_usage_json, expires_at "
             "FROM acquire_markers WHERE key_prefix = ? AND reservation_id = ?",
             (self.key_prefix, reservation_id),
         ).fetchone()
+        if marker is not None and float(marker[3]) <= current_time:
+            connection.execute(
+                "DELETE FROM acquire_markers WHERE key_prefix = ? "
+                "AND reservation_id = ?",
+                (self.key_prefix, reservation_id),
+            )
+            marker = None
         _debug_event(
             _refund_logger,
             "sqlite_refund_marker_read",
@@ -708,6 +761,7 @@ class SqliteEngine:
                     reservation_model_family=reservation_model_family,
                     reservation_bucket_ids=reservation_bucket_ids,
                     reservation_reserved_usage=reservation_reserved_usage,
+                    current_time=current_time,
                 )
             states, fresh = self._load_states(connection, current_time)
             pre = self._capacities(states)

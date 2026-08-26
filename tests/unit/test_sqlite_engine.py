@@ -297,6 +297,90 @@ def test_sqlite_pruning_is_bounded_per_table(tmp_path: Path) -> None:
         engine.close()
 
 
+def test_sqlite_expired_target_marker_is_rejected_beyond_prune_batch(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(
+        tmp_path / "target-marker-expiry.sqlite3",
+        prune_batch_size=1,
+    )
+    usage = frozen_usage({"requests": 4})
+    bucket_ids = frozenset({("requests", 10)})
+    try:
+        engine.consume(
+            usage,
+            current_time=100.0,
+            reservation_id="target-expired-marker",
+            reservation_lifetime_seconds=1.0,
+        )
+        engine._connection.execute(
+            "INSERT INTO acquire_markers VALUES (?, ?, ?, '[]', '[]', 0, 1)",
+            ("tests", "older-expired-marker", "sqlite-tests"),
+        )
+        with pytest.raises(UnknownReservationError):
+            engine.refund(
+                usage,
+                frozen_usage({"requests": 0}),
+                refund_bucket_ids=bucket_ids,
+                current_time=102.0,
+                reservation_id="target-expired-marker",
+                reservation_model_family="sqlite-tests",
+                reservation_bucket_ids=bucket_ids,
+                reservation_reserved_usage=usage,
+            )
+        unavailable = engine.try_consume(
+            frozen_usage({"requests": 9}),
+            current_time=102.0,
+            reservation_id=None,
+            reservation_lifetime_seconds=None,
+        )
+        assert unavailable.available is False
+    finally:
+        engine.close()
+
+
+def test_sqlite_expired_target_tombstone_allows_id_reuse_beyond_prune_batch(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(
+        tmp_path / "target-tombstone-expiry.sqlite3",
+        refund_dedup_ttl_seconds=2,
+        prune_batch_size=1,
+    )
+    usage = frozen_usage({"requests": 1})
+    bucket_ids = frozenset({("requests", 10)})
+    try:
+        engine.consume(
+            usage,
+            current_time=100.0,
+            reservation_id="reusable-id",
+            reservation_lifetime_seconds=20.0,
+        )
+        engine.refund(
+            usage,
+            usage,
+            refund_bucket_ids=bucket_ids,
+            current_time=100.0,
+            reservation_id="reusable-id",
+            reservation_model_family="sqlite-tests",
+            reservation_bucket_ids=bucket_ids,
+            reservation_reserved_usage=usage,
+        )
+        engine._connection.execute(
+            "INSERT INTO refund_tombstones VALUES (?, ?, 0, 1)",
+            ("tests", "older-expired-tombstone"),
+        )
+        reused = engine.try_consume(
+            frozen_usage({"requests": 0}),
+            current_time=103.0,
+            reservation_id="reusable-id",
+            reservation_lifetime_seconds=20.0,
+        )
+        assert reused.available is True
+    finally:
+        engine.close()
+
+
 def test_sqlite_bucket_ttl_pruning_restores_only_fresh_capacity(
     tmp_path: Path,
 ) -> None:
@@ -529,6 +613,23 @@ def test_sqlite_ttl_invariants_match_durable_reservation_margin() -> None:
             bucket_ttl_seconds=100,
             refund_dedup_ttl_seconds=80,
         )
+
+
+def test_sqlite_builder_lifetime_knob_is_a_fail_fast_upper_bound(
+    tmp_path: Path,
+) -> None:
+    builder = SyncSqliteBackendBuilder(
+        tmp_path / "builder-lifetime.sqlite3",
+        key_prefix="scope",
+        max_reservation_lifetime_seconds=10.0,
+    )
+    try:
+        assert builder.resolve_max_reservation_lifetime_seconds(None) == 10.0
+        assert builder.resolve_max_reservation_lifetime_seconds(5.0) == 5.0
+        with pytest.raises(ValueError, match="configured maximum"):
+            builder.resolve_max_reservation_lifetime_seconds(11.0)
+    finally:
+        builder.close()
 
 
 def test_sqlite_builder_rejects_bucket_ttl_shorter_than_quota_window(

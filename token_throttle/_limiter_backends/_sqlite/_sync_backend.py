@@ -201,11 +201,17 @@ class SyncSqliteBackendBuilder(SyncRateLimiterBackendBuilderInterface):
     ) -> float:
         if max_reservation_lifetime_seconds is None:
             return self._max_reservation_lifetime_seconds
-        return resolve_max_reservation_lifetime_seconds_from_ttls(
+        resolved = resolve_max_reservation_lifetime_seconds_from_ttls(
             max_reservation_lifetime_seconds=max_reservation_lifetime_seconds,
             bucket_ttl_seconds=self._bucket_ttl_seconds,
             refund_dedup_ttl_seconds=self._refund_dedup_ttl_seconds,
         )
+        if resolved > self._max_reservation_lifetime_seconds:
+            raise ValueError(
+                "max_reservation_lifetime_seconds exceeds the SQLite builder's "
+                "configured maximum"
+            )
+        return resolved
 
     def validate_reservation_lifetime_seconds(
         self,
