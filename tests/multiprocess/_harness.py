@@ -324,16 +324,22 @@ def _timed_try_acquire(
     payload: Mapping[str, object],
 ) -> dict[str, object]:
     amount = float(payload["amount"])
-    started = time.monotonic()
-    try:
-        with _build_limiter(backend_spec, limiter_spec) as limiter:
+    start_gate = payload.get("start_gate")
+    with _build_limiter(backend_spec, limiter_spec) as limiter:
+        if start_gate is not None:
+            preflight = limiter.acquire_capacity({"requests": amount}, MODEL, timeout=0)
+            limiter.refund_capacity({"requests": 0}, preflight)
+            _send(connection, "ready", pid=os.getpid())
+            _wait_for_gate(start_gate, scaled(15), name="timed-acquire-start")
+        started = time.monotonic()
+        try:
             limiter.acquire_capacity({"requests": amount}, MODEL, timeout=0)
-    except TimeoutError:
-        outcome = "TimeoutError"
-    except Exception as exc:
-        outcome = type(exc).__name__
-    else:
-        outcome = "acquired"
+        except TimeoutError:
+            outcome = "TimeoutError"
+        except Exception as exc:
+            outcome = type(exc).__name__
+        else:
+            outcome = "acquired"
     return {
         "elapsed": time.monotonic() - started,
         "outcome": outcome,

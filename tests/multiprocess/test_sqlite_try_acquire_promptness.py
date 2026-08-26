@@ -33,28 +33,35 @@ def test_sqlite_try_acquire_returns_promptly_while_writer_holds_lock(
     limiter_spec = LimiterSpec(limit=4, per_seconds=60)
     context = multiprocessing.get_context("spawn")
     release_gate = context.Event()
+    probe_gate = context.Event()
+    probes = [
+        spawn_child(
+            "timed_try_acquire",
+            sqlite_backend_case.spec,
+            limiter_spec,
+            amount=1,
+            start_gate=probe_gate,
+        )
+        for _ in range(PROBE_COUNT)
+    ]
+    children: list[ChildHandle] = list(probes)
+    for probe in probes:
+        receive_event(probe, "ready", timeout=scaled(15))
+
     holder = spawn_child(
         "hold_sqlite_write_transaction",
         sqlite_backend_case.spec,
         limiter_spec,
         release_gate=release_gate,
     )
-    children: list[ChildHandle] = [holder]
+    children.append(holder)
     results: list[dict[str, object]] = []
     try:
         receive_event(holder, "write_locked", timeout=scaled(15))
-        probes = [
-            spawn_child(
-                "timed_try_acquire",
-                sqlite_backend_case.spec,
-                limiter_spec,
-                amount=1,
-            )
-            for _ in range(PROBE_COUNT)
-        ]
-        children.extend(probes)
+        probe_gate.set()
         results = [finish_child(probe, timeout=scaled(10)) for probe in probes]
     finally:
+        probe_gate.set()
         release_gate.set()
         if holder.process.is_alive():
             finish_child(holder, timeout=scaled(5))
