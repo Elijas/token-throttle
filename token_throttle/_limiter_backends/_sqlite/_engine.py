@@ -25,7 +25,7 @@ from token_throttle._exceptions import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Mapping
+    from collections.abc import Callable, Iterator, Mapping
 
     from token_throttle._interfaces._models import BucketId, Capacities, FrozenUsage
 
@@ -271,7 +271,8 @@ class SqliteEngine:
         *,
         busy_timeout_ms: int | None = None,
         timeout_on_busy: bool = False,
-    ) -> Iterator[sqlite3.Connection]:
+        clock: Callable[[], float] = time.time,
+    ) -> Iterator[tuple[sqlite3.Connection, float]]:
         with self._lock:
             operation_timeout_ms = (
                 self._busy_timeout_ms
@@ -284,7 +285,11 @@ class SqliteEngine:
             self._connection.execute(f"PRAGMA busy_timeout={operation_timeout_ms:d}")
             try:
                 self._connection.execute("BEGIN IMMEDIATE")
-                yield self._connection
+                # Wall time is transaction state: sampling only after the SQLite
+                # write lock is held prevents lock-wait staleness from moving a
+                # bucket's persisted clock backwards.
+                current_time = clock()
+                yield self._connection, current_time
                 self._connection.execute("COMMIT")
             except BaseException as exc:
                 with contextlib.suppress(sqlite3.Error):
@@ -302,7 +307,7 @@ class SqliteEngine:
                 raise
 
     def _initialize_schema(self) -> None:
-        with self._transaction() as connection:
+        with self._transaction() as (connection, _current_time):
             connection.execute(
                 "CREATE TABLE IF NOT EXISTS meta "
                 "(key TEXT PRIMARY KEY, value TEXT NOT NULL)"
@@ -324,8 +329,8 @@ class SqliteEngine:
             for statement in _SCHEMA_STATEMENTS:
                 connection.execute(statement)
 
-    def initialize_buckets(self, current_time: float) -> None:
-        with self._transaction() as connection:
+    def initialize_buckets(self, clock: Callable[[], float] = time.time) -> None:
+        with self._transaction(clock=clock) as (connection, current_time):
             self._prune(connection, current_time)
             for bucket in self._buckets:
                 _validate_max_capacity_finite_positive(bucket.configured_max_capacity)
@@ -660,16 +665,17 @@ class SqliteEngine:
         self,
         usage: FrozenUsage,
         *,
-        current_time: float,
         reservation_id: str | None,
         reservation_lifetime_seconds: float | None,
         busy_timeout_ms: int | None = None,
         timeout_on_busy: bool = False,
+        clock: Callable[[], float] = time.time,
     ) -> TryConsumeResult:
         with self._transaction(
             busy_timeout_ms=busy_timeout_ms,
             timeout_on_busy=timeout_on_busy,
-        ) as connection:
+            clock=clock,
+        ) as (connection, current_time):
             self._prune(connection, current_time)
             self._raise_if_duplicate_acquire(
                 connection,
@@ -733,12 +739,15 @@ class SqliteEngine:
         self,
         usage: FrozenUsage,
         *,
-        current_time: float,
         reservation_id: str | None,
         reservation_lifetime_seconds: float | None,
         busy_timeout_ms: int | None = None,
+        clock: Callable[[], float] = time.time,
     ) -> CapacityResult:
-        with self._transaction(busy_timeout_ms=busy_timeout_ms) as connection:
+        with self._transaction(busy_timeout_ms=busy_timeout_ms, clock=clock) as (
+            connection,
+            current_time,
+        ):
             self._prune(connection, current_time)
             self._raise_if_duplicate_acquire(
                 connection,
@@ -843,12 +852,12 @@ class SqliteEngine:
         actual_usage: FrozenUsage,
         *,
         refund_bucket_ids: frozenset[BucketId],
-        current_time: float,
         reservation_id: str | None,
         reservation_model_family: str | None,
         reservation_bucket_ids: frozenset[BucketId] | None,
         reservation_reserved_usage: FrozenUsage | None,
         busy_timeout_ms: int | None = None,
+        clock: Callable[[], float] = time.time,
     ) -> RefundResult:
         refund_usage = frozendict(
             {
@@ -856,7 +865,10 @@ class SqliteEngine:
                 for metric, amount in reserved_usage.items()
             }
         )
-        with self._transaction(busy_timeout_ms=busy_timeout_ms) as connection:
+        with self._transaction(busy_timeout_ms=busy_timeout_ms, clock=clock) as (
+            connection,
+            current_time,
+        ):
             self._prune(connection, current_time)
             if reservation_id is not None:
                 if (
@@ -939,11 +951,14 @@ class SqliteEngine:
         usage: FrozenUsage,
         *,
         bucket_ids: frozenset[BucketId],
-        current_time: float,
         reservation_id: str | None,
         busy_timeout_ms: int | None = None,
+        clock: Callable[[], float] = time.time,
     ) -> None:
-        with self._transaction(busy_timeout_ms=busy_timeout_ms) as connection:
+        with self._transaction(busy_timeout_ms=busy_timeout_ms, clock=clock) as (
+            connection,
+            current_time,
+        ):
             self._prune(connection, current_time)
             if reservation_id is not None:
                 marker = connection.execute(
@@ -985,14 +1000,17 @@ class SqliteEngine:
         per_seconds: int,
         value: float,
         *,
-        current_time: float,
         busy_timeout_ms: int | None = None,
+        clock: Callable[[], float] = time.time,
     ) -> None:
         value = _validate_max_capacity_finite_positive(value)
         bucket_id = (metric, per_seconds)
         if bucket_id not in self._bucket_by_id:
             raise ValueError(f"Bucket '{metric}/{per_seconds}s' not found")
-        with self._transaction(busy_timeout_ms=busy_timeout_ms) as connection:
+        with self._transaction(busy_timeout_ms=busy_timeout_ms, clock=clock) as (
+            connection,
+            current_time,
+        ):
             self._prune(connection, current_time)
             states, _ = self._load_states(connection, current_time)
             state = states[bucket_id]
@@ -1025,14 +1043,17 @@ class SqliteEngine:
         per_seconds: int,
         value: float,
         *,
-        current_time: float,
         busy_timeout_ms: int | None = None,
+        clock: Callable[[], float] = time.time,
     ) -> None:
         value = _validate_max_capacity_finite_positive(value)
         bucket_id = (metric, per_seconds)
         if bucket_id not in self._bucket_by_id:
             raise ValueError(f"Bucket '{metric}/{per_seconds}s' not found")
-        with self._transaction(busy_timeout_ms=busy_timeout_ms) as connection:
+        with self._transaction(busy_timeout_ms=busy_timeout_ms, clock=clock) as (
+            connection,
+            current_time,
+        ):
             self._prune(connection, current_time)
             states, _ = self._load_states(connection, current_time)
             if not states[bucket_id].is_fresh_start:
@@ -1070,13 +1091,16 @@ class SqliteEngine:
         self,
         bucket_ids: frozenset[BucketId],
         *,
-        current_time: float,
         busy_timeout_ms: int | None = None,
+        clock: Callable[[], float] = time.time,
     ) -> None:
         target_ids = bucket_ids.intersection(self.bucket_ids)
         if not target_ids:
             return
-        with self._transaction(busy_timeout_ms=busy_timeout_ms) as connection:
+        with self._transaction(busy_timeout_ms=busy_timeout_ms, clock=clock) as (
+            connection,
+            current_time,
+        ):
             self._prune(connection, current_time)
             states, _ = self._load_states(connection, current_time)
             anchored = {
@@ -1105,10 +1129,13 @@ class SqliteEngine:
     def inspect_snapshot(
         self,
         *,
-        current_time: float,
         busy_timeout_ms: int | None = None,
+        clock: Callable[[], float] = time.time,
     ) -> tuple[tuple[BucketSnapshot, ...], dict[str, int]]:
-        with self._transaction(busy_timeout_ms=busy_timeout_ms) as connection:
+        with self._transaction(busy_timeout_ms=busy_timeout_ms, clock=clock) as (
+            connection,
+            current_time,
+        ):
             states, _ = self._load_states(connection, current_time)
             snapshots = tuple(
                 BucketSnapshot(

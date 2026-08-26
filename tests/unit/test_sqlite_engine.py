@@ -6,6 +6,7 @@ import os
 import sqlite3
 import threading
 import time
+import warnings
 from typing import TYPE_CHECKING
 
 import pytest
@@ -82,7 +83,7 @@ def _engine(  # noqa: PLR0913
         max_reservation_lifetime_seconds=max_reservation_lifetime_seconds,
         prune_batch_size=prune_batch_size,
     )
-    engine.initialize_buckets(initialized_at)
+    engine.initialize_buckets(lambda: initialized_at)
     return engine
 
 
@@ -109,6 +110,35 @@ def _acquire_in_process(
         result_queue.put(("error", type(exc).__name__))
     else:
         result_queue.put(("acquired", reservation_id))
+    finally:
+        builder.close()
+
+
+def _consume_loop_in_process(
+    db_path: str,
+    key_prefix: str,
+    iterations: int,
+    result_queue,
+) -> None:
+    builder = SyncSqliteBackendBuilder(
+        db_path,
+        key_prefix=key_prefix,
+        busy_timeout_ms=5000,
+    )
+    try:
+        with warnings.catch_warnings(record=True) as captured:
+            warnings.simplefilter("always", RuntimeWarning)
+            backend = builder.build(_config(limit=1000.0, per_seconds=60))
+            for _ in range(iterations):
+                backend.consume_capacity(frozen_usage({"requests": 0}))
+        result_queue.put(
+            (
+                "ok",
+                sum("Negative time_passed" in str(item.message) for item in captured),
+            )
+        )
+    except Exception as exc:
+        result_queue.put(("error", type(exc).__name__))
     finally:
         builder.close()
 
@@ -172,13 +202,13 @@ def test_sqlite_engine_refill_calls_shared_capacity_math(
     try:
         engine.consume(
             frozen_usage({"requests": 10}),
-            current_time=100.0,
+            clock=lambda: 100.0,
             reservation_id=None,
             reservation_lifetime_seconds=None,
         )
         result = engine.try_consume(
             frozen_usage({"requests": 5}),
-            current_time=105.0,
+            clock=lambda: 105.0,
             reservation_id=None,
             reservation_lifetime_seconds=None,
         )
@@ -190,6 +220,70 @@ def test_sqlite_engine_refill_calls_shared_capacity_math(
         engine.close()
 
 
+def test_sqlite_engine_samples_clock_after_acquiring_write_lock(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "under-lock-clock.sqlite3"
+    engine = _engine(db_path)
+    holder = sqlite3.connect(db_path, isolation_level=None)
+    started = threading.Event()
+    clock_called = threading.Event()
+    calls = 0
+
+    def clock() -> float:
+        nonlocal calls
+        calls += 1
+        clock_called.set()
+        return 101.0
+
+    def consume() -> None:
+        started.set()
+        engine.consume(
+            frozen_usage({"requests": 0}),
+            reservation_id=None,
+            reservation_lifetime_seconds=None,
+            clock=clock,
+        )
+
+    holder.execute("BEGIN IMMEDIATE")
+    thread = threading.Thread(target=consume)
+    thread.start()
+    try:
+        assert started.wait(timeout=1)
+        assert not clock_called.wait(timeout=0.1)
+        holder.execute("COMMIT")
+        thread.join(timeout=2)
+        assert not thread.is_alive()
+        assert calls == 1
+    finally:
+        if holder.in_transaction:
+            holder.execute("ROLLBACK")
+        holder.close()
+        engine.close()
+
+
+def test_sqlite_multiprocess_contention_has_no_spurious_backward_clock_warnings(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "contention-clock.sqlite3"
+    context = multiprocessing.get_context("spawn")
+    result_queue = context.Queue()
+    processes = [
+        context.Process(
+            target=_consume_loop_in_process,
+            args=(str(db_path), "clock-contention", 60, result_queue),
+        )
+        for _ in range(8)
+    ]
+    for process in processes:
+        process.start()
+    for process in processes:
+        process.join(timeout=15)
+        assert process.exitcode == 0
+    results = [result_queue.get(timeout=1) for _ in processes]
+    assert results == [("ok", 0)] * len(processes)
+
+
 def test_sqlite_marker_refund_and_tombstone_are_one_lifecycle(
     tmp_path: Path,
 ) -> None:
@@ -199,7 +293,7 @@ def test_sqlite_marker_refund_and_tombstone_are_one_lifecycle(
     try:
         engine.try_consume(
             reservation_usage,
-            current_time=100.0,
+            clock=lambda: 100.0,
             reservation_id="reservation-1",
             reservation_lifetime_seconds=20.0,
         )
@@ -212,7 +306,7 @@ def test_sqlite_marker_refund_and_tombstone_are_one_lifecycle(
             reservation_usage,
             frozen_usage({"requests": 1}),
             refund_bucket_ids=bucket_ids,
-            current_time=101.0,
+            clock=lambda: 101.0,
             reservation_id="reservation-1",
             reservation_model_family="sqlite-tests",
             reservation_bucket_ids=bucket_ids,
@@ -234,7 +328,7 @@ def test_sqlite_marker_refund_and_tombstone_are_one_lifecycle(
                 reservation_usage,
                 frozen_usage({"requests": 1}),
                 refund_bucket_ids=bucket_ids,
-                current_time=102.0,
+                clock=lambda: 102.0,
                 reservation_id="reservation-1",
                 reservation_model_family="sqlite-tests",
                 reservation_bucket_ids=bucket_ids,
@@ -252,7 +346,7 @@ def test_sqlite_unknown_marker_does_not_credit_capacity(tmp_path: Path) -> None:
     try:
         engine.consume(
             usage,
-            current_time=100.0,
+            clock=lambda: 100.0,
             reservation_id=None,
             reservation_lifetime_seconds=None,
         )
@@ -261,7 +355,7 @@ def test_sqlite_unknown_marker_does_not_credit_capacity(tmp_path: Path) -> None:
                 usage,
                 frozen_usage({"requests": 0}),
                 refund_bucket_ids=bucket_ids,
-                current_time=100.0,
+                clock=lambda: 100.0,
                 reservation_id="missing",
                 reservation_model_family="sqlite-tests",
                 reservation_bucket_ids=bucket_ids,
@@ -269,7 +363,7 @@ def test_sqlite_unknown_marker_does_not_credit_capacity(tmp_path: Path) -> None:
             )
         remaining = engine.try_consume(
             usage,
-            current_time=100.0,
+            clock=lambda: 100.0,
             reservation_id=None,
             reservation_lifetime_seconds=None,
         )
@@ -298,7 +392,7 @@ def test_sqlite_pruning_is_bounded_per_table(tmp_path: Path) -> None:
             )
         engine.consume(
             frozen_usage({"requests": 0}),
-            current_time=10.0,
+            clock=lambda: 10.0,
             reservation_id=None,
             reservation_lifetime_seconds=None,
         )
@@ -320,7 +414,7 @@ def test_sqlite_expired_target_marker_is_rejected_beyond_prune_batch(
     try:
         engine.consume(
             usage,
-            current_time=100.0,
+            clock=lambda: 100.0,
             reservation_id="target-expired-marker",
             reservation_lifetime_seconds=1.0,
         )
@@ -333,7 +427,7 @@ def test_sqlite_expired_target_marker_is_rejected_beyond_prune_batch(
                 usage,
                 frozen_usage({"requests": 0}),
                 refund_bucket_ids=bucket_ids,
-                current_time=102.0,
+                clock=lambda: 102.0,
                 reservation_id="target-expired-marker",
                 reservation_model_family="sqlite-tests",
                 reservation_bucket_ids=bucket_ids,
@@ -341,7 +435,7 @@ def test_sqlite_expired_target_marker_is_rejected_beyond_prune_batch(
             )
         unavailable = engine.try_consume(
             frozen_usage({"requests": 9}),
-            current_time=102.0,
+            clock=lambda: 102.0,
             reservation_id=None,
             reservation_lifetime_seconds=None,
         )
@@ -363,7 +457,7 @@ def test_sqlite_expired_target_tombstone_allows_id_reuse_beyond_prune_batch(
     try:
         engine.consume(
             usage,
-            current_time=100.0,
+            clock=lambda: 100.0,
             reservation_id="reusable-id",
             reservation_lifetime_seconds=20.0,
         )
@@ -371,7 +465,7 @@ def test_sqlite_expired_target_tombstone_allows_id_reuse_beyond_prune_batch(
             usage,
             usage,
             refund_bucket_ids=bucket_ids,
-            current_time=100.0,
+            clock=lambda: 100.0,
             reservation_id="reusable-id",
             reservation_model_family="sqlite-tests",
             reservation_bucket_ids=bucket_ids,
@@ -383,7 +477,7 @@ def test_sqlite_expired_target_tombstone_allows_id_reuse_beyond_prune_batch(
         )
         reused = engine.try_consume(
             frozen_usage({"requests": 0}),
-            current_time=103.0,
+            clock=lambda: 103.0,
             reservation_id="reusable-id",
             reservation_lifetime_seconds=20.0,
         )
@@ -402,13 +496,13 @@ def test_sqlite_bucket_ttl_pruning_restores_only_fresh_capacity(
     try:
         engine.consume(
             frozen_usage({"requests": 10}),
-            current_time=100.0,
+            clock=lambda: 100.0,
             reservation_id=None,
             reservation_lifetime_seconds=None,
         )
         result = engine.consume(
             frozen_usage({"requests": 1}),
-            current_time=111.0,
+            clock=lambda: 111.0,
             reservation_id=None,
             reservation_lifetime_seconds=None,
         )
@@ -427,7 +521,7 @@ def test_sqlite_negative_refund_preserves_debt_for_linear_refill(
     try:
         engine.consume(
             frozen_usage({"requests": 10}),
-            current_time=100.0,
+            clock=lambda: 100.0,
             reservation_id=None,
             reservation_lifetime_seconds=None,
         )
@@ -435,7 +529,7 @@ def test_sqlite_negative_refund_preserves_debt_for_linear_refill(
             frozen_usage({"requests": 2}),
             frozen_usage({"requests": 20}),
             refund_bucket_ids=bucket_ids,
-            current_time=100.0,
+            clock=lambda: 100.0,
             reservation_id=None,
             reservation_model_family=None,
             reservation_bucket_ids=None,
@@ -444,7 +538,7 @@ def test_sqlite_negative_refund_preserves_debt_for_linear_refill(
         assert refunded.post_capacities[("requests", 10)] == -10.0
         halfway = engine.try_consume(
             frozen_usage({"requests": 0}),
-            current_time=105.0,
+            clock=lambda: 105.0,
             reservation_id=None,
             reservation_lifetime_seconds=None,
         )
@@ -460,21 +554,21 @@ def test_sqlite_set_max_capacity_anchors_elapsed_time_at_old_rate(
     try:
         engine.consume(
             frozen_usage({"requests": 10}),
-            current_time=100.0,
+            clock=lambda: 100.0,
             reservation_id=None,
             reservation_lifetime_seconds=None,
         )
-        engine.set_max_capacity("requests", 10, 20.0, current_time=105.0)
+        engine.set_max_capacity("requests", 10, 20.0, clock=lambda: 105.0)
         anchored = engine.try_consume(
             frozen_usage({"requests": 0}),
-            current_time=105.0,
+            clock=lambda: 105.0,
             reservation_id=None,
             reservation_lifetime_seconds=None,
         )
         assert anchored.result.pre_capacities[("requests", 10)] == 5.0
         refilled = engine.try_consume(
             frozen_usage({"requests": 0}),
-            current_time=110.0,
+            clock=lambda: 110.0,
             reservation_id=None,
             reservation_lifetime_seconds=None,
         )
@@ -490,19 +584,19 @@ def test_sqlite_configured_limits_remain_process_local(tmp_path: Path) -> None:
     try:
         first_result = first.try_consume(
             frozen_usage({"requests": 0}),
-            current_time=100.0,
+            clock=lambda: 100.0,
             reservation_id=None,
             reservation_lifetime_seconds=None,
         )
         second_result = second.try_consume(
             frozen_usage({"requests": 0}),
-            current_time=100.0,
+            clock=lambda: 100.0,
             reservation_id=None,
             reservation_lifetime_seconds=None,
         )
         first_again = first.try_consume(
             frozen_usage({"requests": 0}),
-            current_time=100.0,
+            clock=lambda: 100.0,
             reservation_id=None,
             reservation_lifetime_seconds=None,
         )
@@ -527,16 +621,16 @@ def test_sqlite_override_is_cross_process_and_expires_to_local_config(
     first = _engine(db_path, limit=10.0, override_ttl_seconds=2)
     second = _engine(db_path, limit=20.0, override_ttl_seconds=2)
     try:
-        first.set_max_capacity("requests", 10, 15.0, current_time=100.0)
+        first.set_max_capacity("requests", 10, 15.0, clock=lambda: 100.0)
         active = second.try_consume(
             frozen_usage({"requests": 0}),
-            current_time=101.0,
+            clock=lambda: 101.0,
             reservation_id=None,
             reservation_lifetime_seconds=None,
         )
         expired = second.try_consume(
             frozen_usage({"requests": 0}),
-            current_time=102.0,
+            clock=lambda: 102.0,
             reservation_id=None,
             reservation_lifetime_seconds=None,
         )
@@ -559,7 +653,7 @@ def test_sqlite_config_after_restart_applies_without_rewriting_state(
     first = _engine(db_path, limit=10.0)
     first.consume(
         frozen_usage({"requests": 5}),
-        current_time=100.0,
+        clock=lambda: 100.0,
         reservation_id=None,
         reservation_lifetime_seconds=None,
     )
@@ -569,7 +663,7 @@ def test_sqlite_config_after_restart_applies_without_rewriting_state(
     try:
         result = restarted.try_consume(
             frozen_usage({"requests": 0}),
-            current_time=101.0,
+            clock=lambda: 101.0,
             reservation_id=None,
             reservation_lifetime_seconds=None,
         )
@@ -586,15 +680,15 @@ def test_sqlite_apply_configured_max_clears_override_and_anchors_state(
     try:
         engine.consume(
             frozen_usage({"requests": 10}),
-            current_time=100.0,
+            clock=lambda: 100.0,
             reservation_id=None,
             reservation_lifetime_seconds=None,
         )
-        engine.set_max_capacity("requests", 10, 20.0, current_time=105.0)
-        engine.apply_configured_max_capacity("requests", 10, 30.0, current_time=107.0)
+        engine.set_max_capacity("requests", 10, 20.0, clock=lambda: 105.0)
+        engine.apply_configured_max_capacity("requests", 10, 30.0, clock=lambda: 107.0)
         result = engine.try_consume(
             frozen_usage({"requests": 0}),
-            current_time=107.0,
+            clock=lambda: 107.0,
             reservation_id=None,
             reservation_lifetime_seconds=None,
         )
@@ -622,7 +716,7 @@ def test_sqlite_repairs_far_future_last_checked_on_failed_attempt(
         with pytest.warns(RuntimeWarning, match="Negative time_passed"):
             failed = engine.try_consume(
                 frozen_usage({"requests": 1}),
-                current_time=200.0,
+                clock=lambda: 200.0,
                 reservation_id=None,
                 reservation_lifetime_seconds=None,
             )
@@ -630,11 +724,11 @@ def test_sqlite_repairs_far_future_last_checked_on_failed_attempt(
         assert engine._connection.execute(
             "SELECT capacity, last_checked, updated_at FROM buckets"
         ).fetchone() == (0.0, 200.0, 200.0)
-        snapshots, _ = engine.inspect_snapshot(current_time=205.0)
+        snapshots, _ = engine.inspect_snapshot(clock=lambda: 205.0)
         assert snapshots[0].current_capacity == 5.0
         pruned = engine.try_consume(
             frozen_usage({"requests": 0}),
-            current_time=211.0,
+            clock=lambda: 211.0,
             reservation_id=None,
             reservation_lifetime_seconds=None,
         )
@@ -648,7 +742,7 @@ def test_sqlite_operation_sets_deadline_derived_busy_timeout(tmp_path: Path) -> 
     try:
         engine.try_consume(
             frozen_usage({"requests": 0}),
-            current_time=100.0,
+            clock=lambda: 100.0,
             reservation_id=None,
             reservation_lifetime_seconds=None,
             busy_timeout_ms=123,
@@ -656,7 +750,7 @@ def test_sqlite_operation_sets_deadline_derived_busy_timeout(tmp_path: Path) -> 
         assert engine._connection.execute("PRAGMA busy_timeout").fetchone() == (123,)
         engine.consume(
             frozen_usage({"requests": 0}),
-            current_time=100.0,
+            clock=lambda: 100.0,
             reservation_id=None,
             reservation_lifetime_seconds=None,
         )
@@ -788,13 +882,13 @@ def test_sqlite_key_prefixes_isolate_capacity_in_one_database(
     try:
         first.consume(
             frozen_usage({"requests": 2}),
-            current_time=100.0,
+            clock=lambda: 100.0,
             reservation_id=None,
             reservation_lifetime_seconds=None,
         )
         second_result = second.try_consume(
             frozen_usage({"requests": 2}),
-            current_time=100.0,
+            clock=lambda: 100.0,
             reservation_id=None,
             reservation_lifetime_seconds=None,
         )
@@ -825,19 +919,19 @@ def test_sqlite_bucket_pruning_respects_each_rows_absolute_expiry(
     try:
         long_lived.consume(
             frozen_usage({"requests": 10}),
-            current_time=100.0,
+            clock=lambda: 100.0,
             reservation_id=None,
             reservation_lifetime_seconds=None,
         )
         short_lived.consume(
             frozen_usage({"requests": 0}),
-            current_time=102.0,
+            clock=lambda: 102.0,
             reservation_id=None,
             reservation_lifetime_seconds=None,
         )
         preserved = long_lived.try_consume(
             frozen_usage({"requests": 0}),
-            current_time=102.0,
+            clock=lambda: 102.0,
             reservation_id=None,
             reservation_lifetime_seconds=None,
         )
@@ -858,14 +952,14 @@ def test_sqlite_duplicate_acquire_is_visible_across_connections(
     try:
         first.consume(
             usage,
-            current_time=100.0,
+            clock=lambda: 100.0,
             reservation_id="shared-reservation",
             reservation_lifetime_seconds=20.0,
         )
         with pytest.raises(DuplicateRefundError) as duplicate:
             second.consume(
                 usage,
-                current_time=100.0,
+                clock=lambda: 100.0,
                 reservation_id="shared-reservation",
                 reservation_lifetime_seconds=20.0,
             )

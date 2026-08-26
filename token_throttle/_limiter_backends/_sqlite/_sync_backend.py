@@ -278,7 +278,7 @@ class SyncSqliteBackendBuilder(SyncRateLimiterBackendBuilderInterface):
             prune_batch_size=self._prune_batch_size,
         )
         try:
-            engine.initialize_buckets(time.time())
+            engine.initialize_buckets()
         except BaseException:
             engine.close()
             raise
@@ -350,7 +350,7 @@ class SyncSqliteBackend(SyncRateLimiterBackend):
     def introspect(self) -> BackendIntrospectionDiagnostic:
         as_of_monotonic = time.monotonic()
         issues: list[DiagnosticIssue] = []
-        snapshots, counts = self._engine.inspect_snapshot(current_time=time.time())
+        snapshots, counts = self._engine.inspect_snapshot()
         buckets = tuple(
             make_bucket_diagnostic(
                 model_family=self._engine.model_family,
@@ -433,7 +433,6 @@ class SyncSqliteBackend(SyncRateLimiterBackend):
         )
         self._engine.clear_max_capacity_overrides(
             frozenset(old_ids - new_ids) | changed_ids,
-            current_time=time.time(),
         )
         self.close()
         return new_backend
@@ -460,7 +459,6 @@ class SyncSqliteBackend(SyncRateLimiterBackend):
         usage = _normalize_usage(usage)
         result = self._engine.consume(
             usage,
-            current_time=time.time(),
             reservation_id=reservation_id,
             reservation_lifetime_seconds=reservation_lifetime_seconds,
         )
@@ -513,7 +511,6 @@ class SyncSqliteBackend(SyncRateLimiterBackend):
                 busy_timeout_ms, timeout_on_busy = self._wait_busy_timeout(deadline)
                 attempt = self._engine.try_consume(
                     usage,
-                    current_time=time.time(),
                     reservation_id=reservation_id,
                     reservation_lifetime_seconds=reservation_lifetime_seconds,
                     busy_timeout_ms=busy_timeout_ms,
@@ -619,7 +616,6 @@ class SyncSqliteBackend(SyncRateLimiterBackend):
                 self._engine.cleanup_consumption(
                     usage,
                     bucket_ids=consumed_bucket_ids,
-                    current_time=time.time(),
                     reservation_id=reservation_id,
                 )
             except BaseException as refund_exc:  # noqa: BLE001
@@ -749,7 +745,6 @@ class SyncSqliteBackend(SyncRateLimiterBackend):
             reserved_usage,
             actual_usage,
             refund_bucket_ids=refund_bucket_ids,
-            current_time=time.time(),
             reservation_id=reservation_id,
             reservation_model_family=marker_model_family,
             reservation_bucket_ids=marker_bucket_ids,
@@ -780,7 +775,6 @@ class SyncSqliteBackend(SyncRateLimiterBackend):
             metric,
             per_seconds,
             value,
-            current_time=time.time(),
         )
 
     def apply_configured_max_capacity(
@@ -794,7 +788,6 @@ class SyncSqliteBackend(SyncRateLimiterBackend):
             metric,
             per_seconds,
             value,
-            current_time=time.time(),
         )
 
     def _compute_sleep(

@@ -201,7 +201,7 @@ class SqliteBackendBuilder(RateLimiterBackendBuilderInterface):
                 prune_batch_size=self._prune_batch_size,
             )
             try:
-                engine.initialize_buckets(time.time())
+                engine.initialize_buckets()
             except BaseException:
                 engine.close()
                 raise
@@ -309,11 +309,10 @@ class SqliteBackend(RateLimiterBackend):
             await self._wait_for_future_while_cancelled(future)
             raise
 
-    async def _try_consume_cancellation_safe(  # noqa: PLR0913
+    async def _try_consume_cancellation_safe(
         self,
         usage: FrozenUsage,
         *,
-        current_time: float,
         reservation_id: str | None,
         reservation_lifetime_seconds: float | None,
         busy_timeout_ms: int,
@@ -323,7 +322,6 @@ class SqliteBackend(RateLimiterBackend):
             functools.partial(
                 self._engine.try_consume,
                 usage,
-                current_time=current_time,
                 reservation_id=reservation_id,
                 reservation_lifetime_seconds=reservation_lifetime_seconds,
                 busy_timeout_ms=busy_timeout_ms,
@@ -342,7 +340,6 @@ class SqliteBackend(RateLimiterBackend):
                             self._engine.cleanup_consumption,
                             usage,
                             bucket_ids=self._engine.bucket_ids,
-                            current_time=time.time(),
                             reservation_id=reservation_id,
                         )
                     )
@@ -360,9 +357,7 @@ class SqliteBackend(RateLimiterBackend):
 
     async def introspect(self) -> BackendIntrospectionDiagnostic:
         as_of_monotonic = time.monotonic()
-        snapshots, counts = await self._run_engine(
-            functools.partial(self._engine.inspect_snapshot, current_time=time.time())
-        )
+        snapshots, counts = await self._run_engine(self._engine.inspect_snapshot)
         buckets = tuple(
             make_bucket_diagnostic(
                 model_family=self._engine.model_family,
@@ -441,7 +436,6 @@ class SqliteBackend(RateLimiterBackend):
             functools.partial(
                 self._engine.clear_max_capacity_overrides,
                 frozenset(old_ids - new_ids) | changed_ids,
-                current_time=time.time(),
             )
         )
         await self.aclose()
@@ -460,7 +454,6 @@ class SqliteBackend(RateLimiterBackend):
             functools.partial(
                 self._engine.consume,
                 usage,
-                current_time=time.time(),
                 reservation_id=reservation_id,
                 reservation_lifetime_seconds=reservation_lifetime_seconds,
             )
@@ -493,7 +486,6 @@ class SqliteBackend(RateLimiterBackend):
                 try:
                     attempt = await self._try_consume_cancellation_safe(
                         usage,
-                        current_time=time.time(),
                         reservation_id=reservation_id,
                         reservation_lifetime_seconds=reservation_lifetime_seconds,
                         busy_timeout_ms=busy_timeout_ms,
@@ -596,7 +588,6 @@ class SqliteBackend(RateLimiterBackend):
                         self._engine.cleanup_consumption,
                         usage,
                         bucket_ids=self._engine.bucket_ids,
-                        current_time=time.time(),
                         reservation_id=reservation_id,
                     )
                 )
@@ -672,7 +663,6 @@ class SqliteBackend(RateLimiterBackend):
                 reserved_usage,
                 actual_usage,
                 refund_bucket_ids=refund_bucket_ids,
-                current_time=time.time(),
                 reservation_id=reservation_id,
                 reservation_model_family=marker_model_family,
                 reservation_bucket_ids=marker_bucket_ids,
@@ -703,7 +693,6 @@ class SqliteBackend(RateLimiterBackend):
                 metric,
                 per_seconds,
                 value,
-                current_time=time.time(),
             )
         )
 
@@ -717,7 +706,6 @@ class SqliteBackend(RateLimiterBackend):
                 metric,
                 per_seconds,
                 value,
-                current_time=time.time(),
             )
         )
 
