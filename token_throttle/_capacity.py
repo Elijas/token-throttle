@@ -1,4 +1,4 @@
-"""Shared token-bucket capacity math — used by all backends (Redis, in-memory, sync, async)."""
+"""Shared token-bucket capacity math for memory, Redis, and SQLite backends."""
 
 import logging
 import math
@@ -21,7 +21,7 @@ _REDIS_BUCKET_ID_PARTS = 6
 
 
 def _bucket_context_from_bucket_id(bucket_id: str) -> tuple[str, str]:
-    """Best-effort extraction for memory and Redis bucket key formats."""
+    """Best-effort extraction for built-in backend bucket key formats."""
     parts = bucket_id.split(":")
     if len(parts) >= _MEMORY_BUCKET_ID_PARTS and parts[0] == "memory":
         return parts[1], parts[2]
@@ -116,7 +116,7 @@ def calculate_capacity(  # noqa: PLR0913
     """
     Calculate current bucket capacity based on time elapsed since last check.
 
-    Pure function — no I/O, no locks. Shared by Redis and in-memory backends.
+    Pure function — no I/O, no locks. Shared by all built-in backends.
 
     Args:
         last_checked: Timestamp of last capacity update (None = fresh start).

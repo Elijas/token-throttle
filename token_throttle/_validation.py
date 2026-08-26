@@ -60,7 +60,7 @@ def _revalidate_dto[StrictDTO_T: StrictDTO](instance: StrictDTO_T) -> StrictDTO_
 
 
 def _validate_key_prefix(value: object) -> str:
-    """Validate the deployment-scoped Redis key prefix."""
+    """Validate the deployment-scoped backend key prefix."""
     return _validate_key_segment(
         value,
         field_name="key_prefix",
