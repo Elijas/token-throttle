@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 import threading
 from typing import TYPE_CHECKING
 
@@ -14,6 +15,7 @@ from token_throttle import (
     RateLimiterCallbacks,
     SqliteBackendBuilder,
     SqliteBackendHealthDiagnostic,
+    UnknownReservationError,
     UsageQuotas,
     frozen_usage,
 )
@@ -461,3 +463,30 @@ async def test_async_sqlite_metric_rebuilds_bound_worker_threads_and_registry(
             assert live_workers <= baseline_workers + 1
     finally:
         await builder.aclose()
+
+
+async def test_async_sqlite_unknown_reservation_refund_releases_in_flight_count(
+    tmp_path: Path,
+) -> None:
+    """The async limiter drops in-flight state on a fail-closed refund too.
+
+    The engine marker fix is shared with the sync twin, but the consuming side
+    (``_clear_refund_state_if_pending``) is separate code per limiter.
+    """
+    db_path = tmp_path / "async-unknown-refund.sqlite3"
+    builder = SqliteBackendBuilder(db_path, key_prefix="async-unknown-refund")
+    async with RateLimiter(_config(), backend=builder) as limiter:
+        reservation = await limiter.acquire_capacity(
+            {"requests": 1},
+            model="sqlite-model",
+        )
+        assert limiter.snapshot_state()["in_flight_reservations"] == 1
+
+        # Drop the acquire marker the way TTL expiry would.
+        with sqlite3.connect(db_path) as connection:
+            connection.execute("DELETE FROM acquire_markers")
+
+        with pytest.raises(UnknownReservationError):
+            await limiter.refund_capacity({"requests": 1}, reservation)
+
+        assert limiter.snapshot_state()["in_flight_reservations"] == 0

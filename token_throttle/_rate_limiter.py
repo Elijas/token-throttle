@@ -1218,8 +1218,8 @@ class RateLimiter(BaseRateLimiter):
         accept many dynamic model aliases. Families with in-flight reservations
         are skipped so refunds can still route to their original backend.
 
-        Redis-backed limiter state is not deleted here; Redis bucket keys have
-        their own inactivity TTL and expire independently.
+        Durable backend state is not deleted here; Redis keys and SQLite rows
+        have their own inactivity TTLs and expire independently.
         """
         self._check_public_entry()
         if type(unused_for_seconds) is not int:

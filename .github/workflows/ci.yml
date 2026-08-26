@@ -77,6 +77,11 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - run: uv sync --all-extras --group dev
       - run: uv run pytest tests/unit -v
+      # Condition-variable wake semantics are platform-sensitive, and the
+      # memory backend's coverage for them lives in an integration file whose
+      # Redis params this runner has no service for. Select the memory params
+      # so macOS/Windows still exercise them.
+      - run: uv run pytest tests/integration/test_condition_wake_redis.py -k memory -v
 
   test-integration:
     runs-on: ubuntu-latest

@@ -55,11 +55,11 @@ SQLite writer lock.
 The host wall clock is authoritative. Every process on the host reads the same
 kernel clock, so there is no separate server-clock protocol.
 
-- If the clock moves backward, refill clamps elapsed time to zero and emits a
-  `RuntimeWarning` plus a structured warning with the affected model family and
-  metric. A stored timestamp more than one second in the future is repaired in
-  the same transaction while preserving the stored capacity, so it cannot pin
-  a drained persistent bucket indefinitely.
+- If the clock moves backward, refill clamps elapsed time to zero. It emits
+  process-wide throttled `RuntimeWarning` and structured warning notifications
+  with the affected model family and metric. A stored timestamp more than one
+  second in the future is repaired in the same transaction while preserving
+  stored capacity, so it cannot pin a drained persistent bucket indefinitely.
 - If the clock moves forward, the bucket refills for the apparent elapsed time,
   capped at its maximum capacity. There is no forward-jump detection rail.
 - Time spent suspended counts as elapsed wall time, so a laptop or VM may
@@ -173,11 +173,13 @@ capacity recovers only through normal linear refill, exactly as if the request
 had used the full reservation. The orphaned acquire marker remains until its
 reservation lifetime expires and lazy pruning removes it.
 
-After marker expiry, a late refund fails closed with
-`UnknownReservationError`; it never creates capacity that cannot be tied to a
-live marker. A successful refund consumes the marker and writes a tombstone, so
-a duplicate refund fails without double-crediting capacity. After the tombstone
-TTL expires, another attempt is unknown rather than accepted.
+Once a reservation exceeds `max_reservation_lifetime_seconds`, the public refund
+methods fail closed with `ValueError` before backend I/O. If the SQLite backend
+is instead reached without a live acquire marker, it raises
+`UnknownReservationError`. Neither path creates capacity. A successful refund
+consumes the marker and writes a tombstone, so a duplicate refund fails without
+double-crediting capacity. After the tombstone TTL expires, another attempt is
+unknown rather than accepted.
 
 ## Performance envelope
 
@@ -194,16 +196,8 @@ independent limits.
 
 ## Observability
 
-For SQLite, `snapshot_state()` includes `marker_count_estimate` and
-`refund_dedup_count_estimate`. They are cheap, process-local estimates from the
-limiter's own bookkeeping, not database-wide counts. This keeps routine health
-polling free of SQLite I/O.
-
-Use `diagnose()` when you need backend state. Its first-class SQLite health
-section reports exact acquire-marker and refund-tombstone row counts for the
-database namespace, along with per-bucket capacity and active override data.
-Because `diagnose()` reads SQLite, it can wait up to `busy_timeout_ms` for a
-writer and can degrade to a warning if introspection cannot complete.
+SQLite snapshot fields and exact namespace-scoped diagnostics are documented in
+the [observability reference](observability.md#health-snapshot).
 
 ## Troubleshooting
 

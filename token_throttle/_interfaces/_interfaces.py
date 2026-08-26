@@ -302,10 +302,9 @@ class RateLimiterBackend(Protocol):
         """
         Whether backend refunds can prove a reservation was acquired out of process.
 
-        Redis backends return ``True`` because they store acquire markers in
-        shared Redis state. Local-memory and opaque custom backends default to
-        ``False``; public limiters only allow their non-local reservations when
-        this is true.
+        Durable shared-state backends such as Redis and SQLite return ``True``.
+        Local-memory and opaque custom backends default to ``False``; public
+        limiters only allow their non-local reservations when this is true.
         """
         return False
 
@@ -346,12 +345,10 @@ class RateLimiterBackend(Protocol):
         state only in local memory will otherwise lose or split accounting.
 
         Override this to return ``True`` only when metric additions/removals
-        can preserve accounting for surviving buckets. To do so you must
-        satisfy one of two contracts: store live state in stable external
-        storage keyed by metric/window, or override
-        :meth:`prepare_reconfigured_backend` to migrate/share in-process state.
-        Returning ``True`` while inheriting the no-op migration can silently
-        reset surviving metrics' consumption state.
+        can preserve accounting for surviving buckets, and override
+        :meth:`prepare_reconfigured_backend` to establish or confirm that
+        preservation. Stable external-storage implementations may deliberately
+        return the new backend unchanged, but must still override the hook.
 
         This default deliberately stays ``False``: flipping it to
         ``True`` would make naive custom backends opt into silent state loss.
@@ -552,12 +549,10 @@ class SyncRateLimiterBackend(Protocol):
         state only in local memory will otherwise lose or split accounting.
 
         Override this to return ``True`` only when metric additions/removals
-        can preserve accounting for surviving buckets. If your backend keeps
-        any live state outside stable shared storage, you must also override
-        :meth:`prepare_reconfigured_backend` to migrate or share that state.
-        Returning ``True`` while inheriting the no-op
-        ``prepare_reconfigured_backend`` can silently reset surviving metrics'
-        consumption state.
+        can preserve accounting for surviving buckets, and override
+        :meth:`prepare_reconfigured_backend` to establish or confirm that
+        preservation. Stable external-storage implementations may deliberately
+        return the new backend unchanged, but must still override the hook.
 
         This default deliberately stays ``False``: flipping it to
         ``True`` would make naive custom backends opt into silent state loss.

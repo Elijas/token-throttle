@@ -3,11 +3,31 @@
 Notable changes for token-throttle releases. Each major version's breaking
 changes and upgrade steps are recorded in its entry below.
 
+## Unreleased
+
+- Fixes the SQLite backends leaking a reservation from
+  `snapshot_state()["in_flight_reservations"]` when a refund failed closed with
+  `UnknownReservationError` — for example after the acquire marker expired.
+  The reservation stayed counted as in flight for the life of the limiter, so a
+  long-running process could drift toward its in-flight cap and eventually raise
+  `CardinalityLimitExceededError` on healthy acquires. The Redis backends
+  already released the reservation in this case; SQLite now matches them.
+  Capacity accounting is unaffected — the refund still fails closed and credits
+  nothing.
+- Fixes the memory backends never finalizing a reservation whose buckets all
+  disappeared in a callable-config metric-set change. Such a refund returned
+  early — before releasing the reservation's backend acquire state or recording
+  its dedup entry — so the backend kept treating it as acquired for the life of
+  the process. The refund is now finalized on that path, which also means an
+  overuse `RuntimeWarning` can surface where the early return previously
+  suppressed it. Capacity accounting is unchanged: there are no surviving
+  buckets to credit.
+
 ## 10.1.0 - 2026-08-26
 
 - Adds stdlib-only synchronous and asynchronous SQLite backends for persistent,
   multi-process rate-limit coordination on one host without a separate server.
-  The four new public exports are `SqliteBackend`, `SqliteBackendBuilder`,
+  The four new backend exports are `SqliteBackend`, `SqliteBackendBuilder`,
   `SyncSqliteBackend`, and `SyncSqliteBackendBuilder`.
   Use memory for one process, SQLite for multiple processes on one local
   filesystem, and Redis when a budget must span machines. SQLite state uses WAL
@@ -18,10 +38,11 @@ changes and upgrade steps are recorded in its entry below.
   enforcement, cross-process refunds, crash-orphan linear refill, late-refund
   failure, contention accounting, and fresh-interpreter persistence, plus a
   SQLite try-acquire writer-contention regression.
-- Widens the diagnostic backend type additively with the `"sqlite"` literal.
-  SQLite `diagnose()` output now uses a first-class structured health section
-  with exact acquire-marker and refund-tombstone counts; `snapshot_state()`
-  exposes the same local best-effort durable-count estimates as Redis.
+- Adds `SqliteBackendHealthDiagnostic` and widens the diagnostic backend type
+  additively with the `"sqlite"` literal. SQLite `diagnose()` output now uses a
+  first-class structured health section with exact acquire-marker and
+  refund-tombstone counts; `snapshot_state()` exposes the same local
+  best-effort durable-count estimates as Redis.
 - Adds a runnable Anthropic Messages example with independent RPM, ITPM, and
   OTPM buckets; server-side pre-flight token counting; prompt-cache prewarming;
   cache-aware input refunds; observed-p99 output reservations; raw rate-limit

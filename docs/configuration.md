@@ -119,12 +119,8 @@ with an approximately one-second upper polling interval for capacity waiters.
 In both cases the shared value is an explicit runtime override, not a static
 config edit.
 
-SQLite runtime overrides expire after `override_ttl_seconds`, which defaults to
-`bucket_ttl_seconds`; ordinary bucket activity does not extend that fixed
-lifetime. Once an override expires, every process falls back to its own
-process-local configured quota. SQLite does not distribute `PerModelConfig`, so
-deploy the same static quotas to every process sharing a database and prefix.
-Calling `set_max_capacity()` again replaces the override and starts a new TTL.
+SQLite override lifetime and process-local fallback details are in the
+[SQLite backend guide](sqlite-backend.md#runtime-overrides-and-configuration).
 
 If a callable config removes a bucket and later re-adds it, the re-added
 bucket starts from the static quota in the current config. Runtime overrides

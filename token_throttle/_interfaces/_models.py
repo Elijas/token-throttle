@@ -81,7 +81,7 @@ def _validate_key_segment(
     allow_none: bool = False,
     max_length: int | None = None,
 ) -> str | None:
-    """Validate Redis-key path segments used for metrics and model families."""
+    """Validate constrained identifiers used by backend key formats."""
     if value is None and allow_none:
         return None
     if type(value) is not str:
@@ -158,7 +158,7 @@ class Quota(StrictDTO):
     DEFAULT_SECONDS: ClassVar[int] = 60
     metric: str = Field(
         description=(
-            "Metric name used in Redis key segments. Must be non-empty, NFC "
+            "Metric name used in backend bucket keys. Must be non-empty, NFC "
             "normalized, printable, contain no whitespace/control characters, "
             "and cannot contain ':', '{', or '}'; the portable recommended "
             "character set is ^[A-Za-z0-9_./-]+$."
@@ -511,7 +511,7 @@ class CapacityReservation(StrictDTO):
     usage: FrozenUsage
     model_family: str = Field(
         description=(
-            "Model family used in Redis key segments. Must be non-empty, NFC "
+            "Model family used in backend bucket keys. Must be non-empty, NFC "
             "normalized, printable, contain no whitespace/control characters, "
             "and cannot contain ':', '{', or '}'; the portable recommended "
             "character set is ^[A-Za-z0-9_./-]+$."
@@ -538,7 +538,7 @@ class CapacityReservation(StrictDTO):
         description=(
             "Wall-clock Unix timestamp recorded by the limiter when the "
             "reservation is issued. None is a valid state — unlimited "
-            "reservations carry None and the async limiter stamps the "
+            "reservations carry None and the limiter stamps the "
             "timestamp when it issues a bounded reservation — but bounded "
             "reservation lifetimes require it."
         ),

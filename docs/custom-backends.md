@@ -171,10 +171,13 @@ Public limiter code chains the raised `AcquireRefundFailedError` with
 
 Leave it `False` unless the backend can preserve live state for surviving bucket
 ids when callable configs add or remove metrics. To return `True`, the backend
-must either store state in stable external storage keyed by metric/window, or
-override `prepare_reconfigured_backend()` to migrate or share in-process state
-with the rebuilt backend. Returning `True` while inheriting the default no-op
-hook is a contract violation because it can silently reset consumption state.
+must override `prepare_reconfigured_backend()` — either to migrate or share
+in-process state with the rebuilt backend, or, when state already lives in
+stable external storage keyed by metric/window, to return the rebuilt backend
+unchanged. Storing state externally does not exempt a backend from overriding
+the hook: returning `True` while inheriting the default no-op is a contract
+violation, because it can silently reset consumption state, and the conformance
+helper rejects it.
 
 ## Marker Authority for Acquired Reservations
 
@@ -321,7 +324,7 @@ The snapshot always includes:
 - `model_families`
 - `backend_type`
 
-Redis backends also expose best-effort local estimates:
+Redis and SQLite backends also expose best-effort local estimates:
 
 - `marker_count_estimate`
 - `refund_dedup_count_estimate`

@@ -758,7 +758,7 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
             refund_bucket_ids,
             backend_bucket_ids,
         )
-        if not refund_bucket_ids:
+        if not refund_bucket_ids and reservation_id is None:
             return True
         # Calculate refund amounts per metric
         refund_usage_: dict[str, float] = {}
@@ -821,6 +821,11 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
                     reservation_id=reservation_id,
                     model_family=self._limit_config.get_model_family(),
                 )
+            if not refund_bucket_ids:
+                assert reservation_id is not None  # noqa: S101
+                self._acquired_reservation_ids.remove(reservation_id)
+                self._remember_refunded_reservation_id(reservation_id)
+                return True
             current_time = time.time()
             prerefund_capacities, fresh_start_buckets = self._get_capacities(
                 current_time,
@@ -837,16 +842,7 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
                 matching_refund_amount = refund_usage.get(cap_metric)
                 if matching_refund_amount is None:
                     continue
-                bucket = next(
-                    (
-                        b
-                        for b in self._buckets
-                        if b.usage_metric == cap_metric and b.per_seconds == per_seconds
-                    ),
-                    None,
-                )
-                if bucket is None:  # pragma: no cover
-                    raise ValueError(f"Bucket '{cap_metric}/{per_seconds}s' not found")
+                bucket = self._bucket_registry[bucket_id]
                 refund_amount = max(matching_refund_amount, -bucket.max_capacity)
                 updated_capacities_[(cap_metric, int(per_seconds))] = max(
                     -bucket.max_capacity,

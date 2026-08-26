@@ -108,11 +108,12 @@ async def test_await_for_capacity_with_wait(backend_builder):
     config = _make_config(limit=5, per_seconds=1)
     backend = backend_builder.build(config)
 
-    # Exhaust all capacity.
+    # Anchor before the drain so its return-path overhead cannot consume the
+    # 0.2 s refill window measured below.
+    start = time.monotonic()
     await backend.await_for_capacity(frozen_usage({"requests": 5}))
 
     # Next request must wait for refill.
-    start = time.monotonic()
     await backend.await_for_capacity(frozen_usage({"requests": 1}))
     elapsed = time.monotonic() - start
 
@@ -271,7 +272,6 @@ async def test_refund_capped_at_max_capacity(backend_builder):
     assert elapsed < 1.0
 
     # But requesting 1 more should block because we're at 0.
-    start = time.monotonic()
     await backend.await_for_capacity(frozen_usage({"requests": 1}))
     elapsed = time.monotonic() - start
     assert elapsed >= 0.05, "Expected wait after exhaustion"
@@ -349,7 +349,7 @@ async def test_refill_capped_at_max_capacity(backend_builder):
     # Consume 3 of 5.
     await backend.await_for_capacity(frozen_usage({"requests": 3}))
 
-    # Wait 3 s — far more than needed to refill 3 units at 5/s.
+    # Wait 1.5 s — far more than needed to refill 3 units at 5/s.
     await asyncio.sleep(1.5)
 
     # Capacity should be at most 5 (max). Consuming 5 should work immediately.
@@ -465,7 +465,6 @@ async def test_dynamic_max_capacity_via_backend_api(backend_builder):
     assert elapsed < 1.0, "3 requests should succeed with new max_capacity=3"
 
     # Requesting 1 more should block (we just consumed all 3).
-    start = time.monotonic()
     await backend.await_for_capacity(frozen_usage({"requests": 1}))
     elapsed = time.monotonic() - start
     assert elapsed >= 0.08, (

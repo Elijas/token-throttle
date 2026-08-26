@@ -22,6 +22,7 @@ from token_throttle._exceptions import (
     BackendLockContentionError,
     DuplicateRefundError,
     UnknownReservationError,
+    _mark_unknown_reservation_forget_in_flight,
 )
 
 if TYPE_CHECKING:
@@ -893,9 +894,11 @@ class SqliteEngine:
             found=marker is not None,
         )
         if marker is None:
-            raise UnknownReservationError(
-                reservation_id=reservation_id,
-                model_family=reservation_model_family,
+            raise _mark_unknown_reservation_forget_in_flight(
+                UnknownReservationError(
+                    reservation_id=reservation_id,
+                    model_family=reservation_model_family,
+                )
             )
         if (
             marker[0] != reservation_model_family

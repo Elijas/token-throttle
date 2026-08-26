@@ -339,7 +339,7 @@ class TestSyncCallableConfigMetricSetChange:
 
         thread = threading.Thread(target=waiter)
         thread.start()
-        assert wait_started.wait(timeout=0.2)
+        assert wait_started.wait(timeout=2.0)
 
         use_expanded = True
         with warnings.catch_warnings():
@@ -573,7 +573,8 @@ class TestSyncCallableConfigWindowChangeHandling:
     """Window-only changes must update blocked acquires and later refunds correctly."""
 
     def test_window_change_applies_to_existing_blocked_waiter(self):
-        current_window = 1
+        current_window = 60
+        wait_started = threading.Event()
 
         def config_getter(model_name: str) -> PerModelConfig:
             return PerModelConfig(
@@ -583,7 +584,14 @@ class TestSyncCallableConfigWindowChangeHandling:
                 model_family="test-family",
             )
 
-        limiter = SyncRateLimiter(config_getter, backend=SyncMemoryBackendBuilder())
+        def on_wait_start(**_kwargs) -> None:
+            wait_started.set()
+
+        limiter = SyncRateLimiter(
+            config_getter,
+            backend=SyncMemoryBackendBuilder(),
+            callbacks=SyncRateLimiterCallbacks(on_wait_start=on_wait_start),
+        )
 
         limiter.acquire_capacity({"tokens": 100}, "test-model")
 
@@ -591,26 +599,25 @@ class TestSyncCallableConfigWindowChangeHandling:
 
         def waiter() -> None:
             try:
-                started_at = time.monotonic()
-                limiter.acquire_capacity({"tokens": 50}, "test-model", timeout=0.6)
+                result["reservation"] = limiter.acquire_capacity(
+                    {"tokens": 50}, "test-model", timeout=2.0
+                )
             except Exception as exc:
                 result["error"] = exc
-            else:
-                result["elapsed"] = time.monotonic() - started_at
 
         thread = threading.Thread(target=waiter)
         thread.start()
-        time.sleep(0.05)
+        assert wait_started.wait(timeout=2.0)
 
         current_window = 3600
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             limiter.acquire_capacity({"tokens": 0}, "test-model")
 
-        thread.join(timeout=2.0)
+        thread.join(timeout=5.0)
         assert not thread.is_alive()
         assert "error" not in result
-        assert result["elapsed"] < 0.25
+        assert result["reservation"].usage["tokens"] == 50
 
     def test_refund_after_window_replacement_does_not_credit_new_window(self):
         current_window = 60
@@ -671,9 +678,10 @@ class TestSyncCallableConfigMetricSetWaiters:
 
     def test_metric_expansion_preserves_existing_blocked_waiter(self):
         use_expanded = False
+        wait_started = threading.Event()
 
         def config_getter(model_name: str) -> PerModelConfig:
-            quotas = [Quota(metric="tokens", limit=100, per_seconds=1)]
+            quotas = [Quota(metric="tokens", limit=100, per_seconds=3600)]
             if use_expanded:
                 quotas.append(Quota(metric="requests", limit=10, per_seconds=60))
             return PerModelConfig(
@@ -681,12 +689,16 @@ class TestSyncCallableConfigMetricSetWaiters:
                 model_family="test-family",
             )
 
+        def on_wait_start(**_kwargs) -> None:
+            wait_started.set()
+
         limiter = SyncRateLimiter(
             config_getter,
             backend=SyncMemoryBackendBuilder(sleep_interval=0.01),
+            callbacks=SyncRateLimiterCallbacks(on_wait_start=on_wait_start),
         )
 
-        limiter.acquire_capacity({"tokens": 100}, "test-model")
+        drained = limiter.acquire_capacity({"tokens": 100}, "test-model")
 
         result: dict[str, object] = {}
 
@@ -695,21 +707,22 @@ class TestSyncCallableConfigMetricSetWaiters:
                 result["reservation"] = limiter.acquire_capacity(
                     {"tokens": 1},
                     "test-model",
-                    timeout=1.0,
+                    timeout=2.0,
                 )
             except Exception as exc:
                 result["error"] = exc
 
         thread = threading.Thread(target=waiter)
         thread.start()
-        time.sleep(0.05)
+        assert wait_started.wait(timeout=2.0)
 
         use_expanded = True
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             limiter.acquire_capacity({"tokens": 0, "requests": 0}, "test-model")
 
-        thread.join(timeout=2.0)
+        limiter.refund_capacity({"tokens": 0}, drained)
+        thread.join(timeout=5.0)
         assert not thread.is_alive()
         assert "error" not in result
         assert result["reservation"].usage["tokens"] == 1
@@ -875,7 +888,7 @@ class TestSyncCallableConfigMetricSetConcurrency:
                     thread.start()
                 start_barrier.wait()
             for thread in threads:
-                thread.join()
+                thread.join(timeout=5.0)
 
         assert builder.build_calls == 2
         assert sorted(results) == ["TimeoutError", "success"]

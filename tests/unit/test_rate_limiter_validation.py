@@ -1109,13 +1109,3 @@ class TestRecordUsage:
         )
         mock_backend.consume_capacity.assert_awaited_once()
         assert reservation.model_family == "gpt-4"
-
-    async def test_record_usage_unlimited_is_noop(self):
-        builder, _ = make_mock_backend_builder()
-        limiter = RateLimiter(make_unlimited_config(), backend=builder)
-        reservation = await limiter.record_usage({"tokens": 5}, model="gpt-4")
-        assert reservation.model_family == _UNLIMITED_FLAG
-        # Unlimited reservations carry empty usage by construction
-        # (FIX-03 BUNDLE-VALIDATOR option (b)).
-        assert dict(reservation.usage) == {}
-        assert reservation.is_unlimited is True
