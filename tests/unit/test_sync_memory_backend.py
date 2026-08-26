@@ -206,8 +206,11 @@ class TestWaitCallbacks:
         backend.consume_capacity(frozendict({"tokens": 100.0}))
         cbs.on_capacity_consumed.reset_mock()
 
-        # rate is 100/sec, so 0.01s sleep should refill ~1 token
-        backend.wait_for_capacity(frozendict({"tokens": 1.0}))
+        # Rate is 100/sec, so 50 tokens need ~0.5s of refill. Requesting a
+        # 10ms refill (1 token) made the test flaky: any scheduling gap of
+        # >=10ms between the drain and the first capacity check meant the
+        # waiter never waited, so on_wait_start legitimately never fired.
+        backend.wait_for_capacity(frozendict({"tokens": 50.0}))
 
         cbs.on_wait_start.assert_called_once()
         call_kwargs = cbs.on_wait_start.call_args.kwargs
