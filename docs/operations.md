@@ -39,10 +39,10 @@ through the bucket's normal linear refill over the quota window.
 The TTL knobs (`bucket_ttl_seconds`, `refund_dedup_ttl_seconds`,
 `max_reservation_lifetime_seconds`) govern how long Redis keeps the
 bookkeeping keys that make a reservation *refundable* and how long refund
-idempotency is remembered — they do not govern capacity crediting. Letting a
-TTL expire does not credit capacity back; it only means a late refund for that
-reservation will fail closed (`UnknownReservationError`) instead of being
-applied.
+idempotency is remembered — they do not govern capacity crediting. TTL expiry
+never credits capacity back. A public refund after
+`max_reservation_lifetime_seconds` fails with `ValueError` before backend I/O;
+an otherwise missing backend marker raises `UnknownReservationError`.
 
 `snapshot_state()["in_flight_reservations"]` is a process-local, in-memory
 count on the limiter instance that issued the reservations. It cannot detect
@@ -286,17 +286,15 @@ reasons.
 
 ### `UnknownReservationError`
 
-Raised by `refund_capacity()` / `refund_capacity_from_response()` when the
-backend has no record that this reservation was ever acquired: its acquire
-marker already expired (`max_reservation_lifetime_seconds`,
-`bucket_ttl_seconds`, or `refund_dedup_ttl_seconds` elapsed — see
-[If a worker crashes before refunding](#if-a-worker-crashes-before-refunding)
-above), it was issued by a different limiter instance, or it is a
-forged or deserialized reservation. This fails closed: **capacity is not
-credited**. Retrying the identical refund keeps failing — there is no
-transient condition to wait out. Refund through the same limiter instance
-that issued the reservation, refund promptly (before its lifetime/TTL window
-elapses), and do not serialize or queue reservations across processes.
+Raised when a refund reaches the backend but it has no record that the
+reservation was acquired, or earlier when the reservation belongs to a
+different limiter instance. This includes lost backend state and forged or
+deserialized reservations. A reservation older than
+`max_reservation_lifetime_seconds` instead raises `ValueError` before backend
+lookup. Both failures fail closed: **capacity is not credited**. Retrying the
+identical refund keeps failing — there is no transient condition to wait out.
+Refund through the same limiter instance, before its lifetime/TTL window
+elapses, and do not serialize or queue reservations across processes.
 
 ### `AcquireRefundFailedError`
 

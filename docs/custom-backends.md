@@ -321,7 +321,7 @@ The snapshot always includes:
 - `model_families`
 - `backend_type`
 
-Redis backends also expose best-effort local estimates:
+Redis and SQLite backends also expose best-effort local estimates:
 
 - `marker_count_estimate`
 - `refund_dedup_count_estimate`
