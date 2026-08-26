@@ -377,11 +377,6 @@ await limiter.set_max_capacity(
 )
 ```
 
-For SQLite and Redis backends the new limit is written to shared storage, so
-cooperating processes see the change on their next backend operation (within
-about one second for a waiting SQLite process). SQLite overrides expire after
-`override_ttl_seconds` unless they are set again.
-
 Runtime-override semantics — cross-process propagation, expiration,
 remove-and-readd behavior, and ordering against config rotations — are covered in
 [docs/configuration.md](docs/configuration.md#dynamic-rate-limits).
