@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import multiprocessing
 
-import pytest
-
 from tests.multiprocess._harness import (
     ChildHandle,
     LimiterSpec,
@@ -19,13 +17,6 @@ from tests.multiprocess._harness import (
 PROBE_COUNT = 3
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "pending SQLite per-operation busy_timeout fix for spec-review M1; "
-        "remove this mark after re-merging the engine fix"
-    ),
-)
 def test_sqlite_try_acquire_returns_promptly_while_writer_holds_lock(
     sqlite_backend_case,
 ) -> None:
