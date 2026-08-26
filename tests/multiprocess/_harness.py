@@ -258,6 +258,37 @@ def _hold_until_killed(
     return {"unexpected_release": True}
 
 
+def _hold_sqlite_write_transaction(
+    connection: Connection,
+    backend_spec: BackendSpec,
+    limiter_spec: LimiterSpec,
+    payload: Mapping[str, object],
+) -> dict[str, object]:
+    if backend_spec.kind != "sqlite" or backend_spec.locator is None:
+        raise ValueError("write-transaction injection requires a SQLite backend spec")
+    release_gate = payload["release_gate"]
+    import sqlite3  # noqa: PLC0415
+
+    # Build the process-affine public limiter first. The second connection is a
+    # test-only fault-injection seam that holds a real cross-process writer lock.
+    with (
+        _build_limiter(backend_spec, limiter_spec),
+        sqlite3.connect(
+            backend_spec.locator,
+            timeout=0.1,
+            isolation_level=None,
+        ) as lock_connection,
+    ):
+        lock_connection.execute("PRAGMA busy_timeout=100")
+        lock_connection.execute("BEGIN IMMEDIATE")
+        try:
+            _send(connection, "write_locked", locked_monotonic=time.monotonic())
+            _wait_for_gate(release_gate, scaled(20), name="write-release")
+        finally:
+            lock_connection.execute("ROLLBACK")
+    return {"released_monotonic": time.monotonic()}
+
+
 def _try_acquire(
     connection: Connection,
     backend_spec: BackendSpec,
@@ -284,6 +315,29 @@ def _try_acquire(
             "finished_monotonic": time.monotonic(),
             "reservation_id": reservation.reservation_id,
         }
+
+
+def _timed_try_acquire(
+    connection: Connection,
+    backend_spec: BackendSpec,
+    limiter_spec: LimiterSpec,
+    payload: Mapping[str, object],
+) -> dict[str, object]:
+    amount = float(payload["amount"])
+    started = time.monotonic()
+    try:
+        with _build_limiter(backend_spec, limiter_spec) as limiter:
+            limiter.acquire_capacity({"requests": amount}, MODEL, timeout=0)
+    except TimeoutError:
+        outcome = "TimeoutError"
+    except Exception as exc:
+        outcome = type(exc).__name__
+    else:
+        outcome = "acquired"
+    return {
+        "elapsed": time.monotonic() - started,
+        "outcome": outcome,
+    }
 
 
 def _replay_refund(
@@ -350,10 +404,12 @@ def _contention_cycles(
 _ACTIONS = {
     "contention_cycles": _contention_cycles,
     "greedy_acquire": _greedy_acquire,
+    "hold_sqlite_write_transaction": _hold_sqlite_write_transaction,
     "hold_then_refund": _hold_then_refund,
     "hold_until_killed": _hold_until_killed,
     "replay_refund": _replay_refund,
     "try_acquire": _try_acquire,
+    "timed_try_acquire": _timed_try_acquire,
     "wait_for_refund": _wait_for_refund,
 }
 

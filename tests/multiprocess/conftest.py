@@ -116,6 +116,12 @@ def _sqlite_case(tmp_path: Path) -> BackendCase:
     )
 
 
+@pytest.fixture
+def sqlite_backend_case(tmp_path: Path) -> BackendCase:
+    """Yield a SQLite-only backend case without evaluating Redis fixtures."""
+    return _sqlite_case(tmp_path)
+
+
 @pytest.fixture(
     params=[
         pytest.param("redis", marks=pytest.mark.redis, id="redis"),
