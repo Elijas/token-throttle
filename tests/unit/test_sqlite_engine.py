@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import multiprocessing
 import os
+import re
 import sqlite3
 import threading
 import time
@@ -1163,7 +1164,8 @@ def test_sqlite_missing_parent_error_names_resolved_path(tmp_path: Path) -> None
     resolved = os.path.realpath(db_path)
     builder = SyncSqliteBackendBuilder(db_path, key_prefix="scope")
     try:
-        with pytest.raises(sqlite3.OperationalError, match=resolved):
+        # match= is a regex; Windows paths contain backslash escapes like \U.
+        with pytest.raises(sqlite3.OperationalError, match=re.escape(resolved)):
             builder.build(_config())
     finally:
         builder.close()
