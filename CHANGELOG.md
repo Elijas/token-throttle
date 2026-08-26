@@ -3,7 +3,7 @@
 Notable changes for token-throttle releases. Each major version's breaking
 changes and upgrade steps are recorded in its entry below.
 
-## Unreleased
+## 10.1.0 - 2026-08-26
 
 - Adds stdlib-only synchronous and asynchronous SQLite backends for persistent,
   multi-process rate-limit coordination on one host without a separate server.
