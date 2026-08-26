@@ -155,6 +155,16 @@ def validate_bucket_ttl_covers_quota_windows(
     bucket_ttl_seconds: int,
     quotas: Iterable[Quota],
 ) -> None:
+    """
+    Fail fast when a quota window outlives the bucket state TTL.
+
+    SQLite prunes idle bucket rows after ``bucket_ttl_seconds``. If a quota's
+    ``per_seconds`` window is longer than that, an idle gap between the TTL and
+    window silently removes the bucket state, and the next read re-grants full
+    capacity instead of preserving the drained long-window state. Equality
+    (``per_seconds == bucket_ttl_seconds``) is allowed: the bucket only needs to
+    survive gaps *shorter* than the window itself.
+    """
     too_long = [
         f"{quota.metric}: per_seconds={quota.per_seconds}"
         for quota in quotas

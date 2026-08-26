@@ -103,7 +103,9 @@ class BackendLockContentionError(Exception):
 
     * **Acquisition starvation** — the lock could not be acquired within the
       configured wait because other workers held it for the whole window.
-      Retry, raise the backend's contention timeout, or reduce concurrency.
+      Retry, raise the backend's contention timeout
+      (``lock_blocking_timeout_seconds`` for Redis or ``busy_timeout_ms`` for
+      SQLite), or reduce concurrency.
     * **Mid-operation loss** — the lock expired or was stolen by another worker
       between the read and the write, so the in-progress write was aborted to
       avoid clobbering another worker's state. The operation made no change and

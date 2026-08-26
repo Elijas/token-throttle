@@ -1064,6 +1064,13 @@ class SqliteEngine:
         busy_timeout_ms: int | None = None,
         clock: Callable[[], float] = time.time,
     ) -> None:
+        """
+        Persist a runtime cap after anchoring state at the old refill rate.
+
+        The anchor deliberately keeps the uncapped integration. Reads cap the
+        visible amount, but preserving raw overflow makes lower-then-raise cap
+        sequences recoverable when no intervening capacity write occurred.
+        """
         value = _validate_max_capacity_finite_positive(value)
         bucket_id = (metric, per_seconds)
         if bucket_id not in self._bucket_by_id:
