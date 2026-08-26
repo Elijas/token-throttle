@@ -2,7 +2,6 @@
 
 import asyncio
 import concurrent.futures
-import contextlib
 import contextvars
 import threading
 
@@ -169,22 +168,15 @@ class TestSetMaxCapacityLockTransaction:
         backend = limiter._model_family_to_backend[MODEL_FAMILY]
 
         apply_entered = asyncio.Event()
-        override_remembered = asyncio.Event()
+        set_attempted = asyncio.Event()
         original_apply = backend.apply_configured_max_capacity
-        original_remember = limiter._remember_runtime_max_capacity
 
         async def controlled_apply(*args, **kwargs):
             await original_apply(*args, **kwargs)
             apply_entered.set()
-            with contextlib.suppress(TimeoutError):
-                await asyncio.wait_for(override_remembered.wait(), timeout=0.05)
-
-        def remember_and_signal(*args, **kwargs):
-            original_remember(*args, **kwargs)
-            override_remembered.set()
+            await asyncio.wait_for(set_attempted.wait(), timeout=2.0)
 
         backend.apply_configured_max_capacity = controlled_apply
-        limiter._remember_runtime_max_capacity = remember_and_signal
 
         async def actor_rebuild():
             token = config_var.set(new_config)
@@ -195,6 +187,7 @@ class TestSetMaxCapacityLockTransaction:
 
         async def actor_set():
             await asyncio.wait_for(apply_entered.wait(), timeout=1)
+            set_attempted.set()
             token = config_var.set(old_config)
             try:
                 await limiter.set_max_capacity(MODEL, "tokens", 60, 50.0)
@@ -221,21 +214,15 @@ class TestSetMaxCapacityLockTransaction:
         backend = limiter._model_family_to_backend[MODEL_FAMILY]
 
         apply_entered = threading.Event()
-        override_remembered = threading.Event()
+        set_attempted = threading.Event()
         original_apply = backend.apply_configured_max_capacity
-        original_remember = limiter._remember_runtime_max_capacity
 
         def controlled_apply(*args, **kwargs):
             original_apply(*args, **kwargs)
             apply_entered.set()
-            override_remembered.wait(timeout=0.05)
-
-        def remember_and_signal(*args, **kwargs):
-            original_remember(*args, **kwargs)
-            override_remembered.set()
+            assert set_attempted.wait(timeout=2.0)
 
         backend.apply_configured_max_capacity = controlled_apply
-        limiter._remember_runtime_max_capacity = remember_and_signal
 
         def actor_rebuild():
             thread_config.config = new_config
@@ -243,6 +230,7 @@ class TestSetMaxCapacityLockTransaction:
 
         def actor_set():
             assert apply_entered.wait(timeout=1)
+            set_attempted.set()
             thread_config.config = old_config
             limiter.set_max_capacity(MODEL, "tokens", 60, 50.0)
 

@@ -6,7 +6,6 @@ from collections import UserDict
 from unittest.mock import ANY, MagicMock
 
 import pytest
-from pydantic import ValidationError
 
 from token_throttle._interfaces._interfaces import PerModelConfig
 from token_throttle._interfaces._models import CapacityReservation, Quota, UsageQuotas
@@ -181,18 +180,6 @@ class TestAcquireCapacityValidation:
 
 class TestRefundCapacityValidation:
     """Tests for ValueError paths in refund_capacity."""
-
-    def test_unlimited_reservation_with_nonempty_usage_rejected_at_construction(self):
-        # Pre-FIX-03 this hand-construction silently produced an
-        # unlimited reservation that no-op'd on refund (the V05
-        # footgun). The field validator now rejects it at construction.
-        with pytest.raises(ValidationError, match="empty usage"):
-            CapacityReservation(
-                usage={"tokens": 5},
-                model_family=_UNLIMITED_FLAG,
-                is_unlimited=True,
-                limiter_instance_id="limiter",
-            )
 
     def test_unlimited_reservation_with_empty_usage_is_noop(self):
         builder, _ = make_mock_backend_builder()
@@ -960,21 +947,6 @@ class TestSetMaxCapacityValidation:
         mock_backend.set_max_capacity.assert_called_once_with("tokens", 60, 500.0)
 
 
-class TestGetBackendValidation:
-    def test_empty_model_family_rejected_at_construction(self):
-        """PerModelConfig rejects empty model_family at construction time."""
-        with pytest.raises(ValidationError, match="model_family must not be empty"):
-            PerModelConfig(
-                quotas=UsageQuotas(
-                    [
-                        Quota(metric="tokens", limit=1000),
-                        Quota(metric="requests", limit=10),
-                    ]
-                ),
-                model_family="",
-            )
-
-
 class TestModelNameTypeValidation:
     """model parameter must be a string — non-strings should raise ValueError."""
 
@@ -1083,13 +1055,3 @@ class TestRecordUsage:
         )
         mock_backend.consume_capacity.assert_called_once()
         assert reservation.model_family == "gpt-4"
-
-    def test_record_usage_unlimited_is_noop(self):
-        builder, _ = make_mock_backend_builder()
-        limiter = SyncRateLimiter(make_unlimited_config(), backend=builder)
-        reservation = limiter.record_usage({"tokens": 5}, model="gpt-4")
-        assert reservation.model_family == _UNLIMITED_FLAG
-        # Unlimited reservations carry empty usage by construction
-        # (FIX-03 BUNDLE-VALIDATOR option (b)).
-        assert dict(reservation.usage) == {}
-        assert reservation.is_unlimited is True

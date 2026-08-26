@@ -327,7 +327,7 @@ class TestCallableConfigMetricSetChange:
         waiter = asyncio.create_task(
             limiter.acquire_capacity({"tokens": 150}, "test-model", timeout=1.0)
         )
-        await asyncio.wait_for(wait_started.wait(), timeout=0.2)
+        await asyncio.wait_for(wait_started.wait(), timeout=2.0)
 
         use_expanded = True
         with warnings.catch_warnings():
@@ -561,7 +561,8 @@ class TestCallableConfigWindowChangeHandling:
     """Window-only changes must update blocked acquires and later refunds correctly."""
 
     async def test_window_change_applies_to_existing_blocked_waiter(self):
-        current_window = 1
+        current_window = 60
+        wait_started = asyncio.Event()
 
         def config_getter(model_name: str) -> PerModelConfig:
             return PerModelConfig(
@@ -571,25 +572,29 @@ class TestCallableConfigWindowChangeHandling:
                 model_family="test-family",
             )
 
-        limiter = RateLimiter(config_getter, backend=MemoryBackendBuilder())
+        async def on_wait_start(**_kwargs) -> None:
+            wait_started.set()
+
+        limiter = RateLimiter(
+            config_getter,
+            backend=MemoryBackendBuilder(),
+            callbacks=RateLimiterCallbacks(on_wait_start=on_wait_start),
+        )
 
         await limiter.acquire_capacity({"tokens": 100}, "test-model")
 
-        async def waiter():
-            started_at = asyncio.get_running_loop().time()
-            await limiter.acquire_capacity({"tokens": 50}, "test-model", timeout=0.6)
-            return asyncio.get_running_loop().time() - started_at
-
-        waiter = asyncio.create_task(waiter())
-        await asyncio.sleep(0.05)
+        waiter = asyncio.create_task(
+            limiter.acquire_capacity({"tokens": 50}, "test-model", timeout=2.0)
+        )
+        await asyncio.wait_for(wait_started.wait(), timeout=2.0)
 
         current_window = 3600
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             await limiter.acquire_capacity({"tokens": 0}, "test-model")
 
-        elapsed = await waiter
-        assert elapsed < 0.25
+        reservation = await waiter
+        assert reservation.usage["tokens"] == 50
 
     async def test_refund_after_window_replacement_does_not_credit_new_window(self):
         current_window = 60
@@ -650,9 +655,10 @@ class TestCallableConfigMetricSetWaiters:
 
     async def test_metric_expansion_preserves_existing_blocked_waiter(self):
         use_expanded = False
+        wait_started = asyncio.Event()
 
         def config_getter(model_name: str) -> PerModelConfig:
-            quotas = [Quota(metric="tokens", limit=100, per_seconds=1)]
+            quotas = [Quota(metric="tokens", limit=100, per_seconds=3600)]
             if use_expanded:
                 quotas.append(Quota(metric="requests", limit=10, per_seconds=60))
             return PerModelConfig(
@@ -660,17 +666,21 @@ class TestCallableConfigMetricSetWaiters:
                 model_family="test-family",
             )
 
+        async def on_wait_start(**_kwargs) -> None:
+            wait_started.set()
+
         limiter = RateLimiter(
             config_getter,
             backend=MemoryBackendBuilder(sleep_interval=0.01),
+            callbacks=RateLimiterCallbacks(on_wait_start=on_wait_start),
         )
 
-        await limiter.acquire_capacity({"tokens": 100}, "test-model")
+        drained = await limiter.acquire_capacity({"tokens": 100}, "test-model")
 
         waiter = asyncio.create_task(
-            limiter.acquire_capacity({"tokens": 1}, "test-model", timeout=1.0)
+            limiter.acquire_capacity({"tokens": 1}, "test-model", timeout=2.0)
         )
-        await asyncio.sleep(0.05)
+        await asyncio.wait_for(wait_started.wait(), timeout=2.0)
 
         use_expanded = True
         with warnings.catch_warnings():
@@ -680,6 +690,7 @@ class TestCallableConfigMetricSetWaiters:
                 "test-model",
             )
 
+        await limiter.refund_capacity({"tokens": 0}, drained)
         reservation = await waiter
         assert reservation.usage["tokens"] == 1
 

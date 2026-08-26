@@ -10,8 +10,11 @@ these tests will fail (TDD red phase).
 
 import asyncio
 import threading
-import time
 
+from token_throttle._interfaces._callbacks import (
+    RateLimiterCallbacks,
+    SyncRateLimiterCallbacks,
+)
 from token_throttle._interfaces._interfaces import PerModelConfig
 from token_throttle._interfaces._models import Quota, UsageQuotas, frozen_usage
 
@@ -38,7 +41,15 @@ def _make_config(
 async def test_refund_wakes_blocked_waiter(backend_builder):
     """Refunding capacity should wake a blocked waiter immediately."""
     config = _make_config(limit=10, per_seconds=3600)
-    backend = backend_builder.build(config)
+    wait_started = asyncio.Event()
+
+    async def on_wait_start(**_kwargs):
+        wait_started.set()
+
+    backend = backend_builder.build(
+        config,
+        callbacks=RateLimiterCallbacks(on_wait_start=on_wait_start),
+    )
     backend._sleep_interval = _LONG_POLL_INTERVAL
 
     # Exhaust all capacity
@@ -48,7 +59,7 @@ async def test_refund_wakes_blocked_waiter(backend_builder):
     task = asyncio.create_task(
         backend.await_for_capacity(frozen_usage({"requests": 5}))
     )
-    await asyncio.sleep(0.1)  # let waiter enter the wait loop
+    await asyncio.wait_for(wait_started.wait(), timeout=2.0)
 
     # Refund capacity -- should wake the waiter via condition notification
     await backend.refund_capacity(
@@ -79,11 +90,18 @@ async def test_set_max_capacity_wakes_blocked_waiter(backend_builder):
     """Increasing max_capacity should wake a blocked waiter immediately.
 
     Uses per_seconds=1 so the rate increase from set_max_capacity (5/s -> 100/s)
-    produces enough capacity on re-check:
-      capacity = min(100, 0 + ~0.2s * 100/s) = 20 >= 3
+    produces the requested 3 units within about 0.03 s after notification.
     """
     config = _make_config(limit=5, per_seconds=1)
-    backend = backend_builder.build(config)
+    wait_started = asyncio.Event()
+
+    async def on_wait_start(**_kwargs):
+        wait_started.set()
+
+    backend = backend_builder.build(
+        config,
+        callbacks=RateLimiterCallbacks(on_wait_start=on_wait_start),
+    )
     backend._sleep_interval = _LONG_POLL_INTERVAL
 
     # Exhaust all capacity
@@ -93,7 +111,7 @@ async def test_set_max_capacity_wakes_blocked_waiter(backend_builder):
     task = asyncio.create_task(
         backend.await_for_capacity(frozen_usage({"requests": 3}))
     )
-    await asyncio.sleep(0.1)
+    await asyncio.wait_for(wait_started.wait(), timeout=2.0)
 
     # Increase max_capacity: rate goes from 5/s to 100/s
     await backend.set_max_capacity("requests", 1, 100.0)
@@ -118,7 +136,15 @@ async def test_set_max_capacity_wakes_blocked_waiter(backend_builder):
 def test_sync_refund_wakes_blocked_waiter(sync_backend_builder):
     """Refunding capacity should wake a blocked waiter immediately (sync)."""
     config = _make_config(limit=10, per_seconds=3600)
-    backend = sync_backend_builder.build(config)
+    wait_started = threading.Event()
+
+    def on_wait_start(**_kwargs):
+        wait_started.set()
+
+    backend = sync_backend_builder.build(
+        config,
+        callbacks=SyncRateLimiterCallbacks(on_wait_start=on_wait_start),
+    )
     backend._sleep_interval = _LONG_POLL_INTERVAL
 
     # Exhaust all capacity
@@ -132,7 +158,7 @@ def test_sync_refund_wakes_blocked_waiter(sync_backend_builder):
 
     t = threading.Thread(target=waiter, daemon=True)
     t.start()
-    time.sleep(0.1)  # let waiter enter the wait loop
+    assert wait_started.wait(timeout=2.0)
 
     # Refund capacity -- should wake the waiter
     backend.refund_capacity(
@@ -153,7 +179,15 @@ def test_sync_refund_wakes_blocked_waiter(sync_backend_builder):
 def test_sync_set_max_capacity_wakes_blocked_waiter(sync_backend_builder):
     """Increasing max_capacity should wake a blocked waiter immediately (sync)."""
     config = _make_config(limit=5, per_seconds=1)
-    backend = sync_backend_builder.build(config)
+    wait_started = threading.Event()
+
+    def on_wait_start(**_kwargs):
+        wait_started.set()
+
+    backend = sync_backend_builder.build(
+        config,
+        callbacks=SyncRateLimiterCallbacks(on_wait_start=on_wait_start),
+    )
     backend._sleep_interval = _LONG_POLL_INTERVAL
 
     # Exhaust all capacity
@@ -167,7 +201,7 @@ def test_sync_set_max_capacity_wakes_blocked_waiter(sync_backend_builder):
 
     t = threading.Thread(target=waiter, daemon=True)
     t.start()
-    time.sleep(0.1)
+    assert wait_started.wait(timeout=2.0)
 
     # Increase max_capacity: rate goes from 5/s to 100/s
     backend.set_max_capacity("requests", 1, 100.0)

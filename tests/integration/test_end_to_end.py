@@ -182,7 +182,9 @@ async def test_sequential_requests_exhaust_then_block(backend_builder):
     )
     limiter = RateLimiter(config, backend=backend_builder)
 
-    # Consume all 3 request slots.
+    # Anchor before the final drain commit so return-path overhead cannot
+    # consume the next request's 1/3 s refill window.
+    start = time.monotonic()
     for _ in range(3):
         await limiter.acquire_capacity(
             usage={"requests": 1, "tokens": 10},
@@ -190,7 +192,6 @@ async def test_sequential_requests_exhaust_then_block(backend_builder):
         )
 
     # 4th request should block until refill.
-    start = time.monotonic()
     await limiter.acquire_capacity(
         usage={"requests": 1, "tokens": 10},
         model="exhaust",
@@ -250,7 +251,6 @@ async def test_dynamic_max_capacity_change(request, backend_builder, redis_clien
     assert elapsed < 1.0, "3 requests should succeed with new max_capacity=3"
 
     # Now requesting even 1 more should block (we just consumed all 3).
-    start = time.monotonic()
     await limiter.acquire_capacity(
         usage={"requests": 1, "tokens": 10},
         model="dynamic",

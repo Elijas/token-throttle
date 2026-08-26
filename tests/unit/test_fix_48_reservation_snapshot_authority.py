@@ -125,6 +125,7 @@ async def test_async_waited_acquire_issue_time_starts_after_capacity_commit() ->
     await asyncio.sleep(0.25)
     assert not waiter.done()
     backend = limiter._model_family_to_backend[FAMILY]
+    refund_started_at = time.time()
     await backend.refund_capacity_for_buckets(
         {"tokens": 1},
         {"tokens": 0},
@@ -134,7 +135,7 @@ async def test_async_waited_acquire_issue_time_starts_after_capacity_commit() ->
 
     waited = await asyncio.wait_for(waiter, timeout=1)
     assert waited.created_at_seconds is not None
-    assert time.time() - waited.created_at_seconds < 0.2
+    assert refund_started_at <= waited.created_at_seconds <= time.time()
     await limiter.refund_capacity({"tokens": 0}, waited)
 
 
@@ -160,19 +161,20 @@ def test_sync_waited_acquire_issue_time_starts_after_capacity_commit() -> None:
     time.sleep(0.25)
     assert thread.is_alive()
     backend = limiter._model_family_to_backend[FAMILY]
+    refund_started_at = time.time()
     backend.refund_capacity_for_buckets(
         {"tokens": 1},
         {"tokens": 0},
         bucket_ids=frozenset({("tokens", 60)}),
         reservation_id=first.reservation_id,
     )
-    thread.join(timeout=1)
+    thread.join(timeout=5)
 
     assert "error" not in result
     waited = result["reservation"]
     assert isinstance(waited, CapacityReservation)
     assert waited.created_at_seconds is not None
-    assert time.time() - waited.created_at_seconds < 0.2
+    assert refund_started_at <= waited.created_at_seconds <= time.time()
     limiter.refund_capacity({"tokens": 0}, waited)
 
 

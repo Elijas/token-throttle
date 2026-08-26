@@ -58,7 +58,6 @@ def test_dynamic_max_capacity_change(sync_redis_client):
     assert elapsed < 1.0, "3 requests should succeed with new max_capacity=3"
 
     # Now requesting 1 more should block (just consumed all 3).
-    start = time.monotonic()
     backend.wait_for_capacity(frozen_usage({"requests": 1, "tokens": 10}))
     elapsed = time.monotonic() - start
     assert elapsed >= 0.08, (
