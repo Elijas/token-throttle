@@ -14,7 +14,8 @@ not exact scheduler sleeps.
 
 CI intent: run this directory in the Linux Redis ``test-integration`` job with
 ``--redis-url redis://localhost:6379/13``. Allow roughly twice the ordinary
-integration-test wall time. Slow runners may set
+integration-test wall time. SQLite parameters remain runnable when Redis is
+unavailable. Slow runners may set
 ``TOKEN_THROTTLE_MULTIPROCESS_TIMING_SCALE=2`` to scale process/join deadlines;
 quota/refill arithmetic remains unchanged. CI workflow edits are intentionally
 outside this lane.

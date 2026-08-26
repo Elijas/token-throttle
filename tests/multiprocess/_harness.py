@@ -124,10 +124,14 @@ def _build_limiter(
     elif backend_spec.kind == "memory":
         builder = SyncMemoryBackendBuilder()
     elif backend_spec.kind == "sqlite":
-        # This branch is the only harness edit the parallel SQLite lane needs.
-        # Its public builder name is intentionally not guessed before that API lands.
-        raise NotImplementedError(
-            "SQLite backend builder is not available in this lane"
+        if backend_spec.locator is None:
+            raise ValueError("SQLite backend spec requires a database-path locator")
+        from token_throttle import SyncSqliteBackendBuilder  # noqa: PLC0415
+
+        builder = SyncSqliteBackendBuilder(
+            db_path=backend_spec.locator,
+            key_prefix=backend_spec.key_prefix,
+            **options,
         )
     else:  # pragma: no cover - Literal plus spawn input validation makes this defensive.
         raise ValueError(f"Unknown backend kind: {backend_spec.kind}")

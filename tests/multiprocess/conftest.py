@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import sqlite3
 import time
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
 
 import pytest
 
@@ -26,7 +28,18 @@ class BackendCase:
     spec: BackendSpec
     observer: object | None = None
 
-    def marker_exists(self, reservation_id: str) -> bool:
+    def marker_is_live(self, reservation_id: str) -> bool:
+        if self.spec.kind == "sqlite":
+            if self.spec.locator is None:
+                raise AssertionError("SQLite backend case has no database path")
+            read_only_uri = f"{Path(self.spec.locator).resolve().as_uri()}?mode=ro"
+            with sqlite3.connect(read_only_uri, uri=True) as connection:
+                row = connection.execute(
+                    "SELECT expires_at FROM acquire_markers "
+                    "WHERE key_prefix = ? AND reservation_id = ?",
+                    (self.spec.key_prefix, reservation_id),
+                ).fetchone()
+            return row is not None and float(row[0]) > time.time()
         if self.spec.kind != "redis" or self.observer is None:
             raise NotImplementedError(
                 f"marker inspection is not implemented for {self.spec.kind}"
@@ -43,7 +56,7 @@ class BackendCase:
 
     def wait_until_marker_expires(self, reservation_id: str, *, timeout: float) -> None:
         deadline = time.monotonic() + timeout
-        while self.marker_exists(reservation_id):
+        while self.marker_is_live(reservation_id):
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise AssertionError(
@@ -92,9 +105,32 @@ def _redis_case(redis_url: str) -> tuple[BackendCase, object]:
     )
 
 
-@pytest.fixture(params=[pytest.param("redis", marks=pytest.mark.redis)])
-def shared_backend_case(request: pytest.FixtureRequest, redis_url: str):
-    """Yield shared backends; add SQLite to this parameter list when it lands."""
+def _sqlite_case(tmp_path: Path) -> BackendCase:
+    return BackendCase(
+        spec=BackendSpec(
+            kind="sqlite",
+            locator=str(tmp_path / "shared-state.sqlite3"),
+            key_prefix=f"mp-{uuid.uuid4().hex}",
+            options=(("sleep_interval", 0.02),),
+        )
+    )
+
+
+@pytest.fixture(
+    params=[
+        pytest.param("redis", marks=pytest.mark.redis, id="redis"),
+        pytest.param("sqlite", id="sqlite"),
+    ]
+)
+def shared_backend_case(
+    request: pytest.FixtureRequest,
+    redis_url: str,
+    tmp_path: Path,
+):
+    """Yield each cross-process-capable backend without coupling their setup."""
+    if request.param == "sqlite":
+        yield _sqlite_case(tmp_path)
+        return
     if request.param != "redis":
         raise ValueError(f"Unknown shared backend: {request.param}")
     case, client = _redis_case(redis_url)
@@ -107,9 +143,11 @@ def shared_backend_case(request: pytest.FixtureRequest, redis_url: str):
 
 @pytest.fixture(
     params=[
-        pytest.param("redis", marks=pytest.mark.redis),
+        pytest.param("redis", marks=pytest.mark.redis, id="redis"),
+        pytest.param("sqlite", id="sqlite"),
         pytest.param(
             "memory",
+            id="memory",
             marks=pytest.mark.xfail(
                 strict=True,
                 reason=(
@@ -120,13 +158,22 @@ def shared_backend_case(request: pytest.FixtureRequest, redis_url: str):
         ),
     ]
 )
-def fresh_interpreter_backend_case(request: pytest.FixtureRequest, redis_url: str):
+def fresh_interpreter_backend_case(
+    request: pytest.FixtureRequest,
+    redis_url: str,
+    tmp_path: Path,
+):
     """Include memory as a strict expected-failure control for the process cliff."""
     if request.param == "memory":
         yield BackendCase(
             spec=BackendSpec(kind="memory", locator=None, key_prefix="unused")
         )
         return
+    if request.param == "sqlite":
+        yield _sqlite_case(tmp_path)
+        return
+    if request.param != "redis":
+        raise ValueError(f"Unknown fresh-interpreter backend: {request.param}")
     case, client = _redis_case(redis_url)
     try:
         yield case
