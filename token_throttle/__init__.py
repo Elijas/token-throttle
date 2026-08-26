@@ -16,6 +16,7 @@ from token_throttle._diagnostic import (
     RedisBackendHealthDiagnostic,
     ReservationGroupDiagnostic,
     RuntimeOverrideDiagnostic,
+    SqliteBackendHealthDiagnostic,
     WaitBucketDiagnostic,
     WaiterDiagnostic,
 )
@@ -271,6 +272,7 @@ __all__ = [
     "SecondsIn",
     "SqliteBackend",
     "SqliteBackendBuilder",
+    "SqliteBackendHealthDiagnostic",
     "SyncBackendIntrospectable",
     "SyncMemoryBackend",
     "SyncMemoryBackendBuilder",
