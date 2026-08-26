@@ -132,6 +132,10 @@ def test_sqlite_engine_creates_versioned_wal_schema(tmp_path: Path) -> None:
         assert journal_mode == ("wal",)
         assert engine._connection.execute("PRAGMA synchronous").fetchone() == (1,)
         assert engine._connection.execute("PRAGMA busy_timeout").fetchone() == (5000,)
+        bucket_columns = {
+            row[1] for row in engine._connection.execute("PRAGMA table_info(buckets)")
+        }
+        assert "expires_at" in bucket_columns
     finally:
         engine.close()
 
@@ -611,7 +615,8 @@ def test_sqlite_repairs_far_future_last_checked_on_failed_attempt(
         monkeypatch.setattr(capacity_module, "_backward_clock_warned", False)
         monkeypatch.setattr(capacity_module, "_backward_clock_last_warning_at", None)
         engine._connection.execute(
-            "UPDATE buckets SET capacity = 0, last_checked = 1000, updated_at = 1000"
+            "UPDATE buckets SET capacity = 0, last_checked = 1000, "
+            "updated_at = 1000, expires_at = 2000"
         )
         with pytest.warns(RuntimeWarning, match="Negative time_passed"):
             failed = engine.try_consume(
@@ -773,6 +778,50 @@ def test_sqlite_key_prefixes_isolate_capacity_in_one_database(
     finally:
         first.close()
         second.close()
+
+
+def test_sqlite_bucket_pruning_respects_each_rows_absolute_expiry(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "heterogeneous-ttls.sqlite3"
+    long_lived = _engine(
+        db_path,
+        key_prefix="long-lived",
+        limit=10.0,
+        per_seconds=10,
+        bucket_ttl_seconds=100,
+    )
+    short_lived = _engine(
+        db_path,
+        key_prefix="short-lived",
+        limit=1.0,
+        per_seconds=1,
+        bucket_ttl_seconds=1,
+    )
+    try:
+        long_lived.consume(
+            frozen_usage({"requests": 10}),
+            current_time=100.0,
+            reservation_id=None,
+            reservation_lifetime_seconds=None,
+        )
+        short_lived.consume(
+            frozen_usage({"requests": 0}),
+            current_time=102.0,
+            reservation_id=None,
+            reservation_lifetime_seconds=None,
+        )
+        preserved = long_lived.try_consume(
+            frozen_usage({"requests": 0}),
+            current_time=102.0,
+            reservation_id=None,
+            reservation_lifetime_seconds=None,
+        )
+        assert preserved.result.fresh_bucket_ids == ()
+        assert preserved.result.pre_capacities[("requests", 10)] == 2.0
+    finally:
+        long_lived.close()
+        short_lived.close()
 
 
 def test_sqlite_duplicate_acquire_is_visible_across_connections(

@@ -49,6 +49,7 @@ _SCHEMA_STATEMENTS = (
     override_value REAL,
     override_expires_at REAL,
     updated_at REAL NOT NULL,
+    expires_at REAL NOT NULL,
     PRIMARY KEY (key_prefix, model_family, metric, per_seconds)
 )""",
     """CREATE TABLE IF NOT EXISTS acquire_markers (
@@ -68,7 +69,7 @@ _SCHEMA_STATEMENTS = (
     expires_at REAL NOT NULL,
     PRIMARY KEY (key_prefix, reservation_id)
 )""",
-    "CREATE INDEX IF NOT EXISTS idx_buckets_updated_at ON buckets(updated_at)",
+    "CREATE INDEX IF NOT EXISTS idx_buckets_expires_at ON buckets(expires_at)",
     "CREATE INDEX IF NOT EXISTS idx_acquire_markers_expires_at "
     "ON acquire_markers(expires_at)",
     "CREATE INDEX IF NOT EXISTS idx_refund_tombstones_expires_at "
@@ -327,14 +328,16 @@ class SqliteEngine:
                 connection.execute(
                     "INSERT OR IGNORE INTO buckets "
                     "(key_prefix, model_family, metric, per_seconds, capacity, "
-                    "last_checked, override_value, override_expires_at, updated_at) "
-                    "VALUES (?, ?, ?, ?, NULL, NULL, NULL, NULL, ?)",
+                    "last_checked, override_value, override_expires_at, updated_at, "
+                    "expires_at) "
+                    "VALUES (?, ?, ?, ?, NULL, NULL, NULL, NULL, ?, ?)",
                     (
                         self.key_prefix,
                         self.model_family,
                         bucket.metric,
                         bucket.per_seconds,
                         current_time,
+                        current_time + self._bucket_ttl_seconds,
                     ),
                 )
 
@@ -351,8 +354,8 @@ class SqliteEngine:
         )
         connection.execute(
             "DELETE FROM buckets WHERE rowid IN "
-            "(SELECT rowid FROM buckets WHERE updated_at <= ? LIMIT ?)",
-            (current_time - self._bucket_ttl_seconds, self._prune_batch_size),
+            "(SELECT rowid FROM buckets WHERE expires_at <= ? LIMIT ?)",
+            (current_time, self._prune_batch_size),
         )
 
     def _bucket_log_id(self, bucket: BucketSpec) -> str:
@@ -368,7 +371,7 @@ class SqliteEngine:
         for spec in self._buckets:
             row = connection.execute(
                 "SELECT capacity, last_checked, override_value, "
-                "override_expires_at, updated_at FROM buckets "
+                "override_expires_at, updated_at, expires_at FROM buckets "
                 "WHERE key_prefix = ? AND model_family = ? AND metric = ? "
                 "AND per_seconds = ?",
                 (
@@ -378,9 +381,7 @@ class SqliteEngine:
                     spec.per_seconds,
                 ),
             ).fetchone()
-            if row is not None and float(row[4]) <= (
-                current_time - self._bucket_ttl_seconds
-            ):
+            if row is not None and float(row[5]) <= current_time:
                 connection.execute(
                     "DELETE FROM buckets WHERE key_prefix = ? AND model_family = ? "
                     "AND metric = ? AND per_seconds = ?",
@@ -400,14 +401,16 @@ class SqliteEngine:
                 connection.execute(
                     "INSERT INTO buckets "
                     "(key_prefix, model_family, metric, per_seconds, capacity, "
-                    "last_checked, override_value, override_expires_at, updated_at) "
-                    "VALUES (?, ?, ?, ?, NULL, NULL, NULL, NULL, ?)",
+                    "last_checked, override_value, override_expires_at, updated_at, "
+                    "expires_at) "
+                    "VALUES (?, ?, ?, ?, NULL, NULL, NULL, NULL, ?, ?)",
                     (
                         self.key_prefix,
                         self.model_family,
                         spec.metric,
                         spec.per_seconds,
                         current_time,
+                        current_time + self._bucket_ttl_seconds,
                     ),
                 )
                 capacity_value: float | None = None
@@ -433,9 +436,12 @@ class SqliteEngine:
                     if override_value is not None or override_expires_at is not None:
                         connection.execute(
                             "UPDATE buckets SET override_value = NULL, "
-                            "override_expires_at = NULL WHERE key_prefix = ? "
+                            "override_expires_at = NULL, updated_at = ?, "
+                            "expires_at = ? WHERE key_prefix = ? "
                             "AND model_family = ? AND metric = ? AND per_seconds = ?",
                             (
+                                current_time,
+                                current_time + self._bucket_ttl_seconds,
                                 self.key_prefix,
                                 self.model_family,
                                 spec.metric,
@@ -455,11 +461,13 @@ class SqliteEngine:
                 last_checked_value = current_time
                 connection.execute(
                     "UPDATE buckets SET capacity = 0.0, last_checked = ?, "
-                    "updated_at = ? WHERE key_prefix = ? AND model_family = ? "
+                    "updated_at = ?, expires_at = ? WHERE key_prefix = ? "
+                    "AND model_family = ? "
                     "AND metric = ? AND per_seconds = ?",
                     (
                         current_time,
                         current_time,
+                        current_time + self._bucket_ttl_seconds,
                         self.key_prefix,
                         self.model_family,
                         spec.metric,
@@ -488,12 +496,14 @@ class SqliteEngine:
                 > current_time + FUTURE_LAST_CHECKED_REPAIR_TOLERANCE_SECONDS
             ):
                 connection.execute(
-                    "UPDATE buckets SET last_checked = ?, updated_at = ? "
+                    "UPDATE buckets SET last_checked = ?, updated_at = ?, "
+                    "expires_at = ? "
                     "WHERE key_prefix = ? AND model_family = ? AND metric = ? "
                     "AND per_seconds = ?",
                     (
                         current_time,
                         current_time,
+                        current_time + self._bucket_ttl_seconds,
                         self.key_prefix,
                         self.model_family,
                         spec.metric,
@@ -528,13 +538,15 @@ class SqliteEngine:
                 raise ValueError(f"capacity must be finite (got {amount!r})")
             normalized = 0.0 if float(amount) == 0.0 else float(amount)
             cursor = connection.execute(
-                "UPDATE buckets SET capacity = ?, last_checked = ?, updated_at = ? "
+                "UPDATE buckets SET capacity = ?, last_checked = ?, updated_at = ?, "
+                "expires_at = ? "
                 "WHERE key_prefix = ? AND model_family = ? AND metric = ? "
                 "AND per_seconds = ?",
                 (
                     normalized,
                     current_time,
                     current_time,
+                    current_time + self._bucket_ttl_seconds,
                     self.key_prefix,
                     self.model_family,
                     metric,
@@ -988,13 +1000,14 @@ class SqliteEngine:
                 )
             connection.execute(
                 "UPDATE buckets SET override_value = ?, override_expires_at = ?, "
-                "updated_at = ? "
+                "updated_at = ?, expires_at = ? "
                 "WHERE key_prefix = ? "
                 "AND model_family = ? AND metric = ? AND per_seconds = ?",
                 (
                     value,
                     current_time + self._override_ttl_seconds,
                     current_time,
+                    current_time + self._bucket_ttl_seconds,
                     self.key_prefix,
                     self.model_family,
                     metric,
@@ -1026,9 +1039,12 @@ class SqliteEngine:
                 )
             connection.execute(
                 "UPDATE buckets SET override_value = NULL, "
-                "override_expires_at = NULL WHERE key_prefix = ? "
+                "override_expires_at = NULL, updated_at = ?, expires_at = ? "
+                "WHERE key_prefix = ? "
                 "AND model_family = ? AND metric = ? AND per_seconds = ?",
                 (
+                    current_time,
+                    current_time + self._bucket_ttl_seconds,
                     self.key_prefix,
                     self.model_family,
                     metric,
@@ -1069,9 +1085,12 @@ class SqliteEngine:
             for metric, per_seconds in target_ids:
                 connection.execute(
                     "UPDATE buckets SET override_value = NULL, "
-                    "override_expires_at = NULL WHERE key_prefix = ? "
+                    "override_expires_at = NULL, updated_at = ?, expires_at = ? "
+                    "WHERE key_prefix = ? "
                     "AND model_family = ? AND metric = ? AND per_seconds = ?",
                     (
+                        current_time,
+                        current_time + self._bucket_ttl_seconds,
                         self.key_prefix,
                         self.model_family,
                         metric,
