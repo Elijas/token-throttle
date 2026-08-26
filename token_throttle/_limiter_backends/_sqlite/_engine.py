@@ -6,6 +6,7 @@ import logging
 import math
 import sqlite3
 import threading
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
@@ -187,9 +188,7 @@ class SqliteEngine:
                 isolation_level=None,
                 check_same_thread=False,
             )
-            self._connection.execute(f"PRAGMA busy_timeout={busy_timeout_ms:d}")
-            self._connection.execute("PRAGMA journal_mode=WAL")
-            self._connection.execute("PRAGMA synchronous=NORMAL")
+            self._configure_connection(busy_timeout_ms)
             self._initialize_schema()
         except BaseException:
             connection = getattr(self, "_connection", None)
@@ -208,6 +207,33 @@ class SqliteEngine:
     def close(self) -> None:
         with self._lock:
             self._connection.close()
+
+    def _configure_connection(self, busy_timeout_ms: int) -> None:
+        self._connection.execute(f"PRAGMA busy_timeout={busy_timeout_ms:d}")
+        deadline = time.monotonic() + busy_timeout_ms / 1000.0
+        while True:
+            try:
+                self._connection.execute("PRAGMA journal_mode=WAL")
+                break
+            except sqlite3.OperationalError as exc:
+                if not _is_busy_error(exc):
+                    raise
+                if time.monotonic() >= deadline:
+                    raise BackendLockContentionError(
+                        "SQLite database remained busy or locked while enabling WAL "
+                        "beyond busy_timeout; initialization is safe to retry."
+                    ) from exc
+                time.sleep(min(0.01, max(0.0, deadline - time.monotonic())))
+        try:
+            self._connection.execute("PRAGMA synchronous=NORMAL")
+        except sqlite3.OperationalError as exc:
+            if _is_busy_error(exc):
+                raise BackendLockContentionError(
+                    "SQLite database remained busy or locked while configuring "
+                    "synchronous=NORMAL beyond busy_timeout; initialization is "
+                    "safe to retry."
+                ) from exc
+            raise
 
     @contextmanager
     def _transaction(self) -> Iterator[sqlite3.Connection]:
