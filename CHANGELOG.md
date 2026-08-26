@@ -3,6 +3,18 @@
 Notable changes for token-throttle releases. Each major version's breaking
 changes and upgrade steps are recorded in its entry below.
 
+## Unreleased
+
+- Fixes the SQLite backends leaking a reservation from
+  `snapshot_state()["in_flight_reservations"]` when a refund failed closed with
+  `UnknownReservationError` — for example after the acquire marker expired.
+  The reservation stayed counted as in flight for the life of the limiter, so a
+  long-running process could drift toward its in-flight cap and eventually raise
+  `CardinalityLimitExceededError` on healthy acquires. The Redis backends
+  already released the reservation in this case; SQLite now matches them.
+  Capacity accounting is unaffected — the refund still fails closed and credits
+  nothing.
+
 ## 10.1.0 - 2026-08-26
 
 - Adds stdlib-only synchronous and asynchronous SQLite backends for persistent,
