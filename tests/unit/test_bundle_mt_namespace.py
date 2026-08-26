@@ -98,13 +98,6 @@ def _redis_keys_for_backend_bucket(bucket) -> set[str]:
     }
 
 
-def _redis_keys_for_backend(backend) -> set[str]:
-    keys: set[str] = set()
-    for bucket in backend.sorted_buckets:
-        keys.update(_redis_keys_for_backend_bucket(bucket))
-    return keys
-
-
 def test_async_redis_builder_requires_key_prefix() -> None:
     with pytest.raises(TypeError, match="key_prefix"):
         RedisBackendBuilder(_AsyncRedisStore())

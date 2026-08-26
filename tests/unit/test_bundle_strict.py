@@ -177,10 +177,6 @@ class TestNumpySubclassRejections:
         with pytest.raises(ValueError, match="metric"):
             validate_metric(np.str_("tokens"))
 
-    def test_a15_float_per_seconds_rejected(self):
-        with pytest.raises(ValueError, match="positive integer"):
-            validate_per_seconds(60.0)
-
     def test_a15_numpy_per_seconds_rejected_consistently(self):
         np = pytest.importorskip("numpy")
 

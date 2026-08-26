@@ -185,11 +185,12 @@ async def test_record_depletes_then_acquire_waits(backend_builder):
     config = _make_config(limit=5, per_seconds=1)
     limiter = RateLimiter(config, backend=backend_builder)
 
-    # Record all capacity away via non-blocking path
+    # Anchor before the drain so its return-path overhead cannot consume the
+    # 0.2 s refill window measured below.
+    start = time.monotonic()
     await limiter.record_usage({"requests": 5}, model="test")
 
     # Blocking acquire should wait for refill
-    start = time.monotonic()
     await limiter.acquire_capacity({"requests": 1}, model="test")
     elapsed = time.monotonic() - start
 
