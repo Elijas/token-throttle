@@ -14,6 +14,14 @@ changes and upgrade steps are recorded in its entry below.
   already released the reservation in this case; SQLite now matches them.
   Capacity accounting is unaffected — the refund still fails closed and credits
   nothing.
+- Fixes the memory backends never finalizing a reservation whose buckets all
+  disappeared in a callable-config metric-set change. Such a refund returned
+  early — before releasing the reservation's backend acquire state or recording
+  its dedup entry — so the backend kept treating it as acquired for the life of
+  the process. The refund is now finalized on that path, which also means an
+  overuse `RuntimeWarning` can surface where the early return previously
+  suppressed it. Capacity accounting is unchanged: there are no surviving
+  buckets to credit.
 
 ## 10.1.0 - 2026-08-26
 

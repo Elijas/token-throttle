@@ -40,7 +40,10 @@ backend key prefixes.
 a `RateLimiterDiagnostic` DTO: a richer, point-in-time snapshot than
 `snapshot_state()`. Unlike `snapshot_state()`, it performs bounded backend I/O
 to reconcile local bookkeeping against backend-reported bucket state; it never
-mutates capacity.
+mutates capacity. On a write-contended SQLite database that read can wait up to
+`busy_timeout_ms` for the current writer, so a tight `diagnose()` polling loop
+is not free — if introspection cannot complete, the diagnostic degrades to a
+warning issue rather than failing the call.
 
 It reports, per model family and bucket: current and effective capacity, the
 configured limit, and any active runtime override with its source (`limiter`,

@@ -101,17 +101,44 @@ class TestRefundCorrectnessStillMatchesFix07:
             {"tokens": 30, "requests": 3},
             MODEL,
         )
+        backend = limiter._model_family_to_backend[MODEL_FAMILY]
+        assert reservation.reservation_id in backend._acquired_reservation_ids
 
         current_config = _config(metrics=("compute",))
         with pytest.warns(RuntimeWarning, match="Refund dropped"):
             await limiter.refund_capacity({"tokens": 10, "requests": 1}, reservation)
         assert reservation.reservation_id in limiter._refunded_reservation_ids
 
+        # The limiter's own dedup would hide a backend that never finalized the
+        # reservation, so assert the backend released it too: an empty bucket
+        # projection must still clear acquire state and leave a dedup record.
+        assert reservation.reservation_id not in backend._acquired_reservation_ids
+        assert reservation.reservation_id in backend._refunded_reservation_ids
+
         current_config = _two_metric_config()
         with pytest.raises(DuplicateRefundError, match="reservation already refunded"):
             await limiter.refund_capacity({"tokens": 10, "requests": 1}, reservation)
 
         assert limiter._refund_locks == {}
+
+    def test_sync_empty_projection_finalizes_backend_reservation(self) -> None:
+        current_config = _two_metric_config()
+
+        def config_getter(_model: str) -> PerModelConfig:
+            return current_config
+
+        limiter = SyncRateLimiter(config_getter, backend=SyncMemoryBackendBuilder())
+        reservation = limiter.acquire_capacity({"tokens": 30, "requests": 3}, MODEL)
+        backend = limiter._model_family_to_backend[MODEL_FAMILY]
+        assert reservation.reservation_id in backend._acquired_reservation_ids
+
+        current_config = _config(metrics=("compute",))
+        with pytest.warns(RuntimeWarning, match="Refund dropped"):
+            limiter.refund_capacity({"tokens": 10, "requests": 1}, reservation)
+
+        assert reservation.reservation_id not in backend._acquired_reservation_ids
+        assert reservation.reservation_id in backend._refunded_reservation_ids
+        assert limiter.snapshot_state()["in_flight_reservations"] == 0
 
     def test_sync_post_write_failure_keeps_refund_deduped(self) -> None:
         limiter = SyncRateLimiter(_config(), backend=SyncMemoryBackendBuilder())
