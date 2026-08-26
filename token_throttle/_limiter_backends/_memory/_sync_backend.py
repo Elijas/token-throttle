@@ -842,16 +842,7 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
                 matching_refund_amount = refund_usage.get(cap_metric)
                 if matching_refund_amount is None:
                     continue
-                bucket = next(
-                    (
-                        b
-                        for b in self._buckets
-                        if b.usage_metric == cap_metric and b.per_seconds == per_seconds
-                    ),
-                    None,
-                )
-                if bucket is None:  # pragma: no cover
-                    raise ValueError(f"Bucket '{cap_metric}/{per_seconds}s' not found")
+                bucket = self._bucket_registry[bucket_id]
                 refund_amount = max(matching_refund_amount, -bucket.max_capacity)
                 updated_capacities_[(cap_metric, int(per_seconds))] = max(
                     -bucket.max_capacity,

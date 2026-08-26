@@ -154,8 +154,8 @@ def _parse_time_response(raw: Any) -> tuple[int, int]:
     raw_seconds, raw_microseconds = raw
     if type(raw_seconds) is not int or type(raw_microseconds) is not int:
         raise TypeError(
-            "Redis TIME components must be integer-coercible Redis integer "
-            f"components, got {raw!r}"
+            "Redis TIME components must be exact integers; integer-coercible "
+            f"non-integers are rejected, got {raw!r}"
         )
     seconds = raw_seconds
     microseconds = raw_microseconds

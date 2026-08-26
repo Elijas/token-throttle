@@ -3248,10 +3248,6 @@ class RedisBackend(RateLimiterBackend):
         if last_checked_raw is None or stored_raw is None:
             await refresh_pending_override_ttl()
             apply_pending_override_cache()
-            # Partial state (one None) is treated the same as full absence:
-            # the bucket will start fresh on the next acquire. This is the
-            # correct fallback — anchoring with incomplete data would produce
-            # a wrong capacity value.
             _logger.warning(
                 "Bucket %s: snapshot skipped due to missing Redis state "
                 "(last_checked=%r, capacity=%r).",
@@ -3492,24 +3488,21 @@ class RedisBackend(RateLimiterBackend):
                     current_time=current_time,
                     buckets=target_buckets,
                 )
+                max_capacities = {
+                    (bucket.usage_metric, int(bucket.per_seconds)): (
+                        bucket.max_capacity
+                    )
+                    for bucket in target_buckets
+                }
                 refunded: dict[tuple[str, int], float] = dict(capacities)
                 for (cap_metric, per_seconds), cap_amount in capacities.items():
-                    for usage_metric, usage_amount in usage.items():
-                        if cap_metric != usage_metric:
-                            continue
-                        bucket = self._find_bucket(
-                            target_buckets,
-                            cap_metric,
-                            per_seconds,
-                        )
-                        if bucket is None:  # pragma: no cover
-                            raise ValueError(
-                                f"Bucket '{cap_metric}/{per_seconds}s' not found",
-                            )
-                        refunded[(cap_metric, per_seconds)] = min(
-                            cap_amount + usage_amount,
-                            bucket.max_capacity,
-                        )
+                    usage_amount = usage.get(cap_metric)
+                    if usage_amount is None:
+                        continue
+                    refunded[(cap_metric, per_seconds)] = min(
+                        cap_amount + usage_amount,
+                        max_capacities[(cap_metric, per_seconds)],
+                    )
                 await self._extend_locks(lock_stack)
                 await self._set_capacities_unsafe(
                     frozendict(refunded),
