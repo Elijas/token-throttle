@@ -5,6 +5,21 @@ changes and upgrade steps are recorded in its entry below.
 
 ## Unreleased
 
+- Adds stdlib-only synchronous and asynchronous SQLite backends for persistent,
+  multi-process rate-limit coordination on one host without a separate server.
+  Use memory for one process, SQLite for multiple processes on one local
+  filesystem, and Redis when a budget must span machines. SQLite state uses WAL
+  transactions, durable acquire/refund bookkeeping, expiring runtime
+  overrides, and configurable contention and TTL bounds; network filesystems
+  are outside its supported scope.
+- Adds spawn-based multi-process coverage for SQLite and Redis shared-budget
+  enforcement, cross-process refunds, crash-orphan linear refill, late-refund
+  failure, contention accounting, and fresh-interpreter persistence, plus a
+  SQLite try-acquire writer-contention regression.
+- Widens the diagnostic backend type additively with the `"sqlite"` literal.
+  SQLite `diagnose()` output now uses a first-class structured health section
+  with exact acquire-marker and refund-tombstone counts; `snapshot_state()`
+  exposes the same local best-effort durable-count estimates as Redis.
 - Adds a runnable Anthropic Messages example with independent RPM, ITPM, and
   OTPM buckets; server-side pre-flight token counting; prompt-cache prewarming;
   cache-aware input refunds; observed-p99 output reservations; raw rate-limit

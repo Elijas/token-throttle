@@ -112,10 +112,19 @@ await limiter.set_max_capacity(
 )
 ```
 
-For Redis backends the new limit is written to Redis, so all processes
-sharing the same Redis see the change within ~1 second. This persisted Redis
-value is an explicit runtime override; static quota changes from your config do
-not rewrite it automatically.
+For Redis backends the new limit is written to Redis, so all processes sharing
+the same Redis see the change within ~1 second. For SQLite backends it is
+written to the shared database; other processes see it on their next operation,
+with an approximately one-second upper polling interval for capacity waiters.
+In both cases the shared value is an explicit runtime override, not a static
+config edit.
+
+SQLite runtime overrides expire after `override_ttl_seconds`, which defaults to
+`bucket_ttl_seconds`; ordinary bucket activity does not extend that fixed
+lifetime. Once an override expires, every process falls back to its own
+process-local configured quota. SQLite does not distribute `PerModelConfig`, so
+deploy the same static quotas to every process sharing a database and prefix.
+Calling `set_max_capacity()` again replaces the override and starts a new TTL.
 
 If a callable config removes a bucket and later re-adds it, the re-added
 bucket starts from the static quota in the current config. Runtime overrides
@@ -127,4 +136,7 @@ and let the limiter rebuild on the next acquire/refund. `set_max_capacity()` is
 an explicit runtime override, not a config edit. Config rotations concurrent
 with `set_max_capacity()` are ordered by whichever backend update completes
 last; a later config rebuild resolves back to the static quota unless you
-reapply the override.
+reapply the override. For SQLite, applying a changed static quota clears the
+shared override for that bucket, so coordinate config rollout and override
+writers across processes. See the [SQLite backend guide](sqlite-backend.md#runtime-overrides-and-configuration)
+for the persistence and expiry details.

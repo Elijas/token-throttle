@@ -7,6 +7,8 @@ connection/TTL sizing, and capacity planning for high-RPS fleets.
 Start with the [README](../README.md) for installation, the mental model, and
 quickstarts. Reach for this guide once you are deploying on Redis and need to
 reason about durability, scaling ceilings, and resource budgets.
+For single-host, multi-process deployments, use the dedicated
+[SQLite backend guide](sqlite-backend.md).
 
 ## Reservation lifecycle and durability
 
@@ -227,17 +229,24 @@ contention depends on the call:
   case the write is aborted and makes no change), they raise
   `BackendLockContentionError`.
 
+### Backend contention retry contract
+
 `BackendLockContentionError` is exported from the top-level `token_throttle`
-package. When you see it, the operation did not modify state and is safe to
-retry. Seeing it repeatedly means a bucket is genuinely hot; the durable fixes
-are to reduce concurrency on that bucket, spread traffic across more model
-families/windows, provision Redis CPU headroom, or raise
-`lock_blocking_timeout_seconds` so attempts wait longer before giving up. The
-memory backends have no Redis lock and never raise `BackendLockContentionError`.
+package and is shared by the Redis and SQLite backends. When you see it, the
+operation did not modify state and is safe to retry.
+
+For Redis, repeated errors mean a bucket is genuinely hot or its lock deadline
+is too short. Reduce concurrency on that bucket, spread traffic across more
+model families/windows, provision Redis CPU headroom, or raise
+`lock_blocking_timeout_seconds`. SQLite raises the same exception when a
+non-waiting write cannot obtain the database writer lock within
+`busy_timeout_ms`; see [Write contention and try-acquire behavior](sqlite-backend.md#write-contention-and-try-acquire-behavior).
+Memory backends have no shared-storage lock and do not raise this exception.
 
 ## Application-facing errors
 
-Beyond `BackendLockContentionError` (lock contention, covered above) and
+Beyond `BackendLockContentionError` (backend write/lock contention, covered
+above) and
 `TimeoutError` (capacity-wait deadline exceeded, see the
 [README Timeout section](../README.md#timeout)), these are the
 token-throttle-specific exceptions an application should expect at the
