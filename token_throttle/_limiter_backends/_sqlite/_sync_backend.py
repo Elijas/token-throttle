@@ -632,25 +632,30 @@ class SyncSqliteBackend(SyncRateLimiterBackend):
             )
             for bucket_id, maximum in max_capacities.items()
         }
-        state = DiagnosticWaiterState(
-            waiter_id=waiter_key,
-            reservation_id=reservation_id,
-            model_family=self._engine.model_family,
-            model=None,
-            request_id=None,
-            state="waiting_for_capacity",
-            usage=usage,
-            wait_started_monotonic=wait_started_at or time.monotonic(),
-            timeout_deadline_monotonic=deadline,
-            blocked_buckets=wait_bucket_diagnostics(
-                model_family=self._engine.model_family,
-                usage=usage,
-                capacities=dict(capacities),
-                limits=limits,
-            ),
-        )
         with self._diagnostic_lock:
-            self._diagnostic_waiters[waiter_key] = state
+            previous = self._diagnostic_waiters.get(waiter_key)
+            started = (
+                previous.wait_started_monotonic
+                if previous is not None
+                else wait_started_at or time.monotonic()
+            )
+            self._diagnostic_waiters[waiter_key] = DiagnosticWaiterState(
+                waiter_id=waiter_key,
+                reservation_id=reservation_id,
+                model_family=self._engine.model_family,
+                model=None,
+                request_id=None,
+                state="waiting_for_capacity",
+                usage=usage,
+                wait_started_monotonic=started,
+                timeout_deadline_monotonic=deadline,
+                blocked_buckets=wait_bucket_diagnostics(
+                    model_family=self._engine.model_family,
+                    usage=usage,
+                    capacities=dict(capacities),
+                    limits=limits,
+                ),
+            )
 
     def refund_capacity(
         self,

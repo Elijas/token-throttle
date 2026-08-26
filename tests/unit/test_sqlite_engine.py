@@ -4,6 +4,8 @@ import math
 import multiprocessing
 import os
 import sqlite3
+import threading
+import time
 from typing import TYPE_CHECKING
 
 import pytest
@@ -705,6 +707,43 @@ def test_sync_sqlite_introspection_reports_live_state_and_durable_counts(
         assert diagnostic.waits == ()
         assert any("acquire_markers=1" in issue.message for issue in diagnostic.issues)
     finally:
+        builder.close()
+
+
+def test_sync_sqlite_introspection_tracks_and_removes_waiters(tmp_path: Path) -> None:
+    builder = SyncSqliteBackendBuilder(
+        tmp_path / "waiter-introspection.sqlite3",
+        key_prefix="introspection",
+        sleep_interval=0.01,
+    )
+    backend = builder.build(_config(limit=1.0, per_seconds=100))
+    usage = frozen_usage({"requests": 1})
+    backend.consume_capacity(usage)
+    outcome: list[str] = []
+
+    def wait() -> None:
+        backend.wait_for_capacity(usage, timeout=2)
+        outcome.append("acquired")
+
+    thread = threading.Thread(target=wait)
+    thread.start()
+    try:
+        deadline = time.monotonic() + 1
+        diagnostic = backend.introspect()
+        while not diagnostic.waits and time.monotonic() < deadline:
+            time.sleep(0.01)
+            diagnostic = backend.introspect()
+        assert len(diagnostic.waits) == 1
+        assert diagnostic.waits[0].state == "waiting_for_capacity"
+        assert diagnostic.waits[0].blocked_buckets[0].metric == "requests"
+        backend.refund_capacity(usage, frozen_usage({"requests": 0}))
+        thread.join(timeout=1)
+        assert outcome == ["acquired"]
+        assert backend.introspect().waits == ()
+    finally:
+        if thread.is_alive():
+            backend.refund_capacity(usage, frozen_usage({"requests": 0}))
+            thread.join(timeout=1)
         builder.close()
 
 
