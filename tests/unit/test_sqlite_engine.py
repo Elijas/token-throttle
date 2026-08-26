@@ -1164,8 +1164,10 @@ def test_sqlite_missing_parent_error_names_resolved_path(tmp_path: Path) -> None
     resolved = os.path.realpath(db_path)
     builder = SyncSqliteBackendBuilder(db_path, key_prefix="scope")
     try:
-        # match= is a regex; Windows paths contain backslash escapes like \U.
-        with pytest.raises(sqlite3.OperationalError, match=re.escape(resolved)):
+        # The engine embeds the path with !r, so the message carries repr
+        # quoting (and doubled backslashes on Windows); match that form, and
+        # re.escape it because match= is a regex.
+        with pytest.raises(sqlite3.OperationalError, match=re.escape(repr(resolved))):
             builder.build(_config())
     finally:
         builder.close()
