@@ -577,6 +577,30 @@ def test_sqlite_set_max_capacity_anchors_elapsed_time_at_old_rate(
         engine.close()
 
 
+def test_sqlite_set_max_capacity_preserves_uncapped_overflow_across_raise(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path / "uncapped-max.sqlite3")
+    try:
+        engine.consume(
+            frozen_usage({"requests": 0}),
+            clock=lambda: 100.0,
+            reservation_id=None,
+            reservation_lifetime_seconds=None,
+        )
+        engine.set_max_capacity("requests", 10, 5.0, clock=lambda: 100.0)
+        engine.set_max_capacity("requests", 10, 20.0, clock=lambda: 100.0)
+        raised = engine.try_consume(
+            frozen_usage({"requests": 0}),
+            clock=lambda: 100.0,
+            reservation_id=None,
+            reservation_lifetime_seconds=None,
+        )
+        assert raised.result.pre_capacities[("requests", 10)] == 10.0
+    finally:
+        engine.close()
+
+
 def test_sqlite_configured_limits_remain_process_local(tmp_path: Path) -> None:
     db_path = tmp_path / "local-config.sqlite3"
     first = _engine(db_path, limit=10.0)
@@ -734,6 +758,35 @@ def test_sqlite_repairs_far_future_last_checked_on_failed_attempt(
         )
         assert pruned.result.fresh_bucket_ids == (("requests", 10),)
     finally:
+        engine.close()
+
+
+def test_sqlite_introspection_is_read_only_and_does_not_wait_for_writer(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "read-only-introspection.sqlite3"
+    engine = _engine(db_path)
+    writer = sqlite3.connect(db_path, isolation_level=None)
+    try:
+        engine._connection.execute(
+            "UPDATE buckets SET capacity = NULL, last_checked = 100, "
+            "updated_at = 100, expires_at = 200"
+        )
+        changes_before = engine._connection.total_changes
+        writer.execute("BEGIN IMMEDIATE")
+        started = time.monotonic()
+        snapshots, _ = engine.inspect_snapshot(clock=lambda: 101.0)
+        elapsed = time.monotonic() - started
+        assert elapsed < 0.5
+        assert snapshots[0].current_capacity == 0.0
+        assert engine._connection.total_changes == changes_before
+        assert engine._connection.execute(
+            "SELECT capacity, last_checked FROM buckets"
+        ).fetchone() == (None, 100.0)
+    finally:
+        if writer.in_transaction:
+            writer.execute("ROLLBACK")
+        writer.close()
         engine.close()
 
 
@@ -1042,6 +1095,37 @@ def test_sqlite_builder_resolves_realpath_and_validates_prefix(tmp_path: Path) -
 
     with pytest.raises(ValueError, match="key_prefix must not be empty"):
         SyncSqliteBackendBuilder(tmp_path / "other.sqlite3", key_prefix="")
+
+
+@pytest.mark.parametrize(
+    "db_path", [":memory:", "file:shared?mode=memory&cache=shared"]
+)
+def test_sqlite_builder_rejects_non_filesystem_database_paths(db_path: str) -> None:
+    with pytest.raises(ValueError, match="filesystem path"):
+        SyncSqliteBackendBuilder(db_path, key_prefix="scope")
+
+
+def test_sqlite_missing_parent_error_names_resolved_path(tmp_path: Path) -> None:
+    db_path = tmp_path / "missing" / "state.sqlite3"
+    resolved = os.path.realpath(db_path)
+    builder = SyncSqliteBackendBuilder(db_path, key_prefix="scope")
+    try:
+        with pytest.raises(sqlite3.OperationalError, match=resolved):
+            builder.build(_config())
+    finally:
+        builder.close()
+
+
+def test_sqlite_busy_classification_uses_sqlite_metadata_not_message() -> None:
+    busy = sqlite3.OperationalError("opaque localized message")
+    busy.sqlite_errorcode = sqlite3.SQLITE_BUSY | (2 << 8)
+    busy.sqlite_errorname = "SQLITE_BUSY_SNAPSHOT"
+    assert engine_module._is_busy_error(busy)
+
+    misleading = sqlite3.OperationalError("database is locked")
+    misleading.sqlite_errorcode = sqlite3.SQLITE_ERROR
+    misleading.sqlite_errorname = "SQLITE_ERROR"
+    assert not engine_module._is_busy_error(misleading)
 
 
 def test_sqlite_ttl_invariants_match_durable_reservation_margin() -> None:

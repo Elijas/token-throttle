@@ -64,6 +64,17 @@ def derive_default_max_reservation_lifetime_seconds_from_ttls(
     refund_dedup_ttl_seconds: int,
     safety_margin: float = RESERVATION_LIFETIME_TTL_SAFETY_MARGIN,
 ) -> float:
+    """
+    Derive the largest default that still satisfies the strict TTL invariant.
+
+    SQLite bucket state, acquire markers, and refund tombstones must all
+    outlive the reservation refund window. The public rule of thumb is the
+    smaller TTL divided by the safety margin (2 by default), but equality at
+    that quotient is invalid because the invariant is strict: each TTL must be
+    greater than ``lifetime * safety_margin``. ``nextafter`` selects the
+    immediately smaller representable float so the derived default cannot
+    reject itself at that boundary.
+    """
     margin = _validate_safety_margin(safety_margin)
     bucket_ttl = validate_sqlite_ttl_seconds(
         bucket_ttl_seconds,
@@ -83,6 +94,7 @@ def resolve_max_reservation_lifetime_seconds_from_ttls(
     refund_dedup_ttl_seconds: int,
     safety_margin: float = RESERVATION_LIFETIME_TTL_SAFETY_MARGIN,
 ) -> float:
+    """Resolve an explicit lifetime or derive one under the strict TTL rule."""
     max_lifetime = validate_max_reservation_lifetime_seconds(
         max_reservation_lifetime_seconds
     )

@@ -83,6 +83,12 @@ def _validate_db_path(value: object) -> str:
         raise ValueError("db_path must not be empty")
     if "\x00" in path:
         raise ValueError("db_path must not contain NUL characters")
+    if path == ":memory:" or path.startswith("file:"):
+        raise ValueError(
+            "db_path must be a filesystem path; SQLite in-memory databases and "
+            "file: URIs do not provide the backend's required cross-process "
+            "sharing semantics"
+        )
     return os.path.realpath(path)
 
 

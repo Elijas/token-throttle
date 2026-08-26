@@ -269,6 +269,8 @@ class SqliteBackend(RateLimiterBackend):
         self._sleep_interval = (
             self.DEFAULT_SLEEP_INTERVAL if validated_sleep is None else validated_sleep
         )
+        # Async backend methods, including introspection, are event-loop confined;
+        # no executor worker reads or mutates this diagnostic-only mapping.
         self._diagnostic_waiters: dict[str, DiagnosticWaiterState] = {}
         self._close_lock = threading.Lock()
         self._closed = False
@@ -474,7 +476,7 @@ class SqliteBackend(RateLimiterBackend):
         timeout = validate_timeout(timeout)
         usage = _normalize_usage(usage)
         deadline = None if timeout is None else time.monotonic() + timeout
-        waiter_key = reservation_id or f"sqlite:{uuid.uuid4().hex}"
+        waiter_key = uuid.uuid4().hex
         has_waited = False
         wait_started_at: float | None = None
         wait_start_callback_overhead = 0.0
@@ -506,6 +508,15 @@ class SqliteBackend(RateLimiterBackend):
                 result = attempt.result
                 if attempt.available:
                     break
+                self._upsert_diagnostic_waiter(
+                    waiter_key,
+                    reservation_id=reservation_id,
+                    usage=usage,
+                    capacities=result.pre_capacities,
+                    max_capacities=result.max_capacities,
+                    deadline=deadline,
+                    wait_started_at=wait_started_at,
+                )
                 if deadline is not None and time.monotonic() >= deadline:
                     raise self._capacity_timeout_error(
                         usage, result.pre_capacities, result.max_capacities
@@ -535,15 +546,6 @@ class SqliteBackend(RateLimiterBackend):
                             raise self._capacity_timeout_error(
                                 usage, first_failed_pre, result.max_capacities
                             )
-                self._upsert_diagnostic_waiter(
-                    waiter_key,
-                    reservation_id=reservation_id,
-                    usage=usage,
-                    capacities=result.pre_capacities,
-                    max_capacities=result.max_capacities,
-                    deadline=deadline,
-                    wait_started_at=wait_started_at,
-                )
                 computed = self._compute_sleep(
                     usage, result.pre_capacities, result.max_capacities
                 )
