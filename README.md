@@ -264,6 +264,8 @@ Quotas on the same metric compose: every one must allow the call, so the binding
 A quota with `limit=1` makes its window a minimum interval, so pacing needs no separate mechanism. Providers outside the LLM space often publish limits in exactly this shape — "1 request per 3 seconds, 20 per minute":
 
 ```python
+from token_throttle import Quota, SecondsIn, UsageQuotas
+
 quotas = UsageQuotas([
     Quota(metric="requests", limit=1, per_seconds=3),                    # spacing
     Quota(metric="requests", limit=20, per_seconds=SecondsIn.MINUTE),    # ceiling
