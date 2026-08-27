@@ -67,7 +67,7 @@ jobs:
             echo "::error::Run is pinned to ${GITHUB_SHA} but origin/main is at ${REMOTE_MAIN}; re-dispatch the release."
             exit 1
           fi
-      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.12"
@@ -159,7 +159,7 @@ jobs:
             exit 1
           fi
           echo "publishing ${GITHUB_REF_NAME} from ${HEAD_SHA}"
-      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.12"
