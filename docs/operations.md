@@ -125,6 +125,31 @@ Do not add caller-controlled Redis hash tags to key prefixes, model families,
 metrics, reservation ids, or other key segments. Public validators reject `{`
 and `}` in Redis key segments, and Cluster support is intentionally unsupported.
 
+### Supported redis-py client versions
+
+The `redis` extra declares `redis>=5.2.1,!=8.0.0,!=8.0.1` — deliberately with
+**no upper bound**. A ceiling in a library's metadata cannot be relaxed without
+publishing a release, and it propagates into dependency-resolution conflicts for
+anyone who depends on both this package and a newer client. So a new redis-py
+major is allowed by default rather than blocked on the assumption it will break.
+
+The two exclusions are specific defects, not caution:
+
+| Excluded | Why |
+|---|---|
+| `8.0.0` | unix-socket clients fail the RESP3 maintenance-notification handshake ([redis-py#4086](https://github.com/redis/redis-py/issues/4086)) |
+| `8.0.0`, `8.0.1` | the sync Sentinel pool permanently loses a slot on every failover until all commands raise `MaxConnectionsError` ([redis-py#4187](https://github.com/redis/redis-py/issues/4187), fixed in 8.1.0) — and Sentinel is a supported topology here |
+
+An open-ended range is a promise about versions that do not exist yet, so it is
+backed by a scheduled job that installs the newest redis-py and runs the Redis
+suites against it. If a future release breaks the backend, that job goes red
+before your deployment does; the fix is then either a code change or a new
+exclusion with the same kind of evidence as the two above.
+
+If you pin a client version yourself, note the pool-sizing change in
+[Connection pooling](#connection-pooling-and-key-ttls) — redis-py 8 caps the
+default pool where earlier versions did not.
+
 Redis backends require Redis server 6.2 or newer and a Redis user that can run
 `GET`, `EXISTS`, `SET`, `DEL`, `EXPIRE`, `PEXPIRE`, `PTTL`, `TIME`, `MULTI`,
 `EXEC`, `DISCARD`, and Lua scripting (`EVAL`, `EVALSHA`, `SCRIPT LOAD`).
@@ -184,6 +209,16 @@ or `redis.BlockingConnectionPool` and size `max_connections` to at least
 `max_concurrent_acquires` plus headroom for Redis lock acquire/release, `TIME`,
 and pipeline commands. A pool below 10 connections triggers a runtime warning
 because it is usually too small for production traffic.
+
+**Size the pool explicitly on redis-py 8 and newer.** redis-py 8 lowered the
+default `ConnectionPool` cap from effectively unbounded to 100 connections, and
+raises `MaxConnectionsError` once they are all checked out. A client built the
+short way — `redis.from_url(...)`, as the README quickstarts show — silently
+inherits that cap, while token-throttle's own default ceiling on in-flight
+reservations is 100,000 and it imposes no Redis-side concurrency limit of its
+own. Below-10 pools warn; a 100-connection default does not, because it is not
+obviously wrong. If your workload can have more than 100 acquires in flight at
+once, pass `max_connections` yourself rather than inheriting the default.
 
 Redis bucket state expires by default after 7 days of inactivity. Configure
 `bucket_ttl_seconds` on Redis builders or Redis OpenAI factories to choose a

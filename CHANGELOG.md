@@ -3,6 +3,20 @@
 Notable changes for token-throttle releases. Each major version's breaking
 changes and upgrade steps are recorded in its entry below.
 
+## Unreleased
+
+- The `redis` extra now allows redis-py 8, and no longer caps at the next major:
+  the requirement is `redis>=5.2.1,!=8.0.0,!=8.0.1`. An upper bound in library
+  metadata cannot be relaxed without a release and causes resolution conflicts
+  for anything that needs a newer client, so future majors are permitted rather
+  than blocked on the assumption that they break. The two exclusions are
+  releases with specific defects — 8.0.0 breaks unix-socket clients, and
+  8.0.0/8.0.1 leak Sentinel connection-pool slots on every failover.
+  If you build your client the short way (`redis.from_url(...)`) and run more
+  than 100 concurrent acquires, pass `max_connections` explicitly: redis-py 8
+  caps the default pool where earlier versions effectively did not. See
+  [docs/operations.md](docs/operations.md#supported-redis-py-client-versions).
+
 ## 10.1.1 - 2026-08-27
 
 - Fixes the SQLite backends leaking a reservation from
