@@ -378,7 +378,7 @@ The helpers do not check:
   `CapacityReservation.created_at_seconds`; test those with backend-specific
   timing/storage instrumentation
 
-KNOWN UNKNOWN: post-write probes for third-party durable backends are still not
+Known limitation: post-write probes for third-party durable backends are not
 portable. The conformance helper verifies observable behavior through the public
 backend protocol, but it cannot prove that an external storage write reached
 durable media without backend-specific instrumentation.

@@ -20,7 +20,7 @@ pip install "token-throttle[redis]>=10.1.0,<11.0.0"            # Any provider + 
 pip install "token-throttle>=10.1.0,<11.0.0"                   # Any provider + in-memory
 ```
 
-Requires Python 3.12+. The Redis backend requires Redis 6.2+, standalone or Sentinel only — not Redis Cluster or client-side sharding (see [docs/operations.md](docs/operations.md)).
+Requires Python 3.12+. The Redis backend needs Redis 6.2+ for the commands it issues, though tested coverage starts at 7.2; it supports standalone or Sentinel only — not Redis Cluster or client-side sharding (see [docs/operations.md](docs/operations.md)).
 
 token-throttle is beta and follows strict semver. The recent major-version sequence reflects rapid beta development, with each incompatible API or correctness change released as a major. Pin an exact major range (as shown above) and review the [CHANGELOG](CHANGELOG.md) before upgrading — each major's breaking changes and upgrade steps are recorded there. Public constants and type aliases: [docs/api.md](docs/api.md).
 

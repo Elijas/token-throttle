@@ -152,8 +152,12 @@ running, or use a dedicated Redis DB that is not shared with other services that
 flush the script cache.
 
 Compatibility testing used `fakeredis` for unit tests plus local standalone
-Redis (7.x for the test matrix, 8.4.0 for the benchmarks below); 6.2 or newer is
-supported and 6.0/6.1 are outside the range. The test matrix did not cover
+Redis (7.x for the test matrix, 8.4.0 for the benchmarks below). Redis 6.2 is
+the floor for the commands token-throttle issues, and 6.0/6.1 are outside the
+range — but treat 6.2 through 7.1 as best-effort rather than covered: neither
+this project's test matrix nor redis-py's own supported-version table reaches
+below 7.2. If you run a server older than 7.2, validate it in your own
+environment. The test matrix did not cover
 Sentinel failover behavior, KeyDB, Dragonfly, client-side sharding, or low
 `maxmemory` / low `maxclients` configurations. KeyDB and Dragonfly may work as
 Redis-compatible servers, but they are untested and not officially supported;

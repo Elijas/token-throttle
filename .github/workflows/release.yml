@@ -30,6 +30,8 @@ jobs:
   test-dispatch:
     if: github.event_name == 'workflow_dispatch' && inputs.publish_ref == ''
     uses: ./.github/workflows/ci.yml
+    secrets:
+      CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
   prepare-release:
     if: github.event_name == 'workflow_dispatch' && inputs.publish_ref == ''
@@ -49,7 +51,7 @@ jobs:
             echo "::error::Release dispatch requires a bump input"
             exit 1
           fi
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
           persist-credentials: true
@@ -65,8 +67,8 @@ jobs:
             echo "::error::Run is pinned to ${GITHUB_SHA} but origin/main is at ${REMOTE_MAIN}; re-dispatch the release."
             exit 1
           fi
-      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
-      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.12"
       - name: Configure git identity
@@ -112,6 +114,8 @@ jobs:
   test-tag:
     if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.publish_ref != '')
     uses: ./.github/workflows/ci.yml
+    secrets:
+      CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
   publish:
     if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.publish_ref != '')
@@ -134,12 +138,29 @@ jobs:
             echo "::error::Dispatch publish_ref does not match workflow ref"
             exit 1
           fi
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      # Check out the event's immutable SHA, not the tag name. Passing a
+      # non-SHA `ref` makes checkout resolve the tag's *current* tip, so a tag
+      # force-moved during the ~15 minute test-tag run would publish a commit
+      # that was never tested.
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          ref: ${{ github.ref }}
+          ref: ${{ github.sha }}
           persist-credentials: false
-      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
-      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+      - name: Verify the checkout is the tested commit and matches the tag
+        run: |
+          HEAD_SHA=$(git rev-parse HEAD)
+          if [ "${HEAD_SHA}" != "${GITHUB_SHA}" ]; then
+            echo "::error::Checked out ${HEAD_SHA} but this run tested ${GITHUB_SHA}"
+            exit 1
+          fi
+          PROJECT_VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml | head -1)
+          if [ "${GITHUB_REF_NAME}" != "v${PROJECT_VERSION}" ]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match built version v${PROJECT_VERSION}"
+            exit 1
+          fi
+          echo "publishing ${GITHUB_REF_NAME} from ${HEAD_SHA}"
+      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.12"
       - name: Build package

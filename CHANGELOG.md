@@ -3,7 +3,7 @@
 Notable changes for token-throttle releases. Each major version's breaking
 changes and upgrade steps are recorded in its entry below.
 
-## Unreleased
+## 10.1.1 - 2026-08-27
 
 - Fixes the SQLite backends leaking a reservation from
   `snapshot_state()["in_flight_reservations"]` when a refund failed closed with
@@ -18,10 +18,15 @@ changes and upgrade steps are recorded in its entry below.
   disappeared in a callable-config metric-set change. Such a refund returned
   early — before releasing the reservation's backend acquire state or recording
   its dedup entry — so the backend kept treating it as acquired for the life of
-  the process. The refund is now finalized on that path, which also means an
-  overuse `RuntimeWarning` can surface where the early return previously
-  suppressed it. Capacity accounting is unchanged: there are no surviving
-  buckets to credit.
+  the process. The refund is now finalized on that path under ordinary warning
+  handling. Capacity accounting is unchanged: there are no surviving buckets to
+  credit.
+
+  One pre-existing limitation is unchanged by this fix: that refund path emits a
+  `Refund dropped` `RuntimeWarning` before it reaches the backend, so a caller
+  running with warnings promoted to errors (`-W error`) still raises there and
+  still leaves the reservation live. Reordering the notification after
+  finalization is tracked separately.
 
 ## 10.1.0 - 2026-08-26
 
