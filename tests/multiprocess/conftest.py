@@ -13,7 +13,12 @@ import pytest
 from tests._redis_guard import ensure_flush_allowed
 from tests.multiprocess._harness import BackendSpec, scaled
 
-REQUIRED_REDIS_DB = 13
+# These tests flush their logical database, so they refuse to run against DB 0
+# (the default a bare URL selects). Any explicitly chosen non-default database
+# is accepted, which lets parallel workers each take their own index instead of
+# contending on one — sharing a flushing database across runs produces phantom
+# failures that look like product bugs.
+FORBIDDEN_REDIS_DB = 0
 
 
 @pytest.fixture
@@ -79,12 +84,12 @@ def _redis_case(redis_url: str) -> tuple[BackendCase, object]:
         pytest.skip(f"Redis unavailable at {redis_url}: {exc}")
 
     selected_db = int(client.connection_pool.connection_kwargs.get("db", 0))
-    if selected_db != REQUIRED_REDIS_DB:
+    if selected_db == FORBIDDEN_REDIS_DB:
         client.close()
         pytest.fail(
-            "multi-process tests require a dedicated Redis logical database: "
-            f"pass --redis-url redis://localhost:6379/{REQUIRED_REDIS_DB} "
-            f"(configured DB is {selected_db})",
+            "multi-process tests flush their logical database, so they require "
+            "a dedicated one: pass --redis-url redis://localhost:6379/13 "
+            "(or any other non-default index)",
             pytrace=False,
         )
 

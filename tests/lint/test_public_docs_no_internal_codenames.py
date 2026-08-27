@@ -36,6 +36,11 @@ _FORBIDDEN: dict[str, re.Pattern[str]] = {
     "test-case id (TCn / TCn-nnn)": re.compile(r"\bTC\d+(?:-\d+)?\b"),
     "deferred-item id (PD-n)": re.compile(r"\bPD-\d+\b"),
     "capsule date-codename (YYMMDD-name)": re.compile(r"\b2\d{5}-[a-z]"),
+    # Internal uncertainty marker used in worker notes and review artifacts.
+    # Public docs should state the limitation in user-facing prose instead.
+    "uncertainty marker (KNOWN UNKNOWN)": re.compile(
+        r"\bKNOWN[ _]UNKNOWN\b", re.IGNORECASE
+    ),
 }
 
 # Narrow, reviewed exceptions: (doc filename, exact matched token) pairs that a
