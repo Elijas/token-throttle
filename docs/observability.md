@@ -92,6 +92,7 @@ receive these events without changing existing callback signatures:
 # (fragment — see the README Any provider example for standalone context)
 from token_throttle import LifecycleEvent, RateLimiterCallbacks
 
+
 async def on_lifecycle_event(*, event: LifecycleEvent) -> None:
     metrics.increment(
         f"token_throttle.{event.event_type}",
@@ -100,6 +101,7 @@ async def on_lifecycle_event(*, event: LifecycleEvent) -> None:
             "model_alias": event.model_alias,
         },
     )
+
 
 limiter = RateLimiter(
     get_config,

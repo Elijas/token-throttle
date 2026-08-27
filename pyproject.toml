@@ -230,6 +230,7 @@ target-version = "py312"
     "T201",    # print() statement found
     "C901",    # Function is too complex
     "PLR0912", # Too many branches
+    "S603",    # these scripts shell out by design; every argv is a literal
 ]
 "benchmarks/**/*.py" = [
     "T201",     # print() is the benchmark table/report output channel

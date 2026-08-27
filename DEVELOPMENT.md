@@ -89,6 +89,32 @@ Name **new** test files `test_<area>_<behavior>.py` (e.g.
 `test_reservation_refund_dedup.py`), describing what is under test rather than
 which bug-tracker item introduced it.
 
+## Preflight: run the CI gates before pushing
+
+```bash
+task preflight            # every job that gates a pull request
+task preflight -- --quick # lint, types, unit, conformance, doc lints
+task preflight -- --full  # adds the 3.12/3.13/3.14 matrix
+```
+
+Hosted runners routinely queue for tens of minutes before a job starts, so a
+push that fails CI costs far more wall-clock time than the job durations
+suggest. Preflight runs the same gates here: the quick tier finishes in about
+90 seconds, and the default tier — which adds integration, multiprocess, the
+dependency floor, and the newest permitted redis-py — in about three minutes.
+
+Redis must be running. Each Redis-touching check is given its own empty logical
+database, discovered at run time rather than hardcoded, because these suites
+flush the database they are handed; preflight refuses to start rather than
+reuse a populated one.
+
+The floor and newest-client checks re-resolve dependencies, and
+`uv sync --resolution ...` rewrites `uv.lock` in the repository even when
+`UV_PROJECT_ENVIRONMENT` sends the virtualenv elsewhere. Those two therefore run
+serially, last, with the lockfile snapshotted and restored; a run that restores
+it says so. Every run also prints what it could not prove — Windows, Linux
+container specifics, CodeQL, and the Codecov upload still need a real CI run.
+
 ## Type checking
 
 ```bash
@@ -124,7 +150,7 @@ CI runs nine jobs (see `.github/workflows/ci.yml`):
 | `test-unit-full` | Unit tests with all optional deps on Linux / Python 3.12, 3.13, 3.14 | all extras + dev |
 | `test-unit-platform` | Unit tests with all optional deps on macOS and Windows / Python 3.13 | all extras + dev |
 | `test-integration` | Integration tests against Redis on Linux / Python 3.12, 3.13, 3.14 | all extras + dev |
-| `test-min-deps` | Unit tests with lowest direct dependency resolution on Linux / Python 3.12 | dev only |
+| `test-min-deps` | Unit and Redis integration tests at the lowest direct dependency resolution on Linux / Python 3.12 — this is what proves the declared `redis>=5.2.1` floor | redis extra + dev |
 | `conformance` | AST and structural conformance guards on Linux / Python 3.12 | all extras + dev |
 | `coverage` | Full suite + Codecov upload on Linux / Python 3.13 | all extras + dev |
 

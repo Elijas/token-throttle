@@ -33,7 +33,13 @@ Copy-paste runnable.
 ```python
 import asyncio
 
-from token_throttle import MemoryBackendBuilder, PerModelConfig, Quota, RateLimiter, UsageQuotas
+from token_throttle import (
+    MemoryBackendBuilder,
+    PerModelConfig,
+    Quota,
+    RateLimiter,
+    UsageQuotas,
+)
 
 
 async def main() -> None:
@@ -62,7 +68,6 @@ async def main() -> None:
 
     await limiter.aclose()
     print("reserved 1000 tokens, refunded 575 unused tokens")
-
 
 
 asyncio.run(main())
@@ -124,7 +129,10 @@ async def main() -> None:
     except Exception:
         await limiter.refund_capacity(
             reservation=reservation,
-            actual_usage={"requests": 1, "tokens": 0},  # zero-token refund on error is an approximation; reconcile against billing
+            actual_usage={
+                "requests": 1,
+                "tokens": 0,
+            },  # zero-token refund on error is an approximation; reconcile against billing
         )
         raise
     else:
@@ -158,7 +166,13 @@ The manual acquire -> refund pattern that `reserve()` wraps, with explicit error
 ```python
 import asyncio
 
-from token_throttle import MemoryBackendBuilder, PerModelConfig, Quota, RateLimiter, UsageQuotas
+from token_throttle import (
+    MemoryBackendBuilder,
+    PerModelConfig,
+    Quota,
+    RateLimiter,
+    UsageQuotas,
+)
 
 
 async def call_your_llm() -> dict[str, int]:
@@ -195,7 +209,9 @@ async def main() -> None:
         )
         raise
     else:
-        await limiter.refund_capacity(actual_usage=actual_usage, reservation=reservation)
+        await limiter.refund_capacity(
+            actual_usage=actual_usage, reservation=reservation
+        )
     finally:
         await limiter.aclose()
     print("unused 20 input tokens and 2800 output tokens returned to the pool")
@@ -248,11 +264,13 @@ are covered in [docs/operations.md](docs/operations.md#reservation-lifecycle-and
 ```python
 from token_throttle import Quota, UsageQuotas, SecondsIn
 
-quotas = UsageQuotas([
-    Quota(metric="requests", limit=2_000, per_seconds=SecondsIn.MINUTE),
-    Quota(metric="tokens", limit=3_000_000, per_seconds=SecondsIn.MINUTE),
-    Quota(metric="requests", limit=10_000_000, per_seconds=SecondsIn.DAY),
-])
+quotas = UsageQuotas(
+    [
+        Quota(metric="requests", limit=2_000, per_seconds=SecondsIn.MINUTE),
+        Quota(metric="tokens", limit=3_000_000, per_seconds=SecondsIn.MINUTE),
+        Quota(metric="requests", limit=10_000_000, per_seconds=SecondsIn.DAY),
+    ]
+)
 ```
 
 `per_seconds` accepts integer seconds. Use `SecondsIn.MINUTE` (60), `SecondsIn.HOUR` (3600), `SecondsIn.DAY` (86400), or any integer.
@@ -266,10 +284,12 @@ A quota with `limit=1` makes its window a minimum interval, so pacing needs no s
 ```python
 from token_throttle import Quota, SecondsIn, UsageQuotas
 
-quotas = UsageQuotas([
-    Quota(metric="requests", limit=1, per_seconds=3),                    # spacing
-    Quota(metric="requests", limit=20, per_seconds=SecondsIn.MINUTE),    # ceiling
-])
+quotas = UsageQuotas(
+    [
+        Quota(metric="requests", limit=1, per_seconds=3),  # spacing
+        Quota(metric="requests", limit=20, per_seconds=SecondsIn.MINUTE),  # ceiling
+    ]
+)
 ```
 
 Consecutive calls are then spaced 3 seconds apart, and the twenty-first within a minute waits for the window to release rather than for the spacing quota. Both are enforced together; neither supersedes the other.
@@ -281,14 +301,17 @@ Consecutive calls are then spaced 3 seconds apart, and the twenty-first within a
 def get_config(model_name: str) -> PerModelConfig:
     if model_name.startswith("gpt"):
         return PerModelConfig(
-            quotas=UsageQuotas([
-                Quota(metric="requests", limit=10_000, per_seconds=60),
-                Quota(metric="tokens", limit=2_000_000, per_seconds=60),
-            ]),
+            quotas=UsageQuotas(
+                [
+                    Quota(metric="requests", limit=10_000, per_seconds=60),
+                    Quota(metric="tokens", limit=2_000_000, per_seconds=60),
+                ]
+            ),
             usage_counter=OpenAIUsageCounter(),  # text-only: counts payload + instructions/tools/schema + output budget
             model_family=openai_model_family_getter(model_name),
         )
     # ... other providers
+
 
 limiter = RateLimiter(
     get_config,
@@ -323,10 +346,12 @@ for its clock, persistence, TTL, contention, and crash contracts.
 # (fragment — see Memory quickstart for standalone context)
 # Multiple machines
 from token_throttle import RedisBackendBuilder
+
 backend = RedisBackendBuilder(redis_client, key_prefix="my-service-prod")
 
 # Multiple processes on one host; stdlib only
 from token_throttle import SqliteBackendBuilder
+
 backend = SqliteBackendBuilder(
     "/var/lib/my-service/rate-limits.sqlite3",
     key_prefix="my-service-prod",
@@ -334,6 +359,7 @@ backend = SqliteBackendBuilder(
 
 # One process
 from token_throttle import MemoryBackendBuilder
+
 backend = MemoryBackendBuilder()
 ```
 
@@ -488,7 +514,9 @@ Both support context-manager close:
 ```python
 # (fragment — see Memory quickstart for standalone context)
 async with RateLimiter(get_config, backend=MemoryBackendBuilder()) as limiter:
-    reservation = await limiter.acquire_capacity({"requests": 1, "tokens": 500}, model="gpt-4.1")
+    reservation = await limiter.acquire_capacity(
+        {"requests": 1, "tokens": 500}, model="gpt-4.1"
+    )
     await limiter.refund_capacity({"requests": 1, "tokens": 320}, reservation)
 ```
 

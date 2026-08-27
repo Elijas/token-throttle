@@ -128,7 +128,7 @@ _EXPECTED_NON_PYTHON_FENCES = (
     ),
     _ExpectedNonPythonFence(
         document_name="README.md",
-        start_line=93,
+        start_line=98,
         language="bash",
         classification=_NON_PYTHON_CLASSIFICATION_SHELL_SYNTAX,
         reason="package installation command; lint syntax-checks but does not execute it",
@@ -186,6 +186,19 @@ _EXPECTED_NON_PYTHON_FENCES = (
     _ExpectedNonPythonFence(
         document_name="DEVELOPMENT.md",
         start_line=95,
+        language="bash",
+        classification=_NON_PYTHON_CLASSIFICATION_SHELL_SYNTAX,
+        reason="preflight task invocations; lint syntax-checks but does not execute them",
+        heading="## Preflight: run the CI gates before pushing",
+        non_empty_content_lines=(
+            "task preflight            # every job that gates a pull request",
+            "task preflight -- --quick # lint, types, unit, conformance, doc lints",
+            "task preflight -- --full  # adds the 3.12/3.13/3.14 matrix",
+        ),
+    ),
+    _ExpectedNonPythonFence(
+        document_name="DEVELOPMENT.md",
+        start_line=121,
         language="bash",
         classification=_NON_PYTHON_CLASSIFICATION_SHELL_SYNTAX,
         reason="setup and type-check commands; lint syntax-checks but does not execute them",
@@ -260,7 +273,7 @@ _EXPECTED_TASKFILE_RELEASE_DISPATCHES = (
 _EXPECTED_NON_README_STANDALONE_IDENTITIES = (
     _StandaloneExampleIdentity(
         document_name="DEVELOPMENT.md",
-        start_line=450,
+        start_line=476,
         heading="### Redis connection pool sizing",
         first_non_empty_code_line="import redis.asyncio as aioredis",
     ),
@@ -275,7 +288,7 @@ _EXPECTED_STDOUT_EXAMPLES = (
     ),
     _ExpectedStdoutExample(
         document_name="README.md",
-        start_line=159,
+        start_line=167,
         heading="### Any provider (manual usage)",
         first_non_empty_code_line="import asyncio",
         expected_stdout=(

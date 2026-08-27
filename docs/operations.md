@@ -93,14 +93,18 @@ Both limiter types can own their close lifecycle through context managers:
 ```python
 # (fragment — see the README Memory quickstart for standalone context)
 async with RateLimiter(get_config, backend=MemoryBackendBuilder()) as limiter:
-    reservation = await limiter.acquire_capacity({"requests": 1, "tokens": 500}, model="gpt-4.1")
+    reservation = await limiter.acquire_capacity(
+        {"requests": 1, "tokens": 500}, model="gpt-4.1"
+    )
     await limiter.refund_capacity({"requests": 1, "tokens": 320}, reservation)
 ```
 
 ```python
 # (fragment — see the README Sync API example for standalone context)
 with SyncRateLimiter(get_config, backend=SyncMemoryBackendBuilder()) as limiter:
-    reservation = limiter.acquire_capacity({"requests": 1, "tokens": 500}, model="gpt-4.1")
+    reservation = limiter.acquire_capacity(
+        {"requests": 1, "tokens": 500}, model="gpt-4.1"
+    )
     limiter.refund_capacity({"requests": 1, "tokens": 320}, reservation)
 ```
 
