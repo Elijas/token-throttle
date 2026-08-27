@@ -178,16 +178,15 @@ class _AsyncRedis:
             marker_key, dedup_key = keys[0], keys[1]
             marker = await self.get(marker_key)
             if marker is None:
-                return (
-                    "duplicate_refund"
-                    if await self.exists(dedup_key)
-                    else "unknown_reservation"
-                )
+                tombstone = await self.get(dedup_key)
+                if tombstone == argv[2]:
+                    return "replayed_refund"
+                return "duplicate_refund" if tombstone else "unknown_reservation"
             if marker != argv[0]:
                 return "marker_mismatch"
             if await self.exists(dedup_key):
                 return "incoherent_refund"
-            arg_index = 2
+            arg_index = 3
             for key_index in range(2, len(keys), 2):
                 await self.set(
                     keys[key_index], argv[arg_index], ex=int(argv[arg_index + 2])
@@ -199,7 +198,12 @@ class _AsyncRedis:
                 )
                 arg_index += 3
             await self.delete(marker_key)
-            claimed = await self.set(dedup_key, "1", ex=int(argv[1]), nx=True)
+            claimed = await self.set(
+                dedup_key,
+                argv[2],
+                ex=int(argv[1]),
+                nx=True,
+            )
             if not claimed:
                 return "incoherent_refund"
             return "ok"
@@ -333,16 +337,15 @@ class _SyncRedis:
             marker_key, dedup_key = keys[0], keys[1]
             marker = self.get(marker_key)
             if marker is None:
-                return (
-                    "duplicate_refund"
-                    if self.exists(dedup_key)
-                    else "unknown_reservation"
-                )
+                tombstone = self.get(dedup_key)
+                if tombstone == argv[2]:
+                    return "replayed_refund"
+                return "duplicate_refund" if tombstone else "unknown_reservation"
             if marker != argv[0]:
                 return "marker_mismatch"
             if self.exists(dedup_key):
                 return "incoherent_refund"
-            arg_index = 2
+            arg_index = 3
             for key_index in range(2, len(keys), 2):
                 self.set(keys[key_index], argv[arg_index], ex=int(argv[arg_index + 2]))
                 self.set(
@@ -352,7 +355,12 @@ class _SyncRedis:
                 )
                 arg_index += 3
             self.delete(marker_key)
-            claimed = self.set(dedup_key, "1", ex=int(argv[1]), nx=True)
+            claimed = self.set(
+                dedup_key,
+                argv[2],
+                ex=int(argv[1]),
+                nx=True,
+            )
             if not claimed:
                 return "incoherent_refund"
             return "ok"
@@ -508,7 +516,8 @@ async def test_async_redis_happy_path_deletes_marker_and_writes_tombstone() -> N
     await limiter.refund_capacity({"tokens": 10}, reservation)
 
     assert marker_key not in redis_client.store
-    assert redis_client.store[tombstone_key] == "1"
+    assert isinstance(redis_client.store[tombstone_key], str)
+    assert redis_client.store[tombstone_key] != "1"
     assert (
         redis_client.store[f"{PREFIX}:rate_limiting:bucket:{FAMILY}:tokens:60:capacity"]
         == 90.0
@@ -528,7 +537,8 @@ def test_sync_redis_happy_path_deletes_marker_and_writes_tombstone() -> None:
     limiter.refund_capacity({"tokens": 10}, reservation)
 
     assert marker_key not in redis_client.store
-    assert redis_client.store[tombstone_key] == "1"
+    assert isinstance(redis_client.store[tombstone_key], str)
+    assert redis_client.store[tombstone_key] != "1"
     assert (
         redis_client.store[f"{PREFIX}:rate_limiting:bucket:{FAMILY}:tokens:60:capacity"]
         == 90.0
@@ -596,10 +606,11 @@ async def test_async_redis_cross_limiter_refund_rejects_shared_marker() -> None:
         redis_acquired_marker_key(PREFIX, reservation.reservation_id)
         not in redis_client.store
     )
-    assert (
-        redis_client.store[redis_refund_dedup_key(PREFIX, reservation.reservation_id)]
-        == "1"
-    )
+    tombstone = redis_client.store[
+        redis_refund_dedup_key(PREFIX, reservation.reservation_id)
+    ]
+    assert isinstance(tombstone, str)
+    assert tombstone != "1"
 
 
 @_REDIS_SKIP
@@ -619,10 +630,11 @@ def test_sync_redis_cross_limiter_refund_rejects_shared_marker() -> None:
         redis_acquired_marker_key(PREFIX, reservation.reservation_id)
         not in redis_client.store
     )
-    assert (
-        redis_client.store[redis_refund_dedup_key(PREFIX, reservation.reservation_id)]
-        == "1"
-    )
+    tombstone = redis_client.store[
+        redis_refund_dedup_key(PREFIX, reservation.reservation_id)
+    ]
+    assert isinstance(tombstone, str)
+    assert tombstone != "1"
 
 
 @_REDIS_SKIP
