@@ -24,6 +24,8 @@ pytest.importorskip("redis", reason="redis package not installed")
 import redis.asyncio as aioredis
 import redis.exceptions
 from frozendict import frozendict
+from redis.backoff import NoBackoff
+from redis.retry import Retry
 
 from token_throttle._exceptions import BackendLockContentionError, DuplicateRefundError
 from token_throttle._interfaces._callbacks import RateLimiterCallbacks
@@ -94,14 +96,48 @@ def _sync_capacity(sync_redis_client, key: str) -> float | None:
     return None if value is None else float(value)
 
 
-def _default_retry_client_kwargs(redis_client) -> dict[str, object]:
-    """Copy address/auth fields without copying the fixture pool's retry policy."""
+def _address_kwargs(redis_client) -> dict[str, object]:
+    """Address/auth fields only, without the fixture pool's retry policy."""
     pool_kwargs = redis_client.connection_pool.connection_kwargs
     return {
         name: pool_kwargs[name]
         for name in ("host", "port", "db", "username", "password")
         if pool_kwargs.get(name) is not None
     }
+
+
+def _sync_retrying_client_kwargs(redis_client) -> dict[str, object]:
+    """Address fields plus an explicit command-retry policy.
+
+    Set explicitly rather than inherited: the default varies across the
+    supported client range (redis-py 5.2.1 installs no command retry, 8.x
+    retries ten times), and a replay test that relied on the default would
+    silently exercise nothing on older clients. Measured to replay on both
+    5.2.1 and 8.1.0 for the synchronous client.
+    """
+    kwargs = _address_kwargs(redis_client)
+    kwargs["retry"] = Retry(NoBackoff(), 3)
+    kwargs["retry_on_error"] = [redis.exceptions.ConnectionError]
+    return kwargs
+
+
+def _skip_unless_async_client_replays(client) -> None:
+    """Skip when this redis-py version will not replay an async command.
+
+    The asynchronous client cannot be coerced into a uniform replay policy the
+    way the synchronous one can: on 5.2.1 no combination of ``retry`` /
+    ``retry_on_error`` replays a failed command, and on 8.x passing an explicit
+    ``retry`` *disables* the replay that the default performs. So this path is
+    exercised wherever the installed client replays by default, and skipped —
+    visibly — where it cannot, rather than asserting something the client
+    never does.
+    """
+    retry = client.connection_pool.connection_kwargs.get("retry")
+    if retry is None or getattr(retry, "_retries", 0) < 1:
+        pytest.skip(
+            f"redis-py {redis.__version__} does not retry async commands by "
+            "default, so a transport replay cannot be provoked"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -854,7 +890,8 @@ async def test_async_lost_refund_reply_replay_is_reported_as_success(
     monkeypatch,
 ):
     """A committed refund remains successful when redis-py replays its EVAL."""
-    retrying_client = aioredis.Redis(**_default_retry_client_kwargs(redis_client))
+    retrying_client = aioredis.Redis(**_address_kwargs(redis_client))
+    _skip_unless_async_client_replays(retrying_client)
     prefix = "retry-replay-async"
     config = _make_config(limit=100, per_seconds=3600)
     limiter = RateLimiter(
@@ -954,7 +991,7 @@ def test_sync_lost_refund_reply_replay_is_reported_as_success(
     monkeypatch,
 ):
     """The synchronous backend has the same retry-replay semantics."""
-    retrying_client = redis.Redis(**_default_retry_client_kwargs(sync_redis_client))
+    retrying_client = redis.Redis(**_sync_retrying_client_kwargs(sync_redis_client))
     prefix = "retry-replay-sync"
     config = _make_config(limit=100, per_seconds=3600)
     limiter = SyncRateLimiter(
