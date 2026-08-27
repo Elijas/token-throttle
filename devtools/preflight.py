@@ -105,7 +105,10 @@ def _checks(tier: str) -> list[Check]:
     # UV_PROJECT_ENVIRONMENT points the virtualenv elsewhere, and a lock left
     # recording a different resolution mode makes every later `uv run` re-sync
     # the real environment. `uv pip install` is pip-mode and neither reads nor
-    # writes the lockfile.
+    # writes the lockfile. (`-e ".[redis]" --group dev` and
+    # `-r pyproject.toml --extra redis --group dev` were measured to resolve
+    # identically here — every direct dependency lands on its floor — and the
+    # editable form also installs the project itself.)
     checks += [
         Check(
             "integration",
