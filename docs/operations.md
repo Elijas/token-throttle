@@ -140,11 +140,18 @@ The two exclusions are specific defects, not caution:
 | `8.0.0` | unix-socket clients fail the RESP3 maintenance-notification handshake ([redis-py#4086](https://github.com/redis/redis-py/issues/4086)) |
 | `8.0.0`, `8.0.1` | the sync Sentinel pool permanently loses a slot on every failover until all commands raise `MaxConnectionsError` ([redis-py#4187](https://github.com/redis/redis-py/issues/4187), fixed in 8.1.0) — and Sentinel is a supported topology here |
 
+Every admitted major was exercised against a live server before the range was
+widened — 5.2.1 (the floor), 5.3.1, 6.4.0, 7.0.0, 7.4.1, and 8.1.0 each ran the
+full unit, conformance, and integration suites and passed. The two excluded
+releases had their defects reproduced locally rather than taken on faith from
+the upstream issues.
+
 An open-ended range is a promise about versions that do not exist yet, so it is
 backed by a scheduled job that installs the newest redis-py and runs the Redis
-suites against it. If a future release breaks the backend, that job goes red
-before your deployment does; the fix is then either a code change or a new
-exclusion with the same kind of evidence as the two above.
+suites against it, and by a job that pins the declared floor. If a future
+release breaks the backend, those go red before your deployment does; the fix is
+then either a code change or a new exclusion with the same kind of evidence as
+the two above.
 
 If you pin a client version yourself, note the pool-sizing change in
 [Connection pooling](#connection-pooling-and-key-ttls) — redis-py 8 caps the

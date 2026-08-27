@@ -100,6 +100,18 @@ The mypy gate checks the complete `token_throttle/` package with normal import
 following. Install all extras before running it because the checked package
 includes Redis, OpenAI, and tokenizer integration modules.
 
+**Type-check against the locked redis-py, not an older one.** The supported
+client range starts at `redis>=5.2.1`, and every admitted version runs the full
+suite correctly — but redis-py before 7.0 annotates the variadic arguments of
+`eval()` as `str`, while the backend passes the mix of strings, bytes, ints, and
+floats that Redis accepts at runtime. Type-checking this package's source
+against a 5.x or 6.x client therefore reports four `eval()` argument-type errors
+that describe the old annotation, not any real defect: those same versions pass
+the unit, conformance, and integration suites against a live server. The floor
+was deliberately kept at 5.2.1 rather than raised to silence them, because
+raising it would drop working clients for a typing artifact. `uv sync` installs
+the locked client, so this only appears if you deliberately downgrade.
+
 ## CI structure
 
 CI runs nine jobs (see `.github/workflows/ci.yml`):
