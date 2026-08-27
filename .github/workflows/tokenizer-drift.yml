@@ -11,9 +11,9 @@ name: Tokenizer Drift Canary
 
 on:
   schedule:
-    # Wednesday 7 AM UTC. Deliberately offset from the other two recurring
-    # jobs (scheduled.yml: Monday 8 AM UTC, soak.yml: Thursday 9 AM UTC) so
-    # the three never contend for runners.
+    # Wednesday 7 AM UTC. Deliberately offset from the other recurring jobs
+    # (scheduled.yml: Monday 8 AM, redis-client-drift.yml: Tuesday 7 AM,
+    # soak.yml: Thursday 9 AM) so they never contend for runners.
     - cron: "0 7 * * 3"
   workflow_dispatch:
 
