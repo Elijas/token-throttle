@@ -15,9 +15,9 @@ name: Soak / Stress
 
 on:
   schedule:
-    # Thursday 9 AM UTC. Deliberately offset from the Monday 8 AM UTC
-    # "Scheduled Dependency Health" job (scheduled.yml) so the two recurring
-    # jobs never contend for runners or Redis.
+    # Thursday 9 AM UTC. Deliberately offset from the other recurring jobs
+    # (scheduled.yml: Monday 8 AM, redis-client-drift.yml: Tuesday 7 AM,
+    # tokenizer-drift.yml: Wednesday 7 AM) so they never contend for runners.
     - cron: "0 9 * * 4"
   workflow_dispatch:
     inputs:
