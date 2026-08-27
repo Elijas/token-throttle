@@ -91,6 +91,9 @@ _SHARED_NON_TOKEN_BEARING_KEYS = frozenset(
         "safety_identifier",
         "prompt_cache_key",
         "prompt_cache_retention",
+        # {"mode": "implicit"|"explicit", "ttl": "30m"}: caching policy only,
+        # carries no prompt text.
+        "prompt_cache_options",
         "service_tier",
         "user",
         # "auto"/"none"/"required"/named-tool; a named choice adds a short
@@ -131,8 +134,8 @@ _RESPONSES_NON_TOKEN_BEARING_KEYS = _SHARED_NON_TOKEN_BEARING_KEYS | {
     "max_tool_calls",
 }
 
-# Model names the openai SDK already ships but tiktoken (0.13.0 as of
-# 2026-07-06) cannot yet resolve. For each of these, get_encoding() raises
+# Model names the openai SDK already ships but tiktoken (0.14.0 as of
+# 2026-08-27) cannot yet resolve. For each of these, get_encoding() raises
 # its designed guided ValueError (upgrade tiktoken / pass get_encoding_func),
 # so the gap is known and handled — re-flagging it weekly would only train
 # alert-blindness. Exact names only, no wildcards: a NEW unresolvable name
@@ -142,23 +145,9 @@ _RESPONSES_NON_TOKEN_BEARING_KEYS = _SHARED_NON_TOKEN_BEARING_KEYS | {
 # the SDK no longer lists, fails the canary until it is removed.
 _KNOWN_PENDING_TIKTOKEN_MODELS = frozenset(
     {
+        # tiktoken 0.14.0 caught up on every gpt-5.1/5.2/5.3/5.4 name that was
+        # listed here; they resolve now and were removed on 2026-08-27.
         "codex-mini-latest",
-        "gpt-5.1",
-        "gpt-5.1-2025-11-13",
-        "gpt-5.1-chat-latest",
-        "gpt-5.1-codex",
-        "gpt-5.1-mini",
-        "gpt-5.2",
-        "gpt-5.2-2025-12-11",
-        "gpt-5.2-chat-latest",
-        "gpt-5.2-pro",
-        "gpt-5.2-pro-2025-12-11",
-        "gpt-5.3-chat-latest",
-        "gpt-5.4",
-        "gpt-5.4-mini",
-        "gpt-5.4-mini-2026-03-17",
-        "gpt-5.4-nano",
-        "gpt-5.4-nano-2026-03-17",
     }
 )
 
