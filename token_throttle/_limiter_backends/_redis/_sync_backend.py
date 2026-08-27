@@ -253,7 +253,11 @@ local function rollback_then_error(snapshots, err)
 end
 local marker = redis.call('GET', KEYS[1])
 if not marker then
-    if redis.call('EXISTS', KEYS[2]) == 1 then
+    local tombstone = redis.call('GET', KEYS[2])
+    if tombstone == ARGV[3] then
+        return 'replayed_refund'
+    end
+    if tombstone then
         return 'duplicate_refund'
     end
     return 'unknown_reservation'
@@ -268,7 +272,7 @@ local snapshots = {snapshot_key(KEYS[1]), snapshot_key(KEYS[2])}
 for key_index = 3, #KEYS do
     snapshots[#snapshots + 1] = snapshot_key(KEYS[key_index])
 end
-local arg_index = 3
+local arg_index = 4
 for key_index = 3, #KEYS, 2 do
     local last_checked_set = redis.pcall(
         'SET', KEYS[key_index], ARGV[arg_index], 'EX', ARGV[arg_index + 2]
@@ -288,7 +292,7 @@ local marker_deleted = redis.pcall('DEL', KEYS[1])
 if is_error(marker_deleted) then
     return rollback_then_error(snapshots, marker_deleted)
 end
-local claimed = redis.pcall('SET', KEYS[2], '1', 'EX', ARGV[2], 'NX')
+local claimed = redis.pcall('SET', KEYS[2], ARGV[3], 'EX', ARGV[2], 'NX')
 if is_error(claimed) then
     return rollback_then_error(snapshots, claimed)
 end
@@ -1837,9 +1841,14 @@ class SyncRedisBackend(SyncRateLimiterBackend):
             bucket_id=None,
         )
         keys: list[str] = [acquired_marker_key, refund_dedup_key]
+        # redis-py replays the same EVAL arguments after an ambiguous transport
+        # failure. A new backend invocation gets a new token, so only that
+        # internal replay can recognize the tombstone as its own commit.
+        refund_attempt_token = uuid.uuid4().hex
         args: list[str | bytes | int | float] = [
             acquired_marker_value,
             self._refund_dedup_ttl_seconds,
+            refund_attempt_token,
         ]
         for (usage_metric, per_seconds), amount in new_capacities.items():
             matching_bucket = self._find_bucket(
@@ -1888,6 +1897,8 @@ class SyncRedisBackend(SyncRateLimiterBackend):
             result, context="SyncRedisBackend refund marker script"
         )
         if status == "ok":
+            return
+        if status == "replayed_refund":
             return
         if status == "duplicate_refund":
             raise DuplicateRefundError(

@@ -25,7 +25,7 @@ import redis.asyncio as aioredis
 import redis.exceptions
 from frozendict import frozendict
 
-from token_throttle._exceptions import BackendLockContentionError
+from token_throttle._exceptions import BackendLockContentionError, DuplicateRefundError
 from token_throttle._interfaces._callbacks import RateLimiterCallbacks
 from token_throttle._interfaces._interfaces import PerModelConfig
 from token_throttle._interfaces._models import Quota, UsageQuotas
@@ -92,6 +92,16 @@ async def _async_capacity(redis_client, key: str) -> float | None:
 def _sync_capacity(sync_redis_client, key: str) -> float | None:
     value = sync_redis_client.get(key)
     return None if value is None else float(value)
+
+
+def _default_retry_client_kwargs(redis_client) -> dict[str, object]:
+    """Copy address/auth fields without copying the fixture pool's retry policy."""
+    pool_kwargs = redis_client.connection_pool.connection_kwargs
+    return {
+        name: pool_kwargs[name]
+        for name in ("host", "port", "db", "username", "password")
+        if pool_kwargs.get(name) is not None
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -831,3 +841,198 @@ class TestConnectionErrorDuringRefund:
         assert cap_after == pytest.approx(cap_before, abs=2.0), (
             f"Partial refund committed! Before={cap_before}, after={cap_after}."
         )
+
+
+# ---------------------------------------------------------------------------
+# 7. Lost refund reply replayed by redis-py
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.redis
+async def test_async_lost_refund_reply_replay_is_reported_as_success(
+    redis_client,
+    monkeypatch,
+):
+    """A committed refund remains successful when redis-py replays its EVAL."""
+    retrying_client = aioredis.Redis(**_default_retry_client_kwargs(redis_client))
+    prefix = "retry-replay-async"
+    config = _make_config(limit=100, per_seconds=3600)
+    limiter = RateLimiter(
+        config,
+        backend=RedisBackendBuilder(retrying_client, key_prefix=prefix),
+    )
+    refund_eval_attempts = 0
+    reply_dropped = False
+
+    try:
+        reservation = await limiter.acquire_capacity(
+            {"requests": 30.0},
+            config.get_model_family(),
+            timeout=0,
+        )
+        backend = await limiter._get_backend(config)
+        bucket = backend.sorted_buckets[0]
+        original_send_and_parse = retrying_client._send_command_parse_response
+
+        async def drop_first_refund_eval_reply(
+            conn,
+            command_name,
+            *args,
+            **options,
+        ):
+            nonlocal refund_eval_attempts, reply_dropped
+            result = await original_send_and_parse(
+                conn,
+                command_name,
+                *args,
+                **options,
+            )
+            if command_name == "EVAL":
+                refund_eval_attempts += 1
+                if not reply_dropped:
+                    reply_dropped = True
+                    raise redis.exceptions.ConnectionError(
+                        "injected lost refund reply after server commit"
+                    )
+            return result
+
+        monkeypatch.setattr(
+            retrying_client,
+            "_send_command_parse_response",
+            drop_first_refund_eval_reply,
+        )
+
+        await limiter.refund_capacity({"requests": 10.0}, reservation)
+
+        assert reply_dropped
+        assert refund_eval_attempts == 2
+        assert (
+            await redis_client.exists(
+                redis_acquired_marker_key(prefix, reservation.reservation_id)
+            )
+            == 0
+        )
+        assert (
+            await redis_client.exists(
+                redis_refund_dedup_key(prefix, reservation.reservation_id)
+            )
+            == 1
+        )
+        assert await _async_capacity(
+            redis_client, bucket._capacity_key
+        ) == pytest.approx(90.0, abs=1.0)
+
+        monkeypatch.setattr(
+            retrying_client,
+            "_send_command_parse_response",
+            original_send_and_parse,
+        )
+        restarted_backend = RedisBackendBuilder(
+            retrying_client,
+            key_prefix=prefix,
+        ).build(config)
+        with pytest.raises(DuplicateRefundError, match="reservation already refunded"):
+            await restarted_backend.refund_capacity_for_buckets(
+                frozendict({"requests": 30.0}),
+                frozendict({"requests": 10.0}),
+                bucket_ids=reservation.bucket_ids,
+                reservation_id=reservation.reservation_id,
+                reservation_model_family=reservation.model_family,
+                reservation_bucket_ids=reservation.bucket_ids,
+                reservation_reserved_usage=reservation.get_usage(),
+            )
+        assert await _async_capacity(
+            redis_client, bucket._capacity_key
+        ) == pytest.approx(90.0, abs=1.0)
+    finally:
+        await retrying_client.aclose()
+
+
+@pytest.mark.redis
+def test_sync_lost_refund_reply_replay_is_reported_as_success(
+    sync_redis_client,
+    monkeypatch,
+):
+    """The synchronous backend has the same retry-replay semantics."""
+    retrying_client = redis.Redis(**_default_retry_client_kwargs(sync_redis_client))
+    prefix = "retry-replay-sync"
+    config = _make_config(limit=100, per_seconds=3600)
+    limiter = SyncRateLimiter(
+        config,
+        backend=SyncRedisBackendBuilder(retrying_client, key_prefix=prefix),
+    )
+    refund_eval_attempts = 0
+    reply_dropped = False
+
+    try:
+        reservation = limiter.acquire_capacity(
+            {"requests": 30.0},
+            config.get_model_family(),
+            timeout=0,
+        )
+        backend = limiter._get_backend(config)
+        bucket = backend.sorted_buckets[0]
+        original_send_and_parse = retrying_client._send_command_parse_response
+
+        def drop_first_refund_eval_reply(conn, command_name, *args, **options):
+            nonlocal refund_eval_attempts, reply_dropped
+            result = original_send_and_parse(conn, command_name, *args, **options)
+            if command_name == "EVAL":
+                refund_eval_attempts += 1
+                if not reply_dropped:
+                    reply_dropped = True
+                    raise redis.exceptions.ConnectionError(
+                        "injected lost refund reply after server commit"
+                    )
+            return result
+
+        monkeypatch.setattr(
+            retrying_client,
+            "_send_command_parse_response",
+            drop_first_refund_eval_reply,
+        )
+
+        limiter.refund_capacity({"requests": 10.0}, reservation)
+
+        assert reply_dropped
+        assert refund_eval_attempts == 2
+        assert (
+            sync_redis_client.exists(
+                redis_acquired_marker_key(prefix, reservation.reservation_id)
+            )
+            == 0
+        )
+        assert (
+            sync_redis_client.exists(
+                redis_refund_dedup_key(prefix, reservation.reservation_id)
+            )
+            == 1
+        )
+        assert _sync_capacity(sync_redis_client, bucket._capacity_key) == pytest.approx(
+            90.0, abs=1.0
+        )
+
+        monkeypatch.setattr(
+            retrying_client,
+            "_send_command_parse_response",
+            original_send_and_parse,
+        )
+        restarted_backend = SyncRedisBackendBuilder(
+            retrying_client,
+            key_prefix=prefix,
+        ).build(config)
+        with pytest.raises(DuplicateRefundError, match="reservation already refunded"):
+            restarted_backend.refund_capacity_for_buckets(
+                frozendict({"requests": 30.0}),
+                frozendict({"requests": 10.0}),
+                bucket_ids=reservation.bucket_ids,
+                reservation_id=reservation.reservation_id,
+                reservation_model_family=reservation.model_family,
+                reservation_bucket_ids=reservation.bucket_ids,
+                reservation_reserved_usage=reservation.get_usage(),
+            )
+        assert _sync_capacity(sync_redis_client, bucket._capacity_key) == pytest.approx(
+            90.0, abs=1.0
+        )
+    finally:
+        retrying_client.close()
