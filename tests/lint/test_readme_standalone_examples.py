@@ -198,7 +198,7 @@ _EXPECTED_NON_PYTHON_FENCES = (
     ),
     _ExpectedNonPythonFence(
         document_name="DEVELOPMENT.md",
-        start_line=123,
+        start_line=127,
         language="bash",
         classification=_NON_PYTHON_CLASSIFICATION_SHELL_SYNTAX,
         reason="setup and type-check commands; lint syntax-checks but does not execute them",
@@ -273,7 +273,7 @@ _EXPECTED_TASKFILE_RELEASE_DISPATCHES = (
 _EXPECTED_NON_README_STANDALONE_IDENTITIES = (
     _StandaloneExampleIdentity(
         document_name="DEVELOPMENT.md",
-        start_line=478,
+        start_line=482,
         heading="### Redis connection pool sizing",
         first_non_empty_code_line="import redis.asyncio as aioredis",
     ),

@@ -7,15 +7,9 @@ itself suggests. This reproduces what CI checks, on this machine, so a red
 run becomes surprising rather than routine.
 
 Usage:
-    uv run python -m devtools.preflight            # default tier
-    uv run python -m devtools.preflight --quick    # fast feedback only
-    uv run python -m devtools.preflight --full     # + the Python matrix
-
-Tiers:
-    quick    lint, format, type-check, unit, conformance, doc lints
-    default  quick + integration, multiprocess, the dependency floor, and the
-             newest redis client -- i.e. every job that gates a pull request
-    full     default + the 3.12/3.13/3.14 matrix
+    task preflight              # every job that gates a pull request
+    task preflight -- --quick   # lint, types, unit, conformance, doc lints
+    task preflight -- --full    # adds the 3.12/3.13/3.14 matrix
 
 What this cannot prove is listed at the end of every run.
 """
@@ -38,12 +32,15 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # Candidate logical databases, probed for emptiness at run time. Each
 # concurrent Redis-touching check needs its own: the suites flush around every
 # test, so sharing one produces phantom failures that look like product bugs.
-# DB 0 is never a candidate — it is the default a bare URL selects, and is the
-# most likely to hold something real.
+# DB 0 is never a candidate — it is what a bare URL selects and the most likely
+# to hold something real.
 REDIS_DB_CANDIDATES = tuple(range(1, 16))
 REDIS_HOST = os.environ.get("PREFLIGHT_REDIS_HOST", "redis://localhost:6379")
 
-# Proven only by a real CI run; stated after every preflight so a green local
+# Substituted with the check's throwaway virtualenv path.
+VENV = "{venv}"
+
+# Proven only by a real CI run; printed after every preflight so a green local
 # result is never mistaken for a green matrix.
 NOT_COVERED_LOCALLY = (
     "Windows (test-unit-platform windows-latest) — no Windows host here",
@@ -57,19 +54,12 @@ NOT_COVERED_LOCALLY = (
 class Check:
     name: str
     argv: list[str]
-    tier: str = "quick"
     needs_redis: bool = False
     env: dict[str, str] = field(default_factory=dict)
-    # When set, run in a throwaway environment so the dev venv is never mutated.
-    isolated_python: str | None = None
+    # Build a throwaway virtualenv on this Python first. Commands may reference
+    # it as `{venv}`.
+    venv_python: str | None = None
     pre_argv: list[list[str]] = field(default_factory=list)
-    # `uv sync --resolution ...` re-resolves and REWRITES uv.lock in the repo,
-    # even when UV_PROJECT_ENVIRONMENT points the venv elsewhere — that only
-    # redirects the environment, not the lockfile. Worse, a lock left recording
-    # a different resolution mode makes every later `uv run` re-sync the real
-    # environment. Checks flagged here get their own copy of the working tree,
-    # and still run serially and last as a second line of defence.
-    mutates_lockfile: bool = False
 
 
 @dataclass
@@ -84,9 +74,17 @@ def _redis_url(db: int) -> str:
     return f"{REDIS_HOST.rstrip('/')}/{db}"
 
 
+def _pytest(venv: str, *targets: str) -> list[str]:
+    return [f"{venv}/bin/python", "-m", "pytest", *targets, "-q"]
+
+
+def _pip_install(*args: str) -> list[str]:
+    return ["uv", "pip", "install", "--python", VENV, "-q", *args]
+
+
 def _checks(tier: str) -> list[Check]:
     """The local mirror of .github/workflows/ci.yml."""
-    checks: list[Check] = [
+    checks = [
         Check("lint", ["uv", "run", "ruff", "check", "."]),
         Check("format", ["uv", "run", "ruff", "format", "--check", "."]),
         Check("type-check", ["uv", "run", "mypy"]),
@@ -101,75 +99,49 @@ def _checks(tier: str) -> list[Check]:
     if tier == "quick":
         return checks
 
+    # The version-varying checks below install into a throwaway virtualenv with
+    # `uv pip install` rather than `uv sync`. That is deliberate and measured:
+    # `uv sync --resolution ...` rewrites the project's uv.lock even when
+    # UV_PROJECT_ENVIRONMENT points the virtualenv elsewhere, and a lock left
+    # recording a different resolution mode makes every later `uv run` re-sync
+    # the real environment. `uv pip install` is pip-mode and neither reads nor
+    # writes the lockfile.
     checks += [
         Check(
             "integration",
             ["uv", "run", "pytest", "tests/integration", "-q"],
-            tier="default",
             needs_redis=True,
         ),
         Check(
             "multiprocess",
             ["uv", "run", "pytest", "tests/multiprocess", "-q"],
-            tier="default",
             needs_redis=True,
             env={"TOKEN_THROTTLE_MULTIPROCESS_TIMING_SCALE": "2"},
         ),
         # Mirrors test-min-deps: the lowest client the metadata permits. This is
-        # the job that caught retry-replay tests depending on a version-specific
-        # default, which the locked client hid completely.
+        # the check that caught retry-replay tests depending on a
+        # version-specific default, which the locked client hid entirely.
         Check(
             "dependency-floor",
-            [
-                "uv",
-                "run",
-                "--no-sync",
-                "pytest",
-                "tests/unit",
-                "tests/integration",
-                "-m",
-                "redis",
-                "-q",
-            ],
-            tier="default",
+            _pytest(VENV, "tests/unit", "tests/integration", "-m", "redis"),
             needs_redis=True,
-            isolated_python="3.12",
-            mutates_lockfile=True,
+            venv_python="3.12",
             pre_argv=[
-                [
-                    "uv",
-                    "sync",
-                    "--extra",
-                    "redis",
-                    "--group",
-                    "dev",
-                    "--resolution",
-                    "lowest-direct",
-                ],
+                _pip_install(
+                    "--resolution", "lowest-direct", "-e", ".[redis]", "--group", "dev"
+                ),
             ],
         ),
         # Mirrors the scheduled drift canary: the newest client the uncapped
         # range admits, which uv.lock otherwise pins away from.
         Check(
             "newest-redis-client",
-            [
-                "uv",
-                "run",
-                "--no-sync",
-                "pytest",
-                "tests/unit",
-                "tests/integration",
-                "-m",
-                "redis",
-                "-q",
-            ],
-            tier="default",
+            _pytest(VENV, "tests/unit", "tests/integration", "-m", "redis"),
             needs_redis=True,
-            isolated_python="3.13",
-            mutates_lockfile=True,
+            venv_python="3.13",
             pre_argv=[
-                ["uv", "sync", "--all-extras", "--group", "dev"],
-                ["uv", "pip", "install", "--upgrade", "redis"],
+                _pip_install("-e", ".[redis,tiktoken]", "--group", "dev"),
+                _pip_install("--upgrade", "redis"),
             ],
         ),
     ]
@@ -180,91 +152,65 @@ def _checks(tier: str) -> list[Check]:
         checks.append(
             Check(
                 f"unit-py{version}",
-                ["uv", "run", "--no-sync", "pytest", "tests/unit", "-q"],
-                tier="full",
+                _pytest(VENV, "tests/unit"),
                 needs_redis=True,
-                isolated_python=version,
-                pre_argv=[["uv", "sync", "--all-extras", "--group", "dev"]],
+                venv_python=version,
+                pre_argv=[_pip_install("-e", ".[redis,tiktoken]", "--group", "dev")],
             )
         )
     return checks
 
 
-_COPY_SKIP = frozenset(
-    {
-        ".git",
-        ".venv",
-        ".worktrees",
-        "__pycache__",
-        ".mypy_cache",
-        ".pytest_cache",
-        ".ruff_cache",
-        ".hypothesis",
-        "dist",
-        "htmlcov",
-        "node_modules",
-    }
-)
-
-
-def _copy_project(destination: Path) -> None:
-    """Copy the working tree so a check can re-resolve without touching it."""
-    shutil.copytree(
-        REPO_ROOT,
-        destination,
-        ignore=shutil.ignore_patterns(*_COPY_SKIP),
-        symlinks=True,
-    )
+def _substitute(argv: list[str], venv: str | None) -> list[str]:
+    if venv is None:
+        return list(argv)
+    return [part.replace(VENV, venv) for part in argv]
 
 
 def _run(check: Check, db: int | None) -> Result:
     env = os.environ.copy()
     env.update(check.env)
     scratch: str | None = None
-    cwd = REPO_ROOT
-    if check.isolated_python is not None:
-        # A separate environment keeps version-swapping checks from mutating
-        # the dev venv -- an interrupted run must not leave a downgraded client
-        # installed.
-        scratch = tempfile.mkdtemp(prefix="tt-preflight-")
-        env["UV_PROJECT_ENVIRONMENT"] = str(Path(scratch) / "venv")
-        env["UV_PYTHON"] = check.isolated_python
-    if check.mutates_lockfile:
-        # UV_PROJECT_ENVIRONMENT redirects the virtualenv but NOT the lockfile:
-        # `uv sync --resolution ...` still rewrites uv.lock in place, and a lock
-        # left recording a different resolution mode makes every later `uv run`
-        # re-sync the real environment. Give these checks their own copy of the
-        # tree so the repository's lockfile is physically out of reach.
-        if scratch is None:
-            scratch = tempfile.mkdtemp(prefix="tt-preflight-")
-            env["UV_PROJECT_ENVIRONMENT"] = str(Path(scratch) / "venv")
-        cwd = Path(scratch) / "project"
-        _copy_project(cwd)
-        env["UV_PROJECT_ENVIRONMENT"] = str(Path(scratch) / "venv")
-
-    argv = list(check.argv)
-    if check.needs_redis and db is not None:
-        argv += ["--redis-url", _redis_url(db)]
-
+    venv: str | None = None
     started = time.monotonic()
+
     try:
-        for pre in check.pre_argv:
+        commands = list(check.pre_argv)
+        if check.venv_python is not None:
+            scratch = tempfile.mkdtemp(prefix="tt-preflight-")
+            venv = str(Path(scratch) / "venv")
+            commands.insert(
+                0, ["uv", "venv", venv, "-q", "--python", check.venv_python]
+            )
+
+        for pre in commands:
+            resolved = _substitute(pre, venv)
             done = subprocess.run(
-                pre, cwd=cwd, env=env, capture_output=True, text=True, check=False
+                resolved,
+                cwd=REPO_ROOT,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
             )
             if done.returncode != 0:
                 return Result(
-                    check,
+                    check=check,
                     ok=False,
                     seconds=time.monotonic() - started,
-                    tail=f"setup failed: {' '.join(pre)}\n{done.stderr.strip()[-800:]}",
+                    tail=f"setup failed: {' '.join(resolved)}\n"
+                    f"{(done.stdout + done.stderr).strip()[-800:]}",
                 )
+
+        argv = _substitute(check.argv, venv)
+        if check.needs_redis and db is not None:
+            argv += ["--redis-url", _redis_url(db)]
         done = subprocess.run(
-            argv, cwd=cwd, env=env, capture_output=True, text=True, check=False
+            argv, cwd=REPO_ROOT, env=env, capture_output=True, text=True, check=False
         )
         output = (done.stdout + done.stderr).strip()
         return Result(
-            check,
+            check=check,
             ok=done.returncode == 0,
             seconds=time.monotonic() - started,
             tail="\n".join(output.splitlines()[-12:]),
@@ -287,9 +233,8 @@ def _empty_redis_dbs(needed: int) -> list[int]:
     Return `needed` logical databases that are currently empty.
 
     Probed rather than hardcoded: another project (or another preflight) may
-    be holding keys in any given index, and handing a check a populated
-    database means it either refuses to run or destroys someone's data.
-    Returns fewer than requested if that many are not free; the caller decides.
+    hold keys in any given index, and handing a check a populated database
+    means it either refuses to run or destroys someone's data.
     """
     probe = shutil.which("redis-cli")
     if probe is None:
@@ -324,59 +269,48 @@ def main() -> int:
 
     if not _redis_reachable() and any(c.needs_redis for c in checks):
         print(
-            "Redis is not answering at "
-            f"{REDIS_HOST}. Start it before preflighting: the Redis-backed "
-            "suites are where most CI surprises live.",
+            f"Redis is not answering at {REDIS_HOST}. Start it before "
+            "preflighting: the Redis-backed suites are where most CI surprises "
+            "live.",
             file=sys.stderr,
         )
         return 2
 
     redis_checks = [c for c in checks if c.needs_redis]
-    free_dbs = _empty_redis_dbs(len(redis_checks))
-    if len(free_dbs) < len(redis_checks):
+    free = _empty_redis_dbs(len(redis_checks))
+    if len(free) < len(redis_checks):
         print(
-            f"Need {len(redis_checks)} empty Redis databases but found "
-            f"{len(free_dbs)}. These suites flush the database they are given, "
-            "so preflight will not reuse a populated one. Free some up, or run "
-            "with --jobs 1 --quick for the checks that need no Redis.",
+            f"Need {len(redis_checks)} empty Redis databases, found {len(free)}. "
+            "These suites flush the database they are handed, so preflight will "
+            "not reuse a populated one. Free some up, or use --quick.",
             file=sys.stderr,
         )
         return 2
     assigned: dict[str, int | None] = {c.name: None for c in checks}
-    for check, db in zip(redis_checks, free_dbs, strict=False):
+    for check, db in zip(redis_checks, free, strict=False):
         assigned[check.name] = db
 
-    concurrent = [c for c in checks if not c.mutates_lockfile]
-    serial = [c for c in checks if c.mutates_lockfile]
+    lockfile = REPO_ROOT / "uv.lock"
+    lock_before = lockfile.read_bytes() if lockfile.exists() else None
 
     print(f"preflight [{tier}] — {len(checks)} checks, {args.jobs} at a time\n")
     started = time.monotonic()
     results: list[Result] = []
-
-    def record(result: Result) -> None:
-        results.append(result)
-        mark = "PASS" if result.ok else "FAIL"
-        print(f"  {mark}  {result.check.name:<22} {result.seconds:6.1f}s", flush=True)
-
     with ThreadPoolExecutor(max_workers=args.jobs) as pool:
-        futures = [pool.submit(_run, c, assigned[c.name]) for c in concurrent]
+        futures = [pool.submit(_run, c, assigned[c.name]) for c in checks]
         for future in as_completed(futures):
-            record(future.result())
+            result = future.result()
+            results.append(result)
+            mark = "PASS" if result.ok else "FAIL"
+            print(
+                f"  {mark}  {result.check.name:<22} {result.seconds:6.1f}s", flush=True
+            )
 
-    # Re-resolution rewrites uv.lock in place, so these run one at a time, after
-    # everything that reads the lockfile has finished, and the file is put back
-    # exactly as found. A dev tool that silently upgrades pinned dependencies is
-    # worse than no dev tool.
-    if serial:
-        lockfile = REPO_ROOT / "uv.lock"
-        snapshot = lockfile.read_bytes() if lockfile.exists() else None
-        try:
-            for check in serial:
-                record(_run(check, assigned[check.name]))
-        finally:
-            if snapshot is not None and lockfile.read_bytes() != snapshot:
-                lockfile.write_bytes(snapshot)
-                print("  ..    uv.lock changed unexpectedly; restored")
+    # Nothing here should touch the lockfile. If that ever changes, say so
+    # loudly rather than leaving a silently mutated dependency set behind.
+    if lock_before is not None and lockfile.read_bytes() != lock_before:
+        lockfile.write_bytes(lock_before)
+        print("\n!! uv.lock was modified by a check and has been restored")
 
     failed = [r for r in results if not r.ok]
     print(
