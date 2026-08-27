@@ -252,7 +252,8 @@ async def test_async_lost_refund_eval_reply_commits_local_state() -> None:
     marker_key = redis_acquired_marker_key(PREFIX, reservation.reservation_id)
     tombstone_key = redis_refund_dedup_key(PREFIX, reservation.reservation_id)
     assert marker_key not in redis_client.store
-    assert redis_client.store[tombstone_key] == "1"
+    assert isinstance(redis_client.store[tombstone_key], str)
+    assert redis_client.store[tombstone_key] != "1"
     assert redis_client.store[_CAPACITY_KEY] == 90.0
     assert limiter._refunded_reservation_ids[reservation.reservation_id] == "committed"
     assert reservation.reservation_id not in limiter._in_flight_reservation_ids
@@ -271,7 +272,8 @@ def test_sync_lost_refund_eval_reply_commits_local_state() -> None:
     marker_key = redis_acquired_marker_key(PREFIX, reservation.reservation_id)
     tombstone_key = redis_refund_dedup_key(PREFIX, reservation.reservation_id)
     assert marker_key not in redis_client.store
-    assert redis_client.store[tombstone_key] == "1"
+    assert isinstance(redis_client.store[tombstone_key], str)
+    assert redis_client.store[tombstone_key] != "1"
     assert redis_client.store[_CAPACITY_KEY] == 90.0
     assert limiter._refunded_reservation_ids[reservation.reservation_id] == "committed"
     assert reservation.reservation_id not in limiter._in_flight_reservation_ids

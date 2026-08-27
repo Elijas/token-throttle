@@ -89,6 +89,38 @@ Name **new** test files `test_<area>_<behavior>.py` (e.g.
 `test_reservation_refund_dedup.py`), describing what is under test rather than
 which bug-tracker item introduced it.
 
+## Preflight: run the CI gates before pushing
+
+```bash
+task preflight            # every job that gates a pull request
+task preflight -- --quick # lint, types, unit, conformance, doc lints
+task preflight -- --full  # adds the 3.12/3.13/3.14 matrix
+```
+
+Hosted runners routinely queue for tens of minutes before a job starts, so a
+push that fails CI costs far more wall-clock time than the job durations
+suggest. Preflight runs the same gates here: the quick tier finishes in about
+90 seconds, and the default tier — which adds integration, multiprocess, the
+dependency floor, and the newest permitted redis-py — in about three minutes.
+
+Redis must be running. Each Redis-touching check is given its own empty logical
+database, discovered at run time rather than hardcoded, because these suites
+flush the database they are handed; preflight refuses to start rather than
+reuse a populated one.
+
+The version-varying checks build their environment with `uv pip install`
+rather than `uv sync`. This matters: `uv sync --resolution lowest-direct`
+rewrites `uv.lock` even when `UV_PROJECT_ENVIRONMENT` points the virtualenv
+elsewhere — that flag redirects the environment, not the lockfile — and a lock
+left recording a different resolution mode makes every later `uv run` re-sync
+your real environment, silently downgrading your tooling. `uv pip install` is
+pip-mode and neither reads nor writes the lockfile, so
+`uv pip install --resolution lowest-direct --python <venv> -e ".[redis]"
+--group dev` gets the floor without touching anything. Preflight also verifies
+the lockfile is unchanged at the end, and restores it loudly if it ever is not.
+Every run prints what it could not prove — Windows, Linux container specifics,
+CodeQL, and the Codecov upload still need a real CI run.
+
 ## Type checking
 
 ```bash
@@ -99,6 +131,18 @@ uv run mypy
 The mypy gate checks the complete `token_throttle/` package with normal import
 following. Install all extras before running it because the checked package
 includes Redis, OpenAI, and tokenizer integration modules.
+
+**Type-check against the locked redis-py, not an older one.** The supported
+client range starts at `redis>=5.2.1`, and every admitted version runs the full
+suite correctly — but redis-py before 7.0 annotates the variadic arguments of
+`eval()` as `str`, while the backend passes the mix of strings, bytes, ints, and
+floats that Redis accepts at runtime. Type-checking this package's source
+against a 5.x or 6.x client therefore reports four `eval()` argument-type errors
+that describe the old annotation, not any real defect: those same versions pass
+the unit, conformance, and integration suites against a live server. The floor
+was deliberately kept at 5.2.1 rather than raised to silence them, because
+raising it would drop working clients for a typing artifact. `uv sync` installs
+the locked client, so this only appears if you deliberately downgrade.
 
 ## CI structure
 
@@ -112,7 +156,7 @@ CI runs nine jobs (see `.github/workflows/ci.yml`):
 | `test-unit-full` | Unit tests with all optional deps on Linux / Python 3.12, 3.13, 3.14 | all extras + dev |
 | `test-unit-platform` | Unit tests with all optional deps on macOS and Windows / Python 3.13 | all extras + dev |
 | `test-integration` | Integration tests against Redis on Linux / Python 3.12, 3.13, 3.14 | all extras + dev |
-| `test-min-deps` | Unit tests with lowest direct dependency resolution on Linux / Python 3.12 | dev only |
+| `test-min-deps` | Unit and Redis integration tests at the lowest direct dependency resolution on Linux / Python 3.12 — this is what proves the declared `redis>=5.2.1` floor | redis extra + dev |
 | `conformance` | AST and structural conformance guards on Linux / Python 3.12 | all extras + dev |
 | `coverage` | Full suite + Codecov upload on Linux / Python 3.13 | all extras + dev |
 

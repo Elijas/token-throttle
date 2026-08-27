@@ -39,6 +39,14 @@ tasks:
     desc: Run a quick memory-only acquire-path benchmark profile (numbers are machine-relative; see benchmarks/README.md)
     aliases: [b]
   ##############################
+  ### PREFLIGHT
+  ##############################
+  preflight:
+    cmds:
+      - uv run python -m devtools.preflight {{.CLI_ARGS}}
+    desc: Run the CI gates locally before pushing (add --quick or --full)
+    aliases: [pf]
+  ##############################
   ### LINT AND DEPENDENCIES
   ##############################
   lint:

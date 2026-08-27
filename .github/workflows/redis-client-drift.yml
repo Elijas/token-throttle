@@ -1,0 +1,47 @@
+name: Redis Client Drift Canary
+
+# Runs the Redis-backed integration and multiprocess suites, plus the package
+# type check, against the LATEST unpinned redis-py release rather than the
+# version pinned in uv.lock. The redis extra is deliberately uncapped, so this
+# provides a loud weekly signal when a new client release (including a future
+# major) breaks runtime behavior or the async client's typing.
+
+on:
+  schedule:
+    # Tuesday 7 AM UTC. Deliberately offset from the other recurring jobs
+    # (scheduled.yml: Monday 8 AM, tokenizer-drift.yml: Wednesday 7 AM,
+    # soak.yml: Thursday 9 AM) so they never contend for runners.
+    - cron: "0 7 * * 2"
+  workflow_dispatch:
+
+jobs:
+  canary:
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.13"
+      - run: uv sync --all-extras --group dev
+      # Deliberately bypass uv.lock's pinned redis version: this job exists to
+      # catch drift against whatever redis-py ships next, not to re-verify the
+      # client version already covered by ci.yml.
+      - run: uv pip install --upgrade redis
+      # --no-sync: plain `uv run` re-syncs the environment to uv.lock first,
+      # which would silently downgrade the redis upgrade above before either
+      # the type check or Redis-backed tests start.
+      - run: uv run --no-sync python -c "import redis; print(f'redis-py {redis.__version__}')"
+      - run: uv run --no-sync mypy
+      - run: uv run --no-sync pytest tests/integration tests/multiprocess -v --redis-url redis://localhost:6379/13
+        env:
+          TOKEN_THROTTLE_MULTIPROCESS_TIMING_SCALE: "2"

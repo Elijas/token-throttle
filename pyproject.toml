@@ -29,7 +29,7 @@ requires-python = ">=3.12"
 dependencies = ["frozendict>=2.4.6,<3", "pydantic>=2.12.0,<3"]
 
 [project.optional-dependencies]
-redis = ["redis>=5.2.1,<8"]
+redis = ["redis>=5.2.1,!=8.0.0,!=8.0.1"]
 tiktoken = ["tiktoken>=0.10.0,<1"]
 
 [project.urls]
@@ -230,6 +230,7 @@ target-version = "py312"
     "T201",    # print() statement found
     "C901",    # Function is too complex
     "PLR0912", # Too many branches
+    "S603",    # these scripts shell out by design; every argv is a literal
 ]
 "benchmarks/**/*.py" = [
     "T201",     # print() is the benchmark table/report output channel

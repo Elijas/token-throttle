@@ -287,16 +287,15 @@ class _AsyncRedis:
         marker_key, dedup_key = keys[0], keys[1]
         marker = await self.get(marker_key)
         if marker is None:
-            return (
-                "duplicate_refund"
-                if await self.exists(dedup_key)
-                else "unknown_reservation"
-            )
+            tombstone = await self.get(dedup_key)
+            if tombstone == argv[2]:
+                return "replayed_refund"
+            return "duplicate_refund" if tombstone else "unknown_reservation"
         if marker != argv[0]:
             return "marker_mismatch"
         if await self.exists(dedup_key):
             return "incoherent_refund"
-        arg_index = 2
+        arg_index = 3
         for key_index in range(2, len(keys), 2):
             await self.set(
                 keys[key_index], argv[arg_index], ex=int(argv[arg_index + 2])
@@ -308,7 +307,7 @@ class _AsyncRedis:
             )
             arg_index += 3
         await self.delete(marker_key)
-        claimed = await self.set(dedup_key, "1", ex=int(argv[1]), nx=True)
+        claimed = await self.set(dedup_key, argv[2], ex=int(argv[1]), nx=True)
         if not claimed:
             return "incoherent_refund"
         return "ok"
@@ -380,14 +379,15 @@ class _SyncRedis:
         marker_key, dedup_key = keys[0], keys[1]
         marker = self.get(marker_key)
         if marker is None:
-            return (
-                "duplicate_refund" if self.exists(dedup_key) else "unknown_reservation"
-            )
+            tombstone = self.get(dedup_key)
+            if tombstone == argv[2]:
+                return "replayed_refund"
+            return "duplicate_refund" if tombstone else "unknown_reservation"
         if marker != argv[0]:
             return "marker_mismatch"
         if self.exists(dedup_key):
             return "incoherent_refund"
-        arg_index = 2
+        arg_index = 3
         for key_index in range(2, len(keys), 2):
             self.set(keys[key_index], argv[arg_index], ex=int(argv[arg_index + 2]))
             self.set(
@@ -397,7 +397,7 @@ class _SyncRedis:
             )
             arg_index += 3
         self.delete(marker_key)
-        claimed = self.set(dedup_key, "1", ex=int(argv[1]), nx=True)
+        claimed = self.set(dedup_key, argv[2], ex=int(argv[1]), nx=True)
         if not claimed:
             return "incoherent_refund"
         return "ok"
@@ -541,7 +541,8 @@ async def test_async_redis_failed_bucket_write_does_not_claim_tombstone() -> Non
         **_marker_refund_kwargs("redis-r1"),
     )
     assert redis_client.store[bucket._capacity_key] == 90.0
-    assert redis_client.store[dedup_key] == "1"
+    assert isinstance(redis_client.store[dedup_key], str)
+    assert redis_client.store[dedup_key] != "1"
 
     with pytest.raises(DuplicateRefundError, match="reservation already refunded"):
         await backend.refund_capacity_for_buckets(
@@ -585,7 +586,8 @@ def test_sync_redis_failed_bucket_write_does_not_claim_tombstone() -> None:
         **_marker_refund_kwargs("redis-r2"),
     )
     assert redis_client.store[bucket._capacity_key] == 90.0
-    assert redis_client.store[dedup_key] == "1"
+    assert isinstance(redis_client.store[dedup_key], str)
+    assert redis_client.store[dedup_key] != "1"
 
     with pytest.raises(DuplicateRefundError, match="reservation already refunded"):
         backend.refund_capacity_for_buckets(
@@ -625,5 +627,6 @@ async def test_async_redis_deferred_tombstone_serializes_concurrent_retries() ->
 
     assert results.count(True) == 1
     assert sum(isinstance(result, DuplicateRefundError) for result in results) == 1
-    assert redis_client.store[dedup_key] == "1"
+    assert isinstance(redis_client.store[dedup_key], str)
+    assert redis_client.store[dedup_key] != "1"
     assert redis_client.store[bucket._capacity_key] == 90.0

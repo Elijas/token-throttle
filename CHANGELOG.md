@@ -3,6 +3,30 @@
 Notable changes for token-throttle releases. Each major version's breaking
 changes and upgrade steps are recorded in its entry below.
 
+## Unreleased
+
+- The `redis` extra now allows redis-py 8, and no longer caps at the next major:
+  the requirement is `redis>=5.2.1,!=8.0.0,!=8.0.1`. An upper bound in library
+  metadata cannot be relaxed without a release and causes resolution conflicts
+  for anything that needs a newer client, so future majors are permitted rather
+  than blocked on the assumption that they break. The two exclusions are
+  releases with specific defects — 8.0.0 breaks unix-socket clients, and
+  8.0.0/8.0.1 leak Sentinel connection-pool slots on every failover.
+  If you build your client the short way (`redis.from_url(...)`) and run more
+  than 100 concurrent acquires, pass `max_connections` explicitly: redis-py 8
+  caps the default pool where earlier versions effectively did not. See
+  [docs/operations.md](docs/operations.md#supported-redis-py-client-versions).
+- Fixes a refund whose reply was lost in transit being reported as
+  `DuplicateRefundError` even though that same call refunded successfully.
+  redis-py retries a command whose response never arrives, so the replayed
+  script found the refund-dedup record written by its own first execution and
+  reported a duplicate. The refund now carries a per-attempt token, so a replay
+  that finds its own record is reported as the success it was, while a genuine
+  second refund — including one issued after a process restart — still raises
+  `DuplicateRefundError`. Capacity accounting was always correct; only the
+  reported outcome was wrong. The window grows on redis-py 8, which raises the
+  default command-retry count from three to ten.
+
 ## 10.1.1 - 2026-08-27
 
 - Fixes the SQLite backends leaking a reservation from

@@ -113,14 +113,34 @@ jobs:
 
   test-min-deps:
     runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.12"
-      - run: uv sync --group dev --resolution lowest-direct
-      - run: uv run pytest tests/unit -v
+      # Select only the Redis extra: --all-extras would also put the unrelated
+      # tiktoken integration on its floor and make failures harder to attribute.
+      - run: uv sync --extra redis --group dev --resolution lowest-direct
+      # The explicit assertion makes the declared floor auditable. --no-sync is
+      # required because plain `uv run` would resolve the lowest-direct lock back
+      # to the default highest resolution before running anything.
+      - run: uv run --no-sync python -c "import redis; assert redis.__version__ == '5.2.1', redis.__version__; print(f'redis-py {redis.__version__}')"
+      - run: uv run --no-sync pytest tests/unit -v --redis-url redis://localhost:6379/13
+      # Exercise only Redis cases here; the integration matrix already covers
+      # every backend, and duplicating its memory/SQLite cases would slow PRs.
+      - run: uv run --no-sync pytest tests/integration tests/multiprocess -m redis -v --redis-url redis://localhost:6379/13
+        env:
+          TOKEN_THROTTLE_MULTIPROCESS_TIMING_SCALE: "2"
 
   # First-class gate for the AST/structural-prevention layer. The unit tiers
   # run `pytest tests/unit`, an explicit path that excludes tests/conformance/;
