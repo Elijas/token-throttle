@@ -3,7 +3,7 @@
 Notable changes for token-throttle releases. Each major version's breaking
 changes and upgrade steps are recorded in its entry below.
 
-## Unreleased
+## 10.2.0 - 2026-08-27
 
 - The `redis` extra now allows redis-py 8, and no longer caps at the next major:
   the requirement is `redis>=5.2.1,!=8.0.0,!=8.0.1`. An upper bound in library
