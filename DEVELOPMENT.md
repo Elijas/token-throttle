@@ -108,12 +108,14 @@ database, discovered at run time rather than hardcoded, because these suites
 flush the database they are handed; preflight refuses to start rather than
 reuse a populated one.
 
-The floor and newest-client checks re-resolve dependencies, and
-`uv sync --resolution ...` rewrites `uv.lock` in the repository even when
-`UV_PROJECT_ENVIRONMENT` sends the virtualenv elsewhere. Those two therefore run
-serially, last, with the lockfile snapshotted and restored; a run that restores
-it says so. Every run also prints what it could not prove — Windows, Linux
-container specifics, CodeQL, and the Codecov upload still need a real CI run.
+The floor and newest-client checks re-resolve dependencies, which rewrites
+`uv.lock` — `UV_PROJECT_ENVIRONMENT` redirects the virtualenv but not the
+lockfile, and a lock left recording a different resolution mode makes every
+later `uv run` re-sync your real environment. Those two checks therefore run
+against their own copy of the working tree, so the repository's lockfile is
+physically out of reach; preflight also verifies it is unchanged at the end.
+Every run prints what it could not prove — Windows, Linux container specifics,
+CodeQL, and the Codecov upload still need a real CI run.
 
 ## Type checking
 

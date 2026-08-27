@@ -65,8 +65,10 @@ class Check:
     pre_argv: list[list[str]] = field(default_factory=list)
     # `uv sync --resolution ...` re-resolves and REWRITES uv.lock in the repo,
     # even when UV_PROJECT_ENVIRONMENT points the venv elsewhere — that only
-    # redirects the environment, not the lockfile. Checks flagged here run
-    # serially, last, with the lockfile snapshotted and restored around them.
+    # redirects the environment, not the lockfile. Worse, a lock left recording
+    # a different resolution mode makes every later `uv run` re-sync the real
+    # environment. Checks flagged here get their own copy of the working tree,
+    # and still run serially and last as a second line of defence.
     mutates_lockfile: bool = False
 
 
@@ -188,10 +190,38 @@ def _checks(tier: str) -> list[Check]:
     return checks
 
 
+_COPY_SKIP = frozenset(
+    {
+        ".git",
+        ".venv",
+        ".worktrees",
+        "__pycache__",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".hypothesis",
+        "dist",
+        "htmlcov",
+        "node_modules",
+    }
+)
+
+
+def _copy_project(destination: Path) -> None:
+    """Copy the working tree so a check can re-resolve without touching it."""
+    shutil.copytree(
+        REPO_ROOT,
+        destination,
+        ignore=shutil.ignore_patterns(*_COPY_SKIP),
+        symlinks=True,
+    )
+
+
 def _run(check: Check, db: int | None) -> Result:
     env = os.environ.copy()
     env.update(check.env)
     scratch: str | None = None
+    cwd = REPO_ROOT
     if check.isolated_python is not None:
         # A separate environment keeps version-swapping checks from mutating
         # the dev venv -- an interrupted run must not leave a downgraded client
@@ -199,6 +229,18 @@ def _run(check: Check, db: int | None) -> Result:
         scratch = tempfile.mkdtemp(prefix="tt-preflight-")
         env["UV_PROJECT_ENVIRONMENT"] = str(Path(scratch) / "venv")
         env["UV_PYTHON"] = check.isolated_python
+    if check.mutates_lockfile:
+        # UV_PROJECT_ENVIRONMENT redirects the virtualenv but NOT the lockfile:
+        # `uv sync --resolution ...` still rewrites uv.lock in place, and a lock
+        # left recording a different resolution mode makes every later `uv run`
+        # re-sync the real environment. Give these checks their own copy of the
+        # tree so the repository's lockfile is physically out of reach.
+        if scratch is None:
+            scratch = tempfile.mkdtemp(prefix="tt-preflight-")
+            env["UV_PROJECT_ENVIRONMENT"] = str(Path(scratch) / "venv")
+        cwd = Path(scratch) / "project"
+        _copy_project(cwd)
+        env["UV_PROJECT_ENVIRONMENT"] = str(Path(scratch) / "venv")
 
     argv = list(check.argv)
     if check.needs_redis and db is not None:
@@ -208,7 +250,7 @@ def _run(check: Check, db: int | None) -> Result:
     try:
         for pre in check.pre_argv:
             done = subprocess.run(
-                pre, cwd=REPO_ROOT, env=env, capture_output=True, text=True, check=False
+                pre, cwd=cwd, env=env, capture_output=True, text=True, check=False
             )
             if done.returncode != 0:
                 return Result(
@@ -218,7 +260,7 @@ def _run(check: Check, db: int | None) -> Result:
                     tail=f"setup failed: {' '.join(pre)}\n{done.stderr.strip()[-800:]}",
                 )
         done = subprocess.run(
-            argv, cwd=REPO_ROOT, env=env, capture_output=True, text=True, check=False
+            argv, cwd=cwd, env=env, capture_output=True, text=True, check=False
         )
         output = (done.stdout + done.stderr).strip()
         return Result(
@@ -334,7 +376,7 @@ def main() -> int:
         finally:
             if snapshot is not None and lockfile.read_bytes() != snapshot:
                 lockfile.write_bytes(snapshot)
-                print("  ..    uv.lock was rewritten by a re-resolution; restored")
+                print("  ..    uv.lock changed unexpectedly; restored")
 
     failed = [r for r in results if not r.ok]
     print(
