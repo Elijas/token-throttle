@@ -405,8 +405,9 @@ class RedisBucket:
         return override_value
 
     async def _read_max_capacity_override_from_redis(self) -> float | None:
-        # redis-py 8 types the async client's get() as Awaitable, so the
-        # awaited result cannot be assigned back over the call's own variable.
+        # Bind the awaited value separately: some redis-py versions type the
+        # async client's get() as Awaitable, so the result cannot be assigned
+        # back over the call's own variable.
         get_result = self._redis.get(self._max_capacity_key)
         stored_value: object = (
             await get_result if inspect.isawaitable(get_result) else get_result
