@@ -373,6 +373,13 @@ def _cfg_with_preserved_runtime_max_capacity(
     )
 
 
+_REFUND_DROPPED_WARNING = (
+    "Refund dropped: none of the reservation's bucket IDs exist in "
+    "the current backend (bucket set was reconfigured after the "
+    "reservation was created)."
+)
+
+
 def _project_refund_scope(  # noqa: PLR0913
     reserved_usage: FrozenUsage,
     actual_usage: FrozenUsage,
@@ -381,7 +388,7 @@ def _project_refund_scope(  # noqa: PLR0913
     *,
     reservation_id: str | None = None,
     model_family: str | None = None,
-) -> tuple[FrozenUsage, FrozenUsage, frozenset[BucketId] | None]:
+) -> tuple[FrozenUsage, FrozenUsage, frozenset[BucketId] | None, bool]:
     """
     Shape refund data to the buckets that still correspond to the reservation.
 
@@ -389,16 +396,23 @@ def _project_refund_scope(  # noqa: PLR0913
     set after a reservation was created. Surviving bucket ids keep their
     original refund values, removed bucket ids are dropped, and legacy
     reservations without bucket ids fall back to metric-name projection.
+
+    The fourth element reports whether the refund was dropped entirely. This is
+    returned rather than warned about here: under ``-W error`` a warning raised
+    mid-refund would skip finalization and leak the in-flight reservation, so
+    the caller emits it only once the refund is committed. The log record is
+    still written here, because logging cannot raise the refund off course and
+    the context is worth keeping even when a later step fails.
     """
     if active_bucket_ids is None:
-        return reserved_usage, actual_usage, reservation_bucket_ids
+        return reserved_usage, actual_usage, reservation_bucket_ids, False
 
     active_bucket_ids = frozenset(active_bucket_ids)
 
     if reservation_bucket_ids is None:
         active_metric_names = frozenset(metric for metric, _ in active_bucket_ids)
         if set(reserved_usage) == set(active_metric_names):
-            return reserved_usage, actual_usage, active_bucket_ids
+            return reserved_usage, actual_usage, active_bucket_ids, False
         return (
             frozendict(
                 {
@@ -413,6 +427,7 @@ def _project_refund_scope(  # noqa: PLR0913
                 }
             ),
             active_bucket_ids,
+            False,
         )
 
     surviving_bucket_ids = frozenset(
@@ -421,18 +436,8 @@ def _project_refund_scope(  # noqa: PLR0913
         if bucket_id in active_bucket_ids
     )
     if not surviving_bucket_ids:
-        message = (
-            "Refund dropped: none of the reservation's bucket IDs exist in "
-            "the current backend (bucket set was reconfigured after the "
-            "reservation was created)."
-        )
-        warnings.warn(
-            message,
-            RuntimeWarning,
-            stacklevel=3,
-        )
         _logger.warning(
-            message,
+            _REFUND_DROPPED_WARNING,
             extra={
                 "reservation_id": reservation_id,
                 "model_family": model_family,
@@ -440,11 +445,11 @@ def _project_refund_scope(  # noqa: PLR0913
                 "active_bucket_ids": sorted(active_bucket_ids),
             },
         )
-        return frozendict(), frozendict(), surviving_bucket_ids
+        return frozendict(), frozendict(), surviving_bucket_ids, True
 
     surviving_metric_names = frozenset(metric for metric, _ in surviving_bucket_ids)
     if set(reserved_usage) == set(surviving_metric_names):
-        return reserved_usage, actual_usage, surviving_bucket_ids
+        return reserved_usage, actual_usage, surviving_bucket_ids, False
 
     return (
         frozendict(
@@ -457,6 +462,7 @@ def _project_refund_scope(  # noqa: PLR0913
             {metric: actual_usage.get(metric, 0.0) for metric in surviving_metric_names}
         ),
         surviving_bucket_ids,
+        False,
     )
 
 
@@ -2148,6 +2154,7 @@ class RateLimiter(BaseRateLimiter):
         refund_bucket_ids_for_probe: frozenset[BucketId] | None = None
         pre_refund_signature: tuple[tuple[BucketId, object, object], ...] | None = None
         refund_backend_call_started = False
+        refund_dropped = False
         try:
             async with self._refund_state_lock:
                 if not allow_closed:
@@ -2202,7 +2209,12 @@ class RateLimiter(BaseRateLimiter):
                 snapshot = self._model_family_to_quotas.get(reservation.model_family)
                 if snapshot is not None:
                     active_bucket_ids = frozenset(snapshot)
-                reserved_usage, actual_usage, refund_bucket_ids = _project_refund_scope(
+                (
+                    reserved_usage,
+                    actual_usage,
+                    refund_bucket_ids,
+                    refund_dropped,
+                ) = _project_refund_scope(
                     reservation.get_usage(),
                     actual_usage,
                     reservation.bucket_ids,
@@ -2288,6 +2300,18 @@ class RateLimiter(BaseRateLimiter):
                 if refund_started:
                     async with self._refund_state_lock:
                         self._refund_in_progress.discard(rid)
+            if refund_dropped:
+                # Emitted only after the refund is committed and the in-progress
+                # bookkeeping is cleared. Under ``-W error`` this warning raises;
+                # warning any earlier would abandon the reservation in the
+                # backend's acquired set and in ``in_flight_reservations``.
+                # ``stacklevel=2`` keeps the reported frame where it was when
+                # ``_project_refund_scope`` still emitted this itself.
+                warnings.warn(
+                    _REFUND_DROPPED_WARNING,
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
         finally:
             await self._release_reservation_refund_lock(rid, refund_lock)
 

@@ -3,6 +3,25 @@
 Notable changes for token-throttle releases. Each major version's breaking
 changes and upgrade steps are recorded in its entry below.
 
+## Unreleased
+
+- Fixes a dropped refund leaking the reservation for callers who run with
+  warnings promoted to errors (`-W error`, `warnings.simplefilter("error")`, or
+  a strict pytest configuration). When a callable-config metric-set change
+  removes every bucket a reservation was issued against, the refund has nothing
+  left to credit and the limiter reports that with a `Refund dropped`
+  `RuntimeWarning`. That warning was emitted before the refund reached the
+  backend, so promoting it to an exception aborted the call mid-flight: the
+  backend kept the reservation acquired and the limiter kept it in
+  `snapshot_state()["in_flight_reservations"]`, drifting toward
+  `max_in_flight_reservations` until healthy acquires raised
+  `CardinalityLimitExceededError`. The warning is now emitted only after the
+  refund is finalized, so the reservation is released either way — callers who
+  promote warnings to errors still get the raise, just no longer at the cost of
+  the reservation. This completes the memory-backend finalization fix in 10.1.1,
+  which covered only ordinary warning handling. Capacity accounting is
+  unchanged: there are no surviving buckets to credit.
+
 ## 10.2.0 - 2026-08-27
 
 - The `redis` extra now allows redis-py 8, and no longer caps at the next major:
