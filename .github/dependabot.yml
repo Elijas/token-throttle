@@ -8,3 +8,12 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    groups:
+      # `github/codeql-action/init` and `.../analyze` are separate dependency
+      # names to Dependabot but one action repo to CodeQL, which aborts when the
+      # two steps run different versions. Ungrouped, Dependabot raises a PR per
+      # sub-action and every one of them is born failing. Grouping makes the
+      # bump atomic.
+      codeql-action:
+        patterns:
+          - "github/codeql-action*"

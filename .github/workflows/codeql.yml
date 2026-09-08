@@ -18,7 +18,11 @@ jobs:
         language: [python]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - uses: github/codeql-action/init@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
+      # init and analyze are two paths inside ONE action repo and refuse to run
+      # at different versions ("Loaded a configuration file for version X, but
+      # running version Y"). Bump them together, never one at a time —
+      # tests/lint/test_workflow_action_pin_consistency.py enforces this.
+      - uses: github/codeql-action/init@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
         with:
           languages: ${{ matrix.language }}
-      - uses: github/codeql-action/analyze@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
+      - uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
