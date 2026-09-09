@@ -93,9 +93,6 @@ class Reservation:
 class DifferentialMachine(RuleBasedStateMachine):
     kinds: tuple[str, ...] = ALL_KINDS
     modes: tuple[str, ...] = ALL_MODES
-    # Redis introspect() reports the original quota limit after
-    # apply_configured_max_capacity (finding D2); exclude the rule where that
-    # would mask everything else until the finding is resolved.
     include_apply_configured: bool = True
 
     reservations = Bundle("reservations")
@@ -346,7 +343,7 @@ _SETTINGS = settings(
 
 
 class _AllSix(DifferentialMachine):
-    include_apply_configured = False
+    pass
 
 
 class _MemoryVsSqlite(DifferentialMachine):

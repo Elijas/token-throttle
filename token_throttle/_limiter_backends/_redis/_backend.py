@@ -935,11 +935,12 @@ class RedisBackend(RateLimiterBackend):
         self._limit_config = limit_config
         self._usage_metric_names: set[str] = {bucket.usage_metric for bucket in buckets}
         self._local_condition = asyncio.Condition()
-        # Callers sharing this backend object queue here before touching the
-        # distributed per-bucket locks, so in-process concurrency never turns
-        # into distributed-lock contention (which a try-acquire would report
-        # as TimeoutError). Cross-process contention is still bounded by the
-        # caller's timeout, as documented.
+        # Try-acquires (timeout=0) sharing this backend object queue here
+        # before touching the distributed per-bucket locks, so a sibling
+        # caller in the same process can never turn into lock contention that
+        # a try-acquire would have to report as TimeoutError. Waiters with a
+        # timeout keep their retry loop and never queue here; cross-process
+        # contention stays bounded by the caller's timeout, as documented.
         self._local_serial = asyncio.Lock()
         self._diagnostic_waiters: dict[str, DiagnosticWaiterState] = {}
 
@@ -2250,15 +2251,12 @@ class RedisBackend(RateLimiterBackend):
         fresh_start_buckets: list[RedisBucket] = []
         consumed = False
         try:
-            async with (
-                self._local_serial,
-                await self._lock(
-                    timeout=LOCK_TIMEOUT_SECONDS,
-                    blocking_timeout=lock_blocking_timeout,
-                    buckets=buckets,
-                    reservation_id=reservation_id,
-                ) as lock_stack,
-            ):
+            async with await self._lock(
+                timeout=LOCK_TIMEOUT_SECONDS,
+                blocking_timeout=lock_blocking_timeout,
+                buckets=buckets,
+                reservation_id=reservation_id,
+            ) as lock_stack:
                 # Pipeline is reused: _get_capacities_unsafe executes it (clearing
                 # the command buffer), then _set_capacities_unsafe adds new commands
                 # and executes again.  Safe because redis-py clears the buffer on execute().
@@ -2446,14 +2444,11 @@ class RedisBackend(RateLimiterBackend):
         postconsumption_capacities: Capacities = frozendict()
         current_time: float = 0.0
         fresh_start_buckets: list[RedisBucket] = []
-        async with (
-            self._local_serial,
-            await self._lock_or_contention(
-                timeout=LOCK_TIMEOUT_SECONDS,
-                buckets=buckets,
-                reservation_id=reservation_id,
-            ) as lock_stack,
-        ):
+        async with await self._lock_or_contention(
+            timeout=LOCK_TIMEOUT_SECONDS,
+            buckets=buckets,
+            reservation_id=reservation_id,
+        ) as lock_stack:
             pipeline = self._redis.pipeline()
             current_time = await async_server_time(self._redis)
 
@@ -2599,6 +2594,23 @@ class RedisBackend(RateLimiterBackend):
                     None if deadline is None else max(0.0, deadline - time.monotonic())
                 )
                 try:
+                    if remaining == 0.0:
+                        # Try-acquire: decide by capacity, not by a sibling
+                        # in-process caller holding the distributed lock.
+                        async with self._local_serial:
+                            attempt = await self._check_and_consume_capacity(
+                                usage,
+                                lock_blocking_timeout=remaining,
+                                reservation_id=reservation_id,
+                                reservation_lifetime_seconds=reservation_lifetime_seconds,
+                            )
+                    else:
+                        attempt = await self._check_and_consume_capacity(
+                            usage,
+                            lock_blocking_timeout=remaining,
+                            reservation_id=reservation_id,
+                            reservation_lifetime_seconds=reservation_lifetime_seconds,
+                        )
                     (
                         available,
                         preconsumption,
@@ -2606,14 +2618,7 @@ class RedisBackend(RateLimiterBackend):
                         consumed_monotonic,
                         consumed_at_seconds,
                         buckets,
-                    ) = self._normalize_check_result(
-                        await self._check_and_consume_capacity(
-                            usage,
-                            lock_blocking_timeout=remaining,
-                            reservation_id=reservation_id,
-                            reservation_lifetime_seconds=reservation_lifetime_seconds,
-                        )
-                    )
+                    ) = self._normalize_check_result(attempt)
                 except (
                     redis.exceptions.LockError,
                     BackendLockContentionError,
@@ -3078,14 +3083,11 @@ class RedisBackend(RateLimiterBackend):
         refund_usage: frozendict[str, float] = frozendict(refund_usage_)
 
         fresh_start_buckets: list[RedisBucket] = []
-        async with (
-            self._local_serial,
-            await self._lock_or_contention(
-                timeout=LOCK_TIMEOUT_SECONDS,
-                buckets=buckets,
-                reservation_id=reservation_id,
-            ) as lock_stack,
-        ):
+        async with await self._lock_or_contention(
+            timeout=LOCK_TIMEOUT_SECONDS,
+            buckets=buckets,
+            reservation_id=reservation_id,
+        ) as lock_stack:
             pipeline = self._redis.pipeline()
             current_time = await async_server_time(self._redis)
 

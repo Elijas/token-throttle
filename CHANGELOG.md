@@ -36,14 +36,16 @@ rejected at build time. Upgrade steps are listed after the changes.
   sit at `-max_capacity` by design and takes two windows to refill from there;
   with a shorter lifetime, bucket expiry forgave that debt and handed out a
   full bucket early. Builders raise `ValueError` for the rejected range.
-- On the Redis backends, callers sharing one backend object are now serialised
-  in-process before taking the distributed per-bucket locks. Previously a
-  try-acquire (`timeout=0`) issued by concurrent tasks or threads of one
-  process was refused by lock contention rather than by capacity: with 48
-  concurrent callers and room for 33, one was admitted. Now all 33 are, and
-  cross-process contention keeps its documented behaviour (bounded by the
-  caller's timeout). The same rule already held for the memory and SQLite
-  backends.
+- On the Redis backends, a try-acquire (`timeout=0`) is now decided by
+  capacity even when other tasks or threads of the same process are using the
+  same backend object: try-acquires queue in-process before taking the
+  distributed per-bucket locks. Previously such a call was refused by lock
+  contention with its siblings rather than by capacity: with 48 concurrent
+  callers and room for 33, one was admitted. Now all 33 are. Waiters with a
+  timeout keep their retry loop unchanged, and cross-process contention keeps
+  its documented behaviour (bounded by the caller's timeout). The same rule
+  already held for the memory and SQLite backends, which serialise callers
+  before touching their store.
 - `introspect()` on the Redis and memory backends now reports the configured
   limit the decision path actually uses after `apply_configured_max_capacity()`.
   The Redis diagnostic reported the build-time quota as both configured and
