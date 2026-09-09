@@ -11,7 +11,7 @@ lifetime.
            real sleep of 0.6 s).
 
 Run from the repository root:
-    TT_AUDIT_REDIS_URL=redis://127.0.0.1:6399/13 .venv/bin/python repros/marker_expiry_boundary.py
+    TT_AUDIT_REDIS_URL=redis://localhost:6379/13 .venv/bin/python repros/marker_expiry_boundary.py
 """
 
 from __future__ import annotations
@@ -35,7 +35,7 @@ from token_throttle import (
 from token_throttle._interfaces._interfaces import PerModelConfig
 from token_throttle._interfaces._models import frozen_usage
 
-REDIS_URL = os.environ.get("TT_AUDIT_REDIS_URL", "redis://127.0.0.1:6399/13")
+REDIS_URL = os.environ.get("TT_AUDIT_REDIS_URL", "redis://localhost:6379/13")
 FAMILY = "repro"
 CFG = PerModelConfig(
     model_family=FAMILY,

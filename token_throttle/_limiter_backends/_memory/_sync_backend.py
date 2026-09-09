@@ -134,11 +134,24 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
         )
         self._callbacks = callbacks
         self._limit_config = limit_config
+        # Live configured limit per bucket: the quota at build time, replaced
+        # by apply_configured_max_capacity (config-driven), so introspect()
+        # can tell a configured change from a set_max_capacity override.
+        self._configured_limits: dict[tuple[str, int], float] = {
+            (quota.metric, int(quota.per_seconds)): float(quota.limit)
+            for quota in limit_config.quotas
+        }
         self._usage_metric_names: set[str] = {bucket.usage_metric for bucket in buckets}
         self._bucket_registry: dict[tuple[str, int], MemoryBucket] = {
             (bucket.usage_metric, int(bucket.per_seconds)): bucket for bucket in buckets
         }
         self._acquired_reservation_ids: set[str] = set()
+        # Marker value of each live reservation: (bucket ids, reserved usage).
+        # An identical replay of a live reservation is idempotent; a reuse with
+        # a different value, or after a refund, is a duplicate acquire.
+        self._acquired_reservation_values: dict[
+            str, tuple[frozenset[tuple[str, int]], FrozenUsage]
+        ] = {}
         self._refunded_reservation_ids: set[str] = set()
         self._refunded_reservation_id_order: collections.deque[str] = (
             collections.deque()
@@ -154,14 +167,12 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
         current_time = time.time()
         with self._condition:
             buckets = list(self._buckets)
-            quota_limits = {
-                (quota.metric, int(quota.per_seconds)): float(quota.limit)
-                for quota in self._limit_config.quotas
-            }
             bucket_diagnostics: list[BucketDiagnostic] = []
             for bucket in buckets:
                 bucket_id = (bucket.usage_metric, int(bucket.per_seconds))
-                configured_limit = quota_limits.get(bucket_id, bucket.max_capacity)
+                configured_limit = self._configured_limits.get(
+                    bucket_id, bucket.max_capacity
+                )
                 capacity = bucket.get_capacity(current_time)
                 effective = bucket.max_capacity
                 source: DiagnosticOverrideSource = (
@@ -342,6 +353,44 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
             expired = self._refunded_reservation_id_order.popleft()
             self._refunded_reservation_ids.discard(expired)
 
+    def _is_replayed_acquire(self, reservation_id: str, usage: FrozenUsage) -> bool:
+        """
+        Classify a reused ``reservation_id``. Caller MUST hold the lock.
+
+        Returns ``True`` for an identical replay of a live reservation (the
+        caller must then succeed without consuming again). Raises
+        ``DuplicateRefundError(reason="duplicate_acquire")`` when the id is
+        live with a different value or was already refunded.
+        """
+        live = self._acquired_reservation_values.get(reservation_id)
+        if live is not None:
+            if live == (self._bucket_ids(), usage):
+                return True
+            raise DuplicateRefundError(
+                "reservation already acquired",
+                reason="duplicate_acquire",
+                reservation_id=reservation_id,
+                model_family=self._limit_config.get_model_family(),
+            )
+        if reservation_id in self._refunded_reservation_ids:
+            raise DuplicateRefundError(
+                "reservation already acquired and refunded",
+                reason="duplicate_acquire",
+                reservation_id=reservation_id,
+                model_family=self._limit_config.get_model_family(),
+            )
+        return False
+
+    def _record_acquired_reservation(
+        self, reservation_id: str, usage: FrozenUsage
+    ) -> None:
+        self._acquired_reservation_ids.add(reservation_id)
+        self._acquired_reservation_values[reservation_id] = (self._bucket_ids(), usage)
+
+    def _forget_acquired_reservation(self, reservation_id: str) -> None:
+        self._acquired_reservation_ids.discard(reservation_id)
+        self._acquired_reservation_values.pop(reservation_id, None)
+
     def consume_capacity(
         self,
         usage: FrozenUsage,
@@ -361,15 +410,11 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
         fresh_start_buckets: list[MemoryBucket] = []
 
         with self._condition:
-            if reservation_id is not None and (
-                reservation_id in self._acquired_reservation_ids
+            if reservation_id is not None and self._is_replayed_acquire(
+                reservation_id, usage
             ):
-                raise DuplicateRefundError(
-                    "reservation already acquired",
-                    reason="duplicate_acquire",
-                    reservation_id=reservation_id,
-                    model_family=self._limit_config.get_model_family(),
-                )
+                # Identical replay: the consumption already happened.
+                return time.time()
             # time.time() (wall-clock) is intentional: the memory backend
             # runs in a single process, so there is no cross-worker clock
             # skew concern. monotonic() would avoid NTP jumps but would
@@ -430,7 +475,7 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
                 )
             postconsumption_capacities = frozendict(postconsumption_dict)
             if reservation_id is not None:
-                self._acquired_reservation_ids.add(reservation_id)
+                self._record_acquired_reservation(reservation_id, usage)
             self._set_capacities(
                 postconsumption_capacities,
                 current_time,
@@ -477,6 +522,7 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
         current_time = time.time()
         consumed_monotonic = time.monotonic()
         consumed_buckets: list[MemoryBucket] | None = None
+        replayed = False
 
         try:
             while True:
@@ -484,15 +530,14 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
                 with self._condition:
                     while True:
                         current_time = time.time()
-                        if reservation_id is not None and (
-                            reservation_id in self._acquired_reservation_ids
+                        if reservation_id is not None and self._is_replayed_acquire(
+                            reservation_id, usage
                         ):
-                            raise DuplicateRefundError(
-                                "reservation already acquired",
-                                reason="duplicate_acquire",
-                                reservation_id=reservation_id,
-                                model_family=self._limit_config.get_model_family(),
-                            )
+                            # Identical replay of a live reservation: already
+                            # acquired, nothing to consume or announce.
+                            ok = True
+                            replayed = True
+                            break
                         preconsumption, fresh = self._get_capacities(current_time)
                         ok, postconsumption = self._try_consume_locked(
                             usage,
@@ -500,7 +545,7 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
                         )
                         if ok:
                             if reservation_id is not None:
-                                self._acquired_reservation_ids.add(reservation_id)
+                                self._record_acquired_reservation(reservation_id, usage)
                             self._set_capacities(postconsumption, current_time)
                             consumed_monotonic = time.monotonic()
                             consumed_buckets = list(self._buckets)
@@ -557,6 +602,9 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
             if waiter_registered:
                 with self._condition:
                     self._diagnostic_waiters.pop(waiter_key, None)
+
+        if replayed:
+            return current_time
 
         # All callbacks fired outside the lock.  If BaseException arrives
         # during any callback, refund the consumed capacity so it is not
@@ -823,7 +871,7 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
                 )
             if not refund_bucket_ids:
                 assert reservation_id is not None  # noqa: S101
-                self._acquired_reservation_ids.remove(reservation_id)
+                self._forget_acquired_reservation(reservation_id)
                 self._remember_refunded_reservation_id(reservation_id)
                 return True
             current_time = time.time()
@@ -856,7 +904,7 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
 
             self._set_capacities(updated_capacities, current_time, allow_negative=True)
             if reservation_id is not None:
-                self._acquired_reservation_ids.remove(reservation_id)
+                self._forget_acquired_reservation(reservation_id)
                 self._remember_refunded_reservation_id(reservation_id)
             self._condition.notify_all()
 
@@ -874,6 +922,20 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
                 postrefund_capacities=updated_capacities,
             )
         return True
+
+    def apply_configured_max_capacity(
+        self,
+        metric: str,
+        per_seconds: int,
+        value: float,
+    ) -> None:
+        """
+        Config-driven limit change: same live effect as set_max_capacity, but
+        recorded as the new configured limit rather than as an override.
+        """
+        self.set_max_capacity(metric, per_seconds, value)
+        with self._condition:
+            self._configured_limits[(metric, int(per_seconds))] = float(value)
 
     def set_max_capacity(
         self,
@@ -964,6 +1026,10 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
             }
         )
         self._limit_config = cfg
+        self._configured_limits = {
+            (quota.metric, int(quota.per_seconds)): float(quota.limit)
+            for quota in cfg.quotas
+        }
 
     def _invoke_callback_safe(
         self,
@@ -1028,7 +1094,7 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
                 buckets=target_buckets,
             )
             if reservation_id is not None:
-                self._acquired_reservation_ids.discard(reservation_id)
+                self._forget_acquired_reservation(reservation_id)
             self._condition.notify_all()
 
     def _fresh_start_buckets_callback(

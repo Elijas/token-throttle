@@ -50,15 +50,18 @@ def loop():
     loop_.close()
 
 
-def _record(request, admitted: int, timeout: float) -> None:
+def _record(request, admitted: int, timeout: float, *, in_process: bool) -> None:
     ADMISSIONS[request.node.nodeid] = admitted
     print(
         f"\n[concurrency] {request.node.nodeid}: admitted {admitted}/{EXPECTED_ADMITTED} (timeout={timeout})"
     )
     assert admitted <= EXPECTED_ADMITTED, "over-admission"
-    if timeout > 0:
+    if timeout > 0 or in_process:
+        # A bounded wait must admit everyone capacity allows; so must an
+        # in-process try-acquire, where the only contention is between callers
+        # of the same backend object and the backend serialises them itself.
         assert admitted == EXPECTED_ADMITTED, (
-            f"bounded wait admitted {admitted}, expected {EXPECTED_ADMITTED}"
+            f"admitted {admitted}, expected {EXPECTED_ADMITTED} (timeout={timeout})"
         )
 
 
@@ -105,7 +108,7 @@ def test_async_tasks(kind: str, timeout: float, loop, tmp_path: Path, request) -
             assert Driver(loop).capacities(target)[("requests", 60)][
                 0
             ] == pytest.approx(LIMIT - admitted * USAGE)
-            _record(request, admitted, timeout)
+            _record(request, admitted, timeout, in_process=True)
         finally:
             target.cleanup()
 
@@ -146,7 +149,7 @@ def test_threads(kind: str, timeout: float, loop, tmp_path: Path, request) -> No
             assert Driver(loop).capacities(target)[("requests", 60)][
                 0
             ] == pytest.approx(LIMIT - admitted * USAGE)
-            _record(request, admitted, timeout)
+            _record(request, admitted, timeout, in_process=True)
         finally:
             target.cleanup()
 
@@ -239,11 +242,13 @@ def test_processes(kind: str, timeout: float, loop, tmp_path: Path, request) -> 
     )
     try:
         capacity, _ = Driver(loop).capacities(target)[("requests", WINDOW_LONG)]
-        assert capacity == pytest.approx(LIMIT - admitted * USAGE, abs=0.5)
+        # Refill during a slow run (100 units per hour) must stay below one
+        # USAGE, or an extra admission would have been possible.
+        assert capacity == pytest.approx(LIMIT - admitted * USAGE, abs=USAGE - 0.1)
     finally:
         target.cleanup()
     print(f"\n[concurrency] per-process admissions: {results}")
-    _record(request, admitted, timeout)
+    _record(request, admitted, timeout, in_process=False)
 
 
 # ----------------------------------------- cross-process contention rate

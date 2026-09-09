@@ -216,7 +216,7 @@ class SyncSqliteBackendBuilder(SyncRateLimiterBackendBuilderInterface):
         )
         self._busy_timeout_ms = _validate_busy_timeout_ms(busy_timeout_ms)
         self._prune_batch_size = _validate_prune_batch_size(prune_batch_size)
-        self._engines: list[SqliteEngine] = []
+        self._backends: list[SyncSqliteBackend] = []
         self._lock = threading.Lock()
 
     @property
@@ -288,30 +288,30 @@ class SyncSqliteBackendBuilder(SyncRateLimiterBackendBuilderInterface):
         except BaseException:
             engine.close()
             raise
-        with self._lock:
-            self._engines.append(engine)
-
-        def deregister_engine() -> None:
-            self._discard_engine(engine)
-
-        return SyncSqliteBackend(
+        backend = SyncSqliteBackend(
             engine=engine,
             callbacks=callbacks,
             limit_config=cfg,
             sleep_interval=self._sleep_interval,
-            on_close=deregister_engine,
+            on_close=lambda: self._discard_backend(backend),
         )
-
-    def _discard_engine(self, engine: SqliteEngine) -> None:
         with self._lock:
-            self._engines = [item for item in self._engines if item is not engine]
+            self._backends.append(backend)
+        return backend
+
+    def _discard_backend(self, backend: SyncSqliteBackend) -> None:
+        with self._lock:
+            self._backends = [item for item in self._backends if item is not backend]
 
     def close(self) -> None:
+        # Close the backends (marking them closed), not just their engines, so
+        # a later operation on a built backend reports "closed" instead of
+        # leaking a driver exception -- mirroring the async builder.
         with self._lock:
-            engines = tuple(self._engines)
-            self._engines.clear()
-        for engine in engines:
-            engine.close()
+            backends = tuple(self._backends)
+            self._backends.clear()
+        for backend in backends:
+            backend.close()
 
 
 class SyncSqliteBackend(SyncRateLimiterBackend):
@@ -344,6 +344,12 @@ class SyncSqliteBackend(SyncRateLimiterBackend):
             self.DEFAULT_SLEEP_INTERVAL if validated_sleep is None else validated_sleep
         )
 
+    def _require_open(self) -> None:
+        if self._closed:
+            raise RuntimeError(
+                "SQLite backend is closed; build a new backend from the builder"
+            )
+
     def supports_metric_set_change(self) -> bool:
         return True
 
@@ -354,6 +360,7 @@ class SyncSqliteBackend(SyncRateLimiterBackend):
         return True
 
     def introspect(self) -> BackendIntrospectionDiagnostic:
+        self._require_open()
         as_of_monotonic = time.monotonic()
         snapshots, counts = self._engine.inspect_snapshot()
         buckets = tuple(
@@ -451,6 +458,7 @@ class SyncSqliteBackend(SyncRateLimiterBackend):
         reservation_id: str | None = None,
         reservation_lifetime_seconds: float | None = None,
     ) -> float | None:
+        self._require_open()
         validate_backend_usage(usage, self._engine.metric_names)
         usage = _normalize_usage(usage)
         result = self._engine.consume(
@@ -458,6 +466,8 @@ class SyncSqliteBackend(SyncRateLimiterBackend):
             reservation_id=reservation_id,
             reservation_lifetime_seconds=reservation_lifetime_seconds,
         )
+        if result.replayed:
+            return result.current_time
         self._warn_over_max_consumption(usage, result)
         self._emit_consumed_callbacks(usage, result)
         return result.current_time
@@ -492,6 +502,7 @@ class SyncSqliteBackend(SyncRateLimiterBackend):
         reservation_lifetime_seconds: float | None,
         waiter_key: str,
     ) -> float | None:
+        self._require_open()
         validate_backend_usage(usage, self._engine.metric_names)
         timeout = validate_timeout(timeout)
         usage = _normalize_usage(usage)
@@ -582,6 +593,8 @@ class SyncSqliteBackend(SyncRateLimiterBackend):
                 effective = min(effective, max(0.0, deadline - time.monotonic()))
             time.sleep(max(0.001, effective))
 
+        if result.replayed:
+            return result.current_time
         consumed_monotonic = time.monotonic()
         consumed_bucket_ids = self._engine.bucket_ids
         try:
@@ -698,6 +711,7 @@ class SyncSqliteBackend(SyncRateLimiterBackend):
         reservation_bucket_ids: set[BucketId] | frozenset[BucketId] | None = None,
         reservation_reserved_usage: FrozenUsage | None = None,
     ) -> bool:
+        self._require_open()
         backend_bucket_ids = self._engine.bucket_ids
         refund_bucket_ids = (
             backend_bucket_ids if bucket_ids is None else frozenset(bucket_ids)
@@ -766,6 +780,7 @@ class SyncSqliteBackend(SyncRateLimiterBackend):
         per_seconds: int,
         value: float,
     ) -> None:
+        self._require_open()
         value = _validate_max_capacity_finite_positive(value)
         self._engine.set_max_capacity(
             metric,
@@ -779,6 +794,7 @@ class SyncSqliteBackend(SyncRateLimiterBackend):
         per_seconds: int,
         value: float,
     ) -> None:
+        self._require_open()
         value = _validate_max_capacity_finite_positive(value)
         self._engine.apply_configured_max_capacity(
             metric,

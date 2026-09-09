@@ -174,7 +174,7 @@ class _AsyncRedis:
     async def eval(self, _script: str, numkeys: int, *keys_and_args: object) -> str:
         keys = [str(key) for key in keys_and_args[:numkeys]]
         argv = list(keys_and_args[numkeys:])
-        if len(keys) >= 2 and ":refund_dedup:" in keys[1]:
+        if "'replayed_refund'" in _script:
             marker_key, dedup_key = keys[0], keys[1]
             marker = await self.get(marker_key)
             if marker is None:
@@ -208,14 +208,16 @@ class _AsyncRedis:
                 return "incoherent_refund"
             return "ok"
 
-        marker_key = keys[0]
+        marker_key, tombstone_key = keys[0], keys[1]
         existing = await self.get(marker_key)
         if existing is not None:
             if existing == argv[1]:
-                return "ok"
+                return "replayed_acquire"
+            return "duplicate_acquire"
+        if await self.exists(tombstone_key):
             return "duplicate_acquire"
         arg_index = 2
-        for key_index in range(1, len(keys), 2):
+        for key_index in range(2, len(keys), 2):
             await self.set(
                 keys[key_index], argv[arg_index], ex=int(argv[arg_index + 2])
             )
@@ -229,7 +231,7 @@ class _AsyncRedis:
         if not claimed:
             existing = await self.get(marker_key)
             if existing == argv[1]:
-                return "ok"
+                return "replayed_acquire"
             return "duplicate_acquire"
         return "ok"
 
@@ -333,7 +335,7 @@ class _SyncRedis:
     def eval(self, _script: str, numkeys: int, *keys_and_args: object) -> str:
         keys = [str(key) for key in keys_and_args[:numkeys]]
         argv = list(keys_and_args[numkeys:])
-        if len(keys) >= 2 and ":refund_dedup:" in keys[1]:
+        if "'replayed_refund'" in _script:
             marker_key, dedup_key = keys[0], keys[1]
             marker = self.get(marker_key)
             if marker is None:
@@ -365,14 +367,16 @@ class _SyncRedis:
                 return "incoherent_refund"
             return "ok"
 
-        marker_key = keys[0]
+        marker_key, tombstone_key = keys[0], keys[1]
         existing = self.get(marker_key)
         if existing is not None:
             if existing == argv[1]:
-                return "ok"
+                return "replayed_acquire"
+            return "duplicate_acquire"
+        if self.exists(tombstone_key):
             return "duplicate_acquire"
         arg_index = 2
-        for key_index in range(1, len(keys), 2):
+        for key_index in range(2, len(keys), 2):
             self.set(keys[key_index], argv[arg_index], ex=int(argv[arg_index + 2]))
             self.set(
                 keys[key_index + 1],
@@ -384,7 +388,7 @@ class _SyncRedis:
         if not claimed:
             existing = self.get(marker_key)
             if existing == argv[1]:
-                return "ok"
+                return "replayed_acquire"
             return "duplicate_acquire"
         return "ok"
 

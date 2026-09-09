@@ -220,9 +220,11 @@ async def test_async_duplicate_refund_error_reason_duplicate_acquire() -> None:
     backend = MemoryBackendBuilder().build(_config())
 
     await backend.consume_capacity(frozendict({"tokens": 1.0}), reservation_id="same")
+    # An identical replay is idempotent; a reuse with different usage is the
+    # duplicate acquire the error taxonomy describes.
     with pytest.raises(DuplicateRefundError) as exc_info:
         await backend.consume_capacity(
-            frozendict({"tokens": 1.0}),
+            frozendict({"tokens": 2.0}),
             reservation_id="same",
         )
 
@@ -234,7 +236,7 @@ def test_sync_duplicate_refund_error_reason_duplicate_acquire() -> None:
 
     backend.consume_capacity(frozendict({"tokens": 1.0}), reservation_id="same")
     with pytest.raises(DuplicateRefundError) as exc_info:
-        backend.consume_capacity(frozendict({"tokens": 1.0}), reservation_id="same")
+        backend.consume_capacity(frozendict({"tokens": 2.0}), reservation_id="same")
 
     assert exc_info.value.reason == "duplicate_acquire"
 

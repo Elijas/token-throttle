@@ -30,7 +30,8 @@ if TYPE_CHECKING:
 
     from token_throttle._interfaces._models import BucketId, Capacities, FrozenUsage
 
-SCHEMA_VERSION: Final[int] = 1
+SCHEMA_VERSION: Final[int] = 2
+_LEGACY_SCHEMA_VERSION_WITHOUT_OVERRIDE_ANCHOR: Final[str] = "1"
 DEFAULT_BUSY_TIMEOUT_MS: Final[int] = 5000
 DEFAULT_PRUNE_BATCH_SIZE: Final[int] = 256
 FUTURE_LAST_CHECKED_REPAIR_TOLERANCE_SECONDS: Final[float] = 1.0
@@ -49,6 +50,7 @@ _SCHEMA_STATEMENTS = (
     last_checked REAL,
     override_value REAL,
     override_expires_at REAL,
+    override_configured_max_capacity REAL,
     updated_at REAL NOT NULL,
     expires_at REAL NOT NULL,
     PRIMARY KEY (key_prefix, model_family, metric, per_seconds)
@@ -96,6 +98,9 @@ class CapacityResult:
     post_capacities: Capacities
     max_capacities: Capacities
     fresh_bucket_ids: tuple[BucketId, ...]
+    # True when the call was an identical replay of a live reservation: nothing
+    # was consumed and no consumption callback should fire.
+    replayed: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -208,6 +213,7 @@ class SqliteEngine:
         self._prune_batch_size = prune_batch_size
         self._lock = threading.RLock()
         self._closed = False
+        self._override_mismatch_warned: set[BucketId] = set()
         try:
             try:
                 self._connection = sqlite3.connect(
@@ -336,6 +342,18 @@ class SqliteEngine:
                     "INSERT INTO meta(key, value) VALUES ('schema_version', ?)",
                     (str(SCHEMA_VERSION),),
                 )
+            elif row[0] == _LEGACY_SCHEMA_VERSION_WITHOUT_OVERRIDE_ANCHOR:
+                # Schema 1 stored runtime overrides without the configured
+                # limit they were set under. Add the anchor column in place;
+                # legacy overrides stay stored but are never applied because
+                # they cannot prove which configured limit they belong to.
+                connection.execute(
+                    "ALTER TABLE buckets ADD COLUMN override_configured_max_capacity REAL"
+                )
+                connection.execute(
+                    "UPDATE meta SET value = ? WHERE key = 'schema_version'",
+                    (str(SCHEMA_VERSION),),
+                )
             elif row[0] != str(SCHEMA_VERSION):
                 raise RuntimeError(
                     "Unsupported token-throttle SQLite schema version "
@@ -407,16 +425,20 @@ class SqliteEngine:
             "(SELECT rowid FROM refund_tombstones WHERE expires_at <= ? LIMIT ?)",
             (current_time, self._prune_batch_size),
         )
+        # An idle bucket row is pruned only once its runtime override (if any)
+        # has also expired: the override has its own fixed lifetime
+        # (``override_ttl_seconds``) that bucket inactivity must not shorten.
         connection.execute(
             "DELETE FROM buckets WHERE rowid IN "
-            "(SELECT rowid FROM buckets WHERE expires_at <= ? LIMIT ?)",
-            (current_time, self._prune_batch_size),
+            "(SELECT rowid FROM buckets WHERE expires_at <= ? "
+            "AND (override_expires_at IS NULL OR override_expires_at <= ?) LIMIT ?)",
+            (current_time, current_time, self._prune_batch_size),
         )
 
     def _bucket_log_id(self, bucket: BucketSpec) -> str:
         return f"sqlite:{self.model_family}:{bucket.metric}:{bucket.per_seconds}"
 
-    def _load_states(
+    def _load_states(  # noqa: PLR0915 - one transaction-scoped state load
         self,
         connection: sqlite3.Connection,
         current_time: float,
@@ -428,7 +450,8 @@ class SqliteEngine:
         for spec in self._buckets:
             row = connection.execute(
                 "SELECT capacity, last_checked, override_value, "
-                "override_expires_at, updated_at, expires_at FROM buckets "
+                "override_expires_at, updated_at, expires_at, "
+                "override_configured_max_capacity FROM buckets "
                 "WHERE key_prefix = ? AND model_family = ? AND metric = ? "
                 "AND per_seconds = ?",
                 (
@@ -438,7 +461,23 @@ class SqliteEngine:
                     spec.per_seconds,
                 ),
             ).fetchone()
+            surviving_override: tuple[float, float, float | None] | None = None
             if row is not None and float(row[5]) <= current_time:
+                # Idle past bucket_ttl: the capacity state is discarded, but a
+                # runtime override has its own fixed lifetime (documented as
+                # ``override_ttl_seconds``, measured from the write) and must
+                # survive the reset -- as it does in Redis, where the override
+                # lives on an independent key.
+                if (
+                    row[2] is not None
+                    and row[3] is not None
+                    and float(row[3]) > current_time
+                ):
+                    surviving_override = (
+                        float(row[2]),
+                        float(row[3]),
+                        None if row[6] is None else float(row[6]),
+                    )
                 if writable:
                     connection.execute(
                         "DELETE FROM buckets WHERE key_prefix = ? "
@@ -456,18 +495,35 @@ class SqliteEngine:
                 max_capacity = _validate_max_capacity_finite_positive(
                     spec.configured_max_capacity
                 )
+                insert_override: tuple[float | None, float | None, float | None] = (
+                    None,
+                    None,
+                    None,
+                )
+                if surviving_override is not None:
+                    insert_override = surviving_override
+                if surviving_override is not None and self._override_anchor_matches(
+                    spec, surviving_override[2]
+                ):
+                    override_active = True
+                    max_capacity = _validate_max_capacity_finite_positive(
+                        surviving_override[0]
+                    )
                 if writable:
                     connection.execute(
                         "INSERT INTO buckets "
                         "(key_prefix, model_family, metric, per_seconds, capacity, "
                         "last_checked, override_value, override_expires_at, "
-                        "updated_at, expires_at) "
-                        "VALUES (?, ?, ?, ?, NULL, NULL, NULL, NULL, ?, ?)",
+                        "override_configured_max_capacity, updated_at, expires_at) "
+                        "VALUES (?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?)",
                         (
                             self.key_prefix,
                             self.model_family,
                             spec.metric,
                             spec.per_seconds,
+                            insert_override[0],
+                            insert_override[1],
+                            insert_override[2],
                             current_time,
                             current_time + self._bucket_ttl_seconds,
                         ),
@@ -479,10 +535,17 @@ class SqliteEngine:
                 last_checked_value = row[1]
                 override_value = row[2]
                 override_expires_at = row[3]
-                override_active = (
+                override_live = (
                     override_value is not None
                     and override_expires_at is not None
                     and float(override_expires_at) > current_time
+                )
+                # A live override is applied only under the configured limit it
+                # was set under (the anchor); a process deployed with a
+                # different configured limit ignores it, as the Redis backend
+                # does, instead of being pinned to a stale limit.
+                override_active = override_live and self._override_anchor_matches(
+                    spec, None if row[6] is None else float(row[6])
                 )
                 if override_active:
                     max_capacity = _validate_max_capacity_finite_positive(
@@ -492,14 +555,21 @@ class SqliteEngine:
                     max_capacity = _validate_max_capacity_finite_positive(
                         spec.configured_max_capacity
                     )
-                    if writable and (
-                        override_value is not None or override_expires_at is not None
+                    if (
+                        writable
+                        and not override_live
+                        and (
+                            override_value is not None
+                            or override_expires_at is not None
+                        )
                     ):
                         connection.execute(
                             "UPDATE buckets SET override_value = NULL, "
-                            "override_expires_at = NULL, updated_at = ?, "
-                            "expires_at = ? WHERE key_prefix = ? "
-                            "AND model_family = ? AND metric = ? AND per_seconds = ?",
+                            "override_expires_at = NULL, "
+                            "override_configured_max_capacity = NULL, "
+                            "updated_at = ?, expires_at = ? WHERE key_prefix = ? "
+                            "AND model_family = ? AND metric = ? "
+                            "AND per_seconds = ?",
                             (
                                 current_time,
                                 current_time + self._bucket_ttl_seconds,
@@ -592,6 +662,24 @@ class SqliteEngine:
             )
         return states, tuple(fresh)
 
+    def _override_anchor_matches(self, spec: BucketSpec, anchor: float | None) -> bool:
+        if anchor is not None and math.isclose(
+            anchor, spec.configured_max_capacity, rel_tol=1e-12, abs_tol=0.0
+        ):
+            return True
+        if spec.bucket_id not in self._override_mismatch_warned:
+            self._override_mismatch_warned.add(spec.bucket_id)
+            _logger.warning(
+                "Ignoring SQLite max_capacity override for bucket %s: it was set "
+                "under configured limit %r, this process is configured with %r. "
+                "Re-apply the override under the current configuration if it is "
+                "still wanted.",
+                self._bucket_log_id(spec),
+                anchor,
+                spec.configured_max_capacity,
+            )
+        return False
+
     @staticmethod
     def _capacities(states: Mapping[BucketId, _BucketState]) -> Capacities:
         return frozendict(
@@ -635,12 +723,22 @@ class SqliteEngine:
         connection: sqlite3.Connection,
         reservation_id: str | None,
         current_time: float,
-    ) -> None:
+        usage: FrozenUsage,
+    ) -> bool:
+        """
+        Classify a reused ``reservation_id``.
+
+        Returns ``True`` for an identical replay of a live marker (same family,
+        bucket ids and reserved usage): the caller must succeed without
+        consuming again. Raises ``DuplicateRefundError(reason="duplicate_acquire")``
+        when the marker is live with a different value or when a refund
+        tombstone shows the reservation was already refunded.
+        """
         if reservation_id is None:
-            return
+            return False
         marker = connection.execute(
-            "SELECT expires_at FROM acquire_markers WHERE key_prefix = ? "
-            "AND reservation_id = ?",
+            "SELECT expires_at, model_family, bucket_ids_json, reserved_usage_json "
+            "FROM acquire_markers WHERE key_prefix = ? AND reservation_id = ?",
             (self.key_prefix, reservation_id),
         ).fetchone()
         tombstone = connection.execute(
@@ -668,13 +766,27 @@ class SqliteEngine:
             reservation_id=reservation_id,
             found=marker is not None,
         )
-        if marker is not None or tombstone is not None:
+        if marker is not None:
+            if (
+                marker[1] == self.model_family
+                and marker[2] == _bucket_ids_json(self.bucket_ids)
+                and marker[3] == _usage_json(usage)
+            ):
+                return True
             raise DuplicateRefundError(
                 "reservation already acquired",
                 reason="duplicate_acquire",
                 reservation_id=reservation_id,
                 model_family=self.model_family,
             )
+        if tombstone is not None:
+            raise DuplicateRefundError(
+                "reservation already acquired and refunded",
+                reason="duplicate_acquire",
+                reservation_id=reservation_id,
+                model_family=self.model_family,
+            )
+        return False
 
     def _insert_marker(
         self,
@@ -739,16 +851,29 @@ class SqliteEngine:
             clock=clock,
         ) as (connection, current_time):
             self._prune(connection, current_time)
-            self._raise_if_duplicate_acquire(
+            replayed = self._raise_if_duplicate_acquire(
                 connection,
                 reservation_id,
                 current_time,
+                usage,
             )
             states, fresh = self._load_states(connection, current_time)
             pre = self._capacities(states)
             max_capacities = frozendict(
                 {bucket_id: state.max_capacity for bucket_id, state in states.items()}
             )
+            if replayed:
+                return TryConsumeResult(
+                    available=True,
+                    result=CapacityResult(
+                        current_time=current_time,
+                        pre_capacities=pre,
+                        post_capacities=pre,
+                        max_capacities=max_capacities,
+                        fresh_bucket_ids=fresh,
+                        replayed=True,
+                    ),
+                )
             for metric, amount in usage.items():
                 for state in states.values():
                     if state.spec.metric == metric and amount > state.max_capacity:
@@ -811,16 +936,26 @@ class SqliteEngine:
             current_time,
         ):
             self._prune(connection, current_time)
-            self._raise_if_duplicate_acquire(
+            replayed = self._raise_if_duplicate_acquire(
                 connection,
                 reservation_id,
                 current_time,
+                usage,
             )
             states, fresh = self._load_states(connection, current_time)
             pre = self._capacities(states)
             max_capacities = frozendict(
                 {bucket_id: state.max_capacity for bucket_id, state in states.items()}
             )
+            if replayed:
+                return CapacityResult(
+                    current_time=current_time,
+                    pre_capacities=pre,
+                    post_capacities=pre,
+                    max_capacities=max_capacities,
+                    fresh_bucket_ids=fresh,
+                    replayed=True,
+                )
             post = frozendict(
                 {
                     bucket_id: max(
@@ -1093,12 +1228,14 @@ class SqliteEngine:
                 )
             connection.execute(
                 "UPDATE buckets SET override_value = ?, override_expires_at = ?, "
+                "override_configured_max_capacity = ?, "
                 "updated_at = ?, expires_at = ? "
                 "WHERE key_prefix = ? "
                 "AND model_family = ? AND metric = ? AND per_seconds = ?",
                 (
                     value,
                     current_time + self._override_ttl_seconds,
+                    self._bucket_by_id[bucket_id].configured_max_capacity,
                     current_time,
                     current_time + self._bucket_ttl_seconds,
                     self.key_prefix,
@@ -1136,7 +1273,9 @@ class SqliteEngine:
                     )
                 connection.execute(
                     "UPDATE buckets SET override_value = NULL, "
-                    "override_expires_at = NULL, updated_at = ?, expires_at = ? "
+                    "override_expires_at = NULL, "
+                    "override_configured_max_capacity = NULL, "
+                    "updated_at = ?, expires_at = ? "
                     "WHERE key_prefix = ? "
                     "AND model_family = ? AND metric = ? AND per_seconds = ?",
                     (
@@ -1185,7 +1324,9 @@ class SqliteEngine:
             for metric, per_seconds in target_ids:
                 connection.execute(
                     "UPDATE buckets SET override_value = NULL, "
-                    "override_expires_at = NULL, updated_at = ?, expires_at = ? "
+                    "override_expires_at = NULL, "
+                    "override_configured_max_capacity = NULL, "
+                    "updated_at = ?, expires_at = ? "
                     "WHERE key_prefix = ? "
                     "AND model_family = ? AND metric = ? AND per_seconds = ?",
                     (

@@ -227,22 +227,44 @@ def test_sync_builder_rejects_quota_window_exceeding_bucket_ttl() -> None:
         builder.build(_config_with_window(3600))
 
 
-def test_async_builder_allows_quota_window_equal_to_bucket_ttl() -> None:
+def test_async_builder_rejects_quota_window_equal_to_bucket_ttl() -> None:
+    # Capacity may sit at -max_capacity by design; refilling from there takes
+    # two windows, so a lifetime of one window would let expiry forgive debt.
     builder = RedisBackendBuilder(
         _FakeAsyncRedis(),
         key_prefix="test",
         bucket_ttl_seconds=60,
+    )
+    with pytest.raises(ValueError, match="bucket_ttl_seconds must be >= 2"):
+        builder.build(_config_with_window(60))
+
+
+def test_async_builder_allows_quota_window_of_half_the_bucket_ttl() -> None:
+    builder = RedisBackendBuilder(
+        _FakeAsyncRedis(),
+        key_prefix="test",
+        bucket_ttl_seconds=120,
     )
     backend = builder.build(_config_with_window(60))
 
     assert len(backend.sorted_buckets) == 1
 
 
-def test_sync_builder_allows_quota_window_equal_to_bucket_ttl() -> None:
+def test_sync_builder_rejects_quota_window_equal_to_bucket_ttl() -> None:
     builder = SyncRedisBackendBuilder(
         _FakeSyncRedis(),
         key_prefix="test",
         bucket_ttl_seconds=60,
+    )
+    with pytest.raises(ValueError, match="bucket_ttl_seconds must be >= 2"):
+        builder.build(_config_with_window(60))
+
+
+def test_sync_builder_allows_quota_window_of_half_the_bucket_ttl() -> None:
+    builder = SyncRedisBackendBuilder(
+        _FakeSyncRedis(),
+        key_prefix="test",
+        bucket_ttl_seconds=120,
     )
     backend = builder.build(_config_with_window(60))
 

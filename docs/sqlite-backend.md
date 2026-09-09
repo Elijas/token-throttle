@@ -80,7 +80,7 @@ Static `PerModelConfig` quota definitions do not live in SQLite. Every process
 must deploy compatible configuration for each shared `model_family`; the
 database is coordination state, not configuration distribution. A new process
 combines its own configured quotas with the persisted capacity and any active
-runtime override.
+runtime override that was set under the same configured limit (see below).
 
 `CapacityReservation` remains trusted in-process state, not a portable durable
 credential. Do not serialize a reservation and present it to a newly created
@@ -103,10 +103,10 @@ still enforced when a specific marker or tombstone is addressed.
 
 | Builder option | Default | Contract |
 | --- | ---: | --- |
-| `bucket_ttl_seconds` | 604800 (7 days) | Inactivity lifetime for bucket rows. It must be at least the longest configured quota window. After expiry the next use is a fresh bucket; by the validated window bound it has already had enough time to refill fully. |
+| `bucket_ttl_seconds` | 604800 (7 days) | Inactivity lifetime for bucket rows. It must be at least twice the longest configured quota window. After expiry the next use is a fresh bucket; capacity may sit as low as `-max_capacity` by design, and refilling from there takes two windows, so the validated bound guarantees an expired bucket had already refilled fully. |
 | `refund_dedup_ttl_seconds` | 604800 (7 days) | How long a completed refund remains recognizable as a duplicate. |
 | `max_reservation_lifetime_seconds` | Derived | Maximum age at which an acquire marker remains refundable. When omitted, it is just below half of the shorter bucket/refund TTL. |
-| `override_ttl_seconds` | `bucket_ttl_seconds` | Fixed lifetime of a shared `set_max_capacity()` override, measured from the call that writes it. Ordinary bucket activity does not extend it. |
+| `override_ttl_seconds` | `bucket_ttl_seconds` | Fixed lifetime of a shared `set_max_capacity()` override, measured from the call that writes it. Ordinary bucket activity does not extend it, and bucket-row expiry does not shorten it: an idle bucket's capacity state is reset while a still-live override is kept. |
 | `busy_timeout_ms` | 5000 | Maximum SQLite writer-lock wait for ordinary operations. A finite acquire deadline can reduce it, and a try-acquire uses zero. |
 | `prune_batch_size` | 256 | Maximum expired rows pruned from each durable table by one cleanup pass. |
 
@@ -136,10 +136,21 @@ and prefix observe it on their next backend operation; a process already
 waiting for capacity polls shared state at least about once per second.
 
 The override is a shared control layer, while static configuration remains
-process-local. When `override_ttl_seconds` elapses, each process returns to its
-own configured quota on its next operation. Calling `set_max_capacity()` again
-replaces the value and starts a new TTL. Keep static configuration consistent
-across the fleet so override expiry cannot reveal conflicting base limits.
+process-local. Each override records the configured limit it was set under and
+is applied only by processes whose configured limit still matches; a process
+deployed with a different static limit ignores it, logs a warning once per
+bucket, and runs on its own configuration, so an override from a previous
+deployment cannot pin the new one to a stale limit (the same self-healing rule
+the Redis backend applies). When `override_ttl_seconds` elapses, each process
+returns to its own configured quota on its next operation. Calling
+`set_max_capacity()` again replaces the value and starts a new TTL. Keep static
+configuration consistent across the fleet so override expiry cannot reveal
+conflicting base limits.
+
+Databases written by earlier releases (schema version 1) are upgraded in place
+on first open; overrides they stored carry no configured-limit anchor and are
+never applied — re-issue `set_max_capacity()` after upgrading if one is still
+wanted.
 
 A static quota change detected by a process clears the shared override for that
 bucket and applies the new configured limit locally. Removing a metric and
@@ -161,6 +172,10 @@ set to zero for that attempt, and either insufficient capacity or a busy writer
 produces `TimeoutError` promptly. A finite positive acquire timeout bounds both
 capacity waiting and SQLite write-lock waiting. With no acquire timeout,
 temporary lock contention is retried as part of the ordinary wait loop.
+
+Callers sharing one backend object are serialised in-process before the
+database is touched, so a try-acquire is refused only by insufficient capacity
+or by a writer in *another* process, never by a sibling caller in the same one.
 
 Blocked capacity waiters poll because SQLite has no cross-process notification
 channel. Poll intervals follow the refill estimate, are capped at one second,

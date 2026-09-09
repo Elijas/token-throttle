@@ -11,7 +11,7 @@ Three-way divergence at the backend protocol:
            tombstone state") -> the re-acquired capacity can never be refunded.
 
 Run from the repository root:
-    TT_AUDIT_REDIS_URL=redis://127.0.0.1:6399/13 .venv/bin/python repros/reacquire_refunded_reservation_id.py
+    TT_AUDIT_REDIS_URL=redis://localhost:6379/13 .venv/bin/python repros/reacquire_refunded_reservation_id.py
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ from token_throttle import (
 from token_throttle._interfaces._interfaces import PerModelConfig
 from token_throttle._interfaces._models import frozen_usage
 
-REDIS_URL = os.environ.get("TT_AUDIT_REDIS_URL", "redis://127.0.0.1:6399/13")
+REDIS_URL = os.environ.get("TT_AUDIT_REDIS_URL", "redis://localhost:6379/13")
 FAMILY = "repro"
 CFG = PerModelConfig(
     model_family=FAMILY,

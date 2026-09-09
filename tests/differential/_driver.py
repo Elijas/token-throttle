@@ -138,6 +138,15 @@ class Driver:
 
     # -- observation ---------------------------------------------------------
 
+    def bucket_diagnostic(self, target: Harnessed, bucket_id: BucketId):
+        outcome = self.call(target, "introspect")
+        if outcome[0] != "ok":
+            raise RuntimeError(f"{target.name}: introspect failed: {outcome!r}")
+        for bucket in outcome[1].buckets:
+            if (bucket.metric, int(bucket.per_seconds)) == bucket_id:
+                return bucket
+        raise KeyError(bucket_id)
+
     def capacities(self, target: Harnessed) -> dict[BucketId, tuple[float, float]]:
         outcome = self.call(target, "introspect")
         if outcome[0] != "ok":

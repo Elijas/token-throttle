@@ -326,10 +326,12 @@ Despite the name, this is raised in two different places:
   fix the call site rather than retry.
 - From `acquire_capacity()` / `record_usage()`, with `.reason`
   `"duplicate_acquire"`, only if a `reservation_id` is reused across two
-  acquire attempts with different usage or buckets. token-throttle generates
-  a fresh id per reservation, so this should not happen from normal use of
-  the public API; it indicates a reservation object was manually reused or
-  constructed by hand.
+  acquire attempts with different usage or buckets, or reused after the
+  reservation was refunded. An identical replay of a live reservation is
+  accepted without consuming again. All three built-in backends apply this
+  rule. token-throttle generates a fresh id per reservation, so this should
+  not happen from normal use of the public API; it indicates a reservation
+  object was manually reused or constructed by hand.
 
 `.reservation_id` and `.model_family` identify the reservation for all three
 reasons.

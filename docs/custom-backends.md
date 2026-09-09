@@ -120,6 +120,14 @@ full configured metric key set; use `0` for metrics that should not be consumed.
 negative so debt is recovered by normal refill. This is the backend entry point
 used by record-usage style flows.
 
+When a `reservation_id` is supplied, a reused id has one meaning on every
+backend: an identical replay of a live reservation (same model family, bucket
+ids, and reserved usage) succeeds without consuming again and without firing
+consumption callbacks; a reuse with a different value while the reservation is
+live, or any reuse after the reservation was refunded, raises
+`DuplicateRefundError` with `.reason == "duplicate_acquire"` and consumes
+nothing.
+
 `refund_capacity()` must credit `reserved_usage - actual_usage`, cap positive
 refunds at each bucket's current `max_capacity`, and preserve negative debt
 instead of clamping it to zero. If `actual_usage` exceeds `reserved_usage`, emit
@@ -217,9 +225,12 @@ after only validating the marker metadata.
 
 `reservation_lifetime_seconds` is meaningful when `reservation_id` is supplied.
 Durable marker backends must expire acquire markers and refund-dedup tombstones
-only after the reservation lifetime is no longer refundable. Redis builders
-validate their TTL knobs so acquire-marker TTL and refund-dedup TTL are both
-greater than `max_reservation_lifetime_seconds * 2`.
+only after the reservation lifetime is no longer refundable. Redis and SQLite
+builders validate their TTL knobs so acquire-marker TTL and refund-dedup TTL are
+both greater than `max_reservation_lifetime_seconds * 2`, and so the bucket
+state lifetime is at least twice every quota window: capacity may sit at
+`-max_capacity` by design and needs two windows to refill, and a shorter
+lifetime would let expiry forgive that debt.
 
 Custom durable backends should enforce the same invariant:
 

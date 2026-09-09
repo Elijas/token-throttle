@@ -273,7 +273,7 @@ _EXPECTED_TASKFILE_RELEASE_DISPATCHES = (
 _EXPECTED_NON_README_STANDALONE_IDENTITIES = (
     _StandaloneExampleIdentity(
         document_name="DEVELOPMENT.md",
-        start_line=482,
+        start_line=484,
         heading="### Redis connection pool sizing",
         first_non_empty_code_line="import redis.asyncio as aioredis",
     ),

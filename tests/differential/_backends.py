@@ -21,14 +21,30 @@ from token_throttle._interfaces._interfaces import PerModelConfig
 from token_throttle._interfaces._models import Quota, UsageQuotas
 
 REDIS_URL_ENV = "TT_AUDIT_REDIS_URL"
-DEFAULT_REDIS_URL = "redis://127.0.0.1:6399/13"
+DEFAULT_REDIS_URL = "redis://localhost:6379/13"
+_PYTEST_REDIS_URL: str | None = None
 MAX_TTL_SECONDS = 2**31 - 1
 ALL_KINDS: tuple[str, ...] = ("memory", "sqlite", "redis")
 ALL_MODES: tuple[str, ...] = ("async", "sync")
 
 
+def set_pytest_redis_url(url: str) -> None:
+    """Record the suite's ``--redis-url`` (installed by ``conftest.py``)."""
+    global _PYTEST_REDIS_URL  # noqa: PLW0603 - session-level configuration hook
+    _PYTEST_REDIS_URL = url
+
+
 def redis_url() -> str:
-    return os.environ.get(REDIS_URL_ENV, DEFAULT_REDIS_URL)
+    """Env override, else the suite's ``--redis-url``, else the repo default.
+
+    The harness never flushes; it only writes and deletes keys under its own
+    disposable prefixes, so any database index is safe.
+    """
+    if REDIS_URL_ENV in os.environ:
+        return os.environ[REDIS_URL_ENV]
+    if _PYTEST_REDIS_URL is not None:
+        return _PYTEST_REDIS_URL
+    return DEFAULT_REDIS_URL
 
 
 def make_config(

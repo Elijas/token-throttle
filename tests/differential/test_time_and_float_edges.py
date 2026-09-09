@@ -150,7 +150,9 @@ def test_extreme_rate_and_precision_edges(
     clock = FakeClock()
     driver = Driver(loop)
     quotas = (
-        ("slow", MAX_PER_SECONDS, MIN_MAX_CAPACITY),  # rate ~ 4.7e-19 / s
+        # Largest window a persistent backend can host (bucket TTL must cover
+        # two windows and is itself capped at MAX_PER_SECONDS): rate ~ 9e-19 / s
+        ("slow", MAX_PER_SECONDS // 2, MIN_MAX_CAPACITY),
         ("huge", 60, 2.0**53),  # float plateau
         ("exact", 60, 10.0),
     )
@@ -190,8 +192,8 @@ def test_extreme_rate_and_precision_edges(
             assert out[0] == "ok"
             clock.advance(365 * 86400.0)
             _, snap = _all(driver, targets, lambda t: driver.consume(t, zero))
-            assert snap[("slow", MAX_PER_SECONDS)][0] == pytest.approx(
-                MIN_MAX_CAPACITY * 365 * 86400 / MAX_PER_SECONDS
+            assert snap[("slow", MAX_PER_SECONDS // 2)][0] == pytest.approx(
+                MIN_MAX_CAPACITY * 365 * 86400 / (MAX_PER_SECONDS // 2)
             )
             # float plateau: 1 unit from 2**53 is absorbed identically everywhere
             out, snap = _all(

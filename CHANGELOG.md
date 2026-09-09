@@ -3,7 +3,75 @@
 Notable changes for token-throttle releases. Each major version's breaking
 changes and upgrade steps are recorded in its entry below.
 
-## Unreleased
+## 11.0.0 - 2026-09-09
+
+Breaking changes in this release come from a side-by-side audit of the memory,
+SQLite, and Redis backends: every documented rule is now applied the same way by
+all three, and two configurations the documentation could not honour are
+rejected at build time. Upgrade steps are listed after the changes.
+
+- A reused `reservation_id` now means the same thing on every backend. An
+  identical replay of a live reservation (same model family, buckets, and
+  reserved usage) succeeds without consuming again and without firing
+  consumption callbacks; a reuse with a different value while the reservation
+  is live, or any reuse after it was refunded, raises `DuplicateRefundError`
+  with `.reason == "duplicate_acquire"` and consumes nothing. Before, the memory
+  backend accepted a reuse after refund, the Redis backend accepted it and then
+  left the second reservation permanently unrefundable (its refund raised an
+  internal error), and the memory and SQLite backends rejected an identical
+  replay that Redis accepted. The public limiters generate a fresh id per
+  reservation, so this only affects direct users of the exported backends.
+- A persisted `set_max_capacity()` override on the SQLite backend now records
+  the configured limit it was set under and is applied only by processes whose
+  configured limit still matches, exactly as the Redis backend already did. A
+  process deployed with a different static limit ignores the override, logs a
+  warning once per bucket, and runs on its own configuration. The SQLite schema
+  moves to version 2; version-1 databases are upgraded in place on first open,
+  and any override they stored is never applied because it carries no anchor.
+- A SQLite override now keeps its full `override_ttl_seconds` lifetime when the
+  bucket idles past `bucket_ttl_seconds`: the capacity state is reset, the
+  override is kept. Before, the override was discarded with the bucket row.
+- `bucket_ttl_seconds` must now be at least twice every quota's `per_seconds`
+  on the SQLite and Redis backends (previously: at least once). Capacity may
+  sit at `-max_capacity` by design and takes two windows to refill from there;
+  with a shorter lifetime, bucket expiry forgave that debt and handed out a
+  full bucket early. Builders raise `ValueError` for the rejected range.
+- On the Redis backends, callers sharing one backend object are now serialised
+  in-process before taking the distributed per-bucket locks. Previously a
+  try-acquire (`timeout=0`) issued by concurrent tasks or threads of one
+  process was refused by lock contention rather than by capacity: with 48
+  concurrent callers and room for 33, one was admitted. Now all 33 are, and
+  cross-process contention keeps its documented behaviour (bounded by the
+  caller's timeout). The same rule already held for the memory and SQLite
+  backends.
+- `introspect()` on the Redis and memory backends now reports the configured
+  limit the decision path actually uses after `apply_configured_max_capacity()`.
+  The Redis diagnostic reported the build-time quota as both configured and
+  effective limit; the memory diagnostic labelled the applied configured value
+  as a runtime override.
+- Operations on a closed SQLite backend raise `RuntimeError` on both the async
+  and the sync backend, and `SyncSqliteBackendBuilder.close()` now closes the
+  backends it built (marking them closed) rather than only their engines. The
+  sync backend previously leaked `sqlite3.ProgrammingError`.
+- The test suite gains a differential harness (`tests/differential/`) that
+  drives all six built-in backends with identical operation sequences under
+  one controlled clock and compares every decision and every diagnostic, plus
+  concurrency, restart, and clock/float-edge suites; the Redis backends now
+  also run under the public conformance suite.
+
+Upgrade steps:
+
+- If any quota's `per_seconds` is more than half of `bucket_ttl_seconds` on a
+  SQLite or Redis builder, raise `bucket_ttl_seconds` (the default of 7 days
+  covers windows up to 3.5 days). Windows above `2**30` seconds can no longer be
+  hosted on a persistent backend because the bucket lifetime is capped at
+  `2**31 - 1` seconds.
+- SQLite databases are upgraded automatically; re-issue `set_max_capacity()`
+  after the upgrade if a runtime override is still wanted.
+- Direct users of the exported backends who reuse a `reservation_id` after a
+  refund must generate a fresh id instead.
+
+## Unreleased changes folded into 11.0.0
 
 - Fixes a dropped refund leaking the reservation for callers who run with
   warnings promoted to errors (`-W error`, `warnings.simplefilter("error")`, or
