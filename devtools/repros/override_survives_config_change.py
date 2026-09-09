@@ -1,4 +1,4 @@
-# ruff: noqa: T201, INP001
+# ruff: noqa: INP001
 """
 Repro: a runtime override written under configured limit 100 is applied by a
 NEW process whose configured limit is 200.
@@ -11,7 +11,7 @@ NEW process whose configured limit is 200.
            independent backends.
 
 Run from the repository root:
-    TT_AUDIT_REDIS_URL=redis://localhost:6379/13 .venv/bin/python repros/override_survives_config_change.py
+    TOKEN_THROTTLE_TESTS_REDIS_URL=redis://localhost:6379/13 .venv/bin/python devtools/repros/override_survives_config_change.py
 """
 
 from __future__ import annotations
@@ -33,7 +33,9 @@ from token_throttle import (
 from token_throttle._interfaces._interfaces import PerModelConfig
 from token_throttle._interfaces._models import frozen_usage
 
-REDIS_URL = os.environ.get("TT_AUDIT_REDIS_URL", "redis://localhost:6379/13")
+REDIS_URL = os.environ.get(
+    "TOKEN_THROTTLE_TESTS_REDIS_URL", "redis://localhost:6379/13"
+)
 FAMILY = "repro"
 
 

@@ -1,4 +1,4 @@
-# ruff: noqa: T201, INP001
+# ruff: noqa: INP001
 """
 Repro (documented design divergence): a reservation refunded exactly at its
 lifetime.
@@ -11,7 +11,7 @@ lifetime.
            real sleep of 0.6 s).
 
 Run from the repository root:
-    TT_AUDIT_REDIS_URL=redis://localhost:6379/13 .venv/bin/python repros/marker_expiry_boundary.py
+    TOKEN_THROTTLE_TESTS_REDIS_URL=redis://localhost:6379/13 .venv/bin/python devtools/devtools/repros/marker_expiry_boundary.py
 """
 
 from __future__ import annotations
@@ -35,7 +35,9 @@ from token_throttle import (
 from token_throttle._interfaces._interfaces import PerModelConfig
 from token_throttle._interfaces._models import frozen_usage
 
-REDIS_URL = os.environ.get("TT_AUDIT_REDIS_URL", "redis://localhost:6379/13")
+REDIS_URL = os.environ.get(
+    "TOKEN_THROTTLE_TESTS_REDIS_URL", "redis://localhost:6379/13"
+)
 FAMILY = "repro"
 CFG = PerModelConfig(
     model_family=FAMILY,

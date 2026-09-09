@@ -1,4 +1,4 @@
-# ruff: noqa: T201, INP001
+# ruff: noqa: INP001
 """
 Repro: bucket_ttl_seconds == per_seconds (allowed by the validator) with a
 bucket in debt. Real clock.
@@ -17,7 +17,7 @@ That holds only for capacity >= 0. consume_capacity floors capacity at
   memory : never expires; same curve as Redis.
 
 Run from the repository root:
-    TT_AUDIT_REDIS_URL=redis://localhost:6379/13 .venv/bin/python repros/bucket_ttl_expiry_under_debt.py
+    TOKEN_THROTTLE_TESTS_REDIS_URL=redis://localhost:6379/13 .venv/bin/python devtools/repros/bucket_ttl_expiry_under_debt.py
 """
 
 from __future__ import annotations
@@ -42,7 +42,9 @@ from token_throttle import (
 from token_throttle._interfaces._interfaces import PerModelConfig
 from token_throttle._interfaces._models import frozen_usage
 
-REDIS_URL = os.environ.get("TT_AUDIT_REDIS_URL", "redis://localhost:6379/13")
+REDIS_URL = os.environ.get(
+    "TOKEN_THROTTLE_TESTS_REDIS_URL", "redis://localhost:6379/13"
+)
 WINDOW = 1  # seconds
 LIMIT = 10.0
 CFG = PerModelConfig(

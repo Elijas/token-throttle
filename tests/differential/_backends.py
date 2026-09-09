@@ -20,7 +20,7 @@ from tests.differential._clock import FakeClock, bind_sqlite_engine_clock
 from token_throttle._interfaces._interfaces import PerModelConfig
 from token_throttle._interfaces._models import Quota, UsageQuotas
 
-REDIS_URL_ENV = "TT_AUDIT_REDIS_URL"
+REDIS_URL_ENV = "TOKEN_THROTTLE_TESTS_REDIS_URL"
 DEFAULT_REDIS_URL = "redis://localhost:6379/13"
 _PYTEST_REDIS_URL: str | None = None
 MAX_TTL_SECONDS = 2**31 - 1

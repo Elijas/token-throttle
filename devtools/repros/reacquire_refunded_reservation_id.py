@@ -1,4 +1,4 @@
-# ruff: noqa: T201, INP001
+# ruff: noqa: INP001
 """
 Repro: acquire -> refund -> acquire AGAIN with the same reservation_id -> refund.
 
@@ -11,7 +11,7 @@ Three-way divergence at the backend protocol:
            tombstone state") -> the re-acquired capacity can never be refunded.
 
 Run from the repository root:
-    TT_AUDIT_REDIS_URL=redis://localhost:6379/13 .venv/bin/python repros/reacquire_refunded_reservation_id.py
+    TOKEN_THROTTLE_TESTS_REDIS_URL=redis://localhost:6379/13 .venv/bin/python devtools/repros/reacquire_refunded_reservation_id.py
 """
 
 from __future__ import annotations
@@ -34,7 +34,9 @@ from token_throttle import (
 from token_throttle._interfaces._interfaces import PerModelConfig
 from token_throttle._interfaces._models import frozen_usage
 
-REDIS_URL = os.environ.get("TT_AUDIT_REDIS_URL", "redis://localhost:6379/13")
+REDIS_URL = os.environ.get(
+    "TOKEN_THROTTLE_TESTS_REDIS_URL", "redis://localhost:6379/13"
+)
 FAMILY = "repro"
 CFG = PerModelConfig(
     model_family=FAMILY,

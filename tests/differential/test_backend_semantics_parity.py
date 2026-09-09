@@ -103,7 +103,7 @@ def test_d1_marker_expiry_boundary(kind: str, mode: str, loop, tmp_path: Path) -
     """Documented: memory ignores the lifetime; SQLite expires at exactly lifetime."""
     if kind == "redis":
         pytest.skip(
-            "Redis marker expiry is real-time PX; covered by repros/marker_expiry_boundary.py"
+            "Redis marker expiry is real-time PX; covered by devtools/repros/marker_expiry_boundary.py"
         )
     clock = FakeClock()
     driver = Driver(loop)

@@ -1,11 +1,11 @@
-# ruff: noqa: T201, INP001
+# ruff: noqa: INP001
 """
 Repro: after ``apply_configured_max_capacity``, the Redis backend's
 ``introspect()`` reports the ORIGINAL quota limit while its decision path
 uses the NEW configured limit. Memory and SQLite report the new limit.
 
 Run from the repository root:
-    TT_AUDIT_REDIS_URL=redis://localhost:6379/13 .venv/bin/python repros/redis_introspect_stale_configured_limit.py
+    TOKEN_THROTTLE_TESTS_REDIS_URL=redis://localhost:6379/13 .venv/bin/python devtools/repros/redis_introspect_stale_configured_limit.py
 """
 
 from __future__ import annotations
@@ -28,7 +28,9 @@ from token_throttle import (
 from token_throttle._interfaces._interfaces import PerModelConfig
 from token_throttle._interfaces._models import frozen_usage
 
-REDIS_URL = os.environ.get("TT_AUDIT_REDIS_URL", "redis://localhost:6379/13")
+REDIS_URL = os.environ.get(
+    "TOKEN_THROTTLE_TESTS_REDIS_URL", "redis://localhost:6379/13"
+)
 CFG = PerModelConfig(
     model_family="repro",
     quotas=UsageQuotas([Quota(metric="requests", limit=10.0, per_seconds=60)]),

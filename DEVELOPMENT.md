@@ -663,3 +663,27 @@ Each phase tees its output to a log file; on failure those logs upload as a
 cap (measured runtime is roughly half that) and a `concurrency` group so an
 overlapping manual dispatch cancels the in-flight run rather than racing it for
 the shared Redis container.
+
+## Differential backend harness
+
+`tests/differential/` drives all six built-in backends (memory, SQLite, and
+Redis, each async and sync) with identical operation sequences under one
+controlled clock and compares every decision, exception type, return value, and
+`introspect()` reading after every step. It is the regression net for
+"one semantics across backends": `test_stateful_differential.py` is a Hypothesis
+state machine (rules for clock advance, try-acquire, consume, marker-authorised
+refund, duplicate and unknown refunds, runtime and configured limit changes);
+`test_backend_semantics_parity.py` pins each rule that once diverged as one test
+that runs six ways; `test_concurrency_differential.py`, `test_restart_differential.py`
+and `test_time_and_float_edges.py` cover concurrent admission (tasks, threads,
+spawned processes), restart of the persistent backends against a continuous
+memory oracle, and clock/float edges; `test_harness_selfcheck.py` proves the
+comparator fails on an injected divergence.
+
+The harness never flushes Redis: it writes and deletes keys under disposable
+prefixes only, so it is safe on any database index. It reads the suite's
+`--redis-url` option; `TOKEN_THROTTLE_TESTS_REDIS_URL` overrides it for ad-hoc
+runs. `TT_DIFF_EXAMPLES` and `TT_DIFF_STEPS` scale the state machine (defaults
+25 examples of 40 steps; the release gate used 150 of 60). Runnable
+single-scenario scripts for each divergence the audit found live in
+`devtools/repros/` and are run from the repository root.

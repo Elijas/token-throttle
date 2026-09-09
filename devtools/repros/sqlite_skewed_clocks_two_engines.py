@@ -1,4 +1,4 @@
-# ruff: noqa: T201, INP001
+# ruff: noqa: INP001
 """
 Repro (documented as unsupported, quantified here): two SQLite engines on the
 same database and prefix whose wall clocks differ by SKEW seconds -- the model
@@ -13,7 +13,7 @@ timestamp SKEW seconds in its past and refills for time that never elapsed.
 Redis is immune by design (server TIME). Memory has one clock per process.
 
 Run from the repository root:
-    .venv/bin/python repros/sqlite_skewed_clocks_two_engines.py
+    .venv/bin/python devtools/repros/sqlite_skewed_clocks_two_engines.py
 """
 
 from __future__ import annotations
