@@ -29,7 +29,12 @@ from pathlib import Path
 
 import pytest
 
-from tests.differential._backends import build_one, make_config, require_redis
+from tests.differential._backends import (
+    build_one,
+    make_config,
+    purge_redis_prefix,
+    require_redis,
+)
 from tests.differential._clock import FakeClock, RealClock, patched_clock
 from tests.differential._driver import Driver
 from token_throttle._interfaces._models import frozen_usage
@@ -224,11 +229,16 @@ def test_processes(kind: str, timeout: float, loop, tmp_path: Path, request) -> 
         )
         for _ in range(PROCESSES)
     ]
-    for child in children:
-        child.start()
-    results = [queue.get(timeout=180) for _ in children]
-    for child in children:
-        child.join(timeout=30)
+    try:
+        for child in children:
+            child.start()
+        results = [queue.get(timeout=180) for _ in children]
+        for child in children:
+            child.join(timeout=30)
+    except BaseException:
+        if kind == "redis":
+            purge_redis_prefix(locator, prefix)
+        raise
     admitted = sum(results)
     target = build_one(
         kind,
@@ -322,11 +332,15 @@ def test_processes_try_acquire_contention_false_negatives(
         )
         for _ in range(PROCESSES)
     ]
-    for child in children:
-        child.start()
-    results = [queue.get(timeout=300) for _ in children]
-    for child in children:
-        child.join(timeout=30)
+    try:
+        for child in children:
+            child.start()
+        results = [queue.get(timeout=300) for _ in children]
+        for child in children:
+            child.join(timeout=30)
+    finally:
+        if kind == "redis":
+            purge_redis_prefix(locator, prefix)
     admitted = sum(a for a, _ in results)
     refused = sum(r for _, r in results)
     total = PROCESSES * CONTENTION_TRIES

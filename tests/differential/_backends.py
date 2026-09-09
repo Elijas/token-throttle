@@ -94,6 +94,17 @@ def _delete_prefix(client: Any, prefix: str) -> None:
             break
 
 
+def purge_redis_prefix(url: str, prefix: str) -> None:
+    """Delete every key under ``prefix`` (used by tests whose child processes write keys)."""
+    import redis as sync_redis
+
+    janitor = sync_redis.from_url(url)
+    try:
+        _delete_prefix(janitor, prefix)
+    finally:
+        janitor.close()
+
+
 def _redis_reachable(url: str) -> bool:
     try:
         import redis as sync_redis
