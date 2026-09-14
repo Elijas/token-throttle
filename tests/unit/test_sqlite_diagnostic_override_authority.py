@@ -52,7 +52,7 @@ async def sqlite_limiter(request, tmp_path, monkeypatch):
     builder = builder_class(
         tmp_path / "diagnostic-overrides.sqlite3",
         key_prefix="diagnostic-overrides",
-        bucket_ttl_seconds=60,
+        bucket_ttl_seconds=120,
         override_ttl_seconds=1,
     )
     limiter = limiter_class(config, backend=builder)
@@ -67,7 +67,7 @@ async def sqlite_limiter(request, tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("elapsed", "expected_status"), [(1.1, "ok"), (61.0, "fresh_start")]
+    ("elapsed", "expected_status"), [(1.1, "ok"), (121.0, "fresh_start")]
 )
 async def test_sqlite_diagnose_drops_expired_local_override(
     sqlite_limiter, monkeypatch, elapsed, expected_status

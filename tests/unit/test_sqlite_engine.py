@@ -646,10 +646,19 @@ def test_sqlite_override_is_cross_process_and_expires_to_local_config(
 ) -> None:
     db_path = tmp_path / "override.sqlite3"
     first = _engine(db_path, limit=10.0, override_ttl_seconds=2)
-    second = _engine(db_path, limit=20.0, override_ttl_seconds=2)
+    second = _engine(db_path, limit=10.0, override_ttl_seconds=2)
+    # A process deployed with a different configured limit never applies an
+    # override that was set under another limit (the stored anchor mismatches).
+    other_config = _engine(db_path, limit=20.0, override_ttl_seconds=2)
     try:
         first.set_max_capacity("requests", 10, 15.0, clock=lambda: 100.0)
         active = second.try_consume(
+            frozen_usage({"requests": 0}),
+            clock=lambda: 101.0,
+            reservation_id=None,
+            reservation_lifetime_seconds=None,
+        )
+        ignored = other_config.try_consume(
             frozen_usage({"requests": 0}),
             clock=lambda: 101.0,
             reservation_id=None,
@@ -662,15 +671,18 @@ def test_sqlite_override_is_cross_process_and_expires_to_local_config(
             reservation_lifetime_seconds=None,
         )
         assert active.result.max_capacities[("requests", 10)] == 15.0
-        assert expired.result.max_capacities[("requests", 10)] == 20.0
+        assert ignored.result.max_capacities[("requests", 10)] == 20.0
+        assert expired.result.max_capacities[("requests", 10)] == 10.0
         with sqlite3.connect(db_path) as connection:
             override = connection.execute(
-                "SELECT override_value, override_expires_at FROM buckets"
+                "SELECT override_value, override_expires_at, "
+                "override_configured_max_capacity FROM buckets"
             ).fetchone()
-        assert override == (None, None)
+        assert override == (None, None, None)
     finally:
         first.close()
         second.close()
+        other_config.close()
 
 
 def test_sqlite_config_after_restart_applies_without_rewriting_state(
@@ -992,7 +1004,7 @@ def test_sync_sqlite_metric_rebuilds_close_and_deregister_old_engines(
             replacement = builder.build(cfg)
             replaced_engines.append(current._engine)
             current = current.prepare_reconfigured_backend(replacement, cfg)
-            assert len(builder._engines) == 1
+            assert len(builder._backends) == 1
         for engine in replaced_engines:
             with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
                 engine.inspect_counts()
@@ -1083,9 +1095,19 @@ def test_sqlite_duplicate_acquire_is_visible_across_connections(
             reservation_id="shared-reservation",
             reservation_lifetime_seconds=20.0,
         )
+        # An identical replay from another connection is idempotent ...
+        replay = second.consume(
+            usage,
+            clock=lambda: 100.0,
+            reservation_id="shared-reservation",
+            reservation_lifetime_seconds=20.0,
+        )
+        assert replay.replayed is True
+        assert replay.post_capacities == replay.pre_capacities
+        # ... while a reuse with different usage is the duplicate acquire.
         with pytest.raises(DuplicateRefundError) as duplicate:
             second.consume(
-                usage,
+                frozen_usage({"requests": 2}),
                 clock=lambda: 100.0,
                 reservation_id="shared-reservation",
                 reservation_lifetime_seconds=20.0,

@@ -390,6 +390,8 @@ Example: bucket at 50, actual usage 130 → capacity becomes −80. The token-bu
 
 The `allow_negative` flag on `set_capacity` / `_set_capacities_unsafe` controls this. The blocking path (`await_for_capacity` / `_check_and_consume_capacity`) uses `allow_negative=False` because it guarantees capacity ≥ usage before consuming.
 
+Because capacity can sit at `-max_capacity`, refilling to full takes two quota windows; the Redis and SQLite builders therefore require `bucket_ttl_seconds >= 2 * per_seconds` for every quota, so bucket expiry can never forgive debt that refill would still be paying down.
+
 ### `set_max_capacity` anchors capacity before swapping the refill rate
 
 When `set_max_capacity` changes a bucket's limit, it performs an anchor-and-swap in three steps:
@@ -459,9 +461,9 @@ names should still prefer allowlists where possible and should run
 maintenance path to evict idle in-process rows. The cleanup API skips families
 with in-flight reservations; Redis bucket state uses its own inactivity TTL.
 
-### Redis `max_capacity_override` self-heals on config mismatch
+### Persisted `max_capacity` overrides self-heal on config mismatch (Redis and SQLite)
 
-When `_deserialize_max_capacity_override` reads a stored override from Redis, it compares the `configured_max_capacity` field in the JSON payload against the current process's `_max_capacity_default` (from `Quota.limit`). If they differ — e.g. after a deployment changes the static quota — the bucket emits an operator warning, ignores the stale override (returns `None`), and falls back to the new static limit.
+When `_deserialize_max_capacity_override` reads a stored override from Redis, it compares the `configured_max_capacity` field in the JSON payload against the current process's `_max_capacity_default` (from `Quota.limit`). If they differ — e.g. after a deployment changes the static quota — the bucket emits an operator warning, ignores the stale override (returns `None`), and falls back to the new static limit. The SQLite engine applies the same rule with the `override_configured_max_capacity` column (schema version 2; version-1 databases are upgraded in place and their un-anchored overrides are never applied).
 
 This is intentional self-healing: an override created under a previous quota configuration should not pin the new deployment to a stale limit. The override was set relative to the old config; applying it under a different config would produce an unexpected effective limit. Discarding it lets the new static config take effect cleanly, and operators can re-apply an override if needed.
 
@@ -661,3 +663,27 @@ Each phase tees its output to a log file; on failure those logs upload as a
 cap (measured runtime is roughly half that) and a `concurrency` group so an
 overlapping manual dispatch cancels the in-flight run rather than racing it for
 the shared Redis container.
+
+## Differential backend harness
+
+`tests/differential/` drives all six built-in backends (memory, SQLite, and
+Redis, each async and sync) with identical operation sequences under one
+controlled clock and compares every decision, exception type, return value, and
+`introspect()` reading after every step. It is the regression net for
+"one semantics across backends": `test_stateful_differential.py` is a Hypothesis
+state machine (rules for clock advance, try-acquire, consume, marker-authorised
+refund, duplicate and unknown refunds, runtime and configured limit changes);
+`test_backend_semantics_parity.py` pins each rule that once diverged as one test
+that runs six ways; `test_concurrency_differential.py`, `test_restart_differential.py`
+and `test_time_and_float_edges.py` cover concurrent admission (tasks, threads,
+spawned processes), restart of the persistent backends against a continuous
+memory oracle, and clock/float edges; `test_harness_selfcheck.py` proves the
+comparator fails on an injected divergence.
+
+The harness never flushes Redis: it writes and deletes keys under disposable
+prefixes only, so it is safe on any database index. It reads the suite's
+`--redis-url` option; `TOKEN_THROTTLE_TESTS_REDIS_URL` overrides it for ad-hoc
+runs. `TT_DIFF_EXAMPLES` and `TT_DIFF_STEPS` scale the state machine (defaults
+25 examples of 40 steps; the release gate used 150 of 60). Runnable
+single-scenario scripts for each divergence the audit found live in
+`devtools/repros/` and are run from the repository root.

@@ -116,6 +116,102 @@ async def test_async_sqlite_cancelled_committed_acquire_is_refunded(
         await builder.aclose()
 
 
+@pytest.mark.parametrize("interruption", ["cancel", "timeout"])
+async def test_async_sqlite_interrupted_replay_preserves_original_acquire(  # noqa: PLR0915
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    interruption: str,
+) -> None:
+    builder = SqliteBackendBuilder(
+        tmp_path / "interrupted-replay.sqlite3", key_prefix="async-tests"
+    )
+    backend = builder.build(_config(per_seconds=3600))
+    usage = frozen_usage({"requests": 4})
+    bucket_ids = frozenset({("requests", 3600)})
+    replay_completed = threading.Event()
+    release_result = threading.Event()
+    observing_result = asyncio.Event()
+    timeouts: list[asyncio.Timeout] = []
+    original_try_consume = backend._engine.try_consume
+    original_observer = backend._wait_for_future_while_cancelled
+    original_timeout = asyncio.timeout
+
+    def pause_after_replay(*args, **kwargs):
+        result = original_try_consume(*args, **kwargs)
+        assert result.available
+        assert result.result.replayed
+        replay_completed.set()
+        if not release_result.wait(5):
+            raise RuntimeError("test did not release SQLite replay")
+        return result
+
+    def capture_timeout(delay):
+        context = original_timeout(delay)
+        timeouts.append(context)
+        return context
+
+    async def observe_result(future):
+        observing_result.set()
+        return await original_observer(future)
+
+    task = None
+    try:
+        await backend.await_for_capacity(
+            usage,
+            reservation_id="original",
+            reservation_lifetime_seconds=60,
+        )
+        monkeypatch.setattr(backend._engine, "try_consume", pause_after_replay)
+        monkeypatch.setattr(asyncio, "timeout", capture_timeout)
+        monkeypatch.setattr(backend, "_wait_for_future_while_cancelled", observe_result)
+        task = asyncio.create_task(
+            backend.await_for_capacity(
+                usage,
+                timeout=30,
+                reservation_id="original",
+                reservation_lifetime_seconds=60,
+            )
+        )
+        assert await asyncio.to_thread(replay_completed.wait, 2)
+        if interruption == "cancel":
+            task.cancel()
+        else:
+            assert len(timeouts) == 1
+            # Expire the real backend timeout only after the replay has completed.
+            timeouts[0].reschedule(asyncio.get_running_loop().time())
+        await asyncio.wait_for(observing_result.wait(), timeout=2)
+        release_result.set()
+        expected_error = (
+            asyncio.CancelledError if interruption == "cancel" else TimeoutError
+        )
+        with pytest.raises(expected_error):
+            await task
+
+        snapshots, counts = await backend._run_engine(backend._engine.inspect_snapshot)
+        assert snapshots[0].current_capacity == pytest.approx(6.0, abs=0.1)
+        assert counts["acquire_markers"] == 1
+        assert counts["refund_tombstones"] == 0
+        assert await backend.refund_capacity_for_buckets(
+            usage,
+            frozen_usage({"requests": 1}),
+            bucket_ids=bucket_ids,
+            reservation_id="original",
+            reservation_model_family="async-sqlite-tests",
+            reservation_bucket_ids=bucket_ids,
+            reservation_reserved_usage=usage,
+        )
+        snapshots, counts = await backend._run_engine(backend._engine.inspect_snapshot)
+        assert snapshots[0].current_capacity == pytest.approx(9.0, abs=0.1)
+        assert counts["acquire_markers"] == 0
+        assert counts["refund_tombstones"] == 1
+    finally:
+        release_result.set()
+        if task is not None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        await builder.aclose()
+
+
 async def test_async_sqlite_cancel_during_consumed_callback_cleans_acquire(
     tmp_path: Path,
 ) -> None:

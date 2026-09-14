@@ -3,7 +3,125 @@
 Notable changes for token-throttle releases. Each major version's breaking
 changes and upgrade steps are recorded in its entry below.
 
-## Unreleased
+## 12.0.0 - 2026-09-14
+
+This release makes callable reconfiguration safe for pending requests and fixes
+SQLite deadline, override, and cleanup behavior across async and sync use.
+
+- **Breaking:** changing a callable configuration's bucket set now raises
+  `ValueError` while another acquisition for the same model family is pending.
+  This includes adding or removing a metric and changing a quota window.
+  Refunds can still release the existing waiters through the cached backend.
+  Changes to limits alone retain their existing behavior.
+- SQLite refills at each runtime override's rate until its expiry, then at the
+  configured rate. Expiry preserves debt and uncapped overflow, and diagnostic
+  reads predict the same transition without modifying the database. Overrides
+  remain bound to the configuration under which they were set.
+- SQLite bucket inactivity preserves an override until its own expiry.
+  Callable bucket-set rebuilds preserve static configuration and consult the
+  database for active overrides; expired or externally changed overrides no
+  longer reappear from a limiter's local cache.
+- **Breaking:** SQLite `timeout=0` now rejects a busy executor or engine lock
+  immediately, even when capacity remains. It previously queued behind other
+  callers in the same process. Use a positive timeout to wait for contention.
+- Async SQLite initialization runs off the event loop. Finite acquisition
+  deadlines cover cold initialization, executor queues, and engine locks;
+  `timeout=0` rejects a busy SQLite executor or lock without queueing.
+  Custom builders' public `build()` overrides remain honored. Async construction
+  requires explicit `__token_throttle_async_build__` opt-in.
+- Closing a limiter after its drain times out can be retried to release its
+  resources. The limiter continues to reject new operations once closing starts.
+  Cancelling an async SQLite builder close retains unfinished backends for a
+  later cleanup attempt.
+- Scoped refunds on Memory and Redis preserve unrelated buckets' stored
+  overflow while retaining complete callback snapshots.
+- Cancelling or timing out an identical SQLite acquisition replay leaves the
+  original reservation and its consumed capacity intact.
+- Regression coverage includes shared accounting sequences, override expiry
+  boundaries, rollback after database errors, and recovery after a writer
+  process is killed during a transaction.
+
+Upgrade steps:
+
+- Drain pending acquisitions before changing a callable configuration's metrics
+  or quota windows, or retry the change after those acquisitions finish.
+- Use a positive SQLite acquisition timeout if requests should wait behind
+  other local callers when capacity is available.
+- Keep the SQLite database migration and persistent-backend TTL requirements
+  from 11.0.0 when upgrading from an older release. This release adds no new
+  SQLite schema version.
+
+## 11.0.0 - 2026-09-09
+
+Breaking changes in this release come from a side-by-side audit of the memory,
+SQLite, and Redis backends: every documented rule is now applied the same way by
+all three, and two configurations the documentation could not honour are
+rejected at build time. Upgrade steps are listed after the changes.
+
+- A reused `reservation_id` now means the same thing on every backend. An
+  identical replay of a live reservation (same model family, buckets, and
+  reserved usage) succeeds without consuming again and without firing
+  consumption callbacks; a reuse with a different value while the reservation
+  is live, or any reuse after it was refunded, raises `DuplicateRefundError`
+  with `.reason == "duplicate_acquire"` and consumes nothing. Before, the memory
+  backend accepted a reuse after refund, the Redis backend accepted it and then
+  left the second reservation permanently unrefundable (its refund raised an
+  internal error), and the memory and SQLite backends rejected an identical
+  replay that Redis accepted. The public limiters generate a fresh id per
+  reservation, so this only affects direct users of the exported backends.
+- A persisted `set_max_capacity()` override on the SQLite backend now records
+  the configured limit it was set under and is applied only by processes whose
+  configured limit still matches, exactly as the Redis backend already did. A
+  process deployed with a different static limit ignores the override, logs a
+  warning once per bucket, and runs on its own configuration. The SQLite schema
+  moves to version 2; version-1 databases are upgraded in place on first open,
+  and any override they stored is never applied because it carries no anchor.
+- A SQLite override now keeps its full `override_ttl_seconds` lifetime when the
+  bucket idles past `bucket_ttl_seconds`: the capacity state is reset, the
+  override is kept. Before, the override was discarded with the bucket row.
+- `bucket_ttl_seconds` must now be at least twice every quota's `per_seconds`
+  on the SQLite and Redis backends (previously: at least once). Capacity may
+  sit at `-max_capacity` by design and takes two windows to refill from there;
+  with a shorter lifetime, bucket expiry forgave that debt and handed out a
+  full bucket early. Builders raise `ValueError` for the rejected range.
+- On the Redis backends, a try-acquire (`timeout=0`) is now decided by
+  capacity even when other tasks or threads of the same process are using the
+  same backend object: try-acquires queue in-process before taking the
+  distributed per-bucket locks. Previously such a call was refused by lock
+  contention with its siblings rather than by capacity: with 48 concurrent
+  callers and room for 33, one was admitted. Now all 33 are. Waiters with a
+  timeout keep their retry loop unchanged, and cross-process contention keeps
+  its documented behaviour (bounded by the caller's timeout). The same rule
+  already held for the memory and SQLite backends, which serialise callers
+  before touching their store.
+- `introspect()` on the Redis and memory backends now reports the configured
+  limit the decision path actually uses after `apply_configured_max_capacity()`.
+  The Redis diagnostic reported the build-time quota as both configured and
+  effective limit; the memory diagnostic labelled the applied configured value
+  as a runtime override.
+- Operations on a closed SQLite backend raise `RuntimeError` on both the async
+  and the sync backend, and `SyncSqliteBackendBuilder.close()` now closes the
+  backends it built (marking them closed) rather than only their engines. The
+  sync backend previously leaked `sqlite3.ProgrammingError`.
+- The test suite gains a differential harness (`tests/differential/`) that
+  drives all six built-in backends with identical operation sequences under
+  one controlled clock and compares every decision and every diagnostic, plus
+  concurrency, restart, and clock/float-edge suites; the Redis backends now
+  also run under the public conformance suite.
+
+Upgrade steps:
+
+- If any quota's `per_seconds` is more than half of `bucket_ttl_seconds` on a
+  SQLite or Redis builder, raise `bucket_ttl_seconds` (the default of 7 days
+  covers windows up to 3.5 days). Windows above `2**30` seconds can no longer be
+  hosted on a persistent backend because the bucket lifetime is capped at
+  `2**31 - 1` seconds.
+- SQLite databases are upgraded automatically; re-issue `set_max_capacity()`
+  after the upgrade if a runtime override is still wanted.
+- Direct users of the exported backends who reuse a `reservation_id` after a
+  refund must generate a fresh id instead.
+
+## Unreleased changes folded into 11.0.0
 
 - Fixes a dropped refund leaking the reservation for callers who run with
   warnings promoted to errors (`-W error`, `warnings.simplefilter("error")`, or

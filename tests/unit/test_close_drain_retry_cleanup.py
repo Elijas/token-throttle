@@ -174,7 +174,7 @@ def test_sync_close_retry_releases_sqlite_after_drain_timeout(
             for close in closes:
                 close.result(timeout=2)
             limiter.close()
-            assert builder._engines == []
+            assert builder._backends == []
             assert len(close_calls) == 1
             assert engine._closed
             with pytest.raises(sqlite3.ProgrammingError, match="closed"):

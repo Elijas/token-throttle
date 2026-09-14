@@ -51,8 +51,8 @@ def test_sqlite_builder_accepts_override_ttl_longer_than_bucket_ttl(
     builder = SyncSqliteBackendBuilder(
         tmp_path / "builder.sqlite3",
         key_prefix="retention",
-        bucket_ttl_seconds=10,
-        override_ttl_seconds=20,
+        bucket_ttl_seconds=20,
+        override_ttl_seconds=40,
         refund_dedup_ttl_seconds=100,
         max_reservation_lifetime_seconds=4.0,
     )

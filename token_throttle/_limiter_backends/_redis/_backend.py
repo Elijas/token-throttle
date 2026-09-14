@@ -178,16 +178,19 @@ end
 local existing = redis.call('GET', KEYS[1])
 if existing then
     if existing == ARGV[2] then
-        return 'ok'
+        return 'replayed_acquire'
     end
     return 'duplicate_acquire'
 end
+if redis.call('EXISTS', KEYS[2]) == 1 then
+    return 'duplicate_acquire'
+end
 local snapshots = {}
-for key_index = 2, #KEYS do
+for key_index = 3, #KEYS do
     snapshots[#snapshots + 1] = snapshot_key(KEYS[key_index])
 end
 local arg_index = 3
-for key_index = 2, #KEYS, 2 do
+for key_index = 3, #KEYS, 2 do
     local last_checked_set = redis.pcall(
         'SET', KEYS[key_index], ARGV[arg_index], 'EX', ARGV[arg_index + 2]
     )
@@ -213,7 +216,7 @@ if not claimed then
     end
     existing = redis.call('GET', KEYS[1])
     if existing == ARGV[2] then
-        return 'ok'
+        return 'replayed_acquire'
     end
     return 'duplicate_acquire'
 end
@@ -932,6 +935,13 @@ class RedisBackend(RateLimiterBackend):
         self._limit_config = limit_config
         self._usage_metric_names: set[str] = {bucket.usage_metric for bucket in buckets}
         self._local_condition = asyncio.Condition()
+        # Try-acquires (timeout=0) sharing this backend object queue here
+        # before touching the distributed per-bucket locks, so a sibling
+        # caller in the same process can never turn into lock contention that
+        # a try-acquire would have to report as TimeoutError. Waiters with a
+        # timeout keep their retry loop and never queue here; cross-process
+        # contention stays bounded by the caller's timeout, as documented.
+        self._local_serial = asyncio.Lock()
         self._diagnostic_waiters: dict[str, DiagnosticWaiterState] = {}
 
     def add_bucket(self, bucket: RedisBucket) -> None:
@@ -989,18 +999,13 @@ class RedisBackend(RateLimiterBackend):
                     model_family=self._limit_config.get_model_family(),
                 )
             )
-            quota_limits = {
-                (quota.metric, int(quota.per_seconds)): float(quota.limit)
-                for quota in self._limit_config.quotas
-            }
             bucket_diagnostics = tuple(
                 unavailable_bucket_diagnostic(
                     model_family=self._limit_config.get_model_family(),
                     bucket_id=(bucket.usage_metric, int(bucket.per_seconds)),
-                    configured_limit=quota_limits.get(
-                        (bucket.usage_metric, int(bucket.per_seconds)),
-                        bucket.configured_max_capacity,
-                    ),
+                    # The bucket's live configured limit, not the build-time
+                    # quota: apply_configured_max_capacity updates the former.
+                    configured_limit=bucket.configured_max_capacity,
                     local_override=None,
                     backend_type=backend_type_for_object(self),
                     as_of_monotonic=as_of_monotonic,
@@ -1051,10 +1056,6 @@ class RedisBackend(RateLimiterBackend):
             expected_count=len(buckets) * 3,
         )
         diagnostics: list[BucketDiagnostic] = []
-        quota_limits = {
-            (quota.metric, int(quota.per_seconds)): float(quota.limit)
-            for quota in self._limit_config.quotas
-        }
         for index, bucket in enumerate(buckets):
             offset = index * 3
             diagnostics.append(
@@ -1065,10 +1066,9 @@ class RedisBackend(RateLimiterBackend):
                     override_raw=results[offset + 2],
                     current_time=current_time,
                     as_of_monotonic=as_of_monotonic,
-                    configured_limit=quota_limits.get(
-                        (bucket.usage_metric, int(bucket.per_seconds)),
-                        bucket.configured_max_capacity,
-                    ),
+                    # The bucket's live configured limit, not the build-time
+                    # quota: apply_configured_max_capacity updates the former.
+                    configured_limit=bucket.configured_max_capacity,
                     issues=issues,
                 )
             )
@@ -1803,7 +1803,10 @@ class RedisBackend(RateLimiterBackend):
                     reservation_id=reservation_id,
                     bucket_id=(bucket.usage_metric, int(bucket.per_seconds)),
                 )
-            keys: list[str] = [acquired_marker_key]
+            refund_tombstone_key = self._refund_dedup_key(reservation_id)
+            if refund_tombstone_key is None:
+                raise ValueError("acquired marker writes require a reservation_id")
+            keys: list[str] = [acquired_marker_key, refund_tombstone_key]
             args: list[str | bytes | int | float] = [
                 acquired_marker_ttl_ms,
                 acquired_marker_value,
@@ -1863,13 +1866,17 @@ class RedisBackend(RateLimiterBackend):
             )
             if status == "ok":
                 return True
+            if status == "replayed_acquire":
+                # Identical replay of a live reservation: already consumed by
+                # the earlier call, nothing written now.
+                return False
             if status == "duplicate_acquire":
                 if await self._acquire_marker_matches(
                     acquired_marker_key,
                     acquired_marker_value,
                     reservation_id=reservation_id,
                 ):
-                    return True
+                    return False
                 raise DuplicateRefundError(
                     "reservation already acquired",
                     reason="duplicate_acquire",
@@ -2354,15 +2361,27 @@ class RedisBackend(RateLimiterBackend):
                     )
                 )
                 try:
-                    await asyncio.shield(write_task)
+                    written = await asyncio.shield(write_task)
                 except asyncio.CancelledError:
-                    consumed = await self._wait_for_task_outcome_while_cancelled(
-                        write_task
+                    consumed = (
+                        await self._wait_for_task_outcome_while_cancelled(write_task)
+                        and write_task.result() is not False
                     )
                     raise
-                consumed = True
+                # An explicit False means an identical replay of a live
+                # reservation: the earlier call consumed, this one wrote nothing.
+                consumed = written is not False
                 consumed_monotonic = time.monotonic()
                 consumed_at_seconds = current_time
+            if not consumed:
+                return (
+                    True,
+                    preconsumption_capacities,
+                    preconsumption_capacities,
+                    consumed_monotonic,
+                    consumed_at_seconds,
+                    buckets,
+                )
             await self._fresh_start_buckets_callback(fresh_start_buckets)
             if self._callbacks and self._callbacks.on_capacity_consumed:
                 await self._invoke_callback_safe(
@@ -2503,10 +2522,13 @@ class RedisBackend(RateLimiterBackend):
                 )
             )
             try:
-                await asyncio.shield(write_task)
+                written = await asyncio.shield(write_task)
             # ast-guard: skip — landed speedometer writes must not be refunded
             except asyncio.CancelledError:
-                consumed = await self._wait_for_task_outcome_while_cancelled(write_task)
+                consumed = (
+                    await self._wait_for_task_outcome_while_cancelled(write_task)
+                    and write_task.result() is not False
+                )
                 if not consumed:
                     raise
                 # The shielded Redis write actually landed, so the
@@ -2526,6 +2548,9 @@ class RedisBackend(RateLimiterBackend):
                 # guarantee contract.
                 suppress_current_task_cancellation()
                 return None
+        if written is False:
+            # Identical replay of a live reservation: nothing consumed now.
+            return current_time
         # Callbacks fire after the lock is released. Consumption is already
         # durably recorded in Redis, so if CancelledError arrives during
         # callbacks we let it propagate: the caller (e.g. asyncio.timeout)
@@ -2569,6 +2594,23 @@ class RedisBackend(RateLimiterBackend):
                     None if deadline is None else max(0.0, deadline - time.monotonic())
                 )
                 try:
+                    if remaining == 0.0:
+                        # Try-acquire: decide by capacity, not by a sibling
+                        # in-process caller holding the distributed lock.
+                        async with self._local_serial:
+                            attempt = await self._check_and_consume_capacity(
+                                usage,
+                                lock_blocking_timeout=remaining,
+                                reservation_id=reservation_id,
+                                reservation_lifetime_seconds=reservation_lifetime_seconds,
+                            )
+                    else:
+                        attempt = await self._check_and_consume_capacity(
+                            usage,
+                            lock_blocking_timeout=remaining,
+                            reservation_id=reservation_id,
+                            reservation_lifetime_seconds=reservation_lifetime_seconds,
+                        )
                     (
                         available,
                         preconsumption,
@@ -2576,14 +2618,7 @@ class RedisBackend(RateLimiterBackend):
                         consumed_monotonic,
                         consumed_at_seconds,
                         buckets,
-                    ) = self._normalize_check_result(
-                        await self._check_and_consume_capacity(
-                            usage,
-                            lock_blocking_timeout=remaining,
-                            reservation_id=reservation_id,
-                            reservation_lifetime_seconds=reservation_lifetime_seconds,
-                        )
-                    )
+                    ) = self._normalize_check_result(attempt)
                 except (
                     redis.exceptions.LockError,
                     BackendLockContentionError,

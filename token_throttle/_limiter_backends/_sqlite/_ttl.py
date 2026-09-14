@@ -6,6 +6,9 @@ from token_throttle._interfaces._models import Quota
 DEFAULT_BUCKET_TTL_SECONDS = 7 * 24 * 60 * 60
 DEFAULT_REFUND_DEDUP_TTL_SECONDS = 7 * 24 * 60 * 60
 RESERVATION_LIFETIME_TTL_SAFETY_MARGIN = 2.0
+# Capacity is floored at -max_capacity, and refilling from that debt takes two
+# quota windows; a bucket lifetime shorter than that lets expiry erase debt.
+MIN_BUCKET_TTL_WINDOWS = 2
 MAX_SQLITE_TTL_SECONDS = 2**31 - 1
 
 
@@ -156,25 +159,30 @@ def validate_bucket_ttl_covers_quota_windows(
     quotas: Iterable[Quota],
 ) -> None:
     """
-    Fail fast when a quota window outlives the bucket state TTL.
+    Fail fast when a bucket lifetime cannot preserve a bucket's worst-case debt.
 
-    SQLite prunes idle bucket rows after ``bucket_ttl_seconds``. If a quota's
-    ``per_seconds`` window is longer than that, an idle gap between the TTL and
-    window silently removes the bucket state, and the next read re-grants full
-    capacity instead of preserving the drained long-window state. Equality
-    (``per_seconds == bucket_ttl_seconds``) is allowed: the bucket only needs to
-    survive gaps *shorter* than the window itself.
+    SQLite prunes idle bucket rows after ``bucket_ttl_seconds``; the next use is
+    a fresh, full bucket. Capacity may be negative by design (down to
+    ``-max_capacity`` from ``consume_capacity`` / negative refunds), and
+    refilling from that floor takes two quota windows, so every quota's
+    ``per_seconds`` must satisfy ``bucket_ttl_seconds >= 2 * per_seconds``.
+    Otherwise an idle gap between the lifetime and two windows lets expiry
+    forgive debt that normal refill would still be paying down.
     """
     too_long = [
         f"{quota.metric}: per_seconds={quota.per_seconds}"
         for quota in quotas
-        if quota.per_seconds > bucket_ttl_seconds
+        if MIN_BUCKET_TTL_WINDOWS * quota.per_seconds > bucket_ttl_seconds
     ]
     if too_long:
         raise ValueError(
-            "bucket_ttl_seconds must be >= every configured quota's "
-            f"per_seconds (got bucket_ttl_seconds={bucket_ttl_seconds}); "
-            f"offending quotas: {', '.join(too_long)}. Raise "
-            "bucket_ttl_seconds to at least the longest quota window, or "
-            "shorten that quota's per_seconds."
+            f"bucket_ttl_seconds must be >= {MIN_BUCKET_TTL_WINDOWS} * every "
+            "configured quota's per_seconds (got "
+            f"bucket_ttl_seconds={bucket_ttl_seconds}); offending quotas: "
+            f"{', '.join(too_long)}. Raise bucket_ttl_seconds to at least "
+            f"{MIN_BUCKET_TTL_WINDOWS} x the longest quota window, or shorten "
+            "that quota's per_seconds. Capacity may be negative (down to "
+            "-max_capacity) by design, and refilling from there takes "
+            f"{MIN_BUCKET_TTL_WINDOWS} windows; a shorter lifetime would let "
+            "bucket expiry forgive that debt."
         )

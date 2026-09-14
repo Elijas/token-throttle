@@ -385,6 +385,12 @@ class SqliteBackend(RateLimiterBackend):
         self._closed = False
         self._on_close = on_close
 
+    def _require_open(self) -> None:
+        if self._closed:
+            raise RuntimeError(
+                "SQLite backend is closed; build a new backend from the builder"
+            )
+
     def supports_metric_set_change(self) -> bool:
         return True
 
@@ -469,7 +475,7 @@ class SqliteBackend(RateLimiterBackend):
             settled_successfully = await self._wait_for_future_while_cancelled(future)
             if settled_successfully:
                 attempt = future.result()
-                if attempt.available:
+                if attempt.available and not attempt.result.replayed:
                     cleanup = self._submit(
                         functools.partial(
                             self._engine.cleanup_consumption,
@@ -491,6 +497,7 @@ class SqliteBackend(RateLimiterBackend):
             raise
 
     async def introspect(self) -> BackendIntrospectionDiagnostic:
+        self._require_open()
         as_of_monotonic = time.monotonic()
         snapshots, counts = await self._run_engine(self._engine.inspect_snapshot)
         buckets = tuple(
@@ -579,6 +586,7 @@ class SqliteBackend(RateLimiterBackend):
         reservation_id: str | None = None,
         reservation_lifetime_seconds: float | None = None,
     ) -> float | None:
+        self._require_open()
         validate_backend_usage(usage, self._engine.metric_names)
         usage = _normalize_usage(usage)
         result = await self._run_engine(
@@ -589,6 +597,8 @@ class SqliteBackend(RateLimiterBackend):
                 reservation_lifetime_seconds=reservation_lifetime_seconds,
             )
         )
+        if result.replayed:
+            return result.current_time
         self._warn_over_max_consumption(usage, result)
         await self._emit_consumed_callbacks(usage, result)
         return result.current_time
@@ -607,6 +617,7 @@ class SqliteBackend(RateLimiterBackend):
         A zero timeout rejects a busy executor or lock without queueing.
         Cancellation waits for work that may have committed and refunds it.
         """
+        self._require_open()
         validate_backend_usage(usage, self._engine.metric_names)
         timeout = validate_timeout(timeout)
         usage = _normalize_usage(usage)
@@ -695,6 +706,8 @@ class SqliteBackend(RateLimiterBackend):
         finally:
             self._diagnostic_waiters.pop(waiter_key, None)
 
+        if result.replayed:
+            return result.current_time
         consumed_monotonic = time.monotonic()
         try:
             await self._emit_consumed_callbacks(usage, result)
@@ -758,6 +771,7 @@ class SqliteBackend(RateLimiterBackend):
         reservation_bucket_ids: set[BucketId] | frozenset[BucketId] | None = None,
         reservation_reserved_usage: FrozenUsage | None = None,
     ) -> bool:
+        self._require_open()
         backend_bucket_ids = self._engine.bucket_ids
         refund_bucket_ids = (
             backend_bucket_ids if bucket_ids is None else frozenset(bucket_ids)
@@ -824,6 +838,7 @@ class SqliteBackend(RateLimiterBackend):
     async def set_max_capacity(
         self, metric: str, per_seconds: int, value: float
     ) -> None:
+        self._require_open()
         value = _validate_max_capacity_finite_positive(value)
         await self._run_engine(
             functools.partial(
@@ -837,6 +852,7 @@ class SqliteBackend(RateLimiterBackend):
     async def apply_configured_max_capacity(
         self, metric: str, per_seconds: int, value: float
     ) -> None:
+        self._require_open()
         value = _validate_max_capacity_finite_positive(value)
         await self._run_engine(
             functools.partial(

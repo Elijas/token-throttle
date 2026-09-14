@@ -5,6 +5,10 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # Dispatched explicitly by release.yml onto release/* branches: a branch
+  # pushed with GITHUB_TOKEN fires no push/pull_request events, so this is
+  # the only way the release PR gets its required CodeQL check run.
+  workflow_dispatch:
   schedule:
     - cron: "0 8 * * 1"
 

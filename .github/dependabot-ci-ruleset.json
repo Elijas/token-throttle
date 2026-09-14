@@ -1,0 +1,93 @@
+{
+  "name": "Required CI for main",
+  "target": "branch",
+  "enforcement": "active",
+  "bypass_actors": [],
+  "conditions": {
+    "ref_name": {
+      "include": [
+        "refs/heads/main"
+      ],
+      "exclude": []
+    }
+  },
+  "rules": [
+    {
+      "type": "required_status_checks",
+      "parameters": {
+        "strict_required_status_checks_policy": true,
+        "do_not_enforce_on_create": false,
+        "required_status_checks": [
+          {
+            "context": "lint",
+            "integration_id": 15368
+          },
+          {
+            "context": "type-check",
+            "integration_id": 15368
+          },
+          {
+            "context": "analyze (python)",
+            "integration_id": 15368
+          },
+          {
+            "context": "test-unit-core (3.12)",
+            "integration_id": 15368
+          },
+          {
+            "context": "test-unit-core (3.13)",
+            "integration_id": 15368
+          },
+          {
+            "context": "test-unit-core (3.14)",
+            "integration_id": 15368
+          },
+          {
+            "context": "test-unit-full (3.12)",
+            "integration_id": 15368
+          },
+          {
+            "context": "test-unit-full (3.13)",
+            "integration_id": 15368
+          },
+          {
+            "context": "test-unit-full (3.14)",
+            "integration_id": 15368
+          },
+          {
+            "context": "test-unit-platform (macos-latest, 3.13)",
+            "integration_id": 15368
+          },
+          {
+            "context": "test-unit-platform (windows-latest, 3.13)",
+            "integration_id": 15368
+          },
+          {
+            "context": "test-integration (3.12)",
+            "integration_id": 15368
+          },
+          {
+            "context": "test-integration (3.13)",
+            "integration_id": 15368
+          },
+          {
+            "context": "test-integration (3.14)",
+            "integration_id": 15368
+          },
+          {
+            "context": "test-min-deps",
+            "integration_id": 15368
+          },
+          {
+            "context": "conformance",
+            "integration_id": 15368
+          },
+          {
+            "context": "coverage",
+            "integration_id": 15368
+          }
+        ]
+      }
+    }
+  ]
+}
