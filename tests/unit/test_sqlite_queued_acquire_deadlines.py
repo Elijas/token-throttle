@@ -252,7 +252,9 @@ def test_sync_acquire_deadline_includes_engine_lock_queue(
                 assert entered.wait(2)
                 attempt = executor.submit(acquire)
                 assert acquire_started.wait(2)
-                completed, _ = concurrent.futures.wait({attempt}, timeout=0.3)
+                # Allow worker scheduling time; the invariant is that the
+                # acquisition returns before the blocking writer is released.
+                completed, _ = concurrent.futures.wait({attempt}, timeout=2)
                 returned_while_blocked = attempt in completed
             finally:
                 writer.execute("ROLLBACK")

@@ -1,6 +1,5 @@
 """Tests for SyncRateLimiter callable config refresh (stale-callable-config fix)."""
 
-import contextlib
 import threading
 import time
 import warnings
@@ -742,22 +741,23 @@ class TestSyncCallableConfigMetricSetWaiters:
         assert retry.bucket_ids == frozenset({("tokens", 3600), ("requests", 60)})
 
 
-class RacingSyncMemoryBackendBuilder(SyncMemoryBackendBuilder):
-    """Block rebuilds long enough for duplicate refreshes to overlap."""
+class BlockingRebuildSyncMemoryBackendBuilder(SyncMemoryBackendBuilder):
+    """Pause a rebuild after the pending-acquisition guard has passed."""
 
     def __init__(self) -> None:
         super().__init__()
         self.build_calls = 0
         self._build_calls_lock = threading.Lock()
-        self._rebuild_barrier = threading.Barrier(2)
+        self.rebuild_started = threading.Event()
+        self.release_rebuild = threading.Event()
 
     def build(self, cfg, *, callbacks=None):
         with self._build_calls_lock:
             self.build_calls += 1
             build_call = self.build_calls
         if build_call >= 2:
-            with contextlib.suppress(threading.BrokenBarrierError):
-                self._rebuild_barrier.wait(timeout=0.2)
+            self.rebuild_started.set()
+            assert self.release_rebuild.wait(timeout=5.0)
         return super().build(cfg, callbacks=callbacks)
 
 
@@ -850,36 +850,46 @@ class DelayedPrepareSyncMemoryBackendBuilder(SyncMemoryBackendBuilder):
 class TestSyncCallableConfigMetricSetConcurrency:
     """Concurrent refreshes must not rebuild and consume from split state."""
 
-    def test_metric_expansion_refresh_is_serialized(self):
+    def test_metric_expansion_refresh_is_serialized(self, monkeypatch):
         use_expanded = False
 
         def config_getter(model_name: str) -> PerModelConfig:
             if use_expanded:
                 quotas = UsageQuotas(
                     [
-                        Quota(metric="tokens", limit=100, per_seconds=60),
+                        Quota(metric="tokens", limit=100, per_seconds=3600),
                         Quota(metric="requests", limit=10, per_seconds=60),
                     ]
                 )
             else:
                 quotas = UsageQuotas(
-                    [Quota(metric="tokens", limit=100, per_seconds=60)]
+                    [Quota(metric="tokens", limit=100, per_seconds=3600)]
                 )
             return PerModelConfig(quotas=quotas, model_family="test-family")
 
-        builder = RacingSyncMemoryBackendBuilder()
+        builder = BlockingRebuildSyncMemoryBackendBuilder()
         limiter = SyncRateLimiter(config_getter, backend=builder)
 
         reservation = limiter.acquire_capacity({"tokens": 90}, "test-model")
         limiter.refund_capacity({"tokens": 90}, reservation)
-        old_backend = limiter._model_family_to_backend["test-family"]
+        refresh_lock = limiter._lock
+        refresh_contended = threading.Event()
 
-        start_barrier = threading.Barrier(3)
+        class ObservedRefreshLock:
+            def __enter__(self):
+                if not refresh_lock.acquire(blocking=False):
+                    refresh_contended.set()
+                    refresh_lock.acquire()
+
+            def __exit__(self, *_exc):
+                refresh_lock.release()
+
+        monkeypatch.setattr(limiter, "_lock", ObservedRefreshLock())
         results: list[str] = []
+        errors: list[BaseException] = []
         results_lock = threading.Lock()
 
         def worker() -> None:
-            start_barrier.wait()
             try:
                 limiter.acquire_capacity(
                     {"tokens": 8, "requests": 1},
@@ -888,6 +898,10 @@ class TestSyncCallableConfigMetricSetConcurrency:
                 )
             except TimeoutError:
                 result = "TimeoutError"
+            except BaseException as exc:
+                with results_lock:
+                    errors.append(exc)
+                return
             else:
                 result = "success"
             with results_lock:
@@ -896,14 +910,24 @@ class TestSyncCallableConfigMetricSetConcurrency:
         use_expanded = True
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            with old_backend._condition:
-                threads = [threading.Thread(target=worker) for _ in range(2)]
+            threads = [threading.Thread(target=worker)]
+            threads[0].start()
+            try:
+                # Starting both acquires before this point can legitimately
+                # reject a rebuild because another acquisition is pending.
+                assert builder.rebuild_started.wait(timeout=5.0)
+                threads.append(threading.Thread(target=worker))
+                threads[1].start()
+                # Prove the second caller encounters the held refresh lock,
+                # without relying on a sleep to make the calls overlap.
+                assert refresh_contended.wait(timeout=5.0)
+            finally:
+                builder.release_rebuild.set()
                 for thread in threads:
-                    thread.start()
-                start_barrier.wait()
-            for thread in threads:
-                thread.join(timeout=5.0)
+                    thread.join(timeout=5.0)
 
+        assert all(not thread.is_alive() for thread in threads)
+        assert not errors, errors
         assert builder.build_calls == 2
         assert sorted(results) == ["TimeoutError", "success"]
 
