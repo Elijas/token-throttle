@@ -1,16 +1,41 @@
 name: Release
 
+# Three-mode manual workflow. Exactly one mode input must be set; `validate-inputs`
+# rejects any other combination rather than skipping every job and reporting green.
+#
+#   bump=<patch|minor|major>  -> prepare:  open a release PR. main is NOT written.
+#   finalize=vX.Y.Z           -> finalize: tag the merged main tip, arm publish.
+#   publish_ref=vX.Y.Z        -> publish:  internal, re-dispatched by finalize.
+#
+# Why the split: main is protected by strict required CI with no bypass, so a
+# release can no longer direct-push the version bump to main. The bump arrives
+# through a reviewable PR like any other change, so tagging and publishing must
+# be a second, separate act after that PR merges.
+#
+# DEPLOYMENT PREREQUISITE: the repository setting
+#   Settings -> Actions -> General -> Workflow permissions
+#   -> "Allow GitHub Actions to create and approve pull requests"
+# (API: actions/permissions/workflow can_approve_pull_request_reviews) must be
+# ENABLED, or the prepare mode cannot open its PR. Default token permissions
+# stay read-only; this toggle is orthogonal to them.
+
 on:
   workflow_dispatch:
     inputs:
       bump:
-        description: "Version bump type"
+        description: "Prepare a release PR with this version bump"
         required: false
         type: choice
         options:
+          - none
           - patch
           - minor
           - major
+        default: none
+      finalize:
+        description: "Finalize a merged release PR: tag + publish this version (e.g. v1.2.3)"
+        required: false
+        type: string
       publish_ref:
         description: "Internal: immutable tag ref to publish"
         required: false
@@ -27,19 +52,74 @@ permissions:
   contents: read
 
 jobs:
+  # --------------------------------------------------------------- validate --
+  # Runs unconditionally so every downstream job can `needs:` it without being
+  # skipped on the tag-push path. Only workflow_dispatch is actually checked.
+  validate-inputs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Exactly one mode must be selected
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          BUMP: ${{ inputs.bump }}
+          FINALIZE: ${{ inputs.finalize }}
+          PUBLISH_REF: ${{ inputs.publish_ref }}
+        run: |
+          MODES=0
+          SELECTED=""
+          if [ -n "${BUMP}" ] && [ "${BUMP}" != "none" ]; then
+            MODES=$((MODES + 1)); SELECTED="${SELECTED} bump"
+          fi
+          if [ -n "${FINALIZE}" ]; then
+            MODES=$((MODES + 1)); SELECTED="${SELECTED} finalize"
+          fi
+          if [ -n "${PUBLISH_REF}" ]; then
+            MODES=$((MODES + 1)); SELECTED="${SELECTED} publish_ref"
+          fi
+          if [ "${MODES}" -eq 0 ]; then
+            echo "::error::No release mode selected. Set exactly one of bump / finalize / publish_ref."
+            exit 1
+          fi
+          if [ "${MODES}" -gt 1 ]; then
+            echo "::error::Mutually exclusive inputs set (${SELECTED# }). Select exactly one mode."
+            exit 1
+          fi
+          # Validate the free-text inputs here, once, before any release work.
+          # Two rejected approaches, both of which let junk through:
+          #   - a `case` glob: v[0-9]*.[0-9]*.[0-9]* also matches 'v1abc.2xyz.3z'
+          #   - `grep -Eq`: matches per LINE, so $'v1.2.3\njunk' passes on its
+          #     first line. Verified, not theoretical.
+          # Bash [[ =~ ]] anchors against the WHOLE string, including newlines.
+          if [ -n "${FINALIZE}" ]; then
+            if ! [[ "${FINALIZE}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::finalize must match ^v[0-9]+\.[0-9]+\.[0-9]+\$ (whole string)"
+              exit 1
+            fi
+          fi
+          if [ -n "${PUBLISH_REF}" ]; then
+            if ! [[ "${PUBLISH_REF}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::publish_ref must match ^v[0-9]+\.[0-9]+\.[0-9]+\$ (whole string)"
+              exit 1
+            fi
+          fi
+          echo "mode:${SELECTED# }"
+
+  # ---------------------------------------------------------------- prepare --
   test-dispatch:
-    if: github.event_name == 'workflow_dispatch' && inputs.publish_ref == ''
+    if: github.event_name == 'workflow_dispatch' && inputs.bump != 'none' && inputs.bump != '' && inputs.finalize == '' && inputs.publish_ref == ''
+    needs: validate-inputs
     uses: ./.github/workflows/ci.yml
     secrets:
       CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
   prepare-release:
-    if: github.event_name == 'workflow_dispatch' && inputs.publish_ref == ''
-    needs: test-dispatch
+    if: github.event_name == 'workflow_dispatch' && inputs.bump != 'none' && inputs.bump != '' && inputs.finalize == '' && inputs.publish_ref == ''
+    needs: [validate-inputs, test-dispatch]
     runs-on: ubuntu-latest
     permissions:
       actions: write
       contents: write
+      pull-requests: write
     steps:
       - name: Check release source ref
         run: |
@@ -47,19 +127,13 @@ jobs:
             echo "::error::Manual releases must run from refs/heads/main, got ${GITHUB_REF}"
             exit 1
           fi
-          if [ -z "${{ inputs.bump }}" ]; then
-            echo "::error::Release dispatch requires a bump input"
-            exit 1
-          fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: true
       # A dispatch issued seconds after a push can be pinned to the previous
-      # main commit (ref resolution is eventually consistent). The atomic
-      # push at the end would reject that anyway, but only after the full CI
-      # wait — fail here instead, before any release work starts. This also
-      # catches commits landing on main mid-run.
+      # main commit (ref resolution is eventually consistent). Fail here rather
+      # than opening a release PR built on a stale tree.
       - name: Fail fast if pinned commit is not the live main tip
         run: |
           REMOTE_MAIN=$(git ls-remote origin refs/heads/main | cut -f1)
@@ -75,10 +149,13 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-      - name: Bump version, verify build, tag
+      - name: Bump version, verify build, commit to release branch
+        id: prep
+        env:
+          BUMP: ${{ inputs.bump }}
         run: |
           uv sync --group dev
-          uv run bump-my-version bump ${{ inputs.bump }}
+          uv run bump-my-version bump "${BUMP}"
           NEW_VERSION=$(python -c "import re; print(re.search(r'current_version = \"(.+?)\"', open('pyproject.toml', encoding='utf-8').read()).group(1))")
           uv run python devtools/bump_readme_version.py "$NEW_VERSION"
           uv lock
@@ -88,38 +165,180 @@ jobs:
             echo "::error::ruff check found issues that --fix could not resolve"
             exit 1
           fi
+          # Build purely as a gate: proves the bumped tree is publishable before
+          # anyone reviews the PR. The artifact is discarded; publish rebuilds
+          # from the immutable tag.
           uv build
+          # Refuse to reuse a shipped version. Without this a repeated dispatch
+          # silently opens a PR for an existing tag and the collision only
+          # surfaces at finalize, after review.
+          if git rev-parse -q --verify "refs/tags/v${NEW_VERSION}" >/dev/null; then
+            echo "::error::Tag v${NEW_VERSION} already exists; nothing to prepare"
+            exit 1
+          fi
+          BRANCH="release/v${NEW_VERSION}"
+          if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
+            echo "::error::Branch ${BRANCH} already exists on origin; close or delete the stale release PR first"
+            exit 1
+          fi
+          git checkout -b "$BRANCH"
           git add -A
           if git diff --cached --quiet; then
             echo "::error::No release changes were staged"
             exit 1
           fi
-          git commit -m "chore(release): update lockfile and formatting for v${NEW_VERSION}"
+          git commit -m "chore(release): prepare v${NEW_VERSION}"
           if [ -n "$(git status --porcelain)" ]; then
             echo "::error::Working tree is dirty after release commit:"
             git status --short
             exit 1
           fi
-          git tag -a "v${NEW_VERSION}" -m "Release v${NEW_VERSION}"
-          git push --atomic origin "HEAD:${GITHUB_REF}" "refs/tags/v${NEW_VERSION}"
+          # Branch only. refs/heads/main is never written by this workflow.
+          git push origin "refs/heads/${BRANCH}"
+          {
+            echo "new_version=${NEW_VERSION}"
+            echo "branch=${BRANCH}"
+            echo "head_sha=$(git rev-parse HEAD)"
+          } >> "$GITHUB_OUTPUT"
+      - name: Open release PR
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ steps.prep.outputs.branch }}
+          VERSION: ${{ steps.prep.outputs.new_version }}
+        run: |
+          {
+            printf '%s\n' "Automated release preparation for v${VERSION}."
+            printf '\n'
+            printf '%s\n' "Contains the version bump, refreshed lockfile and formatting."
+            printf '%s\n' "No tag has been created and nothing has been published yet."
+            printf '\n'
+            printf '%s\n' "After this PR merges with required CI green, finalize the release:"
+            printf '\n'
+            printf '%s\n' '```'
+            printf '%s\n' "gh workflow run release.yml --ref main -f finalize=v${VERSION}"
+            printf '%s\n' '```'
+          } > /tmp/pr-body.md
+          if ! gh pr create \
+              --base main \
+              --head "${BRANCH}" \
+              --title "chore(release): prepare v${VERSION}" \
+              --body-file /tmp/pr-body.md; then
+            echo "::error::Could not open the release PR. The branch ${BRANCH} IS pushed, so no work is lost."
+            echo "::error::Most likely cause: Settings -> Actions -> General -> Workflow permissions"
+            echo "::error::-> 'Allow GitHub Actions to create and approve pull requests' is disabled."
+            echo "::error::Enable it and re-run, or open the PR by hand: gh pr create --base main --head ${BRANCH}"
+            exit 1
+          fi
+          echo "url=$(gh pr view "${BRANCH}" --json url -q .url)" >> "$GITHUB_OUTPUT"
+      # A branch pushed with GITHUB_TOKEN fires no `push` or `pull_request`
+      # events (GitHub's anti-recursion rule), so the PR would sit with zero
+      # checks and could never satisfy required CI. An explicit
+      # workflow_dispatch API call is exempt from that rule -- the same
+      # exemption the publish re-dispatch has always relied on.
+      - name: Dispatch required checks onto the release branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ steps.prep.outputs.branch }}
+        run: |
+          for wf in ci.yml codeql.yml; do
+            echo "dispatching ${wf} on ${BRANCH}"
+            gh api --method POST \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "/repos/${GITHUB_REPOSITORY}/actions/workflows/${wf}/dispatches" \
+              -f "ref=${BRANCH}"
+          done
+      - name: Summary
+        env:
+          VERSION: ${{ steps.prep.outputs.new_version }}
+          BRANCH: ${{ steps.prep.outputs.branch }}
+          HEAD_SHA: ${{ steps.prep.outputs.head_sha }}
+          PR_URL: ${{ steps.pr.outputs.url }}
+        run: |
+          {
+            echo "### Release v${VERSION} prepared"
+            echo ""
+            echo "PR: ${PR_URL}"
+            echo "Branch: \`${BRANCH}\` @ \`${HEAD_SHA}\`"
+            echo ""
+            echo "After required CI is green and the PR is merged:"
+            echo '```'
+            echo "gh workflow run release.yml --ref main -f finalize=v${VERSION}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # --------------------------------------------------------------- finalize --
+  finalize-release:
+    if: github.event_name == 'workflow_dispatch' && inputs.finalize != '' && inputs.publish_ref == ''
+    needs: validate-inputs
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: write
+    steps:
+      - name: Check finalize source ref
+        run: |
+          if [ "${GITHUB_REF}" != "refs/heads/main" ]; then
+            echo "::error::Finalize must run from refs/heads/main, got ${GITHUB_REF}"
+            exit 1
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+      - name: Verify main tip carries the version being finalized
+        env:
+          FINALIZE_VERSION: ${{ inputs.finalize }}
+        run: |
+          REMOTE_MAIN=$(git ls-remote origin refs/heads/main | cut -f1)
+          if [ "${REMOTE_MAIN}" != "${GITHUB_SHA}" ]; then
+            echo "::error::Run is pinned to ${GITHUB_SHA} but origin/main is at ${REMOTE_MAIN}; re-dispatch finalize."
+            exit 1
+          fi
+          PROJECT_VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml | head -1)
+          if [ "${FINALIZE_VERSION}" != "v${PROJECT_VERSION}" ]; then
+            echo "::error::main is at v${PROJECT_VERSION} but finalize asked for ${FINALIZE_VERSION}; has the release PR merged?"
+            exit 1
+          fi
+          if git rev-parse -q --verify "refs/tags/${FINALIZE_VERSION}" >/dev/null; then
+            echo "::error::Tag ${FINALIZE_VERSION} already exists"
+            exit 1
+          fi
+          echo "finalizing ${FINALIZE_VERSION} at ${GITHUB_SHA}"
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+      - name: Tag main tip and arm publish
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          FINALIZE_VERSION: ${{ inputs.finalize }}
+        run: |
+          git tag -a "${FINALIZE_VERSION}" -m "Release ${FINALIZE_VERSION}"
+          # Tag ref only. refs/heads/main is never written -- branch protection
+          # governs refs/heads/*, so this needs no bypass.
+          git push origin "refs/tags/${FINALIZE_VERSION}"
+          # A tag pushed by GITHUB_TOKEN does not fire the `push: tags:`
+          # trigger, so publish must be armed by explicit dispatch.
           curl -fsS -X POST \
             -H "Accept: application/vnd.github+json" \
             -H "Authorization: Bearer ${GITHUB_TOKEN}" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
             "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/workflows/release.yml/dispatches" \
-            -d "{\"ref\":\"v${NEW_VERSION}\",\"inputs\":{\"publish_ref\":\"v${NEW_VERSION}\"}}"
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
+            -d "{\"ref\":\"${FINALIZE_VERSION}\",\"inputs\":{\"publish_ref\":\"${FINALIZE_VERSION}\"}}"
 
+  # ---------------------------------------------------------------- publish --
   test-tag:
     if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.publish_ref != '')
+    needs: validate-inputs
     uses: ./.github/workflows/ci.yml
     secrets:
       CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
   publish:
     if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.publish_ref != '')
-    needs: test-tag
+    needs: [validate-inputs, test-tag]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -129,12 +348,14 @@ jobs:
       url: https://pypi.org/project/token-throttle/
     steps:
       - name: Check publish ref
+        env:
+          PUBLISH_REF: ${{ inputs.publish_ref }}
         run: |
           if [[ "${GITHUB_REF}" != refs/tags/v* ]]; then
             echo "::error::Publishing requires an immutable version tag ref, got ${GITHUB_REF}"
             exit 1
           fi
-          if [ -n "${{ inputs.publish_ref }}" ] && [ "${GITHUB_REF}" != "refs/tags/${{ inputs.publish_ref }}" ]; then
+          if [ -n "${PUBLISH_REF}" ] && [ "${GITHUB_REF}" != "refs/tags/${PUBLISH_REF}" ]; then
             echo "::error::Dispatch publish_ref does not match workflow ref"
             exit 1
           fi
@@ -145,6 +366,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
+          fetch-depth: 0
           persist-credentials: false
       - name: Verify the checkout is the tested commit and matches the tag
         run: |
@@ -159,6 +381,17 @@ jobs:
             exit 1
           fi
           echo "publishing ${GITHUB_REF_NAME} from ${HEAD_SHA}"
+      # The tag namespace is not covered by branch protection, so a tag can be
+      # created on any commit -- including one that never passed through a
+      # release PR. Require the commit to be reachable from origin/main so an
+      # arbitrary side-branch tag cannot reach PyPI.
+      - name: Verify the tagged commit is on main
+        run: |
+          git fetch --no-tags origin "+refs/heads/main:refs/remotes/origin/main"
+          if ! git merge-base --is-ancestor "${GITHUB_SHA}" refs/remotes/origin/main; then
+            echo "::error::${GITHUB_SHA} is not reachable from origin/main; refusing to publish an off-main ref"
+            exit 1
+          fi
       - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
