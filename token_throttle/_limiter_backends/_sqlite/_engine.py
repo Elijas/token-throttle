@@ -25,6 +25,7 @@ from token_throttle._exceptions import (
     UnknownReservationError,
     _mark_unknown_reservation_forget_in_flight,
 )
+from token_throttle._limiter_backends._debt_ttl import debt_ttl_seconds
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Mapping
@@ -800,6 +801,26 @@ class SqliteEngine:
                     ),
                 )
                 self._pending_state_confirmations[spec.bucket_id] = current_time
+            if writable and calculated.amount < 0:
+                connection.execute(
+                    "UPDATE buckets SET expires_at = MAX(expires_at, ?) "
+                    "WHERE key_prefix = ? AND model_family = ? "
+                    "AND metric = ? AND per_seconds = ?",
+                    (
+                        current_time
+                        + debt_ttl_seconds(
+                            calculated.amount,
+                            bucket_ttl_seconds=self._bucket_ttl_seconds,
+                            per_seconds=spec.per_seconds,
+                            max_capacity=max_capacity,
+                            configured_max_capacity=spec.configured_max_capacity,
+                        ),
+                        self.key_prefix,
+                        self.model_family,
+                        spec.metric,
+                        spec.per_seconds,
+                    ),
+                )
             if calculated.is_fresh_start:
                 fresh.append(spec.bucket_id)
             states[spec.bucket_id] = _BucketState(
@@ -864,6 +885,30 @@ class SqliteEngine:
             if not math.isfinite(float(amount)):
                 raise ValueError(f"capacity must be finite (got {amount!r})")
             normalized = 0.0 if float(amount) == 0.0 else float(amount)
+            spec = self._bucket_by_id[(metric, per_seconds)]
+            override = connection.execute(
+                "SELECT override_value, override_expires_at, "
+                "override_configured_max_capacity FROM buckets "
+                "WHERE key_prefix = ? AND model_family = ? AND metric = ? "
+                "AND per_seconds = ?",
+                (self.key_prefix, self.model_family, metric, per_seconds),
+            ).fetchone()
+            maximum = spec.configured_max_capacity
+            if (
+                override is not None
+                and override[0] is not None
+                and override[1] is not None
+                and override[1] > current_time
+                and self._override_anchor_matches(spec, override[2])
+            ):
+                maximum = float(override[0])
+            ttl = debt_ttl_seconds(
+                normalized,
+                bucket_ttl_seconds=self._bucket_ttl_seconds,
+                per_seconds=per_seconds,
+                max_capacity=maximum,
+                configured_max_capacity=spec.configured_max_capacity,
+            )
             cursor = connection.execute(
                 "UPDATE buckets SET capacity = ?, last_checked = ?, updated_at = ?, "
                 "expires_at = ? "
@@ -873,7 +918,7 @@ class SqliteEngine:
                     normalized,
                     current_time,
                     current_time,
-                    current_time + self._bucket_ttl_seconds,
+                    current_time + ttl,
                     self.key_prefix,
                     self.model_family,
                     metric,
@@ -1402,6 +1447,13 @@ class SqliteEngine:
             self._prune(connection, current_time)
             states, _ = self._load_states(connection, current_time)
             state = states[bucket_id]
+            ttl = debt_ttl_seconds(
+                state.uncapped_capacity,
+                bucket_ttl_seconds=self._bucket_ttl_seconds,
+                per_seconds=per_seconds,
+                max_capacity=value,
+                configured_max_capacity=state.spec.configured_max_capacity,
+            )
             if not state.is_fresh_start:
                 self._write_capacities(
                     connection,
@@ -1419,7 +1471,7 @@ class SqliteEngine:
                     current_time + self._override_ttl_seconds,
                     self._bucket_by_id[bucket_id].configured_max_capacity,
                     current_time,
-                    current_time + self._bucket_ttl_seconds,
+                    current_time + ttl,
                     self.key_prefix,
                     self.model_family,
                     metric,
@@ -1447,6 +1499,13 @@ class SqliteEngine:
             ):
                 self._prune(connection, current_time)
                 states, _ = self._load_states(connection, current_time)
+                ttl = debt_ttl_seconds(
+                    states[bucket_id].uncapped_capacity,
+                    bucket_ttl_seconds=self._bucket_ttl_seconds,
+                    per_seconds=per_seconds,
+                    max_capacity=value,
+                    configured_max_capacity=value,
+                )
                 if not states[bucket_id].is_fresh_start:
                     self._write_capacities(
                         connection,
@@ -1462,7 +1521,7 @@ class SqliteEngine:
                     "AND model_family = ? AND metric = ? AND per_seconds = ?",
                     (
                         current_time,
-                        current_time + self._bucket_ttl_seconds,
+                        current_time + ttl,
                         self.key_prefix,
                         self.model_family,
                         metric,
@@ -1484,6 +1543,7 @@ class SqliteEngine:
         self,
         bucket_ids: frozenset[BucketId],
         *,
+        configured_max_capacities: Mapping[BucketId, float] | None = None,
         busy_timeout_ms: int | None = None,
         clock: Callable[[], float] = time.time,
     ) -> None:
@@ -1504,6 +1564,17 @@ class SqliteEngine:
             if anchored:
                 self._write_capacities(connection, anchored, current_time)
             for metric, per_seconds in target_ids:
+                maximum = (configured_max_capacities or {}).get(
+                    (metric, per_seconds),
+                    self._bucket_by_id[(metric, per_seconds)].configured_max_capacity,
+                )
+                ttl = debt_ttl_seconds(
+                    states[(metric, per_seconds)].uncapped_capacity,
+                    bucket_ttl_seconds=self._bucket_ttl_seconds,
+                    per_seconds=per_seconds,
+                    max_capacity=maximum,
+                    configured_max_capacity=maximum,
+                )
                 connection.execute(
                     "UPDATE buckets SET override_value = NULL, "
                     "override_expires_at = NULL, "
@@ -1513,7 +1584,7 @@ class SqliteEngine:
                     "AND model_family = ? AND metric = ? AND per_seconds = ?",
                     (
                         current_time,
-                        current_time + self._bucket_ttl_seconds,
+                        current_time + ttl,
                         self.key_prefix,
                         self.model_family,
                         metric,

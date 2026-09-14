@@ -15,6 +15,7 @@ from typing import Literal, Self
 
 from frozendict import frozendict
 
+from token_throttle._acquire_recovery import _ACQUIRE_RECOVERY, _AcquireRecovery
 from token_throttle._diagnostic import (
     BackendIntrospectionDiagnostic,
     DiagnosticIssue,
@@ -1508,6 +1509,7 @@ class RateLimiter(BaseRateLimiter):
         )
 
         await self._begin_pending_acquire(reservation)
+        recovery = _AcquireRecovery(reservation.reservation_id)
         backend_task: asyncio.Task[float | None] | None = None
         try:
             # Reserve an in-flight slot before registering family/alias rows.
@@ -1536,6 +1538,7 @@ class RateLimiter(BaseRateLimiter):
                 request_id=request_id,
                 reservation_id=reservation.reservation_id,
             )
+            recovery_token = _ACQUIRE_RECOVERY.set(recovery if _block else None)
             try:
                 backend_task = asyncio.create_task(
                     backend.await_for_capacity(
@@ -1556,6 +1559,7 @@ class RateLimiter(BaseRateLimiter):
                     )
                 )
             finally:
+                _ACQUIRE_RECOVERY.reset(recovery_token)
                 reset_limiter_callback_context(callback_context_token)
             issued_at_seconds = await backend_task
             reservation = _issued_reservation(reservation, issued_at_seconds)
@@ -1568,12 +1572,16 @@ class RateLimiter(BaseRateLimiter):
                         backend_task
                     )
                 except BaseException as helper_exc:
+                    await self._deliver_backend_cleanup_failure(
+                        recovery, reservation, model
+                    )
                     interrupted_by = await self._complete_acquire_state_update(
                         self._rollback_pending_acquire(reservation.reservation_id)
                     )
                     if interrupted_by is not None:
                         raise interrupted_by from helper_exc
                     raise
+            await self._deliver_backend_cleanup_failure(recovery, reservation, model)
             if consumed:
                 issued_at_seconds = None
                 with contextlib.suppress(BaseException):
@@ -1598,6 +1606,7 @@ class RateLimiter(BaseRateLimiter):
                 )
             raise
         except Exception as exc:
+            await self._deliver_backend_cleanup_failure(recovery, reservation, model)
             interrupted_by = await self._complete_acquire_state_update(
                 self._rollback_pending_acquire(reservation.reservation_id)
             )
@@ -1605,6 +1614,7 @@ class RateLimiter(BaseRateLimiter):
                 raise interrupted_by from exc
             _raise_backend_external_error(exc)
         except BaseException as exc:
+            await self._deliver_backend_cleanup_failure(recovery, reservation, model)
             interrupted_by = await self._complete_acquire_state_update(
                 self._rollback_pending_acquire(reservation.reservation_id)
             )
@@ -1638,6 +1648,19 @@ class RateLimiter(BaseRateLimiter):
             return reservation
         finally:
             await self._end_acquire_delivery_cleanup(reservation.reservation_id)
+
+    async def _deliver_backend_cleanup_failure(
+        self,
+        recovery: _AcquireRecovery,
+        reservation: CapacityReservation,
+        model: str,
+    ) -> None:
+        error = recovery.error(reservation)
+        if error is not None:
+            await self._complete_acquire_state_update(
+                self._finalize_pending_acquire(error.reservation, model)
+            )
+            raise error from error.refund_error
 
     @asynccontextmanager
     async def _refund_or_forget_reservation_on_raise(

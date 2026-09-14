@@ -85,7 +85,7 @@ from token_throttle.conformance import (
     sync_conformance_test_for,
 )
 
-__version__ = "13.0.0"
+__version__ = "14.0.0"
 
 if TYPE_CHECKING:
     from token_throttle._capacity import CalculatedCapacity

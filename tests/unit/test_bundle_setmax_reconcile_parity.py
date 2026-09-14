@@ -94,6 +94,8 @@ async def test_async_redis_post_write_readback_failure_does_not_abort_commit(
     quota, cfg = _redis_bucket_config()
     redis_client = MagicMock()
     redis_client.set = AsyncMock(return_value=True)
+    redis_client.time = AsyncMock(return_value=(1000, 0))
+    redis_client.eval = AsyncMock(return_value=1)
     redis_client.get.side_effect = RuntimeError("readback unavailable")
     bucket = RedisBucket(quota, cfg, redis_client, key_prefix="test")
 
@@ -104,7 +106,7 @@ async def test_async_redis_post_write_readback_failure_does_not_abort_commit(
 
     await bucket.set_max_capacity(50.0)
 
-    assert redis_client.set.call_count == 1
+    assert redis_client.eval.call_count == 1
 
 
 @pytest.mark.parametrize(

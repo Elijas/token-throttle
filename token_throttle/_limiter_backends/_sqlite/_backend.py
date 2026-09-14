@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, ClassVar, TypeVar
 
 from frozendict import frozendict
 
+from token_throttle._acquire_recovery import _record_acquire_cleanup_failure
 from token_throttle._capacity import _validate_max_capacity_finite_positive
 from token_throttle._diagnostic import (
     BackendBucketLimit,
@@ -469,7 +470,7 @@ class SqliteBackend(RateLimiterBackend):
                 None if deadline is None else max(0.0, deadline - time.monotonic())
             ):
                 return await asyncio.shield(future)
-        except BaseException:
+        except BaseException as interrupted_by:
             if operation.cancel():
                 future.cancel()
                 raise
@@ -485,16 +486,21 @@ class SqliteBackend(RateLimiterBackend):
                             reservation_id=reservation_id,
                         )
                     )
-                    cleanup_ok = await self._wait_for_future_while_cancelled(cleanup)
-                    if not cleanup_ok and cleanup.done() and not cleanup.cancelled():
-                        try:
-                            cleanup.result()
-                        except BaseException as exc:  # noqa: BLE001
-                            _log_cancellation_refund_failure(
-                                exc,
-                                reservation_id=reservation_id,
-                                usage=usage,
-                            )
+                    await self._wait_for_future_while_cancelled(cleanup)
+                    try:
+                        cleanup.result()
+                    except BaseException as exc:  # noqa: BLE001
+                        _record_acquire_cleanup_failure(
+                            exc,
+                            reservation_id=reservation_id,
+                            issued_at_seconds=attempt.result.current_time,
+                            interrupted_by=interrupted_by,
+                        )
+                        _log_cancellation_refund_failure(
+                            exc,
+                            reservation_id=reservation_id,
+                            usage=usage,
+                        )
             raise
 
     async def introspect(self) -> BackendIntrospectionDiagnostic:
@@ -586,6 +592,10 @@ class SqliteBackend(RateLimiterBackend):
             functools.partial(
                 self._engine.clear_max_capacity_overrides,
                 frozenset(old_ids - new_ids) | changed_ids,
+                configured_max_capacities={
+                    (quota.metric, int(quota.per_seconds)): float(quota.limit)
+                    for quota in cfg.quotas
+                },
             )
         )
         new_backend._engine.inherit_state_confirmations(self._engine)  # noqa: SLF001
@@ -754,9 +764,9 @@ class SqliteBackend(RateLimiterBackend):
                     wait_time_s=wait_time_s,
                     **current_limiter_callback_context(),
                 )
-        except BaseException:
+        except BaseException as interrupted_by:
             try:
-                await self._run_engine(
+                cleanup = self._submit(
                     functools.partial(
                         self._engine.cleanup_consumption,
                         usage,
@@ -764,7 +774,15 @@ class SqliteBackend(RateLimiterBackend):
                         reservation_id=reservation_id,
                     )
                 )
+                await self._wait_for_future_while_cancelled(cleanup)
+                cleanup.result()
             except BaseException as refund_exc:  # noqa: BLE001
+                _record_acquire_cleanup_failure(
+                    refund_exc,
+                    reservation_id=reservation_id,
+                    issued_at_seconds=result.current_time,
+                    interrupted_by=interrupted_by,
+                )
                 _log_cancellation_refund_failure(
                     refund_exc,
                     reservation_id=reservation_id,

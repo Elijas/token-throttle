@@ -25,6 +25,30 @@ from token_throttle._limiter_backends._redis._sync_backend import (
 
 
 class _AsyncRedisStore(_async_redis.Redis):
+    async def time(self):
+        return (1000, 0)
+
+    async def eval(  # noqa: PLR0913
+        self,
+        _script,
+        _numkeys,
+        key,
+        history_key,
+        _last_key,
+        _capacity_key,
+        action,
+        payload,
+        history,
+        history_ttl,
+        _configured,
+        _maximum,
+        override_ttl,
+    ):
+        self.store[history_key] = history
+        if action == "set":
+            self.store[key] = payload
+        return 1
+
     def __init__(self) -> None:
         self.store: dict[str, object] = {}
 

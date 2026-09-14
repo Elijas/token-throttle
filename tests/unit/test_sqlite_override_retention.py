@@ -71,7 +71,7 @@ def test_sqlite_builder_accepts_override_ttl_longer_than_bucket_ttl(
 
 @pytest.mark.parametrize("current_time", [110.0, 111.0, 119.0])
 @pytest.mark.parametrize("usage", [10.0, 20.0])
-def test_sqlite_snapshot_retains_override_with_fresh_idle_capacity(
+def test_sqlite_snapshot_retains_override_and_unpaid_debt(
     tmp_path: Path, current_time: float, usage: float
 ) -> None:
     db_path = tmp_path / "snapshot.sqlite3"
@@ -82,13 +82,21 @@ def test_sqlite_snapshot_retains_override_with_fresh_idle_capacity(
         snapshot = snapshots[0]
         assert snapshot.override_active
         assert snapshot.effective_max_capacity == 1.0
-        assert snapshot.current_capacity == 1.0
-        assert snapshot.is_fresh_start
+        expected_capacity = (
+            1.0 if usage == 10.0 else -10.0 + (current_time - 100.0) * 0.1
+        )
+        assert snapshot.current_capacity == pytest.approx(expected_capacity)
+        assert snapshot.is_fresh_start == (usage == 10.0)
         with sqlite3.connect(db_path) as connection:
             assert connection.execute(
                 "SELECT capacity, override_value, override_expires_at, expires_at "
                 "FROM buckets"
-            ).fetchone() == (10.0 - usage, 1.0, 120.0, 110.0)
+            ).fetchone() == (
+                10.0 - usage,
+                1.0,
+                120.0,
+                110.0 if usage == 10.0 else 210.0,
+            )
     finally:
         engine.close()
 
@@ -174,7 +182,7 @@ def test_sqlite_cleanup_from_another_connection_respects_override_expiry(
         reopened.close()
 
 
-def test_sqlite_replacing_override_after_idle_expiry_discards_old_capacity(
+def test_sqlite_replacing_override_after_idle_retains_unpaid_debt(
     tmp_path: Path,
 ) -> None:
     engine = _engine(tmp_path / "replace.sqlite3")
@@ -182,8 +190,8 @@ def test_sqlite_replacing_override_after_idle_expiry_discards_old_capacity(
         _drain_and_override(engine, usage=20.0)
         engine.set_max_capacity("requests", 10, 2.0, clock=lambda: 111.0)
         snapshots, _ = engine.inspect_snapshot(clock=lambda: 111.0)
-        assert snapshots[0].current_capacity == 2.0
+        assert snapshots[0].current_capacity == pytest.approx(-8.9)
         assert snapshots[0].effective_max_capacity == 2.0
-        assert snapshots[0].is_fresh_start
+        assert not snapshots[0].is_fresh_start
     finally:
         engine.close()

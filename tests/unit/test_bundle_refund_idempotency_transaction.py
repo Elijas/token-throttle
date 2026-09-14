@@ -234,6 +234,10 @@ class _AsyncPipeline:
         self._commands.clear()
         return results
 
+    def eval(self, _script, _numkeys, key, _capacity_key, _history_key, ttl, *_args):
+        # This fake models the ordinary-TTL branch; live tests cover debt retention.
+        return self.expire(key, ttl)
+
 
 class _AsyncRedis:
     def __init__(self) -> None:
@@ -336,6 +340,10 @@ class _SyncPipeline:
             results.append(getattr(self._redis, name)(*args, **kwargs))
         self._commands.clear()
         return results
+
+    def eval(self, _script, _numkeys, key, _capacity_key, _history_key, ttl, *_args):
+        # This fake models the ordinary-TTL branch; live tests cover debt retention.
+        return self.expire(key, ttl)
 
 
 class _SyncRedis:

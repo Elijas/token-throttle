@@ -15,6 +15,7 @@ from typing import Literal, Self
 
 from frozendict import frozendict
 
+from token_throttle._acquire_recovery import _ACQUIRE_RECOVERY, _AcquireRecovery
 from token_throttle._diagnostic import (
     BackendIntrospectionDiagnostic,
     DiagnosticIssue,
@@ -1389,6 +1390,7 @@ class SyncRateLimiter:
         )
 
         self._begin_pending_acquire(reservation)
+        recovery = _AcquireRecovery(reservation.reservation_id)
         try:
             # Reserve an in-flight slot before registering family/alias rows.
             # If max_in_flight rejects, validation metadata is never inserted;
@@ -1402,6 +1404,7 @@ class SyncRateLimiter:
                 request_id=request_id,
                 reservation_id=reservation.reservation_id,
             )
+            recovery_token = _ACQUIRE_RECOVERY.set(recovery if _block else None)
             try:
                 if _block:
                     issued_at_seconds = backend.wait_for_capacity(
@@ -1421,13 +1424,17 @@ class SyncRateLimiter:
                         ),
                     )
             finally:
+                _ACQUIRE_RECOVERY.reset(recovery_token)
                 reset_limiter_callback_context(callback_context_token)
             reservation = _issued_reservation(reservation, issued_at_seconds)
-        except Exception as exc:  # noqa: BLE001 - boundary wrapper preserves cause
+        except BaseException as exc:
+            error = recovery.error(reservation)
+            if error is not None:
+                self._finalize_pending_acquire(error.reservation, model)
+                raise error from error.refund_error
             self._rollback_pending_acquire(reservation.reservation_id)
-            _raise_backend_external_error(exc)
-        except BaseException:
-            self._rollback_pending_acquire(reservation.reservation_id)
+            if isinstance(exc, Exception):
+                _raise_backend_external_error(exc)
             raise
         self._begin_acquire_delivery_cleanup(reservation.reservation_id)
         try:

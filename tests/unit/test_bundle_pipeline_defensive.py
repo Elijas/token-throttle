@@ -54,6 +54,10 @@ class AsyncPipeline:
             raise self.exc
         return self.result
 
+    def eval(self, _script, _numkeys, key, _capacity_key, _history_key, ttl, *_args):
+        # This fake models the ordinary-TTL branch; live tests cover debt retention.
+        return self.expire(key, ttl)
+
 
 class SyncPipeline:
     def __init__(self, result: object = None, exc: BaseException | None = None) -> None:
@@ -74,6 +78,10 @@ class SyncPipeline:
             raise self.exc
         return self.result
 
+    def eval(self, _script, _numkeys, key, _capacity_key, _history_key, ttl, *_args):
+        # This fake models the ordinary-TTL branch; live tests cover debt retention.
+        return self.expire(key, ttl)
+
 
 async def test_partial_none_bucket_state_is_normalized_to_drained_capacity(
     quota: Quota, limit_config: PerModelConfig, monkeypatch: pytest.MonkeyPatch
@@ -90,9 +98,9 @@ async def test_partial_none_bucket_state_is_normalized_to_drained_capacity(
         seen.append((kwargs["last_checked"], kwargs["outdated_capacity"]))
         return original_calculate_capacity(**kwargs)
 
-    original_calculate_capacity = redis_backend_module.calculate_capacity
+    original_calculate_capacity = redis_backend_module.calculate_with_expiry
     monkeypatch.setattr(
-        redis_backend_module, "calculate_capacity", capture_calculate_capacity
+        redis_backend_module, "calculate_with_expiry", capture_calculate_capacity
     )
 
     result = await backend._get_capacities_unsafe(

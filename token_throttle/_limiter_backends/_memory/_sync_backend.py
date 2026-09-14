@@ -10,6 +10,7 @@ from typing import ClassVar
 
 from frozendict import frozendict
 
+from token_throttle._acquire_recovery import _record_acquire_cleanup_failure
 from token_throttle._diagnostic import (
     BackendBucketLimit,
     BackendIntrospectionDiagnostic,
@@ -642,7 +643,7 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
                     wait_time_s=wait_time_s,
                     **current_limiter_callback_context(),
                 )
-        except BaseException:
+        except BaseException as interrupted_by:
             # KI/SystemExit are the sync analogue of asyncio.CancelledError:
             # they can interrupt mid-statement and need the same best-effort
             # refund to avoid leaking capacity. Do not narrow to Exception.
@@ -653,10 +654,12 @@ class SyncMemoryBackend(SyncRateLimiterBackend):
                     reservation_id=reservation_id,
                 )
             except BaseException as refund_exc:  # noqa: BLE001
-                # Best-effort refund: in sync code, KI/SystemExit are the
-                # interrupt analogue of asyncio.shield() cancellation cleanup,
-                # but the refund itself can still fail. Log it, then swallow
-                # so the original interrupt propagates intact.
+                _record_acquire_cleanup_failure(
+                    refund_exc,
+                    reservation_id=reservation_id,
+                    issued_at_seconds=current_time,
+                    interrupted_by=interrupted_by,
+                )
                 _log_cancellation_refund_failure(
                     refund_exc,
                     reservation_id=reservation_id,

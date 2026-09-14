@@ -79,6 +79,8 @@ async def test_d03_non_utf8_override_warns_and_raises(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     redis_client = AsyncMock()
+    redis_client.time.return_value = (1000, 0)
+    redis_client.eval.return_value = 1
     redis_client.get.return_value = b"\xff"
     bucket = _bucket(quota, limit_config, redis_client)
 
@@ -113,6 +115,8 @@ async def test_d04_override_ttl_is_applied_when_configured(
     limit_config: PerModelConfig,
 ) -> None:
     redis_client = AsyncMock()
+    redis_client.time.return_value = (1000, 0)
+    redis_client.eval.return_value = 1
     bucket = _bucket(
         quota,
         limit_config,
@@ -122,6 +126,6 @@ async def test_d04_override_ttl_is_applied_when_configured(
 
     await bucket.set_max_capacity(10.0)
 
-    override_call = redis_client.set.await_args_list[0]
-    assert override_call.args[0] == bucket._max_capacity_key
-    assert override_call.kwargs == {"ex": 30 * 24 * 60 * 60}
+    override_call = redis_client.eval.await_args_list[0]
+    assert override_call.args[2] == bucket._max_capacity_key
+    assert override_call.args[-1] == 30 * 24 * 60 * 60

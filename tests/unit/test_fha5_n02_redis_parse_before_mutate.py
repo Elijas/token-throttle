@@ -42,6 +42,10 @@ class _AsyncPipeline:
     async def execute(self) -> object:
         return self.result
 
+    def eval(self, _script, _numkeys, key, _capacity_key, _history_key, ttl, *_args):
+        # This fake models the ordinary-TTL branch; live tests cover debt retention.
+        return self.expire(key, ttl)
+
 
 class _SyncPipeline(_AsyncPipeline):
     def execute(self) -> object:

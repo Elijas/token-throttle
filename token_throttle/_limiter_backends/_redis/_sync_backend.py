@@ -22,7 +22,11 @@ except ImportError as exc:
     ) from exc
 from frozendict import frozendict
 
-from token_throttle._capacity import CalculatedCapacity, calculate_capacity
+from token_throttle._acquire_recovery import _record_acquire_cleanup_failure
+from token_throttle._capacity import (
+    CalculatedCapacity,
+    _validate_max_capacity_finite_positive,
+)
 from token_throttle._diagnostic import (
     BackendBucketLimit,
     BackendIntrospectionDiagnostic,
@@ -72,6 +76,13 @@ from ._keys import (
     validate_redis_key_prefix,
     validate_refund_dedup_ttl_seconds,
 )
+from ._override_expiry import (
+    OverrideExpiry,
+    accrue_with_expiry,
+    calculate_with_expiry,
+    parse_expiry,
+)
+from ._retention import BucketSnapshotPlan, RetentionKwargs
 from ._server_time import sync_server_time
 from ._sync_bucket import (
     SyncRedisBucket,
@@ -112,6 +123,7 @@ class _ParsedCapacityReadResult(typing.NamedTuple):
     present_keys: tuple[str, ...]
     max_capacity_override: float | None
     calculated_capacity: CalculatedCapacity
+    expiry_history: OverrideExpiry | None
 
 
 LOCK_TIMEOUT_SECONDS = 30
@@ -921,6 +933,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                     last_checked_raw=results[offset],
                     capacity_raw=results[offset + 1],
                     override_raw=results[offset + 2],
+                    history_raw=self._redis.get(bucket._override_expiry_key),  # noqa: SLF001
                     current_time=current_time,
                     as_of_monotonic=as_of_monotonic,
                     # The bucket's live configured limit, not the build-time
@@ -938,6 +951,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         last_checked_raw: object,
         capacity_raw: object,
         override_raw: object,
+        history_raw: object = None,
         current_time: float,
         as_of_monotonic: float,
         configured_limit: float,
@@ -995,14 +1009,17 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                     status="partial_missing" if partial_missing else "state_loss",
                     as_of_monotonic=as_of_monotonic,
                 )
-            calculated = calculate_capacity(
-                last_checked=(None if last_checked is None else float(last_checked)),
-                outdated_capacity=(
-                    None if stored_capacity is None else float(stored_capacity)
-                ),
+            history = parse_expiry(
+                _validate_redis_get_result(history_raw, context="override expiry")
+            )
+            calculated = calculate_with_expiry(
+                history=history,
+                override=override,
+                configured=configured_limit,
+                per_seconds=per_seconds,
+                last_checked=last_checked,
+                outdated_capacity=stored_capacity,
                 current_time=current_time,
-                max_capacity=effective,
-                rate_per_sec=effective / per_seconds,
                 bucket_id=bucket.full_redis_key,
             )
             return make_bucket_diagnostic(
@@ -1521,17 +1538,15 @@ class SyncRedisBackend(SyncRateLimiterBackend):
             max_capacity_override = bucket._deserialize_max_capacity_override(  # noqa: SLF001
                 max_capacity_raw
             )
-            effective_max_capacity = (
-                bucket.configured_max_capacity
-                if max_capacity_override is None
-                else max_capacity_override
-            )
-            calculated = calculate_capacity(
+            history = bucket._read_override_expiry()  # noqa: SLF001
+            calculated = calculate_with_expiry(
+                history=history,
+                override=max_capacity_override,
+                configured=bucket.configured_max_capacity,
+                per_seconds=bucket.per_seconds,
                 last_checked=last_checked,
                 outdated_capacity=capacity,
                 current_time=current_time,
-                max_capacity=effective_max_capacity,
-                rate_per_sec=effective_max_capacity / bucket.per_seconds,
                 bucket_id=bucket.full_redis_key,
             )
             calculated = _revalidate_dto(calculated)
@@ -1542,6 +1557,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                     present_keys=present_keys,
                     max_capacity_override=max_capacity_override,
                     calculated_capacity=calculated,
+                    expiry_history=history,
                 )
             )
 
@@ -1606,6 +1622,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
             bucket._apply_parsed_max_capacity_override(  # noqa: SLF001
                 parsed_result.max_capacity_override
             )
+            bucket._expiry_history = parsed_result.expiry_history  # noqa: SLF001
             result = parsed_result.calculated_capacity
             if parsed_result.missing_keys and not result.is_fresh_start:
                 bucket._set_missing_consumption_data_context(  # noqa: SLF001
@@ -1693,6 +1710,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
             if refund_tombstone_key is None:
                 raise ValueError("acquired marker writes require a reservation_id")
             keys: list[str] = [acquired_marker_key, refund_tombstone_key]
+            history_retention: list[tuple[SyncRedisBucket, int]] = []
             args: list[str | bytes | int | float] = [
                 acquired_marker_ttl_ms,
                 acquired_marker_value,
@@ -1718,13 +1736,17 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                         matching_bucket._capacity_key,  # noqa: SLF001
                     ]
                 )
+                ttl = matching_bucket.capacity_ttl(normalized_amount)
+                history_retention.append((matching_bucket, ttl))
                 args.extend(
                     [
                         current_time,
                         normalized_amount,
-                        matching_bucket._bucket_ttl_seconds,  # noqa: SLF001
+                        ttl,
                     ]
                 )
+            for history_bucket, ttl in history_retention:
+                history_bucket.retain_capacity_history(ttl)
             try:
                 result = self._redis.eval(
                     _ACQUIRE_MARKER_SET_SCRIPT,
@@ -1879,6 +1901,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
             bucket_id=None,
         )
         keys: list[str] = [acquired_marker_key, refund_dedup_key]
+        history_retention: list[tuple[SyncRedisBucket, int]] = []
         # redis-py replays the same EVAL arguments after an ambiguous transport
         # failure. A new backend invocation gets a new token, so only that
         # internal replay can recognize the tombstone as its own commit.
@@ -1907,13 +1930,17 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                     matching_bucket._capacity_key,  # noqa: SLF001
                 ]
             )
+            ttl = matching_bucket.capacity_ttl(normalized_amount)
+            history_retention.append((matching_bucket, ttl))
             args.extend(
                 [
                     current_time,
                     normalized_amount,
-                    matching_bucket._bucket_ttl_seconds,  # noqa: SLF001
+                    ttl,
                 ]
             )
+        for history_bucket, ttl in history_retention:
+            history_bucket.retain_capacity_history(ttl)
         try:
             result = self._redis.eval(
                 _REFUND_WITH_MARKER_SCRIPT,
@@ -2214,7 +2241,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                     usage=usage,
                     current_time=current_time,
                 )
-        except BaseException:
+        except BaseException as interrupted_by:
             # KI/SystemExit are the sync analogue of asyncio.CancelledError:
             # they can interrupt mid-statement and need the same best-effort
             # refund to avoid leaking capacity. Do not narrow to Exception.
@@ -2226,8 +2253,12 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                         acquired_marker_key=self._acquired_marker_key(reservation_id),
                     )
                 except BaseException as refund_exc:  # noqa: BLE001
-                    # Best-effort: sync interrupts mirror async cancellation
-                    # cleanup. Swallow so the original interrupt propagates.
+                    _record_acquire_cleanup_failure(
+                        refund_exc,
+                        reservation_id=reservation_id,
+                        issued_at_seconds=current_time,
+                        interrupted_by=interrupted_by,
+                    )
                     _log_cancellation_refund_failure(
                         refund_exc,
                         reservation_id=reservation_id,
@@ -2458,7 +2489,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                                     wait_time_s=wait_time_s,
                                     **current_limiter_callback_context(),
                                 )
-                    except BaseException:
+                    except BaseException as interrupted_by:
                         # KI/SystemExit are the sync analogue of asyncio.CancelledError:
                         # they can interrupt mid-statement and need the same best-effort
                         # refund to avoid leaking capacity. Do not narrow to Exception.
@@ -2471,8 +2502,12 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                                 ),
                             )
                         except BaseException as refund_exc:  # noqa: BLE001
-                            # Best-effort: sync interrupts mirror async cancellation
-                            # cleanup. Swallow so the original interrupt propagates.
+                            _record_acquire_cleanup_failure(
+                                refund_exc,
+                                reservation_id=reservation_id,
+                                issued_at_seconds=consumed_at_seconds,
+                                interrupted_by=interrupted_by,
+                            )
                             _log_cancellation_refund_failure(
                                 refund_exc,
                                 reservation_id=reservation_id,
@@ -2887,13 +2922,23 @@ class SyncRedisBackend(SyncRateLimiterBackend):
             )
         return True
 
-    def _snapshot_bucket_state(self, bucket: SyncRedisBucket) -> None:  # noqa: PLR0915
+    def _snapshot_bucket_state(  # noqa: PLR0915
+        self,
+        bucket: SyncRedisBucket,
+        *,
+        retention_max_capacity: float | None = None,
+        prepare_only: bool = False,
+    ) -> BucketSnapshotPlan | None:
         """
         Freeze ``bucket`` in Redis at its accrued capacity under the CURRENT rate.
 
         Uncapped anchor (stored + elapsed*old_rate) preserves raw values above
         ``max_capacity`` — reads apply ``min(max_capacity, …)`` and a later
         cap raise can re-expose the hidden overflow.
+
+        ``prepare_only`` returns a validated projection without refreshing TTLs
+        or changing caches/proof. Rebuilds prepare every bucket, then commit
+        those same projections so validation cannot drift between phases.
         """
         supports_pending_override = all(
             hasattr(bucket, attr)
@@ -2919,21 +2964,21 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                 "refresh_max_capacity_from_redis",
                 None,
             )
-            if callable(refresh_max_capacity):
+            if not prepare_only and callable(refresh_max_capacity):
                 refresh_max_capacity()
-            else:  # test fakes and compatible custom bucket shims
+            elif not prepare_only:  # test fakes and compatible custom bucket shims
                 bucket.get_max_capacity()
             max_capacity_override = None
             effective_rate_per_sec = bucket._rate_per_sec  # noqa: SLF001
 
         def refresh_pending_override_ttl() -> None:
-            if supports_pending_override:
+            if supports_pending_override and not prepare_only:
                 bucket._refresh_max_capacity_override_ttl(  # noqa: SLF001
                     max_capacity_override
                 )
 
         def apply_pending_override_cache() -> None:
-            if supports_pending_override:
+            if supports_pending_override and not prepare_only:
                 bucket._apply_parsed_max_capacity_override(  # noqa: SLF001
                     max_capacity_override
                 )
@@ -2942,8 +2987,13 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         pipeline = self._redis.pipeline()
         pipeline.get(bucket._last_checked_key)  # noqa: SLF001
         pipeline.get(bucket._capacity_key)  # noqa: SLF001
-        pipeline.expire(bucket._last_checked_key, bucket._bucket_ttl_seconds)  # noqa: SLF001
-        pipeline.expire(bucket._capacity_key, bucket._bucket_ttl_seconds)  # noqa: SLF001
+        if not prepare_only and hasattr(bucket, "queue_state_ttl_refresh"):
+            bucket.queue_state_ttl_refresh(pipeline)
+        elif (
+            not prepare_only
+        ):  # Compatible custom bucket shims retain their own TTL policy.
+            pipeline.expire(bucket._last_checked_key, bucket._bucket_ttl_seconds)  # noqa: SLF001
+            pipeline.expire(bucket._capacity_key, bucket._bucket_ttl_seconds)  # noqa: SLF001
         try:
             results = pipeline.execute()
         except redis.exceptions.ResponseError as exc:
@@ -2953,7 +3003,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         results = _validate_pipeline_results(
             results,
             context=f"SyncRedisBackend._snapshot_bucket_state({bucket.full_redis_key})",
-            expected_count=4,
+            expected_count=2 if prepare_only else 4,
         )
         last_checked_raw, stored_raw = _normalize_bucket_state_pair(
             results[SyncRedisBucket.PIPELINE_LAST_CHECKED_OFFSET],
@@ -2966,20 +3016,21 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                 else False
             ),
         )
-        _validate_expire_result(
-            results[2],
-            context=(
-                f"SyncRedisBackend._snapshot_bucket_state({bucket.full_redis_key}) "
-                "last_checked TTL"
-            ),
-        )
-        _validate_expire_result(
-            results[3],
-            context=(
-                f"SyncRedisBackend._snapshot_bucket_state({bucket.full_redis_key}) "
-                "capacity TTL"
-            ),
-        )
+        if not prepare_only:
+            _validate_expire_result(
+                results[2],
+                context=(
+                    f"SyncRedisBackend._snapshot_bucket_state({bucket.full_redis_key}) "
+                    "last_checked TTL"
+                ),
+            )
+            _validate_expire_result(
+                results[3],
+                context=(
+                    f"SyncRedisBackend._snapshot_bucket_state({bucket.full_redis_key}) "
+                    "capacity TTL"
+                ),
+            )
         if last_checked_raw is None or stored_raw is None:
             refresh_pending_override_ttl()
             apply_pending_override_cache()
@@ -2990,7 +3041,13 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                 last_checked_raw,
                 stored_raw,
             )
-            return
+            return (
+                BucketSnapshotPlan(
+                    current_time, None, max_capacity_override, RetentionKwargs()
+                )
+                if prepare_only
+                else None
+            )
         try:
             last_checked = float(last_checked_raw)
             stored = float(stored_raw)
@@ -3006,7 +3063,13 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                 _safe_redis_value_repr(last_checked_raw),
                 _safe_redis_value_repr(stored_raw),
             )
-            return
+            return (
+                BucketSnapshotPlan(
+                    current_time, None, max_capacity_override, RetentionKwargs()
+                )
+                if prepare_only
+                else None
+            )
         if not (math.isfinite(last_checked) and math.isfinite(stored)):
             refresh_pending_override_ttl()
             apply_pending_override_cache()
@@ -3017,18 +3080,77 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                 _safe_redis_value_repr(last_checked_raw),
                 _safe_redis_value_repr(stored_raw),
             )
-            return
-        time_passed = current_time - last_checked
-        if time_passed < 0:
-            time_passed = 0.0
+            return (
+                BucketSnapshotPlan(
+                    current_time, None, max_capacity_override, RetentionKwargs()
+                )
+                if prepare_only
+                else None
+            )
+        history = (
+            bucket._read_override_expiry()  # noqa: SLF001
+            if supports_pending_override
+            else None
+        )
+        anchored = accrue_with_expiry(
+            history,
+            override=max_capacity_override,
+            configured=bucket.configured_max_capacity,
+            per_seconds=bucket.per_seconds,
+            last_checked=last_checked,
+            current_time=current_time,
+            stored=stored,
+            rate_per_sec=effective_rate_per_sec,
+        )
         refresh_pending_override_ttl()
-        anchored = stored + time_passed * effective_rate_per_sec
+        retention_kwargs = RetentionKwargs()
+        if hasattr(bucket, "capacity_ttl"):
+            # The following override/config write can fail: the anchor must
+            # remain safe at both the old and the proposed refill rate.
+            retention_kwargs["retention_max_capacity"] = (
+                effective_rate_per_sec * bucket.per_seconds
+                if retention_max_capacity is None
+                else min(
+                    effective_rate_per_sec * bucket.per_seconds,
+                    retention_max_capacity,
+                )
+            )
+        if prepare_only:
+            if not math.isfinite(anchored):
+                raise ValueError(f"capacity must be finite (got {anchored!r})")
+            if hasattr(bucket, "capacity_ttl"):
+                bucket.capacity_ttl(
+                    anchored, retention_kwargs.get("retention_max_capacity")
+                )
+            return BucketSnapshotPlan(
+                current_time, anchored, max_capacity_override, retention_kwargs
+            )
         bucket.set_capacity(
             anchored,
             current_time=current_time,
             allow_negative=True,
+            **retention_kwargs,
         )
         apply_pending_override_cache()
+        return None
+
+    def _commit_bucket_snapshot(
+        self,
+        bucket: SyncRedisBucket,
+        plan: BucketSnapshotPlan,
+    ) -> None:
+        """Commit a validated projection without reading or projecting it again."""
+        if hasattr(bucket, "_refresh_max_capacity_override_ttl"):
+            bucket._refresh_max_capacity_override_ttl(plan.max_capacity_override)  # noqa: SLF001
+        if plan.capacity is not None:
+            bucket.set_capacity(
+                plan.capacity,
+                current_time=plan.current_time,
+                allow_negative=True,
+                **plan.retention_kwargs,
+            )
+        if hasattr(bucket, "_apply_parsed_max_capacity_override"):
+            bucket._apply_parsed_max_capacity_override(plan.max_capacity_override)  # noqa: SLF001
 
     def set_max_capacity(
         self,
@@ -3048,7 +3170,10 @@ class SyncRedisBackend(SyncRateLimiterBackend):
             timeout=LOCK_TIMEOUT_SECONDS, buckets=buckets
         ) as lock_stack:
             self._extend_locks(lock_stack)
-            self._snapshot_bucket_state(bucket)
+            self._snapshot_bucket_state(
+                bucket,
+                retention_max_capacity=_validate_max_capacity_finite_positive(value),
+            )
             bucket.set_max_capacity(value)
         with self._local_condition:
             self._local_condition.notify_all()
@@ -3071,7 +3196,10 @@ class SyncRedisBackend(SyncRateLimiterBackend):
             timeout=LOCK_TIMEOUT_SECONDS, buckets=buckets
         ) as lock_stack:
             self._extend_locks(lock_stack)
-            self._snapshot_bucket_state(bucket)
+            self._snapshot_bucket_state(
+                bucket,
+                retention_max_capacity=_validate_max_capacity_finite_positive(value),
+            )
             bucket.clear_max_capacity_override()
             bucket.set_configured_max_capacity(value)
         with self._local_condition:
@@ -3106,6 +3234,36 @@ class SyncRedisBackend(SyncRateLimiterBackend):
         with self._lock_or_contention(
             timeout=LOCK_TIMEOUT_SECONDS, buckets=reconfigure_buckets
         ) as lock_stack:
+            # Prepare the complete rebuild under the union of old/new locks.
+            # Predictable retention errors must precede every accounting,
+            # override, configuration-cache and confirmation mutation.
+            snapshots: dict[str, BucketSnapshotPlan] = {}
+            targets: list[tuple[SyncRedisBucket, float | None]] = [
+                (bucket, None) for bucket in removed_buckets
+            ]
+            for quota in cfg.quotas:
+                matching = self._find_bucket(
+                    new_buckets, quota.metric, int(quota.per_seconds)
+                )
+                if matching is None:
+                    raise ValueError(
+                        f"Bucket '{quota.metric}/{quota.per_seconds}s' not found"
+                    )
+                current = self._find_bucket(
+                    current_buckets, quota.metric, int(quota.per_seconds)
+                )
+                targets.append(
+                    (current if current is not None else matching, float(quota.limit))
+                )
+            for bucket, maximum in targets:
+                self._extend_locks(lock_stack)
+                plan = self._snapshot_bucket_state(
+                    bucket,
+                    retention_max_capacity=maximum,
+                    prepare_only=True,
+                )
+                assert plan is not None  # noqa: S101
+                snapshots[bucket.full_redis_key] = plan
             for bucket in removed_buckets:
                 # Snapshot first so the frozen capacity/last_checked in Redis
                 # reflect the bucket's state at the moment of removal. Without
@@ -3114,7 +3272,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                 # time preceding it). Then clear the runtime override so the
                 # re-add starts from the callable config's static quota again.
                 self._extend_locks(lock_stack)
-                self._snapshot_bucket_state(bucket)
+                self._commit_bucket_snapshot(bucket, snapshots[bucket.full_redis_key])
                 bucket.clear_max_capacity_override()
             for quota in cfg.quotas:
                 matching_bucket = self._find_bucket(
@@ -3136,8 +3294,12 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                 # stored override payload, so the override is accepted and
                 # yields the true active rate).
                 self._extend_locks(lock_stack)
-                self._snapshot_bucket_state(
+                snapshot_bucket = (
                     current_bucket if current_bucket is not None else matching_bucket
+                )
+                self._commit_bucket_snapshot(
+                    snapshot_bucket,
+                    snapshots[snapshot_bucket.full_redis_key],
                 )
                 if current_bucket is not None and float(
                     current_bucket.configured_max_capacity

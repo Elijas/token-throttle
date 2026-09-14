@@ -171,8 +171,25 @@ class _AsyncRedisPipeline:
                 results.append(key in self._redis.store)
         return results
 
+    def eval(self, _script, _numkeys, key, _capacity_key, _history_key, ttl, *_args):
+        # This fake models the ordinary-TTL branch; live tests cover debt retention.
+        return self.expire(key, ttl)
+
 
 class _AsyncRedis:
+    async def time(self):
+        return (1000, 0)
+
+    async def eval(self, _script, numkeys, *args):
+        if numkeys == 3:
+            return await self.expire(args[0], args[3])
+        assert numkeys == 4
+        key, history_key, _last_key, _capacity_key, action, payload, history, *_ = args
+        self.store[history_key] = history
+        if action == "set":
+            self.store[key] = payload
+        return 1
+
     def __init__(self) -> None:
         self.store: dict[str, object] = {}
         self.get_calls: list[str] = []
@@ -219,8 +236,25 @@ class _SyncRedisPipeline:
                 results.append(key in self._redis.store)
         return results
 
+    def eval(self, _script, _numkeys, key, _capacity_key, _history_key, ttl, *_args):
+        # This fake models the ordinary-TTL branch; live tests cover debt retention.
+        return self.expire(key, ttl)
+
 
 class _SyncRedis:
+    def time(self):
+        return (1000, 0)
+
+    def eval(self, _script, numkeys, *args):
+        if numkeys == 3:
+            return self.expire(args[0], args[3])
+        assert numkeys == 4
+        key, history_key, _last_key, _capacity_key, action, payload, history, *_ = args
+        self.store[history_key] = history
+        if action == "set":
+            self.store[key] = payload
+        return 1
+
     def __init__(self) -> None:
         self.store: dict[str, object] = {}
         self.get_calls: list[str] = []
@@ -286,7 +320,11 @@ async def test_async_redis_snapshot_force_refreshes_stale_local_override_cache(
 
     await backend._snapshot_bucket_state(bucket)
 
-    assert redis_client.get_calls == [bucket._max_capacity_key]
+    assert redis_client.get_calls == [
+        bucket._max_capacity_key,
+        bucket._override_expiry_key,
+        bucket._override_expiry_key,
+    ]
     assert bucket.max_capacity == pytest.approx(200.0)
     assert redis_client.store[bucket._capacity_key] == pytest.approx(100.0)
 
@@ -328,6 +366,10 @@ def test_sync_redis_snapshot_force_refreshes_stale_local_override_cache(
 
     backend._snapshot_bucket_state(bucket)
 
-    assert redis_client.get_calls == [bucket._max_capacity_key]
+    assert redis_client.get_calls == [
+        bucket._max_capacity_key,
+        bucket._override_expiry_key,
+        bucket._override_expiry_key,
+    ]
     assert bucket.max_capacity == pytest.approx(200.0)
     assert redis_client.store[bucket._capacity_key] == pytest.approx(100.0)

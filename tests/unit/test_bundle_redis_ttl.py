@@ -46,8 +46,38 @@ class _FakeAsyncPipeline:
         self._commands.clear()
         return results
 
+    def eval(self, _script, _numkeys, key, _capacity_key, _history_key, ttl, *_args):
+        # This fake models the ordinary-TTL branch; live tests cover debt retention.
+        return self.expire(key, ttl)
+
 
 class _FakeAsyncRedis(_async_redis.Redis):
+    async def time(self):
+        return (1000, 0)
+
+    async def eval(  # noqa: PLR0913
+        self,
+        _script,
+        _numkeys,
+        key,
+        history_key,
+        _last_key,
+        _capacity_key,
+        action,
+        payload,
+        history,
+        history_ttl,
+        _configured,
+        _maximum,
+        override_ttl,
+    ):
+        await self.set(history_key, history, ex=history_ttl)
+        if action == "set":
+            await self.set(key, payload, ex=override_ttl)
+        else:
+            await self.expire(key, override_ttl)
+        return 1
+
     def __init__(self) -> None:
         self.store: dict[str, object] = {}
         self.deadlines: dict[str, float | None] = {}

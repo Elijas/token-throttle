@@ -103,7 +103,7 @@ still enforced when a specific marker or tombstone is addressed.
 
 | Builder option | Default | Contract |
 | --- | ---: | --- |
-| `bucket_ttl_seconds` | 604800 (7 days) | Inactivity lifetime for bucket rows. It must be at least twice the longest configured quota window. After expiry the next use is a fresh bucket; capacity may sit as low as `-max_capacity` by design, and refilling from there takes two windows, so the validated bound guarantees an expired bucket had already refilled fully. |
+| `bucket_ttl_seconds` | 604800 (7 days) | Base inactivity lifetime for bucket rows, at least twice the longest configured quota window. Negative capacity left by a lower maximum extends retention until the debt can refill; expiry then permits a fresh bucket. |
 | `refund_dedup_ttl_seconds` | 604800 (7 days) | How long a completed refund remains recognizable as a duplicate. |
 | `max_reservation_lifetime_seconds` | Derived | Maximum age at which an acquire marker remains refundable. When omitted, it is just below half of the shorter bucket/refund TTL. |
 | `override_ttl_seconds` | `bucket_ttl_seconds` | Fixed lifetime of a shared `set_max_capacity()` override, measured from the call that writes it. Ordinary bucket activity does not extend it, and bucket-row expiry does not shorten it: an idle bucket's capacity state is reset while a still-live override is kept. |
@@ -115,6 +115,16 @@ seconds (at most `2**31 - 1`). `None` is not a supported "never expire" value,
 including for bucket or refund-dedup state. This release intentionally keeps
 all durable bookkeeping bounded; choose a sufficiently long finite TTL when
 you need a long idle or refund window.
+
+When lowering a maximum preserves deep debt, bucket retention grows using the
+slower of the configured and active override rates, plus one refill window.
+Requirements beyond `2**31 - 1` seconds raise `ValueError`, including when a
+short-lived override would later expire to a faster rate. Allow debt to refill
+or choose a less restrictive limit before retrying. This extension uses the
+existing row deadline and does not extend reservation lifetimes or the local
+state-loss confirmation window. Upgrade all processes sharing this accounting
+together; older clients can shorten the required retention. No schema migration
+is needed for this change.
 
 The builder enforces both safety inequalities:
 

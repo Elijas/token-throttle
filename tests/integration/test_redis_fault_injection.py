@@ -273,6 +273,8 @@ async def test_acquire_lua_restores_preexisting_bucket_via_set_when_later_set_fa
     )
     seed_marker = redis_acquired_marker_key(prefix, seed.reservation_id)
     good_value_before = await redis_client.get(good_bucket._capacity_key)
+    bad_value_before = await redis_client.get(bad_bucket._capacity_key)
+    bad_timestamp_before = await redis_client.get(bad_bucket._last_checked_key)
     assert good_value_before is not None
     assert await _async_capacity(
         redis_client, good_bucket._capacity_key
@@ -294,10 +296,12 @@ async def test_acquire_lua_restores_preexisting_bucket_via_set_when_later_set_fa
     # Pre-existing good bucket restored byte-for-byte via SET ... PX, TTL intact.
     assert await redis_client.get(good_bucket._capacity_key) == good_value_before
     assert await redis_client.pttl(good_bucket._capacity_key) > 0
-    # The poisoned bucket's read-phase EXPIRE 0 drops its keys, so rollback finds
-    # them already absent and DELs — no partial capacity survives the failed acquire.
-    assert await _async_capacity(redis_client, bad_bucket._capacity_key) is None
-    assert await _async_capacity(redis_client, bad_bucket._last_checked_key) is None
+    # Refresh cannot shorten existing retention, even with the poisoned TTL.
+    # The failed SET must therefore restore this bucket byte-for-byte as well.
+    assert await redis_client.get(bad_bucket._capacity_key) == bad_value_before
+    assert await redis_client.get(bad_bucket._last_checked_key) == bad_timestamp_before
+    assert await redis_client.pttl(bad_bucket._capacity_key) > 0
+    assert await redis_client.pttl(bad_bucket._last_checked_key) > 0
 
     # The failed acquire created no new marker; only the seed's marker survives.
     assert await redis_client.exists(seed_marker) == 1
@@ -328,6 +332,8 @@ def test_sync_acquire_lua_restores_preexisting_bucket_via_set_when_later_set_fai
     )
     seed_marker = redis_acquired_marker_key(prefix, seed.reservation_id)
     good_value_before = sync_redis_client.get(good_bucket._capacity_key)
+    bad_value_before = sync_redis_client.get(bad_bucket._capacity_key)
+    bad_timestamp_before = sync_redis_client.get(bad_bucket._last_checked_key)
     assert good_value_before is not None
     assert _sync_capacity(
         sync_redis_client, good_bucket._capacity_key
@@ -349,10 +355,12 @@ def test_sync_acquire_lua_restores_preexisting_bucket_via_set_when_later_set_fai
     # Pre-existing good bucket restored byte-for-byte via SET ... PX, TTL intact.
     assert sync_redis_client.get(good_bucket._capacity_key) == good_value_before
     assert sync_redis_client.pttl(good_bucket._capacity_key) > 0
-    # The poisoned bucket's read-phase EXPIRE 0 drops its keys, so rollback finds
-    # them already absent and DELs — no partial capacity survives the failed acquire.
-    assert _sync_capacity(sync_redis_client, bad_bucket._capacity_key) is None
-    assert _sync_capacity(sync_redis_client, bad_bucket._last_checked_key) is None
+    # Refresh cannot shorten existing retention, even with the poisoned TTL.
+    # The failed SET must therefore restore this bucket byte-for-byte as well.
+    assert sync_redis_client.get(bad_bucket._capacity_key) == bad_value_before
+    assert sync_redis_client.get(bad_bucket._last_checked_key) == bad_timestamp_before
+    assert sync_redis_client.pttl(bad_bucket._capacity_key) > 0
+    assert sync_redis_client.pttl(bad_bucket._last_checked_key) > 0
 
     # The failed acquire created no new marker; only the seed's marker survives.
     assert sync_redis_client.exists(seed_marker) == 1

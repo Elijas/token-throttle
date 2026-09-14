@@ -316,6 +316,10 @@ class _AsyncPipeline:
         self._ops.clear()
         return results
 
+    def eval(self, _script, _numkeys, key, _capacity_key, _history_key, ttl, *_args):
+        # This fake models the ordinary-TTL branch; live tests cover debt retention.
+        return self.expire(key, ttl)
+
 
 class _AsyncRedisState:
     def __init__(self) -> None:
@@ -376,6 +380,10 @@ class _SyncPipeline:
                 raise AssertionError(f"Unknown op {op}")
         self._ops.clear()
         return results
+
+    def eval(self, _script, _numkeys, key, _capacity_key, _history_key, ttl, *_args):
+        # This fake models the ordinary-TTL branch; live tests cover debt retention.
+        return self.expire(key, ttl)
 
 
 class _SyncRedisState:

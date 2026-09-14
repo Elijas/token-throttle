@@ -18,29 +18,36 @@ from token_throttle._limiter_backends._redis._sync_backend import SyncRedisBacke
 
 
 class _NoopPipeline:
+    def __init__(self):
+        self.results = []
+
     def get(self, key):  # pragma: no cover
-        pass
+        self.results.append(None)
 
     def set(self, key, value):  # pragma: no cover
         pass
 
     def expire(self, key, seconds):  # pragma: no cover
-        pass
+        self.results.append(False)
 
     def delete(self, key):  # pragma: no cover
         pass
 
     async def execute(self):
         # Fresh: last_checked + capacity both absent -> skips snapshot write.
-        return [None, None, False, False]
+        return self.results
 
     def execute_sync(self):  # pragma: no cover
-        return [None, None, False, False]
+        return self.results
+
+    def eval(self, _script, _numkeys, key, _capacity_key, _history_key, ttl, *_args):
+        # This fake models the ordinary-TTL branch; live tests cover debt retention.
+        return self.expire(key, ttl)
 
 
 class _SyncNoopPipeline(_NoopPipeline):
     def execute(self):  # type: ignore[override]
-        return [None, None, False, False]
+        return self.results
 
 
 class FakeAsyncRedis:

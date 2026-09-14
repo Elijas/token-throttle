@@ -33,6 +33,9 @@ def mock_redis() -> MagicMock:
     mock = MagicMock()
     mock.get.return_value = None
     mock.set.return_value = True
+    mock.time.return_value = (1000, 0)
+    mock.eval.return_value = 1
+    mock.expire.return_value = True
     mock.pipeline.return_value = MagicMock()
     return mock
 
@@ -59,12 +62,12 @@ def test_set_max_capacity_rejects_boolean(bucket):
 def test_set_max_capacity_writes_override_payload(bucket, mock_redis):
     bucket.set_max_capacity(5.0)
 
-    assert mock_redis.set.call_count == 1
-    key, payload = mock_redis.set.call_args_list[0].args
-    assert key == bucket._max_capacity_key
-    assert mock_redis.set.call_args_list[0].kwargs == {
-        "ex": bucket._override_ttl_seconds
-    }
+    mock_redis.eval.assert_called_once()
+    args = mock_redis.eval.call_args.args
+    assert args[2] == bucket._max_capacity_key
+    assert args[3] == bucket._override_expiry_key
+    assert args[-1] == bucket._override_ttl_seconds
+    payload = args[7]
     assert json.loads(payload) == {
         "configured_max_capacity": 20.0,
         "override_max_capacity": 5.0,

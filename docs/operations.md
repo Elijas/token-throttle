@@ -192,11 +192,10 @@ default pool where earlier versions did not.
 Redis backends require Redis server 6.2 or newer and a Redis user that can run
 `GET`, `EXISTS`, `SET`, `DEL`, `EXPIRE`, `PEXPIRE`, `PTTL`, `TIME`, `MULTI`,
 `EXEC`, `DISCARD`, and Lua scripting (`EVAL`, `EVALSHA`, `SCRIPT LOAD`).
-`PEXPIRE` is used by redis-py's lock extend/reacquire script, and `MULTI` /
-`EXEC` / `DISCARD` are used by redis-py's transaction pipelines that
-token-throttle uses for atomic acquire/refund transactions. token-throttle's own
-code never issues `PEXPIRE` or `MULTI` / `EXEC` / `DISCARD` by name, so they are
-easy to omit from a hand-written ACL: a user provisioned with only
+`PEXPIRE` is used by token-throttle's state/history-retention Lua and redis-py's lock
+extend/reacquire script. `MULTI` / `EXEC` / `DISCARD` are used by redis-py's
+transaction pipelines for atomic acquire/refund transactions. These commands
+are easy to omit from a hand-written ACL: a user provisioned with only
 `GET` / `EXISTS` / `SET` / `DEL` / `EXPIRE` / `PTTL` / `TIME` plus scripting can
 pass an initial smoke test but fail during ordinary multi-quota usage as soon as
 a lock needs to extend or a pipelined transaction is discarded. Lua scripting
@@ -261,11 +260,27 @@ once, pass `max_connections` yourself rather than inheriting the default.
 
 Redis bucket state expires by default after 7 days of inactivity. Configure
 `bucket_ttl_seconds` on Redis builders or Redis OpenAI factories to choose a
-different positive TTL. The TTL is refreshed whenever bucket state is read or
-written. `bucket_ttl_seconds` must be at least as long as your longest
-configured quota window (`per_seconds`); backend build time rejects
-configurations where it is shorter, since an idle gap longer than the TTL
-would silently reset a quota that has not actually refilled.
+different positive TTL. Ordinary capacity reads and writes refresh retention;
+diagnostics do not. `bucket_ttl_seconds` must be at least twice your longest
+configured quota window (`per_seconds`); backend build time rejects shorter
+values so ordinary negative capacity has time to refill before expiry.
+
+Lowering a maximum can leave deeper debt relative to the new rate. Redis and
+SQLite then extend state retention to at least
+`ceil((1 + unpaid_debt / min(active_maximum, configured_maximum)) * per_seconds)`,
+or the base TTL if longer. Reads preserve an existing longer deadline; ordinary
+nonnegative writes return to the base TTL. This conservative bound allows one
+extra refill window and uses the slower possible rate even if a short override
+would expire sooner. Requirements beyond `2**31 - 1` seconds are rejected;
+limit changes and rebuilds raise `ValueError` before their predictable
+retention rejection can change accounting. A cold Redis reader with incompatible
+configuration can instead receive `RedisPipelineResultError` from retention Lua.
+Allow debt to refill or choose a less restrictive limit before retrying.
+
+Extended retention does not extend marker/refund TTLs, reservation lifetimes,
+or the state-loss confirmation cutoff of 90% of the original base TTL. All
+processes sharing Redis or SQLite accounting must upgrade together: older
+participants can shorten the retained state lifetime.
 
 Redis refunds also write a cross-process idempotency key:
 `{key_prefix}:rate_limiting:refund_dedup:{reservation_id}`. The TTL defaults to
@@ -273,13 +288,46 @@ Redis refunds also write a cross-process idempotency key:
 builders or Redis OpenAI factories. Memory backends keep only process-local
 refund dedup state and cannot safely refund reservations after a cold restart.
 
+## Redis override history and version compatibility
+
+Redis stores a versioned JSON `:override_expiry` key alongside each bucket
+that has a runtime override. It records the configured maximum, override
+maximum and expiry boundary, allowing later readers to refill each interval
+at its applicable rate. The key can outlive the live override because retained
+capacity may still need that history. This adds one string key per such bucket
+and additional reads and Lua calls. Diagnostic reads do not refresh its TTL.
+
+**Breaking upgrade requirement for 14.0.0:** stop every older token-throttle
+process accessing a shared Redis namespace before starting the upgraded
+processes. Mixed-version operation is unsupported. Ordinary capacity reads by
+older clients can extend a live override's TTL without updating its history,
+so the new client can later over-credit or under-credit capacity. The unchanged
+override JSON format does not make that combination operationally compatible.
+Use a coordinated stop, upgrade and restart for all namespace participants.
+
+Upgraded clients establish history when setting or refreshing a live override.
+They cannot reconstruct intervals for overrides that already expired without
+history, or reliably detect a stale boundary left by mixed-version activity.
+In those cases, stored balances can retain earlier accounting errors; upgrading
+or reapplying an override does not repair the past balance. The piecewise-refill
+guarantee applies to history maintained exclusively by upgraded clients. Keep
+static quota configuration consistent across those clients as well.
+
+The expiry boundary uses Redis time sampled before the TTL write. Operation
+latency between that sample and the write can shift the physical expiration
+relative to the recorded boundary; it is not an exact cross-command timestamp.
+
 ## Shared-storage locking and contention
 
 Redis serializes each bucket with a distributed lock. SQLite instead serializes
 transactions through the database-wide writer lock and uses
 `busy_timeout_ms` as the analogue of Redis's
-`lock_blocking_timeout_seconds`. Both backends keep multi-bucket writes atomic;
-their tuning and throughput ceilings differ.
+`lock_blocking_timeout_seconds`. SQLite transactions and Redis marker-authorized
+acquire/refund scripts keep their multi-bucket accounting writes atomic.
+Redis configuration rebuilds validate predictable retention failures before
+writing, but transport failures between separate snapshot writes can leave a
+partially applied rebuild; no cross-bucket rollback is guaranteed there.
+Their tuning and throughput ceilings differ.
 
 The Redis backend serializes every mutation of a given bucket through a
 short-lived per-bucket lock, so concurrent workers never race on the same

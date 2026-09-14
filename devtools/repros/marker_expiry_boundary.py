@@ -11,7 +11,7 @@ lifetime.
            real sleep of 0.6 s).
 
 Run from the repository root:
-    TOKEN_THROTTLE_TESTS_REDIS_URL=redis://localhost:6379/13 .venv/bin/python devtools/devtools/repros/marker_expiry_boundary.py
+    TOKEN_THROTTLE_TESTS_REDIS_URL=redis://localhost:6379/13 .venv/bin/python devtools/repros/marker_expiry_boundary.py
 """
 
 from __future__ import annotations
@@ -88,7 +88,7 @@ async def main() -> None:
     client = async_redis.from_url(REDIS_URL)
     prefix = f"repro-{uuid.uuid4().hex}"
     redis_builder = RedisBackendBuilder(
-        client, key_prefix=prefix, bucket_ttl_seconds=60, refund_dedup_ttl_seconds=60
+        client, key_prefix=prefix, bucket_ttl_seconds=120, refund_dedup_ttl_seconds=60
     )
     backend = redis_builder.build(CFG)
     try:

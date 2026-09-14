@@ -3,6 +3,48 @@
 Notable changes for token-throttle releases. Each major version's breaking
 changes and upgrade steps are recorded in its entry below.
 
+## 14.0.0 - 2026-09-14
+
+- Redis refills across runtime-override expiry using the rate applicable to
+  each interval. A retained `:override_expiry` key supplies history to later
+  readers, including new processes. Diagnostics use the same arithmetic
+  without refreshing storage.
+- Redis and SQLite retain unpaid capacity debt after lowering a maximum,
+  extending bucket-state lifetime when necessary. Inactivity can no longer
+  forgive debt that needs longer than the base TTL to refill. This does not
+  extend reservation lifetimes or the local state-loss confirmation window.
+- **Breaking:** persistent backends reject limit changes and rebuilds with
+  `ValueError` when required debt retention exceeds `2**31 - 1` seconds.
+  Retention conservatively uses the slower of the configured and active
+  override rates, even for short-lived overrides. Predictable Redis rebuild
+  rejection validates all buckets before changing accounting or overrides.
+  Arbitrary transport failures during separate rebuild writes still lack a
+  cross-bucket rollback guarantee.
+- Interrupted acquisitions whose commit is known now preserve an authentic
+  reservation in `AcquireRefundFailedError` if ordinary cleanup fails. This
+  covers Memory, Redis and SQLite, async and sync. Retrying the refund after
+  the storage problem clears cannot double-credit a racing background refund.
+  Successful cleanup still propagates the original interruption.
+
+Upgrade steps:
+
+- **Breaking deployment requirement:** stop every older process sharing a
+  Redis namespace or SQLite database/namespace, upgrade all participants,
+  then restart them. Mixed-version operation is unsupported: older clients
+  can shorten debt retention, and ordinary older Redis reads can refresh an
+  override without updating its expiry history, causing over- or under-credit.
+- Already-expired Redis overrides without history, stale history from mixed
+  versions, and previously lost accounting cannot be reconstructed. Upgrading
+  or reapplying an override does not repair historical balances. Keep static
+  configuration consistent across shared-storage participants.
+- Handle the new finite-retention rejection when reducing limits against deep
+  debt; allow debt to refill or choose a less restrictive limit. Redis ordinary
+  reads now require retention Lua with `GET`, `PTTL` and `PEXPIRE` permissions.
+  See [operational guidance](docs/operations.md#connection-pooling-and-key-ttls)
+  for retention and [Redis upgrade details](docs/operations.md#redis-override-history-and-version-compatibility).
+- No SQLite schema migration is introduced. Retain the migration and API
+  upgrade requirements from earlier major versions when upgrading past them.
+
 ## 13.0.0 - 2026-09-14
 
 - **Breaking:** Redis and SQLite now drain a bucket to zero when both state

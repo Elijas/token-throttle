@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, ClassVar
 
 from frozendict import frozendict
 
+from token_throttle._acquire_recovery import _record_acquire_cleanup_failure
 from token_throttle._capacity import _validate_max_capacity_finite_positive
 from token_throttle._diagnostic import (
     BackendBucketLimit,
@@ -448,6 +449,10 @@ class SyncSqliteBackend(SyncRateLimiterBackend):
         )
         self._engine.clear_max_capacity_overrides(
             frozenset(old_ids - new_ids) | changed_ids,
+            configured_max_capacities={
+                (quota.metric, int(quota.per_seconds)): float(quota.limit)
+                for quota in cfg.quotas
+            },
         )
         new_backend._engine.inherit_state_confirmations(self._engine)  # noqa: SLF001
         self.close()
@@ -648,7 +653,7 @@ class SyncSqliteBackend(SyncRateLimiterBackend):
                     wait_time_s=wait_time_s,
                     **current_limiter_callback_context(),
                 )
-        except BaseException:
+        except BaseException as interrupted_by:
             try:
                 self._engine.cleanup_consumption(
                     usage,
@@ -656,6 +661,12 @@ class SyncSqliteBackend(SyncRateLimiterBackend):
                     reservation_id=reservation_id,
                 )
             except BaseException as refund_exc:  # noqa: BLE001
+                _record_acquire_cleanup_failure(
+                    refund_exc,
+                    reservation_id=reservation_id,
+                    issued_at_seconds=result.current_time,
+                    interrupted_by=interrupted_by,
+                )
                 _log_cancellation_refund_failure(
                     refund_exc,
                     reservation_id=reservation_id,

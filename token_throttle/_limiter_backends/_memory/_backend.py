@@ -10,6 +10,7 @@ from typing import ClassVar
 
 from frozendict import frozendict
 
+from token_throttle._acquire_recovery import _record_acquire_cleanup_failure
 from token_throttle._diagnostic import (
     BackendBucketLimit,
     BackendIntrospectionDiagnostic,
@@ -666,7 +667,7 @@ class MemoryBackend(RateLimiterBackend):
                     wait_time_s=wait_time_s,
                     **current_limiter_callback_context(),
                 )
-        except BaseException:
+        except BaseException as interrupted_by:
             try:
                 await self._refund_cancelled_consumption(
                     usage,
@@ -674,11 +675,12 @@ class MemoryBackend(RateLimiterBackend):
                     reservation_id=reservation_id,
                 )
             except BaseException as refund_exc:  # noqa: BLE001
-                # Best-effort refund: asyncio.shield() inside the refund
-                # ensures the coroutine runs to completion even under
-                # re-cancel, but the refund itself can still fail (e.g. a
-                # lock/state error). Log it, then swallow so the original
-                # interrupt is re-raised below.
+                _record_acquire_cleanup_failure(
+                    refund_exc,
+                    reservation_id=reservation_id,
+                    issued_at_seconds=current_time,
+                    interrupted_by=interrupted_by,
+                )
                 _log_cancellation_refund_failure(
                     refund_exc,
                     reservation_id=reservation_id,
@@ -1132,7 +1134,13 @@ class MemoryBackend(RateLimiterBackend):
                     self._forget_acquired_reservation(reservation_id)
                 self._condition.notify_all()
 
-        await asyncio.shield(_do_refund())
+        refund_task = asyncio.create_task(_do_refund())
+        while not refund_task.done():
+            try:
+                await asyncio.shield(refund_task)
+            except asyncio.CancelledError:  # ast-guard: skip — settled result below
+                continue
+        refund_task.result()
 
     async def _fresh_start_buckets_callback(
         self,

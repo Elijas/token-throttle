@@ -23,13 +23,22 @@ from token_throttle._capacity import (
     _calculate_rate_per_sec,
     _validate_max_capacity_finite_positive,
     _validate_rate_per_sec_finite_positive,
-    calculate_capacity,
 )
 from token_throttle._interfaces._interfaces import PerModelConfig
 from token_throttle._interfaces._models import Quota, _is_bool_like
+from token_throttle._limiter_backends._debt_ttl import debt_ttl_seconds
 from token_throttle._validation import _revalidate_dto, validate_per_seconds
 
 from ._keys import redis_key_with_suffix, redis_namespace_key, validate_redis_key_prefix
+from ._override_expiry import (
+    RETAIN_EXPIRY,
+    WRITE_OVERRIDE,
+    OverrideExpiry,
+    calculate_with_expiry,
+    expiry_payload,
+    parse_expiry,
+)
+from ._retention import REFRESH_STATE_TTL_SCRIPT
 from ._server_time import async_server_time
 from ._ttl import DEFAULT_BUCKET_TTL_SECONDS, validate_redis_ttl_seconds
 
@@ -295,6 +304,7 @@ class RedisBucket:
         self._max_capacity_cached: float | None = None
         self._max_capacity_cache_populated: bool = False
         self._max_capacity_cache_time: float = 0.0
+        self._expiry_history: OverrideExpiry | None = None
         self._bucket_ttl_seconds = validate_redis_ttl_seconds(
             bucket_ttl_seconds, name="bucket_ttl_seconds"
         )
@@ -320,6 +330,9 @@ class RedisBucket:
         self._lock_key = redis_key_with_suffix(self.full_redis_key, "lock")
         self._max_capacity_key = redis_key_with_suffix(
             self.full_redis_key, "max_capacity_override"
+        )
+        self._override_expiry_key = redis_key_with_suffix(
+            self.full_redis_key, "override_expiry"
         )
         self._state_confirmed_at_server_time: float | None = None
         self._state_confirmed_ttl_seconds = self._bucket_ttl_seconds
@@ -363,8 +376,10 @@ class RedisBucket:
         override cannot be hidden by this process's 1-second convenience cache.
         """
         override_value = await self._read_max_capacity_override_from_redis()
+        history = await self._read_override_expiry() if override_value is None else None
         await self._refresh_max_capacity_override_ttl(override_value)
         self._apply_parsed_max_capacity_override(override_value)
+        self._expiry_history = history
         return self.max_capacity
 
     async def get_max_capacity(self) -> float:
@@ -417,17 +432,71 @@ class RedisBucket:
         )
         return self._deserialize_max_capacity_override(stored_value)
 
+    async def _read_override_expiry(self) -> OverrideExpiry | None:
+        raw = await self._redis.get(self._override_expiry_key)
+        return parse_expiry(_validate_redis_get_result(raw, context="override expiry"))
+
+    async def _write_override_with_expiry(self, value: float, *, refresh: bool) -> None:
+        current_time = await async_server_time(self._redis)
+        payload = json.dumps(
+            {
+                self._CONFIGURED_LIMIT_KEY: self._max_capacity_default,
+                self._OVERRIDE_LIMIT_KEY: value,
+            }
+        )
+        result = await self._redis.eval(
+            WRITE_OVERRIDE,
+            4,
+            self._max_capacity_key,
+            self._override_expiry_key,
+            self._last_checked_key,
+            self._capacity_key,
+            "refresh" if refresh else "set",
+            payload,
+            expiry_payload(
+                self._max_capacity_default,
+                value,
+                current_time + self._override_ttl_seconds,
+            ),
+            max(self._bucket_ttl_seconds, self._override_ttl_seconds),
+            self._max_capacity_default,
+            value,
+            self._override_ttl_seconds,
+        )
+        written = _validate_expire_result(result, context="override expiry write")
+        if not written and not refresh:
+            raise RedisPipelineResultError("Redis override write did not commit")
+
+    async def _refresh_override_expiry_retention(
+        self, *, minimum_ttl_seconds: int | None = None
+    ) -> None:
+        """Retain history before a planned extension of accounting-state lifetime."""
+        minimum = self._bucket_ttl_seconds
+        if minimum_ttl_seconds is not None:
+            minimum = max(
+                minimum,
+                validate_redis_ttl_seconds(
+                    minimum_ttl_seconds, name="minimum_ttl_seconds"
+                ),
+            )
+        result = await self._redis.eval(
+            RETAIN_EXPIRY,
+            3,
+            self._override_expiry_key,
+            self._last_checked_key,
+            self._capacity_key,
+            minimum,
+        )
+        _validate_expire_result(result, context="override history TTL")
+
     async def _refresh_max_capacity_override_ttl(
         self, override_value: float | None
     ) -> None:
         if override_value is None:
+            if await self._read_override_expiry() is not None:
+                await self._refresh_override_expiry_retention()
             return
-        expire_result = self._redis.expire(
-            self._max_capacity_key,
-            self._override_ttl_seconds,
-        )
-        if inspect.isawaitable(expire_result):
-            await expire_result
+        await self._write_override_with_expiry(override_value, refresh=True)
 
     def _apply_parsed_max_capacity_override(self, override_value: float | None) -> None:
         self._set_cached_max_capacity_override(override_value)
@@ -550,6 +619,33 @@ class RedisBucket:
         self._apply_parsed_max_capacity_override(new_value)
         return new_value is not None
 
+    def capacity_ttl(self, capacity: float, maximum: float | None = None) -> int:
+        return debt_ttl_seconds(
+            capacity,
+            bucket_ttl_seconds=self._bucket_ttl_seconds,
+            per_seconds=self.per_seconds,
+            max_capacity=self.max_capacity if maximum is None else maximum,
+            configured_max_capacity=self.configured_max_capacity,
+        )
+
+    def queue_state_ttl_refresh(self, pipeline) -> None:
+        for key in (self._last_checked_key, self._capacity_key):
+            pipeline.eval(
+                REFRESH_STATE_TTL_SCRIPT,
+                3,
+                key,
+                self._capacity_key,
+                self._override_expiry_key,
+                self._bucket_ttl_seconds,
+                self.configured_max_capacity,
+                self.per_seconds,
+            )
+
+    async def retain_capacity_history(self, ttl: int) -> None:
+        """Keep existing history before extending the accounting it explains."""
+        if await self._read_override_expiry() is not None:
+            await self._refresh_override_expiry_retention(minimum_ttl_seconds=ttl)
+
     def confirm_state_present(self, current_time: float) -> None:
         """Record validated complete state using Redis' TTL clock."""
         self._state_confirmed_at_server_time = float(current_time)
@@ -596,17 +692,7 @@ class RedisBucket:
             raise ValueError("max_capacity must not be a boolean")
         value = _validate_max_capacity_finite_positive(value)
 
-        payload = json.dumps(
-            {
-                self._CONFIGURED_LIMIT_KEY: self._max_capacity_default,
-                self._OVERRIDE_LIMIT_KEY: value,
-            }
-        )
-        await self._redis.set(
-            self._max_capacity_key,
-            payload,
-            ex=self._override_ttl_seconds,
-        )
+        await self._write_override_with_expiry(value, refresh=False)
         # Update runtime override cache immediately
         try:
             self._set_cached_max_capacity_override(value)
@@ -642,7 +728,8 @@ class RedisBucket:
 
     async def clear_max_capacity_override(self) -> None:
         """Remove any persisted runtime override for this bucket."""
-        await self._redis.delete(self._max_capacity_key)
+        await self._redis.delete(self._max_capacity_key, self._override_expiry_key)
+        self._expiry_history = None
         self._set_cached_max_capacity_override(None)
         self._max_capacity_cache_time = time.time()
 
@@ -685,21 +772,10 @@ class RedisBucket:
         # Order must match PIPELINE_LAST_CHECKED_OFFSET / PIPELINE_CAPACITY_OFFSET
         pipeline.get(self._last_checked_key)
         pipeline.get(self._capacity_key)
-        pipeline.expire(self._last_checked_key, self._bucket_ttl_seconds)
-        pipeline.expire(self._capacity_key, self._bucket_ttl_seconds)
+        self.queue_state_ttl_refresh(pipeline)
 
         if own_pipeline:
-            update_max_capacity_cache = not self._max_capacity_cache_is_fresh()
-            max_capacity_override = (
-                await self._read_max_capacity_override_from_redis()
-                if update_max_capacity_cache
-                else self._max_capacity_cached
-            )
-            effective_max_capacity = (
-                self._effective_max_capacity_for_override(max_capacity_override)
-                if update_max_capacity_cache
-                else self.max_capacity
-            )
+            max_capacity_override = await self._read_max_capacity_override_from_redis()
             try:
                 results = await pipeline.execute()
             except redis.exceptions.ResponseError as exc:
@@ -725,18 +801,21 @@ class RedisBucket:
                 results[3],
                 context=f"RedisBucket.get_capacity({self.full_redis_key}) capacity TTL",
             )
-            result = calculate_capacity(
+            history = await self._read_override_expiry()
+            result = calculate_with_expiry(
+                history=history,
+                override=max_capacity_override,
+                configured=self.configured_max_capacity,
+                per_seconds=self.per_seconds,
                 last_checked=last_checked,
                 outdated_capacity=capacity,
                 current_time=current_time,
-                max_capacity=effective_max_capacity,
-                rate_per_sec=effective_max_capacity / self.per_seconds,
                 bucket_id=self.full_redis_key,
             )
             result = _revalidate_dto(result)
-            if update_max_capacity_cache:
-                await self._refresh_max_capacity_override_ttl(max_capacity_override)
-                self._apply_parsed_max_capacity_override(max_capacity_override)
+            await self._refresh_max_capacity_override_ttl(max_capacity_override)
+            self._apply_parsed_max_capacity_override(max_capacity_override)
+            self._expiry_history = history
             missing = _bucket_state_missing_keys(results[0], results[1])
             if missing and not result.is_fresh_start:
                 await self.set_capacity(0.0, current_time=current_time)
@@ -745,7 +824,7 @@ class RedisBucket:
             return result
         return None
 
-    async def set_capacity(
+    async def set_capacity(  # noqa: PLR0913
         self,
         new_capacity: float,
         pipeline: redis.asyncio.client.Pipeline | None = None,
@@ -753,6 +832,7 @@ class RedisBucket:
         *,
         execute: bool = True,
         allow_negative: bool = False,
+        retention_max_capacity: float | None = None,
     ) -> None:
         """
         Set bucket capacity in Redis and update the timestamp.
@@ -779,8 +859,10 @@ class RedisBucket:
         if new_capacity == 0.0:
             new_capacity = 0.0
         new_capacity = new_capacity if allow_negative else max(0, new_capacity)
-        pipeline.set(self._last_checked_key, current_time, ex=self._bucket_ttl_seconds)
-        pipeline.set(self._capacity_key, new_capacity, ex=self._bucket_ttl_seconds)
+        ttl = self.capacity_ttl(new_capacity, retention_max_capacity)
+        await self.retain_capacity_history(ttl)
+        pipeline.set(self._last_checked_key, current_time, ex=ttl)
+        pipeline.set(self._capacity_key, new_capacity, ex=ttl)
 
         if execute:
             try:
@@ -810,12 +892,14 @@ class RedisBucket:
         current_time: float,
     ) -> CalculatedCapacity:
         """Calculate refilled capacity from Redis state; inputs must be decoded values."""
-        return calculate_capacity(
+        return calculate_with_expiry(
+            history=self._expiry_history,
+            override=self._max_capacity_cached,
+            configured=self.configured_max_capacity,
+            per_seconds=self.per_seconds,
             last_checked=last_checked,
             outdated_capacity=outdated_capacity,
             current_time=current_time,
-            max_capacity=self.max_capacity,
-            rate_per_sec=self._rate_per_sec,
             bucket_id=self.full_redis_key,
         )
 

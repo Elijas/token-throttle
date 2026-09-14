@@ -138,6 +138,13 @@ with an approximately one-second upper polling interval for capacity waiters.
 In both cases the shared value is an explicit runtime override, not a static
 config edit.
 
+Redis and SQLite preserve existing debt when a maximum decreases and extend
+bucket retention to let it refill. Limit changes or rebuilds requiring more
+than `2**31 - 1` seconds of retention raise `ValueError`; the conservative bound
+uses the slower configured/override rate even for a short override. Allow debt
+to refill or choose a less restrictive limit before retrying. See
+[retention guidance](operations.md#connection-pooling-and-key-ttls).
+
 SQLite override lifetime and process-local fallback details are in the
 [SQLite backend guide](sqlite-backend.md#runtime-overrides-and-configuration).
 
