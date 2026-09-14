@@ -25,6 +25,19 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      - name: Clear previous eligibility before re-evaluating
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          pr=$(gh pr view "$PR_URL" --json headRefOid,autoMergeRequest)
+          test "$(jq -r '.headRefOid' <<< "$pr")" = "$HEAD_SHA"
+          if jq -e '.autoMergeRequest != null' <<< "$pr" > /dev/null; then
+            gh pr merge --disable-auto "$PR_URL"
+          fi
+
       - name: Read verified Dependabot metadata
         id: metadata
         uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3
@@ -77,4 +90,3 @@ jobs:
           PR_URL: ${{ github.event.pull_request.html_url }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: gh pr merge --auto --merge --match-head-commit "$HEAD_SHA" "$PR_URL"
-
