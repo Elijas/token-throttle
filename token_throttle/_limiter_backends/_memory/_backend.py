@@ -875,7 +875,15 @@ class MemoryBackend(RateLimiterBackend):
                 )
             updated_capacities = frozendict(updated_capacities_)
 
-            self._set_capacities(updated_capacities, current_time, allow_negative=True)
+            # Reads cap raw overflow; only a scoped bucket may be written back.
+            refund_capacities = frozendict(
+                {
+                    key: value
+                    for key, value in updated_capacities.items()
+                    if key in refund_bucket_ids
+                }
+            )
+            self._set_capacities(refund_capacities, current_time, allow_negative=True)
             if reservation_id is not None:
                 self._acquired_reservation_ids.remove(reservation_id)
                 self._remember_refunded_reservation_id(reservation_id)

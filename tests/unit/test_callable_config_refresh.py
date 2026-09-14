@@ -330,8 +330,10 @@ class TestCallableConfigMetricSetChange:
         await asyncio.wait_for(wait_started.wait(), timeout=2.0)
 
         use_expanded = True
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
+        with (
+            warnings.catch_warnings(action="ignore"),
+            pytest.raises(ValueError, match="pending acquisitions"),
+        ):
             await limiter.acquire_capacity(
                 {"tokens": 0, "requests": 0},
                 "test-model",
@@ -339,6 +341,7 @@ class TestCallableConfigMetricSetChange:
 
         reservation = await waiter
         assert reservation.usage["tokens"] == 150
+        await limiter.acquire_capacity({"tokens": 0, "requests": 0}, "test-model")
 
 
 class TestCallableConfigMetricSetStateTransfer:
@@ -560,7 +563,7 @@ class TestCallableConfigRefundRefreshFallback:
 class TestCallableConfigWindowChangeHandling:
     """Window-only changes must update blocked acquires and later refunds correctly."""
 
-    async def test_window_change_applies_to_existing_blocked_waiter(self):
+    async def test_window_change_is_deferred_until_existing_waiter_finishes(self):
         current_window = 60
         wait_started = asyncio.Event()
 
@@ -581,7 +584,7 @@ class TestCallableConfigWindowChangeHandling:
             callbacks=RateLimiterCallbacks(on_wait_start=on_wait_start),
         )
 
-        await limiter.acquire_capacity({"tokens": 100}, "test-model")
+        drained = await limiter.acquire_capacity({"tokens": 100}, "test-model")
 
         waiter = asyncio.create_task(
             limiter.acquire_capacity({"tokens": 50}, "test-model", timeout=2.0)
@@ -589,12 +592,18 @@ class TestCallableConfigWindowChangeHandling:
         await asyncio.wait_for(wait_started.wait(), timeout=2.0)
 
         current_window = 3600
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
+        with (
+            warnings.catch_warnings(action="ignore"),
+            pytest.raises(ValueError, match="pending acquisitions"),
+        ):
             await limiter.acquire_capacity({"tokens": 0}, "test-model")
 
+        await limiter.refund_capacity({"tokens": 0}, drained)
         reservation = await waiter
         assert reservation.usage["tokens"] == 50
+        assert reservation.bucket_ids == frozenset({("tokens", 60)})
+        retry = await limiter.acquire_capacity({"tokens": 0}, "test-model")
+        assert retry.bucket_ids == frozenset({("tokens", 3600)})
 
     async def test_refund_after_window_replacement_does_not_credit_new_window(self):
         current_window = 60
@@ -683,8 +692,10 @@ class TestCallableConfigMetricSetWaiters:
         await asyncio.wait_for(wait_started.wait(), timeout=2.0)
 
         use_expanded = True
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
+        with (
+            warnings.catch_warnings(action="ignore"),
+            pytest.raises(ValueError, match="pending acquisitions"),
+        ):
             await limiter.acquire_capacity(
                 {"tokens": 0, "requests": 0},
                 "test-model",
@@ -693,6 +704,11 @@ class TestCallableConfigMetricSetWaiters:
         await limiter.refund_capacity({"tokens": 0}, drained)
         reservation = await waiter
         assert reservation.usage["tokens"] == 1
+        await limiter.refund_capacity({"tokens": 0}, reservation)
+        retry = await limiter.acquire_capacity(
+            {"tokens": 0, "requests": 0}, "test-model"
+        )
+        assert retry.bucket_ids == frozenset({("tokens", 3600), ("requests", 60)})
 
 
 class GateCondition:

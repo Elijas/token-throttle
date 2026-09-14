@@ -30,6 +30,25 @@ with the same name) from an operator-controlled maintenance path. It evicts idle
 in-process family caches and skips families with in-flight reservations. Redis
 bucket keys expire separately through the Redis bucket TTL.
 
+### Changing quotas while requests are pending
+
+Adding or removing metrics or quota windows rebuilds a family's backend. If
+another acquisition for that family is still pending, the operation requesting
+the rebuild raises `ValueError` before changing backend state. Retry after the
+pending acquisitions finish. This applies to sync and async limiters with
+Memory, Redis, and SQLite backends, including changes requested through
+`record_usage()` or `set_max_capacity()`.
+
+Existing waiters retain their original buckets and reservation authority.
+Refunds that encounter this condition warn and use the cached backend, so an
+earlier reservation can release capacity and let those waiters complete. A
+later operation applies the new config once no other acquisitions are pending.
+Limit-only changes do not rebuild the bucket set and remain allowed during
+waits. Changes to another model family are independent.
+
+This rejection replaces previously accepted concurrent bucket-set changes;
+applications that rotate callable configs during traffic must handle it.
+
 ### Unlimited configs
 
 To disable rate limiting for a model while keeping the same API surface, return

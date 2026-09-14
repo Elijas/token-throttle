@@ -94,7 +94,9 @@ class BucketDiagnostic(StrictDTO):
     runtime_override: float | None = Field(
         default=None,
         description=(
-            "Active set_max_capacity override for this bucket, if one is active."
+            "Active set_max_capacity override for this bucket, if one is active. "
+            "Successful SQLite reads report backend override state, including "
+            "absence after expiry, even if local limiter bookkeeping is stale."
         ),
     )
     override_source: DiagnosticOverrideSource = Field(
@@ -894,6 +896,12 @@ def _reconcile_bucket(
     issues: list[DiagnosticIssue],
 ) -> BucketDiagnostic:
     backend_override = backend_bucket.runtime_override
+    if (
+        backend_bucket.backend_type == "sqlite"
+        and backend_bucket.status in {"ok", "fresh_start"}
+        and backend_override is None
+    ):
+        local_override = None
     if local_override is None and backend_override is None:
         effective = configured_limit
         source: DiagnosticOverrideSource = "none"

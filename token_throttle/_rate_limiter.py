@@ -68,6 +68,7 @@ from token_throttle._interfaces._models import (
 from token_throttle._limiter_backends._redis._ttl import (
     validate_max_reservation_lifetime_seconds,
 )
+from token_throttle._limiter_backends._sqlite._backend import SqliteBackend
 from token_throttle._validation import (
     _UNLIMITED_FLAG,
     _UNSET_USAGE,
@@ -344,6 +345,9 @@ def _cfg_with_preserved_runtime_max_capacity(
     still has a live ``set_max_capacity()`` override that should survive the
     rebuild, bake that value into the config used for the rebuild so waiters
     never observe the stale static limit between prepare/install and restore.
+
+    SQLite passes no local overrides here: its shared rows retain overrides
+    separately from the configured fallback, including the original expiry.
     """
     if not runtime_overrides:
         return cfg
@@ -507,7 +511,7 @@ def _raise_duplicate_refund(
     )
 
 
-def _get_backend_lifetime_hook(
+def _get_backend_hook(
     backend: RateLimiterBackendBuilderInterface,
     name: str,
 ):
@@ -525,7 +529,7 @@ def _validate_backend_reservation_lifetime(
     backend: RateLimiterBackendBuilderInterface,
     max_reservation_lifetime_seconds: float | None,
 ) -> None:
-    validator = _get_backend_lifetime_hook(
+    validator = _get_backend_hook(
         backend,
         "validate_reservation_lifetime_seconds",
     )
@@ -540,7 +544,7 @@ def _resolve_backend_reservation_lifetime(
     max_lifetime = validate_max_reservation_lifetime_seconds(
         max_reservation_lifetime_seconds
     )
-    resolver = _get_backend_lifetime_hook(
+    resolver = _get_backend_hook(
         backend,
         "resolve_max_reservation_lifetime_seconds",
     )
@@ -806,6 +810,7 @@ class RateLimiter(BaseRateLimiter):
         self._in_flight_reservation_family: dict[str, str] = {}
         self._model_family_last_touched: dict[str, float] = {}
         self._closed = False
+        self._close_drained = False
         _logger.info("token_throttle version %s", _token_throttle_version())
 
     def snapshot_state(self) -> dict[str, object]:
@@ -1045,22 +1050,24 @@ class RateLimiter(BaseRateLimiter):
         Close is terminal once started: if draining pending acquires or closing
         backend resources fails, the limiter is still marked closed so future
         operations fail cleanly instead of observing a permanent closing state.
+        After a drain timeout, retry close once pending work settles to release
+        backend resources and retained state; public operations remain rejected.
         """
         _raise_if_close_called_from_callback()
         self._check_close_entry()
         interrupted = False
         try:
             async with self._acquire_guard:
-                if self._closed:
+                if self._closed and self._close_drained:
                     return
-                self._closing = True
+                self._closing = not self._closed
                 self._refresh_pending_drained_locked()
 
             interrupted = await self._wait_for_pending_acquire_drain()
 
             async with self._lifecycle_lock:
                 async with self._acquire_guard:
-                    if self._closed:
+                    if self._close_drained:
                         already_closed = True
                     else:
                         already_closed = False
@@ -1072,6 +1079,9 @@ class RateLimiter(BaseRateLimiter):
                         refund_interrupted,
                     ) = await self._wait_for_refund_lock_drain()
                     interrupted = refund_interrupted or interrupted
+                    # A failed drain is terminal for public work, but must not
+                    # prevent a later close from reaching builder cleanup.
+                    self._close_drained = True
                     interrupted = (
                         await self._close_backend_cancellation_hardened()
                     ) or interrupted
@@ -1275,9 +1285,18 @@ class RateLimiter(BaseRateLimiter):
         The returned reservation should be refunded by this limiter after the
         external request completes.
 
+        A callable config that adds or removes quota metrics/windows raises
+        ``ValueError`` while another acquisition for that family is pending.
+        Retry the new config after those acquisitions finish. Refunds may use
+        the cached config to release capacity for existing waiters.
+
         ``timeout`` bounds only the time spent waiting for capacity. It does not
         bound backend operation latency or callback dispatch time; callbacks are
         bounded separately by ``callback_timeout`` configured on the limiter.
+        For SQLite, the budget also includes cold backend initialization and
+        SQLite write-lock waits. Cold ``timeout=0`` makes one initialization
+        attempt without waiting for a writer lock. Initialization runs off-loop;
+        cancellation queues cleanup of any connection still being initialized.
         """
         self._check_public_entry()
         self._raise_if_closed()
@@ -1396,6 +1415,9 @@ class RateLimiter(BaseRateLimiter):
         callbacks are bounded separately by ``callback_timeout`` configured on
         the limiter.
 
+        For SQLite, cold backend initialization and write-lock waits also count
+        against the timeout, after usage counting has completed.
+
         Returns a ``CapacityReservation`` for the counted request. Raises
         ``ValueError`` for invalid timeout, missing or invalid ``model``,
         missing limited-config ``usage_counter``, invalid counter output,
@@ -1492,7 +1514,23 @@ class RateLimiter(BaseRateLimiter):
             # If max_in_flight rejects, validation metadata is never inserted;
             # while the slot is pending, cleanup treats the family as active.
             self._validate_shared_model_family_config(model, limit_config)
-            backend = await self._get_backend(limit_config)
+            cold_initialization = (
+                model_family not in self._model_family_to_backend
+                and _get_backend_hook(self._backend, "__token_throttle_async_build__")
+                is not None
+            )
+            build_started = time.monotonic()
+            backend = await self._get_backend(
+                limit_config,
+                timeout=timeout if cold_initialization else None,
+                reservation_id=reservation.reservation_id,
+            )
+            if cold_initialization and timeout is not None and timeout > 0:
+                timeout -= time.monotonic() - build_started
+                if timeout <= 0:
+                    raise TimeoutError(  # noqa: TRY301
+                        "Timed out initializing rate limiter backend"
+                    )
             callback_context_token = set_limiter_callback_context(
                 model_alias=model,
                 request_id=request_id,
@@ -1880,6 +1918,10 @@ class RateLimiter(BaseRateLimiter):
     ) -> None:
         """
         Dynamically change the max capacity for a specific bucket.
+
+        SQLite overrides retain their original expiry when a callable config
+        changes other metrics. Expired overrides fall back to the configured
+        quota; rebuilding does not renew them or replace a peer's live override.
 
         This is a runtime override. To change the static configured quota,
         update the callable config; the limiter will rebuild on the next
@@ -2591,7 +2633,23 @@ class RateLimiter(BaseRateLimiter):
                 exc=exc,
             )
 
-    async def _get_backend(self, cfg: PerModelConfig) -> RateLimiterBackend:
+    async def _build_backend(
+        self, cfg: PerModelConfig, *, timeout: float | None = None
+    ) -> RateLimiterBackend:
+        build_async = _get_backend_hook(self._backend, "__token_throttle_async_build__")
+        if build_async is not None:
+            return await build_async(
+                cfg, callbacks=self._backend_callbacks, timeout=timeout
+            )
+        return self._backend.build(cfg, callbacks=self._backend_callbacks)
+
+    async def _get_backend(
+        self,
+        cfg: PerModelConfig,
+        *,
+        timeout: float | None = None,
+        reservation_id: str | None = None,
+    ) -> RateLimiterBackend:
         model_family = cfg.get_model_family()
         new_snapshot = _quotas_snapshot(cfg)
 
@@ -2606,17 +2664,30 @@ class RateLimiter(BaseRateLimiter):
         ):
             return backend
 
-        async with self._lock:
-            backend = self._model_family_to_backend.get(model_family)
-            if backend is not None:
-                return await self._sync_backend_quotas(cfg)
+        if _get_backend_hook(self._backend, "__token_throttle_async_build__") is None:
+            timeout = None
+        if timeout == 0 and self._lock.locked():
+            raise TimeoutError("Timed out waiting for backend initialization")
+        async with asyncio.timeout(timeout or None):
+            async with self._lock:
+                backend = self._model_family_to_backend.get(model_family)
+                if backend is not None:
+                    return await self._sync_backend_quotas(
+                        cfg, timeout=timeout, reservation_id=reservation_id
+                    )
 
-            backend = self._backend.build(cfg, callbacks=self._backend_callbacks)
-            self._model_family_to_backend[model_family] = backend
-            self._model_family_to_quotas[model_family] = new_snapshot
-            return backend
+                backend = await self._build_backend(cfg, timeout=timeout)
+                self._model_family_to_backend[model_family] = backend
+                self._model_family_to_quotas[model_family] = new_snapshot
+                return backend
 
-    async def _sync_backend_quotas(self, cfg: PerModelConfig) -> RateLimiterBackend:
+    async def _sync_backend_quotas(
+        self,
+        cfg: PerModelConfig,
+        *,
+        timeout: float | None = None,
+        reservation_id: str | None = None,
+    ) -> RateLimiterBackend:
         """
         If quotas changed since backend creation, update or rebuild it.
 
@@ -2666,19 +2737,28 @@ class RateLimiter(BaseRateLimiter):
             rebuild_cfg = _cfg_with_preserved_runtime_max_capacity(
                 cfg,
                 old_snapshot=old_snapshot,
-                runtime_overrides=self._model_family_to_runtime_max_capacity.get(
-                    model_family
+                runtime_overrides=(
+                    None
+                    if isinstance(old_backend, SqliteBackend)
+                    else self._model_family_to_runtime_max_capacity.get(model_family)
                 ),
             )
-            backend = self._backend.build(
-                rebuild_cfg, callbacks=self._backend_callbacks
-            )
-            # Invalidate fast-path cache before mutation to close the
-            # TOCTOU window where a concurrent reader could match the stale
-            # snapshot against an already-mutated backend, tag its reservation
-            # with old bucket_ids, and silently leak capacity on refund.
-            self._model_family_to_quotas.pop(model_family, None)
+            # A pending acquire already owns its reservation bucket scope.
+            # Check and invalidate together: later entrants must take _lock
+            # before obtaining a backend, including while async build awaits.
+            async with self._acquire_guard:
+                if any(
+                    rid != reservation_id
+                    and self._in_flight_reservation_family.get(rid) == model_family
+                    for rid in self._pending_acquire_reservations
+                ):
+                    raise ValueError(
+                        f"Cannot change quota bucket set for model family {model_family!r} "
+                        "while other pending acquisitions exist; retry after they finish."
+                    )
+                self._model_family_to_quotas.pop(model_family, None)
             try:
+                backend = await self._build_backend(rebuild_cfg, timeout=timeout)
                 backend = await old_backend.prepare_reconfigured_backend(
                     backend, rebuild_cfg
                 )
@@ -2878,6 +2958,16 @@ class RateLimiter(BaseRateLimiter):
         new_snapshot: dict[BucketId, float],
         backend: RateLimiterBackend,
     ) -> None:
+        """
+        Restore local overrides only when the backend needs them.
+
+        SQLite's replacement already shares authoritative override rows,
+        including their expiry. Replaying local values would renew expired
+        overrides and overwrite concurrent peer updates.
+        """
+        if isinstance(backend, SqliteBackend):
+            self._model_family_to_runtime_max_capacity.pop(model_family, None)
+            return
         # Caller must hold self._lock; see _clear_runtime_max_capacity.
         overrides = self._model_family_to_runtime_max_capacity.get(model_family)
         if not overrides:

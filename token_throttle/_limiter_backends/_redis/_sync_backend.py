@@ -2770,6 +2770,14 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                 )
             updated_capacities = frozendict(updated_capacities_)
 
+            # Preserve the full callback snapshot, but write only refund scope.
+            refund_capacities = frozendict(
+                {
+                    key: value
+                    for key, value in updated_capacities.items()
+                    if key in refund_bucket_ids
+                }
+            )
             # Extend lock TTL before write; see _extend_locks.
             self._extend_locks(lock_stack, reservation_id=reservation_id)
             # Defer the Redis tombstone until the same pipeline execution as
@@ -2779,7 +2787,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
             # the bucket locks, while lock expiry/manual writers can still race.
             if reservation_id is None:
                 self._set_capacities_unsafe(
-                    frozendict(updated_capacities),
+                    refund_capacities,
                     pipeline=pipeline,
                     current_time=current_time,
                     allow_negative=True,
@@ -2791,7 +2799,7 @@ class SyncRedisBackend(SyncRateLimiterBackend):
                 assert refund_dedup_key is not None  # noqa: S101
                 assert expected_marker_value is not None  # noqa: S101
                 self._commit_refund_with_acquire_marker_unsafe(
-                    frozendict(updated_capacities),
+                    refund_capacities,
                     current_time=current_time,
                     buckets=buckets,
                     acquired_marker_key=acquired_marker_key,

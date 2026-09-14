@@ -74,7 +74,7 @@ from ._ttl import (
 
 if TYPE_CHECKING:
     import os
-    from collections.abc import Callable
+    from collections.abc import Awaitable, Callable
 
     from token_throttle._interfaces._models import BucketId, Capacities, FrozenUsage
 
@@ -166,6 +166,102 @@ class SqliteBackendBuilder(RateLimiterBackendBuilderInterface):
         *,
         callbacks: RateLimiterCallbacks | None = None,
     ) -> SqliteBackend:
+        """Synchronously initialize a backend; async callers use build_async()."""
+        executor, future = self._start_build(cfg, callbacks=callbacks)
+        try:
+            engine = future.result()
+        except BaseException:
+            executor.shutdown(wait=True, cancel_futures=True)
+            raise
+        return self._finish_build(cfg, callbacks, executor, engine)
+
+    _default_build = build
+
+    @property
+    def __token_throttle_async_build__(
+        self,
+    ) -> Callable[..., Awaitable[SqliteBackend]] | None:
+        """
+        Opt into async initialization while the original build is in use.
+
+        Public build overrides retain synchronous dispatch. A subclass can
+        deliberately override this hook to opt in with its own async factory.
+        An unrelated build_async override does not affect limiter dispatch.
+        """
+        if (
+            getattr(self.build, "__func__", None)
+            is not SqliteBackendBuilder._default_build
+        ):
+            return None
+        return functools.partial(SqliteBackendBuilder.build_async, self)
+
+    async def build_async(
+        self,
+        cfg: PerModelConfig,
+        *,
+        callbacks: RateLimiterCallbacks | None = None,
+        timeout: float | None = None,  # noqa: ASYNC109
+    ) -> SqliteBackend:
+        """
+        Initialize off-loop, including lock retries in the acquisition budget.
+
+        Zero timeout makes one attempt without SQLite busy waits. Cancellation
+        or deadline expiry queues connection cleanup on its owning worker;
+        an already running filesystem operation must finish before cleanup.
+        No capacity is consumed by initialization. With no acquisition timeout,
+        initialization retains the synchronous builder's busy-timeout limit and
+        raises BackendLockContentionError if contention persists beyond it.
+        """
+        timeout = validate_timeout(timeout)
+        ordinary_deadline = time.monotonic() + self._busy_timeout_ms / 1000.0
+        async with asyncio.timeout(timeout or None):
+            while True:
+                executor, future = self._start_build(
+                    cfg, callbacks=callbacks, initialization_busy_timeout_ms=0
+                )
+                try:
+                    engine = await asyncio.wrap_future(future)
+                except BaseException as exc:
+                    self._abandon_build(executor, future)
+                    if not isinstance(exc, BackendLockContentionError):
+                        raise
+                    if timeout == 0:
+                        raise TimeoutError(
+                            "Timed out initializing SQLite under write-lock contention"
+                        ) from exc
+                    retry_delay = 0.01
+                    if timeout is None:
+                        remaining = ordinary_deadline - time.monotonic()
+                        if remaining <= 0:
+                            raise
+                        retry_delay = min(retry_delay, remaining)
+                    await asyncio.sleep(retry_delay)
+                else:
+                    return self._finish_build(cfg, callbacks, executor, engine)
+
+    @staticmethod
+    def _abandon_build(
+        executor: concurrent.futures.ThreadPoolExecutor,
+        future: concurrent.futures.Future[SqliteEngine],
+    ) -> None:
+        def close_unclaimed_engine() -> None:
+            if future.cancelled() or future.exception() is not None:
+                return
+            future.result().close()
+
+        executor.submit(close_unclaimed_engine)
+        executor.shutdown(wait=False)
+
+    def _start_build(
+        self,
+        cfg: PerModelConfig,
+        *,
+        callbacks: RateLimiterCallbacks | None,
+        initialization_busy_timeout_ms: int | None = None,
+    ) -> tuple[
+        concurrent.futures.ThreadPoolExecutor,
+        concurrent.futures.Future[SqliteEngine],
+    ]:
         cfg = _revalidate_dto(cfg)
         if callbacks is not None:
             _revalidate_dto(callbacks)
@@ -199,19 +295,30 @@ class SqliteBackendBuilder(RateLimiterBackendBuilderInterface):
                 ),
                 busy_timeout_ms=self._busy_timeout_ms,
                 prune_batch_size=self._prune_batch_size,
+                initialization_busy_timeout_ms=initialization_busy_timeout_ms,
             )
             try:
-                engine.initialize_buckets()
+                engine.initialize_buckets(
+                    busy_timeout_ms=initialization_busy_timeout_ms
+                )
             except BaseException:
                 engine.close()
                 raise
             return engine
 
         try:
-            engine = executor.submit(create_engine).result()
+            return executor, executor.submit(create_engine)
         except BaseException:
             executor.shutdown(wait=True, cancel_futures=True)
             raise
+
+    def _finish_build(
+        self,
+        cfg: PerModelConfig,
+        callbacks: RateLimiterCallbacks | None,
+        executor: concurrent.futures.ThreadPoolExecutor,
+        engine: SqliteEngine,
+    ) -> SqliteBackend:
         backend = SqliteBackend(
             engine=engine,
             executor=executor,
@@ -231,7 +338,8 @@ class SqliteBackendBuilder(RateLimiterBackendBuilderInterface):
     async def aclose(self) -> None:
         with self._lock:
             backends = tuple(self._backends)
-            self._backends.clear()
+        # Each backend deregisters after closing. Keep unfinished backends
+        # reachable if cancellation interrupts this loop so close can be retried.
         for backend in backends:
             await backend.aclose()
 
@@ -261,6 +369,7 @@ class SqliteBackend(RateLimiterBackend):
         super().__init__()
         self._engine = engine
         self._executor = executor
+        self._pending_engine_calls: set[concurrent.futures.Future] = set()
         self._limit_config = _revalidate_dto(limit_config)
         if callbacks is not None:
             _revalidate_dto(callbacks)
@@ -285,9 +394,18 @@ class SqliteBackend(RateLimiterBackend):
     def supports_acquire_marker_authority(self) -> bool:
         return True
 
+    def _submit_future(
+        self, callable_: Callable[[], _T]
+    ) -> concurrent.futures.Future[_T]:
+        self._pending_engine_calls = {
+            future for future in self._pending_engine_calls if not future.done()
+        }
+        future = self._executor.submit(callable_)
+        self._pending_engine_calls.add(future)
+        return future
+
     def _submit(self, callable_: Callable[[], _T]) -> asyncio.Future[_T]:
-        loop = asyncio.get_running_loop()
-        return loop.run_in_executor(self._executor, callable_)
+        return asyncio.wrap_future(self._submit_future(callable_))
 
     @staticmethod
     async def _wait_for_future_while_cancelled(
@@ -311,7 +429,7 @@ class SqliteBackend(RateLimiterBackend):
             await self._wait_for_future_while_cancelled(future)
             raise
 
-    async def _try_consume_cancellation_safe(
+    async def _try_consume_cancellation_safe(  # noqa: PLR0913
         self,
         usage: FrozenUsage,
         *,
@@ -319,8 +437,15 @@ class SqliteBackend(RateLimiterBackend):
         reservation_lifetime_seconds: float | None,
         busy_timeout_ms: int,
         timeout_on_busy: bool,
+        deadline: float | None,
     ) -> TryConsumeResult:
-        future = self._submit(
+        if (
+            deadline is None
+            and timeout_on_busy
+            and any(not future.done() for future in self._pending_engine_calls)
+        ):
+            raise TimeoutError("Timed out waiting for SQLite executor queue")
+        operation = self._submit_future(
             functools.partial(
                 self._engine.try_consume,
                 usage,
@@ -328,11 +453,19 @@ class SqliteBackend(RateLimiterBackend):
                 reservation_lifetime_seconds=reservation_lifetime_seconds,
                 busy_timeout_ms=busy_timeout_ms,
                 timeout_on_busy=timeout_on_busy,
+                deadline=deadline,
             )
         )
+        future = asyncio.wrap_future(operation)
         try:
-            return await asyncio.shield(future)
+            async with asyncio.timeout(
+                None if deadline is None else max(0.0, deadline - time.monotonic())
+            ):
+                return await asyncio.shield(future)
         except BaseException:
+            if operation.cancel():
+                future.cancel()
+                raise
             settled_successfully = await self._wait_for_future_while_cancelled(future)
             if settled_successfully:
                 attempt = future.result()
@@ -468,6 +601,12 @@ class SqliteBackend(RateLimiterBackend):
         reservation_id: str | None = None,
         reservation_lifetime_seconds: float | None = None,
     ) -> float | None:
+        """
+        Acquire capacity with executor and engine-lock waits in the timeout.
+
+        A zero timeout rejects a busy executor or lock without queueing.
+        Cancellation waits for work that may have committed and refunds it.
+        """
         validate_backend_usage(usage, self._engine.metric_names)
         timeout = validate_timeout(timeout)
         usage = _normalize_usage(usage)
@@ -488,6 +627,7 @@ class SqliteBackend(RateLimiterBackend):
                         reservation_lifetime_seconds=reservation_lifetime_seconds,
                         busy_timeout_ms=busy_timeout_ms,
                         timeout_on_busy=timeout_on_busy,
+                        deadline=deadline if timeout != 0 else None,
                     )
                 except BackendLockContentionError as exc:
                     if deadline is not None and time.monotonic() >= deadline:

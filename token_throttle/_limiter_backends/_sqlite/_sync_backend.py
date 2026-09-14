@@ -470,6 +470,11 @@ class SyncSqliteBackend(SyncRateLimiterBackend):
         reservation_id: str | None = None,
         reservation_lifetime_seconds: float | None = None,
     ) -> float | None:
+        """
+        Acquire capacity, including engine-lock waits in finite timeouts.
+
+        A zero timeout attempts both engine and SQLite locks without waiting.
+        """
         waiter_key = uuid.uuid4().hex
         try:
             return self._wait_for_capacity_impl(
@@ -511,6 +516,7 @@ class SyncSqliteBackend(SyncRateLimiterBackend):
                     reservation_lifetime_seconds=reservation_lifetime_seconds,
                     busy_timeout_ms=busy_timeout_ms,
                     timeout_on_busy=timeout_on_busy,
+                    deadline=deadline if timeout != 0 else None,
                 )
             except BackendLockContentionError as exc:
                 if deadline is not None and time.monotonic() >= deadline:

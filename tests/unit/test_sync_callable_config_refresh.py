@@ -342,8 +342,10 @@ class TestSyncCallableConfigMetricSetChange:
         assert wait_started.wait(timeout=2.0)
 
         use_expanded = True
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
+        with (
+            warnings.catch_warnings(action="ignore"),
+            pytest.raises(ValueError, match="pending acquisitions"),
+        ):
             limiter.acquire_capacity(
                 {"tokens": 0, "requests": 0},
                 "test-model",
@@ -353,6 +355,7 @@ class TestSyncCallableConfigMetricSetChange:
         assert not thread.is_alive()
         assert "error" not in result
         assert result["reservation"].usage["tokens"] == 150
+        limiter.acquire_capacity({"tokens": 0, "requests": 0}, "test-model")
 
 
 class TestSyncCallableConfigMetricSetStateTransfer:
@@ -572,7 +575,7 @@ class TestSyncCallableConfigRefundRefreshFallback:
 class TestSyncCallableConfigWindowChangeHandling:
     """Window-only changes must update blocked acquires and later refunds correctly."""
 
-    def test_window_change_applies_to_existing_blocked_waiter(self):
+    def test_window_change_is_deferred_until_existing_waiter_finishes(self):
         current_window = 60
         wait_started = threading.Event()
 
@@ -593,7 +596,7 @@ class TestSyncCallableConfigWindowChangeHandling:
             callbacks=SyncRateLimiterCallbacks(on_wait_start=on_wait_start),
         )
 
-        limiter.acquire_capacity({"tokens": 100}, "test-model")
+        drained = limiter.acquire_capacity({"tokens": 100}, "test-model")
 
         result: dict[str, object] = {}
 
@@ -610,14 +613,20 @@ class TestSyncCallableConfigWindowChangeHandling:
         assert wait_started.wait(timeout=2.0)
 
         current_window = 3600
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
+        with (
+            warnings.catch_warnings(action="ignore"),
+            pytest.raises(ValueError, match="pending acquisitions"),
+        ):
             limiter.acquire_capacity({"tokens": 0}, "test-model")
 
+        limiter.refund_capacity({"tokens": 0}, drained)
         thread.join(timeout=5.0)
         assert not thread.is_alive()
         assert "error" not in result
         assert result["reservation"].usage["tokens"] == 50
+        assert result["reservation"].bucket_ids == frozenset({("tokens", 60)})
+        retry = limiter.acquire_capacity({"tokens": 0}, "test-model")
+        assert retry.bucket_ids == frozenset({("tokens", 3600)})
 
     def test_refund_after_window_replacement_does_not_credit_new_window(self):
         current_window = 60
@@ -717,8 +726,10 @@ class TestSyncCallableConfigMetricSetWaiters:
         assert wait_started.wait(timeout=2.0)
 
         use_expanded = True
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
+        with (
+            warnings.catch_warnings(action="ignore"),
+            pytest.raises(ValueError, match="pending acquisitions"),
+        ):
             limiter.acquire_capacity({"tokens": 0, "requests": 0}, "test-model")
 
         limiter.refund_capacity({"tokens": 0}, drained)
@@ -726,6 +737,9 @@ class TestSyncCallableConfigMetricSetWaiters:
         assert not thread.is_alive()
         assert "error" not in result
         assert result["reservation"].usage["tokens"] == 1
+        limiter.refund_capacity({"tokens": 0}, result["reservation"])
+        retry = limiter.acquire_capacity({"tokens": 0, "requests": 0}, "test-model")
+        assert retry.bucket_ids == frozenset({("tokens", 3600), ("requests", 60)})
 
 
 class RacingSyncMemoryBackendBuilder(SyncMemoryBackendBuilder):

@@ -378,7 +378,7 @@ async def test_async_sqlite_waiter_is_visible_before_wait_callback(
         await backend.consume_capacity(usage)
         await backend.await_for_capacity(
             usage,
-            timeout=1,
+            timeout=2,
             reservation_id="visible-reservation",
             reservation_lifetime_seconds=20.0,
         )

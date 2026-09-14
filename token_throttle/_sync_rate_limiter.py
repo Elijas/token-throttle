@@ -66,6 +66,7 @@ from token_throttle._interfaces._models import (
 from token_throttle._limiter_backends._redis._ttl import (
     validate_max_reservation_lifetime_seconds,
 )
+from token_throttle._limiter_backends._sqlite._sync_backend import SyncSqliteBackend
 from token_throttle._validation import (
     _UNLIMITED_FLAG,
     _UNSET_USAGE,
@@ -344,6 +345,9 @@ def _cfg_with_preserved_runtime_max_capacity(
     still has a live ``set_max_capacity()`` override that should survive the
     rebuild, bake that value into the config used for the rebuild so waiters
     never observe the stale static limit between prepare/install and restore.
+
+    SQLite passes no local overrides here: its shared rows retain overrides
+    separately from the configured fallback, including the original expiry.
     """
     if not runtime_overrides:
         return cfg
@@ -765,6 +769,7 @@ class SyncRateLimiter:
         self._in_flight_reservation_family: dict[str, str] = {}
         self._model_family_last_touched: dict[str, float] = {}
         self._closed = False
+        self._close_drained = False
         _logger.info("token_throttle version %s", _token_throttle_version())
 
     def snapshot_state(self) -> dict[str, object]:
@@ -1003,14 +1008,16 @@ class SyncRateLimiter:
         Close is terminal once started: if draining pending acquires or closing
         backend resources fails, the limiter is still marked closed so future
         operations fail cleanly instead of observing a permanent closing state.
+        After a drain timeout, retry close once pending work settles to release
+        backend resources and retained state; public operations remain rejected.
         """
         _raise_if_close_called_from_callback()
         self._check_close_entry()
         try:
             with self._acquire_guard:
-                if self._closed:
+                if self._closed and self._close_drained:
                     return
-                self._closing = True
+                self._closing = not self._closed
                 self._refresh_pending_drained_locked()
 
             if not self._pending_drained.wait(
@@ -1020,7 +1027,7 @@ class SyncRateLimiter:
 
             with self._lifecycle_lock:
                 with self._acquire_guard:
-                    if self._closed:
+                    if self._close_drained:
                         already_closed = True
                     else:
                         already_closed = False
@@ -1028,6 +1035,9 @@ class SyncRateLimiter:
                         self._closing = False
                 if not already_closed:
                     in_flight_count = self._wait_for_refund_lock_drain()
+                    # A failed drain is terminal for public work, but must not
+                    # prevent a later close from reaching builder cleanup.
+                    self._close_drained = True
                     # builder.close() is a documented-optional cleanup hook;
                     # builders that own no shared resources may omit it entirely.
                     if hasattr(self._backend, "close"):
@@ -1163,6 +1173,11 @@ class SyncRateLimiter:
         readability matters: ``acquire_capacity(usage={...}, model="gpt-4o")``.
         The returned reservation should be refunded by this limiter after the
         external request completes.
+
+        A callable config that adds or removes quota metrics/windows raises
+        ``ValueError`` while another acquisition for that family is pending.
+        Retry the new config after those acquisitions finish. Refunds may use
+        the cached config to release capacity for existing waiters.
 
         ``timeout`` bounds only the time spent waiting for capacity. It does not
         bound backend operation latency or callback dispatch time; callbacks are
@@ -1379,7 +1394,9 @@ class SyncRateLimiter:
             # If max_in_flight rejects, validation metadata is never inserted;
             # while the slot is pending, cleanup treats the family as active.
             self._validate_shared_model_family_config(model, limit_config)
-            backend = self._get_backend(limit_config)
+            backend = self._get_backend(
+                limit_config, reservation_id=reservation.reservation_id
+            )
             callback_context_token = set_limiter_callback_context(
                 model_alias=model,
                 request_id=request_id,
@@ -1657,6 +1674,10 @@ class SyncRateLimiter:
     ) -> None:
         """
         Dynamically change the max capacity for a specific bucket.
+
+        SQLite overrides retain their original expiry when a callable config
+        changes other metrics. Expired overrides fall back to the configured
+        quota; rebuilding does not renew them or replace a peer's live override.
 
         This is a runtime override. To change the static configured quota,
         update the callable config; the limiter will rebuild on the next
@@ -2221,7 +2242,9 @@ class SyncRateLimiter:
                 exc=exc,
             )
 
-    def _get_backend(self, cfg: PerModelConfig) -> SyncRateLimiterBackend:
+    def _get_backend(
+        self, cfg: PerModelConfig, *, reservation_id: str | None = None
+    ) -> SyncRateLimiterBackend:
         model_family = cfg.get_model_family()
         new_snapshot = _quotas_snapshot(cfg)
 
@@ -2239,14 +2262,16 @@ class SyncRateLimiter:
         with self._lock:
             backend = self._model_family_to_backend.get(model_family)
             if backend is not None:
-                return self._sync_backend_quotas(cfg)
+                return self._sync_backend_quotas(cfg, reservation_id=reservation_id)
 
             backend = self._backend.build(cfg, callbacks=self._backend_callbacks)
             self._model_family_to_backend[model_family] = backend
             self._model_family_to_quotas[model_family] = new_snapshot
             return backend
 
-    def _sync_backend_quotas(self, cfg: PerModelConfig) -> SyncRateLimiterBackend:
+    def _sync_backend_quotas(
+        self, cfg: PerModelConfig, *, reservation_id: str | None = None
+    ) -> SyncRateLimiterBackend:
         """
         If quotas changed since backend creation, update or rebuild it.
 
@@ -2296,19 +2321,30 @@ class SyncRateLimiter:
             rebuild_cfg = _cfg_with_preserved_runtime_max_capacity(
                 cfg,
                 old_snapshot=old_snapshot,
-                runtime_overrides=self._model_family_to_runtime_max_capacity.get(
-                    model_family
+                runtime_overrides=(
+                    None
+                    if isinstance(old_backend, SyncSqliteBackend)
+                    else self._model_family_to_runtime_max_capacity.get(model_family)
                 ),
             )
-            backend = self._backend.build(
-                rebuild_cfg, callbacks=self._backend_callbacks
-            )
-            # Invalidate fast-path cache before mutation to close the
-            # TOCTOU window where a concurrent reader could match the stale
-            # snapshot against an already-mutated backend, tag its reservation
-            # with old bucket_ids, and silently leak capacity on refund.
-            self._model_family_to_quotas.pop(model_family, None)
+            # A pending acquire already owns its reservation bucket scope.
+            # Check and invalidate together: later entrants must take _lock
+            # before obtaining a backend, including while build is running.
+            with self._acquire_guard:
+                if any(
+                    rid != reservation_id
+                    and self._in_flight_reservation_family.get(rid) == model_family
+                    for rid in self._pending_acquire_reservations
+                ):
+                    raise ValueError(
+                        f"Cannot change quota bucket set for model family {model_family!r} "
+                        "while other pending acquisitions exist; retry after they finish."
+                    )
+                self._model_family_to_quotas.pop(model_family, None)
             try:
+                backend = self._backend.build(
+                    rebuild_cfg, callbacks=self._backend_callbacks
+                )
                 backend = old_backend.prepare_reconfigured_backend(backend, rebuild_cfg)
                 self._restore_runtime_max_capacity(
                     model_family,
@@ -2521,6 +2557,16 @@ class SyncRateLimiter:
         new_snapshot: dict[BucketId, float],
         backend: SyncRateLimiterBackend,
     ) -> None:
+        """
+        Restore local overrides only when the backend needs them.
+
+        SQLite's replacement already shares authoritative override rows,
+        including their expiry. Replaying local values would renew expired
+        overrides and overwrite concurrent peer updates.
+        """
+        if isinstance(backend, SyncSqliteBackend):
+            self._model_family_to_runtime_max_capacity.pop(model_family, None)
+            return
         # Caller must hold self._lock; see _clear_runtime_max_capacity.
         overrides = self._model_family_to_runtime_max_capacity.get(model_family)
         if not overrides:

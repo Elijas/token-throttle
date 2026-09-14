@@ -3106,6 +3106,14 @@ class RedisBackend(RateLimiterBackend):
             updated_capacities = frozendict(updated_capacities_)
 
             # Extend lock TTL before committing the write, see _extend_locks.
+            # Preserve the full callback snapshot, but write only refund scope.
+            refund_capacities = frozendict(
+                {
+                    key: value
+                    for key, value in updated_capacities.items()
+                    if key in refund_bucket_ids
+                }
+            )
             await self._extend_locks(lock_stack, reservation_id=reservation_id)
             # Defer the Redis tombstone until the same pipeline execution as
             # the capacity write. This prevents the
@@ -3116,7 +3124,7 @@ class RedisBackend(RateLimiterBackend):
             if reservation_id is None:
                 write_task = asyncio.create_task(
                     self._set_capacities_unsafe(
-                        frozendict(updated_capacities),
+                        refund_capacities,
                         pipeline=pipeline,
                         current_time=current_time,
                         allow_negative=True,
@@ -3129,7 +3137,7 @@ class RedisBackend(RateLimiterBackend):
                 assert expected_marker_value is not None  # noqa: S101
                 write_task = asyncio.create_task(
                     self._commit_refund_with_acquire_marker_unsafe(
-                        frozendict(updated_capacities),
+                        refund_capacities,
                         current_time=current_time,
                         buckets=buckets,
                         acquired_marker_key=acquired_marker_key,

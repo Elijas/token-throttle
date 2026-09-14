@@ -158,6 +158,17 @@ class RateLimiterBackendBuilderInterface(Protocol):
     time it needs backend state for a model family. Implementations may hold
     shared resources such as Redis clients or connection pools. ``close()`` and
     ``aclose()`` are optional cleanup hooks for those shared resources.
+
+    Builders may explicitly opt in with the namespaced callable
+    ``async __token_throttle_async_build__(cfg, *, callbacks=None, timeout=None)``.
+    Merely defining ``build_async`` does not opt in. The limiter prefers the
+    namespaced hook over ``build()`` for nonblocking initialization
+    and includes cold initialization in the acquisition timeout for these builders.
+    Zero timeout allows one initialization attempt without lock waiting.
+    Implementations must clean up resources if initialization fails or is
+    cancelled. The synchronous ``build()`` contract remains supported.
+    SQLite's built-in opt-in is disabled when public ``build()`` is overridden;
+    a subclass must deliberately override the namespaced hook to opt back in.
     """
 
     @abstractmethod

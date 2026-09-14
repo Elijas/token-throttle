@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Final
 from frozendict import frozendict
 
 from token_throttle._capacity import (
+    CalculatedCapacity,
     _calculate_rate_per_sec,
     _validate_max_capacity_finite_positive,
     calculate_capacity,
@@ -178,6 +179,11 @@ def _is_busy_error(exc: sqlite3.OperationalError) -> bool:
     )
 
 
+def _check_acquire_deadline(deadline: float | None) -> None:
+    if deadline is not None and time.monotonic() >= deadline:
+        raise TimeoutError("Timed out waiting for SQLite acquisition")
+
+
 class SqliteEngine:
     """Backend-agnostic SQLite transaction engine for one model family."""
 
@@ -194,6 +200,7 @@ class SqliteEngine:
         max_reservation_lifetime_seconds: float,
         busy_timeout_ms: int = DEFAULT_BUSY_TIMEOUT_MS,
         prune_batch_size: int = DEFAULT_PRUNE_BATCH_SIZE,
+        initialization_busy_timeout_ms: int | None = None,
     ) -> None:
         self.db_path = db_path
         self.key_prefix = key_prefix
@@ -208,11 +215,16 @@ class SqliteEngine:
         self._prune_batch_size = prune_batch_size
         self._lock = threading.RLock()
         self._closed = False
+        initialization_timeout_ms = (
+            busy_timeout_ms
+            if initialization_busy_timeout_ms is None
+            else initialization_busy_timeout_ms
+        )
         try:
             try:
                 self._connection = sqlite3.connect(
                     db_path,
-                    timeout=busy_timeout_ms / 1000.0,
+                    timeout=initialization_timeout_ms / 1000.0,
                     isolation_level=None,
                     check_same_thread=False,
                 )
@@ -221,8 +233,8 @@ class SqliteEngine:
                     "Unable to open SQLite database at resolved db_path "
                     f"{db_path!r}: {exc}"
                 ) from exc
-            self._configure_connection(busy_timeout_ms)
-            self._initialize_schema()
+            self._configure_connection(initialization_timeout_ms)
+            self._initialize_schema(busy_timeout_ms=initialization_timeout_ms)
         except BaseException:
             connection = getattr(self, "_connection", None)
             if connection is not None:
@@ -282,25 +294,53 @@ class SqliteEngine:
             raise
 
     @contextmanager
+    def _transaction_lock(
+        self, *, deadline: float | None, timeout_on_busy: bool
+    ) -> Iterator[None]:
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("Timed out waiting for SQLite acquisition")
+            acquired = self._lock.acquire(timeout=min(remaining, threading.TIMEOUT_MAX))
+        elif timeout_on_busy:
+            acquired = self._lock.acquire(blocking=False)
+        else:
+            acquired = self._lock.acquire()
+        if not acquired:
+            raise TimeoutError("Timed out waiting for SQLite engine-lock contention")
+        try:
+            _check_acquire_deadline(deadline)
+            yield
+        finally:
+            self._lock.release()
+
+    @contextmanager
     def _transaction(
         self,
         *,
         busy_timeout_ms: int | None = None,
         timeout_on_busy: bool = False,
+        deadline: float | None = None,
         clock: Callable[[], float] = time.time,
     ) -> Iterator[tuple[sqlite3.Connection, float]]:
-        with self._lock:
+        with self._transaction_lock(deadline=deadline, timeout_on_busy=timeout_on_busy):
             operation_timeout_ms = (
                 self._busy_timeout_ms
                 if busy_timeout_ms is None
                 else max(0, min(busy_timeout_ms, self._busy_timeout_ms))
             )
+            if deadline is not None:
+                operation_timeout_ms = min(
+                    operation_timeout_ms,
+                    max(0, math.ceil((deadline - time.monotonic()) * 1000)),
+                )
             # This connection is shared by all engine operations. Set the
             # deadline-derived timeout before every operation; the next operation
             # will replace it, so there is no stale timeout to restore.
             self._connection.execute(f"PRAGMA busy_timeout={operation_timeout_ms:d}")
             try:
                 self._connection.execute("BEGIN IMMEDIATE")
+                _check_acquire_deadline(deadline)
                 # Wall time is transaction state: sampling only after the SQLite
                 # write lock is held prevents lock-wait staleness from moving a
                 # bucket's persisted clock backwards.
@@ -322,8 +362,11 @@ class SqliteEngine:
                     ) from exc
                 raise
 
-    def _initialize_schema(self) -> None:
-        with self._transaction() as (connection, _current_time):
+    def _initialize_schema(self, *, busy_timeout_ms: int | None = None) -> None:
+        with self._transaction(busy_timeout_ms=busy_timeout_ms) as (
+            connection,
+            _current_time,
+        ):
             connection.execute(
                 "CREATE TABLE IF NOT EXISTS meta "
                 "(key TEXT PRIMARY KEY, value TEXT NOT NULL)"
@@ -375,8 +418,16 @@ class SqliteEngine:
                     ) from exc
                 raise
 
-    def initialize_buckets(self, clock: Callable[[], float] = time.time) -> None:
-        with self._transaction(clock=clock) as (connection, current_time):
+    def initialize_buckets(
+        self,
+        clock: Callable[[], float] = time.time,
+        *,
+        busy_timeout_ms: int | None = None,
+    ) -> None:
+        with self._transaction(clock=clock, busy_timeout_ms=busy_timeout_ms) as (
+            connection,
+            current_time,
+        ):
             self._prune(connection, current_time)
             for bucket in self._buckets:
                 _validate_max_capacity_finite_positive(bucket.configured_max_capacity)
@@ -409,12 +460,41 @@ class SqliteEngine:
         )
         connection.execute(
             "DELETE FROM buckets WHERE rowid IN "
-            "(SELECT rowid FROM buckets WHERE expires_at <= ? LIMIT ?)",
-            (current_time, self._prune_batch_size),
+            "(SELECT rowid FROM buckets WHERE expires_at <= ? "
+            "AND (override_value IS NULL OR override_expires_at IS NULL "
+            "OR override_expires_at <= ?) LIMIT ?)",
+            (current_time, current_time, self._prune_batch_size),
         )
 
     def _bucket_log_id(self, bucket: BucketSpec) -> str:
         return f"sqlite:{self.model_family}:{bucket.metric}:{bucket.per_seconds}"
+
+    def _refill_capacity(
+        self,
+        spec: BucketSpec,
+        *,
+        capacity: float | None,
+        last_checked: float | None,
+        current_time: float,
+        max_capacity: float,
+    ) -> tuple[CalculatedCapacity, float]:
+        rate = _calculate_rate_per_sec(max_capacity, spec.per_seconds)
+        calculated = calculate_capacity(
+            last_checked=last_checked,
+            outdated_capacity=capacity,
+            current_time=current_time,
+            max_capacity=max_capacity,
+            rate_per_sec=rate,
+            bucket_id=self._bucket_log_id(spec),
+        )
+        if capacity is None or last_checked is None:
+            uncapped_capacity = max_capacity
+        else:
+            elapsed = max(0.0, current_time - float(last_checked))
+            uncapped_capacity = float(capacity) + elapsed * rate
+            if not math.isfinite(uncapped_capacity):
+                uncapped_capacity = max_capacity
+        return calculated, uncapped_capacity
 
     def _load_states(
         self,
@@ -423,6 +503,14 @@ class SqliteEngine:
         *,
         writable: bool = True,
     ) -> tuple[dict[BucketId, _BucketState], tuple[BucketId, ...]]:
+        """
+        Integrate each rate up to its expiry before applying the current cap.
+
+        Expiry retains uncapped overflow and debt, like an explicit cap change.
+        Writes anchor that integration before removing the expired override,
+        even when the caller does not subsequently consume capacity. Snapshots
+        predict the same transition without changing persisted state.
+        """
         states: dict[BucketId, _BucketState] = {}
         fresh: list[BucketId] = []
         for spec in self._buckets:
@@ -438,7 +526,14 @@ class SqliteEngine:
                     spec.per_seconds,
                 ),
             ).fetchone()
-            if row is not None and float(row[5]) <= current_time:
+            bucket_expired = row is not None and float(row[5]) <= current_time
+            override_active = (
+                row is not None
+                and row[2] is not None
+                and row[3] is not None
+                and float(row[3]) > current_time
+            )
+            if bucket_expired and not override_active:
                 if writable:
                     connection.execute(
                         "DELETE FROM buckets WHERE key_prefix = ? "
@@ -475,15 +570,22 @@ class SqliteEngine:
                 capacity_value: float | None = None
                 last_checked_value: float | None = None
             else:
-                capacity_value = row[0]
-                last_checked_value = row[1]
+                capacity_value = None if bucket_expired else row[0]
+                last_checked_value = None if bucket_expired else row[1]
+                if bucket_expired and writable:
+                    connection.execute(
+                        "UPDATE buckets SET capacity = NULL, last_checked = NULL "
+                        "WHERE key_prefix = ? AND model_family = ? "
+                        "AND metric = ? AND per_seconds = ?",
+                        (
+                            self.key_prefix,
+                            self.model_family,
+                            spec.metric,
+                            spec.per_seconds,
+                        ),
+                    )
                 override_value = row[2]
                 override_expires_at = row[3]
-                override_active = (
-                    override_value is not None
-                    and override_expires_at is not None
-                    and float(override_expires_at) > current_time
-                )
                 if override_active:
                     max_capacity = _validate_max_capacity_finite_positive(
                         override_value
@@ -492,15 +594,37 @@ class SqliteEngine:
                     max_capacity = _validate_max_capacity_finite_positive(
                         spec.configured_max_capacity
                     )
+                    if (
+                        override_value is not None
+                        and override_expires_at is not None
+                        and capacity_value is not None
+                        and last_checked_value is not None
+                        and float(last_checked_value)
+                        < float(override_expires_at)
+                        <= current_time
+                    ):
+                        _at_expiry, capacity_value = self._refill_capacity(
+                            spec,
+                            last_checked=last_checked_value,
+                            capacity=capacity_value,
+                            current_time=float(override_expires_at),
+                            max_capacity=_validate_max_capacity_finite_positive(
+                                override_value
+                            ),
+                        )
+                        last_checked_value = float(override_expires_at)
                     if writable and (
                         override_value is not None or override_expires_at is not None
                     ):
                         connection.execute(
                             "UPDATE buckets SET override_value = NULL, "
-                            "override_expires_at = NULL, updated_at = ?, "
+                            "override_expires_at = NULL, capacity = ?, "
+                            "last_checked = ?, updated_at = ?, "
                             "expires_at = ? WHERE key_prefix = ? "
                             "AND model_family = ? AND metric = ? AND per_seconds = ?",
                             (
+                                capacity_value,
+                                last_checked_value,
                                 current_time,
                                 current_time + self._bucket_ttl_seconds,
                                 self.key_prefix,
@@ -536,26 +660,13 @@ class SqliteEngine:
                         ),
                     )
 
-            calculated = calculate_capacity(
+            calculated, uncapped_capacity = self._refill_capacity(
+                spec,
                 last_checked=last_checked_value,
-                outdated_capacity=capacity_value,
+                capacity=capacity_value,
                 current_time=current_time,
                 max_capacity=max_capacity,
-                rate_per_sec=_calculate_rate_per_sec(
-                    max_capacity,
-                    spec.per_seconds,
-                ),
-                bucket_id=self._bucket_log_id(spec),
             )
-            if capacity_value is None or last_checked_value is None:
-                uncapped_capacity = max_capacity
-            else:
-                elapsed = max(0.0, current_time - float(last_checked_value))
-                uncapped_capacity = float(capacity_value) + elapsed * (
-                    _calculate_rate_per_sec(max_capacity, spec.per_seconds)
-                )
-                if not math.isfinite(uncapped_capacity):
-                    uncapped_capacity = max_capacity
             # A persisted wall-clock timestamp far in the future can otherwise
             # survive restarts and suppress refill indefinitely. One second is a
             # narrow tolerance for capture/rounding skew; larger jumps are repaired
@@ -731,11 +842,13 @@ class SqliteEngine:
         reservation_lifetime_seconds: float | None,
         busy_timeout_ms: int | None = None,
         timeout_on_busy: bool = False,
+        deadline: float | None = None,
         clock: Callable[[], float] = time.time,
     ) -> TryConsumeResult:
         with self._transaction(
             busy_timeout_ms=busy_timeout_ms,
             timeout_on_busy=timeout_on_busy,
+            deadline=deadline,
             clock=clock,
         ) as (connection, current_time):
             self._prune(connection, current_time)
@@ -1069,6 +1182,11 @@ class SqliteEngine:
     ) -> None:
         """
         Persist a runtime cap after anchoring state at the old refill rate.
+
+        The fixed override TTL may exceed the bucket inactivity TTL. Inactivity
+        resets capacity to a fresh bucket at the active override's limit, while
+        the override remains shared until its own expiry. Ordinary activity
+        does not extend that expiry.
 
         The anchor deliberately keeps the uncapped integration. Reads cap the
         visible amount, but preserving raw overflow makes lower-then-raise cap
