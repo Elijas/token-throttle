@@ -92,7 +92,7 @@ async def harness(request, tmp_path):  # noqa: PLR0915
                 await asyncio.to_thread(client.ping)
             else:
                 await client.ping()
-        except redis.exceptions.ConnectionError:
+        except (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError):
             if sync:
                 client.close()
             else:

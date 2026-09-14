@@ -128,7 +128,7 @@ async def cleanup_redis(request: pytest.FixtureRequest):
     )
     try:
         await client.ping()
-    except redis.ConnectionError:
+    except (redis.ConnectionError, redis.TimeoutError):
         await client.aclose()
         pytest.skip("dedicated Redis unavailable")
     ensure_flush_allowed(request.config.getoption("--redis-url"))
@@ -387,7 +387,7 @@ async def test_builtin_callback_cleanup_outcomes(  # noqa: PLR0913, PLR0915
         )
         try:
             await _call(client.ping)
-        except redis.ConnectionError:
+        except (redis.ConnectionError, redis.TimeoutError):
             await _call(client.aclose if asynchronous else client.close)
             pytest.skip("dedicated Redis unavailable")
         ensure_flush_allowed(request.config.getoption("--redis-url"))
