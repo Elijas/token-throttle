@@ -210,11 +210,11 @@ _EXPECTED_NON_PYTHON_FENCES = (
     ),
     _ExpectedNonPythonFence(
         document_name="CLAUDE.md",
-        start_line=10,
+        start_line=14,
         language="bash",
         classification=_NON_PYTHON_CLASSIFICATION_SHELL_SYNTAX,
         reason="release dispatch commands; lint syntax-checks but does not execute them",
-        heading="### Trigger a release",
+        heading="### Step 1 — prepare the release PR",
         non_empty_content_lines=(
             "gh workflow run release.yml --ref main -f bump=patch   # 0.5.0 -> 0.5.1",
             "gh workflow run release.yml --ref main -f bump=minor   # 0.5.0 -> 0.6.0",
@@ -223,7 +223,18 @@ _EXPECTED_NON_PYTHON_FENCES = (
     ),
     _ExpectedNonPythonFence(
         document_name="CLAUDE.md",
-        start_line=39,
+        start_line=26,
+        language="bash",
+        classification=_NON_PYTHON_CLASSIFICATION_SHELL_SYNTAX,
+        reason="release finalize command; lint syntax-checks but does not execute it",
+        heading="### Step 2 — finalize after the PR merges",
+        non_empty_content_lines=(
+            "gh workflow run release.yml --ref main -f finalize=v0.5.1",
+        ),
+    ),
+    _ExpectedNonPythonFence(
+        document_name="CLAUDE.md",
+        start_line=72,
         language="bash",
         classification=_NON_PYTHON_CLASSIFICATION_SHELL_SYNTAX,
         reason="maintainer development commands; lint syntax-checks but does not execute them",
@@ -236,7 +247,7 @@ _EXPECTED_NON_PYTHON_FENCES = (
     ),
     _ExpectedNonPythonFence(
         document_name="CLAUDE.md",
-        start_line=52,
+        start_line=85,
         language="bash",
         classification=_NON_PYTHON_CLASSIFICATION_SHELL_SYNTAX,
         reason="Redis flush-gate escape command; lint syntax-checks but does not execute it",
@@ -247,7 +258,7 @@ _EXPECTED_NON_PYTHON_FENCES = (
     ),
     _ExpectedNonPythonFence(
         document_name="CLAUDE.md",
-        start_line=60,
+        start_line=93,
         language="bash",
         classification=_NON_PYTHON_CLASSIFICATION_SHELL_SYNTAX,
         reason="type-check setup commands; lint syntax-checks but does not execute them",
@@ -524,9 +535,10 @@ def _workflow_dispatch_input_options(
 
 def _release_bump_input_name_from_workflow(workflow_text: str) -> str:
     matches = re.findall(
-        r"uv run bump-my-version bump\s+\$\{\{\s*inputs\.([A-Za-z_][A-Za-z0-9_]*)\s*\}\}",
+        r"BUMP:\s+\$\{\{\s*inputs\.([A-Za-z_][A-Za-z0-9_]*)\s*\}\}",
         workflow_text,
     )
+    assert 'uv run bump-my-version bump "${BUMP}"' in workflow_text
     unique_matches = tuple(dict.fromkeys(matches))
     assert len(unique_matches) == 1, (
         "Expected exactly one release workflow bump-my-version input reference, "
@@ -563,9 +575,13 @@ def _release_workflow_contract_from_text(
         workflow_file=workflow_file,
         ref=_manual_release_branch_from_workflow(workflow_text),
         bump_input_name=bump_input_name,
-        bump_options=_workflow_dispatch_input_options(
-            workflow_text,
-            input_name=bump_input_name,
+        bump_options=tuple(
+            option
+            for option in _workflow_dispatch_input_options(
+                workflow_text,
+                input_name=bump_input_name,
+            )
+            if option != "none"
         ),
     )
 
@@ -661,7 +677,7 @@ def _claude_release_dispatch_command_lines(markdown: str) -> tuple[str, ...]:
             markdown,
             document_name=_CLAUDE.name,
         )
-        if block.heading == "### Trigger a release"
+        if block.heading == "### Step 1 — prepare the release PR"
     ]
     assert len(matching_blocks) == 1, (
         f"Expected one CLAUDE release dispatch fence, found {len(matching_blocks)}"
@@ -772,6 +788,21 @@ def _assert_release_dispatch_commands_match_live_workflow(
         taskfile_text,
         contract=contract,
     )
+    finalize_blocks = [
+        block
+        for block in _non_python_fence_blocks_from_markdown(
+            claude_markdown, document_name=_CLAUDE.name
+        )
+        if block.heading == "### Step 2 — finalize after the PR merges"
+    ]
+    assert len(finalize_blocks) == 1
+    commands = _non_python_content_lines(finalize_blocks[0].code, language="bash")
+    assert len(commands) == 1
+    finalize = _parse_gh_workflow_run_command(commands[0])
+    assert finalize.workflow_file == contract.workflow_file
+    assert finalize.ref == contract.ref
+    assert "finalize" in _workflow_dispatch_input_names(release_workflow_text)
+    assert dict(finalize.fields) == {"finalize": "v0.5.1"}
 
 
 def _fence_language(fence_info: str) -> str:
@@ -1476,7 +1507,7 @@ def test_claude_release_command_inventory_catches_stale_workflow_name() -> None:
     stale_release_identity = next(
         _current_non_python_fence_identity(block)
         for block in stale_blocks
-        if block.heading == "### Trigger a release"
+        if block.heading == "### Step 1 — prepare the release PR"
     )
     assert "stale-release.yml" in "\n".join(
         stale_release_identity.non_empty_content_lines
@@ -1495,6 +1526,29 @@ def test_release_dispatch_commands_match_live_workflow_contract() -> None:
         taskfile_text=_TASKFILE.read_text(encoding="utf-8"),
         claude_markdown=_CLAUDE.read_text(encoding="utf-8"),
     )
+
+
+@pytest.mark.parametrize(
+    "replacement",
+    [
+        "gh workflow run stale-release.yml --ref main -f finalize=v0.5.1",
+        "gh workflow run release.yml --ref release/v0.5.1 -f finalize=v0.5.1",
+        "gh workflow run release.yml --ref main -f publish_ref=v0.5.1",
+    ],
+)
+def test_release_dispatch_contract_catches_stale_finalize_command(
+    replacement: str,
+) -> None:
+    stale_claude = _CLAUDE.read_text(encoding="utf-8").replace(
+        "gh workflow run release.yml --ref main -f finalize=v0.5.1",
+        replacement,
+    )
+    with pytest.raises(AssertionError):
+        _assert_release_dispatch_commands_match_live_workflow(
+            release_workflow_text=_RELEASE_WORKFLOW.read_text(encoding="utf-8"),
+            taskfile_text=_TASKFILE.read_text(encoding="utf-8"),
+            claude_markdown=stale_claude,
+        )
 
 
 def test_release_dispatch_contract_catches_workflow_bump_input_rename() -> None:
