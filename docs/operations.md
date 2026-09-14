@@ -68,6 +68,15 @@ state first can hide the loss from an older observer. Confirmation is preserved
 for surviving bucket identities when a callable configuration rebuilds a
 backend; it is not transferred to newly added or removed identities.
 
+After both the stored state and the observer's memory are lost, first use and
+accidental deletion look identical. For example, if a worker exhausts a bucket,
+the store is wiped, and all workers restart, the next worker can initialize a
+full bucket immediately. This can admit traffic before the previous quota
+would have refilled. An extra marker in the same store would also disappear in
+a full wipe, so it cannot close this gap. Distinguishing those cases requires
+evidence that survives the loss independently; always starting absent buckets
+empty would instead change legitimate first-use behavior.
+
 `introspect()` and `diagnose()` predict zero after detectable loss without
 repairing storage or refreshing confirmation. Total loss has bucket status
 `"state_loss"`; partial loss has `"partial_missing"`. An ordinary operation
@@ -85,6 +94,10 @@ Use Redis persistence and a `maxmemory-policy` that protects bucket keys, and
 protect SQLite files from deletion or replacement. Monitor loss events and
 bursts of fresh starts across active model families. Recent observations cannot
 replace durable storage or guarantee detection after every restart or wipe.
+If your application must stop admitting traffic after suspected storage loss,
+gate that traffic outside the limiter until your recovery policy allows it to
+resume. Do not treat a `fresh_start` event or the absence of a `state_loss`
+diagnostic as proof that no accounting state was lost.
 
 ## Concurrency model
 

@@ -223,7 +223,11 @@ operation drains that bucket to zero durably. Read-only diagnostics predict
 that repair with status `state_loss`; partial state uses `partial_missing`.
 Confirmation survives callable rebuilds for surviving bucket identities, but
 is local to the observer and expires before the bucket TTL. A new backend after
-loss may still initialize full capacity. See
+loss may still initialize full capacity: deleting the database and restarting
+all workers can immediately restore a full quota. Reopening the path does not
+recover evidence that disappeared with the database and the old processes.
+Applications that must stop traffic in this situation need a recovery gate
+outside the limiter. See
 [state-loss behavior and limits](operations.md#if-redis-or-sqlite-loses-bucket-state).
 
 ## Troubleshooting
