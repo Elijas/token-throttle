@@ -38,6 +38,24 @@ jobs:
             gh pr merge --disable-auto "$PR_URL"
           fi
 
+      # fetch-metadata verifies only the first commit. Reject extra commits,
+      # including manual merges, rather than trusting metadata for another head.
+      - name: Verify the complete PR is one signed Dependabot commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          gh api "repos/$GH_REPO/pulls/$PR_NUMBER/commits?per_page=2" |
+            jq -e --arg head "$HEAD_SHA" '
+              length == 1 and
+              .[0].sha == $head and
+              .[0].author.login == "dependabot[bot]" and
+              .[0].commit.verification.verified == true
+            '
+
       - name: Read verified Dependabot metadata
         id: metadata
         uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3

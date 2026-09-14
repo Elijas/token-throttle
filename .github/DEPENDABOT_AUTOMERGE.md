@@ -9,6 +9,9 @@ The workflow runs on `pull_request_target` without checking out PR code.
 Dependabot's commit verification stays enabled. Every PR update clears previous
 auto-merge eligibility before checking the new metadata, and the final merge
 command is bound to the event's head SHA.
+Only a single verified Dependabot commit is eligible. PRs with additional
+commits or manual merge resolutions stay manual; the metadata action checks
+only the first commit, so the workflow verifies the complete PR separately.
 
 ## Required repository settings
 
