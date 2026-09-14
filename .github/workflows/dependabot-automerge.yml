@@ -1,0 +1,80 @@
+name: Dependabot auto-merge
+
+# Only trusted base-branch code runs with write permissions. Never check out
+# or execute code from the PR in this workflow.
+on:
+  pull_request_target:
+    branches: [main]
+    types: [opened, reopened, synchronize, ready_for_review]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: dependabot-auto-merge-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  auto-merge:
+    if: >-
+      github.repository == 'Elijas/token-throttle' &&
+      github.event.pull_request.user.login == 'dependabot[bot]' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      !github.event.pull_request.draft
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Read verified Dependabot metadata
+        id: metadata
+        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3
+        with:
+          github-token: ${{ github.token }}
+
+      - name: Evaluate every dependency in the PR
+        id: policy
+        env:
+          DEPENDENCIES: ${{ steps.metadata.outputs.updated-dependencies-json }}
+          DEV_DEPENDENCIES: '["anthropic","bump-my-version","hypothesis","mypy","openai","pytest","pytest-asyncio","pytest-cov","pytest-watch","ruff"]'
+        run: |
+          set -euo pipefail
+          eligible=$(jq -r --argjson dev "$DEV_DEPENDENCIES" '
+            type == "array" and length > 0 and all(.[];
+              (.updateType == "version-update:semver-patch" or
+               .updateType == "version-update:semver-minor") and
+              .maintainerChanges == false and
+              (.packageEcosystem == "github_actions" or
+               (.packageEcosystem == "pip" and
+                .dependencyType == "direct:development" and
+                (.dependencyName as $name | $dev | index($name) != null)))
+            )
+          ' <<< "$DEPENDENCIES")
+          echo "eligible=$eligible" >> "$GITHUB_OUTPUT"
+
+      - name: Require enforced CI rules before enabling auto-merge
+        if: steps.policy.outputs.eligible == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          REQUIRED_CHECKS: '["lint","type-check","analyze (python)","test-unit-core (3.12)","test-unit-core (3.13)","test-unit-core (3.14)","test-unit-full (3.12)","test-unit-full (3.13)","test-unit-full (3.14)","test-unit-platform (macos-latest, 3.13)","test-unit-platform (windows-latest, 3.13)","test-integration (3.12)","test-integration (3.13)","test-integration (3.14)","test-min-deps","conformance","coverage"]'
+        run: |
+          set -euo pipefail
+          # Fail closed if deployment is incomplete or CI protection is removed.
+          gh api "repos/$GH_REPO/rules/branches/main" |
+            jq -e --argjson expected "$REQUIRED_CHECKS" '
+              [.[]
+               | select(.type == "required_status_checks")
+               | .parameters.required_status_checks[]
+               | select(.integration_id == 15368)
+               | .context] as $actual
+              | ($expected - $actual | length) == 0
+            '
+
+      - name: Enable auto-merge for the verified commit
+        if: steps.policy.outputs.eligible == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: gh pr merge --auto --merge --match-head-commit "$HEAD_SHA" "$PR_URL"
+
