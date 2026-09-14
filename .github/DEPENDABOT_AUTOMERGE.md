@@ -1,36 +1,47 @@
-# Dependabot auto-merge deployment
+# Dependabot auto-merge
 
-Prepared locally; not active until published and the repository settings below
-are applied.
+Patch/minor GitHub Actions updates and explicitly listed direct development
+dependencies are eligible for auto-merge. Runtime, indirect, major, unknown,
+mixed-ineligible, and maintainer-change updates remain manual. CodeQL sub-actions
+remain grouped so init and analyze update together.
 
-Policy: automatically merge only patch/minor GitHub Actions updates and
-explicitly listed direct development dependencies. Runtime, indirect, major,
-unknown, mixed-ineligible, and maintainer-change updates remain manual.
-Existing CodeQL grouping is unchanged.
+The workflow runs on `pull_request_target` without checking out PR code.
+Dependabot's commit verification stays enabled. Every PR update clears previous
+auto-merge eligibility before checking the new metadata, and the final merge
+command is bound to the event's head SHA.
 
-The workflow runs on pull_request_target without checking out PR code. Metadata
-commit verification stays enabled. The merge command is bound to the event head
-SHA. Every listed CI check must be enforced by a ruleset and supplied by GitHub
-Actions (integration 15368), or the workflow refuses to enable auto-merge.
+## Required repository settings
 
-## Activation prerequisites
+- Enable **Allow auto-merge** and **Allow merge commits**.
+- Install the additional ruleset in `.github/dependabot-ci-ruleset.json`.
+  Preserve other rulesets. All listed CI checks must come from GitHub Actions,
+  and the PR must be up to date with main. Do not configure bypass actors.
+- Keep default workflow permissions **read-only**. Enable **Allow GitHub Actions
+  to create and approve pull requests** so Release can create preparation PRs.
+  Neither workflow automatically approves PRs; permissions are granted per job.
 
-1. Fix the Release workflow's direct push to main before enabling required CI.
-   It currently creates a new, untested version commit and pushes it to main.
-   A suitable migration is a release-preparation PR that runs CI before merging,
-   followed by tagging and publishing the tested commit. Do not add a broad
-   GitHub Actions bypass: the auto-merge workflow uses that identity too.
-2. Publish this branch through the authorized owning orchestrator. The current
-   session's push was denied by automatic approval review, which requires that
-   orchestrator's SHA-bound approval and email audit.
-3. Create the additional ruleset from .github/dependabot-ci-ruleset.json,
-   preserving existing rulesets. Its strict checks require an up-to-date branch.
-4. Enable the repository setting allow_auto_merge. Merge commits must remain
-   enabled. No automatic approval permission or personal access token is needed.
-5. Verify a real eligible Dependabot PR waits for all required checks, then
-   merges. Verify major/runtime PRs do not get auto-merge enabled.
+The auto-merge workflow fails closed if its required CI rules are absent. These
+files alone do not change repository settings. They must be deployed together.
 
-When CI matrix names or development dependencies change, update the explicit
-lists in the workflow and the CI ruleset together. The workflow checks rulesets,
-not legacy branch-protection settings.
+## Releases with protected main
 
+Release preparation creates a branch and PR instead of pushing to main.
+It explicitly dispatches CI and CodeQL because pushes and PRs created using
+`GITHUB_TOKEN` do not trigger those workflows automatically.
+
+1. Dispatch **Release** on `main` with `bump=patch|minor|major`.
+2. Review and merge the generated release PR after required CI passes.
+3. Dispatch **Release** on `main` with `finalize=vX.Y.Z` to tag the merged
+   version and start the existing tag-test and publication sequence.
+
+Do not use a broad GitHub Actions bypass to restore direct release pushes:
+the auto-merge workflow runs under the same identity.
+
+## Maintenance
+
+When CI matrix names or allowed development dependencies change, update the
+workflow lists and ruleset together. The protection check reads rulesets, not
+legacy branch-protection settings. Unknown update types remain manual.
+
+The next eligible Dependabot PR exercises the complete automatic path. Major
+or runtime updates should remain open for review regardless of green CI.
