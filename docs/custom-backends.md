@@ -248,7 +248,14 @@ Backends receive `RateLimiterCallbacks` or `SyncRateLimiterCallbacks` from their
 builder. They must invoke callback slots outside backend locks where possible:
 
 - `on_missing_consumption_data`: when a bucket is first observed without stored
-  consumption data and full quota is assumed.
+  consumption data, or when a backend detects and repairs state loss. Built-in
+  backends include `missing_state_reason` (`"fresh_start"` or
+  `"state_loss_drained"`), `missing_state_keys`, and `present_state_keys`.
+  Field-name tuples contain `"last_checked"` and/or `"capacity"`. Loss repair
+  can emit the callback even when the acquisition is blocked. Existing callback
+  functions accepting only the original three arguments remain supported.
+  Built-in runtime-limit and rebuild snapshots may repair loss without emitting
+  this callback; it is not a complete audit ledger of every storage repair.
 - `on_capacity_consumed`: after capacity has been committed by
   `await_for_capacity()`, `wait_for_capacity()`, or `consume_capacity()`.
 - `on_wait_start`: when a blocking acquire determines it must wait.

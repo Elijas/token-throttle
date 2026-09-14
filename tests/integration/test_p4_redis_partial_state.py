@@ -56,7 +56,7 @@ async def test_p4_redis_01_partial_state_blocks_acquire_and_reports_missing_key(
     partial_events = [
         event
         for event in events
-        if event.get("missing_state_reason") == "partial_state_drained"
+        if event.get("missing_state_reason") == "state_loss_drained"
     ]
     assert partial_events
     assert partial_events[-1]["usage_metric"] == "requests"

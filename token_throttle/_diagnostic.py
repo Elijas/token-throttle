@@ -25,6 +25,7 @@ DiagnosticBucketStatus = Literal[
     "fresh_start",
     "missing",
     "partial_missing",
+    "state_loss",
     "corrupt",
     "unavailable",
 ]
@@ -898,7 +899,13 @@ def _reconcile_bucket(
     backend_override = backend_bucket.runtime_override
     if (
         backend_bucket.backend_type == "sqlite"
-        and backend_bucket.status in {"ok", "fresh_start"}
+        and (
+            backend_bucket.status in {"ok", "fresh_start"}
+            or (
+                backend_bucket.status in {"partial_missing", "state_loss"}
+                and backend_bucket.current_capacity is not None
+            )
+        )
         and backend_override is None
     ):
         local_override = None

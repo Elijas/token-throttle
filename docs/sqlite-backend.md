@@ -218,6 +218,14 @@ independent limits.
 SQLite snapshot fields and exact namespace-scoped diagnostics are documented in
 the [observability reference](observability.md#health-snapshot).
 
+If bucket state disappears after this backend recently committed it, the next
+operation drains that bucket to zero durably. Read-only diagnostics predict
+that repair with status `state_loss`; partial state uses `partial_missing`.
+Confirmation survives callable rebuilds for surviving bucket identities, but
+is local to the observer and expires before the bucket TTL. A new backend after
+loss may still initialize full capacity. See
+[state-loss behavior and limits](operations.md#if-redis-or-sqlite-loses-bucket-state).
+
 ## Troubleshooting
 
 ### `database is locked` or repeated `BackendLockContentionError`
@@ -237,8 +245,8 @@ and VM snapshot history. A backward-clock warning means refill was clamped
 rather than calculated from negative elapsed time; a sufficiently future stored
 timestamp is repaired without adding capacity. A forward clock jump cannot be
 distinguished from real elapsed time and may refill up to the bucket maximum.
-Do not delete the database as a clock repair: deleting it resets shared bucket
-state to fresh capacity.
+Do not delete the database as a clock repair: it can invalidate active
+connections and reset quotas for observers without prior state evidence.
 
 ### Processes do not appear to share a budget
 

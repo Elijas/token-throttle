@@ -142,9 +142,9 @@ def calculate_capacity(  # noqa: PLR0913
     max_capacity = _validate_max_capacity_finite_positive(max_capacity)
     rate_per_sec = _validate_rate_per_sec_finite_positive(rate_per_sec)
 
-    # Backends should only pass None for genuine new buckets where both state
-    # fields are missing. Redis normalizes partial state before reaching this
-    # shared math so a missing key cannot reset a drained bucket to full.
+    # Persistent backends normalize partial or recently confirmed total state
+    # loss to (current_time, 0) before this math. Without evidence of prior
+    # state, None/None remains a full fresh start.
     if last_checked is None or outdated_capacity is None:
         return CalculatedCapacity(amount=max_capacity, is_fresh_start=True)
 

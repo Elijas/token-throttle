@@ -193,15 +193,16 @@ def _normalize_bucket_state_pair(
     *,
     context: str,
     current_time: float | None = None,
+    drain_total_loss: bool = False,
 ) -> tuple[bytes | str | None, bytes | str | None]:
     last_checked = _validate_bucket_state_result(
         last_checked, context=f"{context} last_checked"
     )
     capacity = _validate_bucket_state_result(capacity, context=f"{context} capacity")
     missing_keys = _bucket_state_missing_keys(last_checked, capacity)
-    if len(missing_keys) == _BUCKET_STATE_KEY_COUNT:
+    if len(missing_keys) == _BUCKET_STATE_KEY_COUNT and not drain_total_loss:
         return None, None
-    if len(missing_keys) == 1:
+    if missing_keys:
         partial_state_time = time.time() if current_time is None else current_time
         return str(partial_state_time), b"0.0"
     return last_checked, capacity
@@ -320,6 +321,8 @@ class RedisBucket:
         self._max_capacity_key = redis_key_with_suffix(
             self.full_redis_key, "max_capacity_override"
         )
+        self._state_confirmed_at_server_time: float | None = None
+        self._state_confirmed_ttl_seconds = self._bucket_ttl_seconds
         self._missing_consumption_data_reason: str | None = None
         self._missing_consumption_data_missing_keys: tuple[str, ...] = ()
         self._missing_consumption_data_present_keys: tuple[str, ...] = ()
@@ -547,6 +550,24 @@ class RedisBucket:
         self._apply_parsed_max_capacity_override(new_value)
         return new_value is not None
 
+    def confirm_state_present(self, current_time: float) -> None:
+        """Record validated complete state using Redis' TTL clock."""
+        self._state_confirmed_at_server_time = float(current_time)
+        self._state_confirmed_ttl_seconds = self._bucket_ttl_seconds
+
+    def state_loss_suspected(self, current_time: float) -> bool:
+        """
+        Treat disappearance within 90% of the refreshed TTL as state loss.
+
+        A negative age remains suspicious: a backward clock adjustment cannot
+        establish that the state expired naturally.
+        """
+        return (
+            self._state_confirmed_at_server_time is not None
+            and current_time - self._state_confirmed_at_server_time
+            < self._state_confirmed_ttl_seconds * 0.9
+        )
+
     def _set_missing_consumption_data_context(
         self,
         *,
@@ -693,6 +714,7 @@ class RedisBucket:
                 results[self.PIPELINE_CAPACITY_OFFSET],
                 context=f"RedisBucket.get_capacity({self.full_redis_key})",
                 current_time=current_time,
+                drain_total_loss=self.state_loss_suspected(current_time),
             )
             _validate_expire_result(
                 results[2],
@@ -715,6 +737,11 @@ class RedisBucket:
             if update_max_capacity_cache:
                 await self._refresh_max_capacity_override_ttl(max_capacity_override)
                 self._apply_parsed_max_capacity_override(max_capacity_override)
+            missing = _bucket_state_missing_keys(results[0], results[1])
+            if missing and not result.is_fresh_start:
+                await self.set_capacity(0.0, current_time=current_time)
+            elif not missing and results[2] and results[3]:
+                self.confirm_state_present(current_time)
             return result
         return None
 
@@ -773,6 +800,8 @@ class RedisBucket:
                 results[1],
                 context=f"RedisBucket.set_capacity({self.full_redis_key}) capacity",
             )
+
+            self.confirm_state_present(current_time)
 
     def calculate_capacity(
         self,

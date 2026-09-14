@@ -1150,4 +1150,7 @@ class MemoryBackend(RateLimiterBackend):
                     model_family=self._limit_config.get_model_family(),
                     usage_metric=bucket.usage_metric,
                     per_seconds=bucket.per_seconds,
+                    missing_state_reason="fresh_start",
+                    missing_state_keys=("last_checked", "capacity"),
+                    present_state_keys=(),
                 )

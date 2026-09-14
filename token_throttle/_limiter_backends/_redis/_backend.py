@@ -1107,12 +1107,18 @@ class RedisBackend(RateLimiterBackend):
             override = bucket._deserialize_max_capacity_override(override_raw)  # noqa: SLF001
             effective = configured_limit if override is None else override
             source: DiagnosticOverrideSource = "none" if override is None else "backend"
-            if (last_checked is None) != (stored_capacity is None):
+            partial_missing = (last_checked is None) != (stored_capacity is None)
+            total_loss = (
+                last_checked is None
+                and stored_capacity is None
+                and bucket.state_loss_suspected(current_time)
+            )
+            if partial_missing or total_loss:
                 issues.append(
                     DiagnosticIssue(
                         severity="warning",
                         component="redis_backend",
-                        message="Redis bucket has partial state",
+                        message="Redis bucket state was lost",
                         model_family=self._limit_config.get_model_family(),
                         metric=metric,
                         per_seconds=per_seconds,
@@ -1123,11 +1129,11 @@ class RedisBackend(RateLimiterBackend):
                     metric=metric,
                     per_seconds=per_seconds,
                     backend_type=backend_type_for_object(self),
-                    current_capacity=None,
+                    current_capacity=0.0,
                     configured_limit=configured_limit,
                     effective_max_capacity=effective,
                     override_source=source,
-                    status="partial_missing",
+                    status="partial_missing" if partial_missing else "state_loss",
                     as_of_monotonic=as_of_monotonic,
                 )
             calculated = calculate_capacity(
@@ -1629,6 +1635,7 @@ class RedisBackend(RateLimiterBackend):
                 capacity_raw,
                 context=f"RedisBackend._get_capacities_unsafe({bucket.full_redis_key})",
                 current_time=current_time,
+                drain_total_loss=bucket.state_loss_suspected(current_time),
             )
             _validate_expire_result(
                 results[idx + 2],
@@ -1679,12 +1686,12 @@ class RedisBackend(RateLimiterBackend):
             )
 
         fresh_start_buckets: list[RedisBucket] = []
-        partial_state_buckets: list[RedisBucket] = []
+        state_loss_buckets: list[RedisBucket] = []
         for parsed_result in parsed_bucket_results:
             bucket = parsed_result.bucket
             result = parsed_result.calculated_capacity
-            if len(parsed_result.missing_keys) == 1:
-                partial_state_buckets.append(bucket)
+            if parsed_result.missing_keys and not result.is_fresh_start:
+                state_loss_buckets.append(bucket)
                 fresh_start_buckets.append(bucket)
             elif result.is_fresh_start:
                 fresh_start_buckets.append(bucket)
@@ -1692,9 +1699,9 @@ class RedisBackend(RateLimiterBackend):
                 result.amount
             )
 
-        if partial_state_buckets:
+        if state_loss_buckets:
             repair_pipeline = self._redis.pipeline()
-            for bucket in partial_state_buckets:
+            for bucket in state_loss_buckets:
                 await bucket.set_capacity(
                     0.0,
                     pipeline=repair_pipeline,
@@ -1710,9 +1717,9 @@ class RedisBackend(RateLimiterBackend):
             repair_results = _validate_pipeline_results(
                 repair_results,
                 context="RedisBackend._get_capacities_unsafe partial-state repair",
-                expected_count=2 * len(partial_state_buckets),
+                expected_count=2 * len(state_loss_buckets),
             )
-            for i, bucket in enumerate(partial_state_buckets):
+            for i, bucket in enumerate(state_loss_buckets):
                 _validate_set_result(
                     repair_results[i * 2],
                     context=(
@@ -1739,9 +1746,9 @@ class RedisBackend(RateLimiterBackend):
                 parsed_result.max_capacity_override
             )
             result = parsed_result.calculated_capacity
-            if len(parsed_result.missing_keys) == 1:
+            if parsed_result.missing_keys and not result.is_fresh_start:
                 bucket._set_missing_consumption_data_context(  # noqa: SLF001
-                    reason="partial_state_drained",
+                    reason="state_loss_drained",
                     missing_keys=parsed_result.missing_keys,
                     present_keys=parsed_result.present_keys,
                 )
@@ -1758,10 +1765,28 @@ class RedisBackend(RateLimiterBackend):
                     present_keys=parsed_result.present_keys,
                 )
 
+        for i, parsed_result in enumerate(parsed_bucket_results):
+            if parsed_result.bucket in state_loss_buckets or (
+                not parsed_result.missing_keys
+                and results[i * _PIPELINE_CMDS_PER_BUCKET + 2]
+                and results[i * _PIPELINE_CMDS_PER_BUCKET + 3]
+            ):
+                parsed_result.bucket.confirm_state_present(current_time)
+
         return CapacitiesGetterResult(
             capacities=frozendict(new_capacities),
             fresh_start_buckets=fresh_start_buckets,
         )
+
+    def _confirm_written_state(
+        self,
+        capacities: Capacities,
+        buckets: tuple[RedisBucket, ...] | list[RedisBucket],
+        current_time: float,
+    ) -> None:
+        for bucket in buckets:
+            if (bucket.usage_metric, int(bucket.per_seconds)) in capacities:
+                bucket.confirm_state_present(current_time)
 
     async def _set_capacities_unsafe(  # noqa: PLR0913
         self,
@@ -1865,6 +1890,9 @@ class RedisBackend(RateLimiterBackend):
                 result, context="RedisBackend acquire marker script"
             )
             if status == "ok":
+                self._confirm_written_state(
+                    new_capacities, target_buckets, current_time
+                )
                 return True
             if status == "replayed_acquire":
                 # Identical replay of a live reservation: already consumed by
@@ -1946,6 +1974,7 @@ class RedisBackend(RateLimiterBackend):
                     results[len(new_capacities) * 2],
                     context="RedisBackend._set_capacities_unsafe acquired marker DEL",
                 )
+            self._confirm_written_state(new_capacities, target_buckets, current_time)
             return True
         dedup_idx = len(new_capacities) * 2
         if delete_acquired_marker_key is not None:
@@ -1957,7 +1986,9 @@ class RedisBackend(RateLimiterBackend):
             results[dedup_idx],
             context="RedisBackend._set_capacities_unsafe refund dedup SET NX",
         ):
+            self._confirm_written_state(new_capacities, target_buckets, current_time)
             return True
+        self._confirm_written_state(new_capacities, target_buckets, current_time)
         if refund_dedup_reservation_id is not None:
             self._warn_refund_dedup_duplicate(refund_dedup_reservation_id)
         return False
@@ -2047,6 +2078,7 @@ class RedisBackend(RateLimiterBackend):
             result, context="RedisBackend refund marker script"
         )
         if status == "ok":
+            self._confirm_written_state(new_capacities, buckets, current_time)
             return
         if status == "replayed_refund":
             return
@@ -3288,6 +3320,11 @@ class RedisBackend(RateLimiterBackend):
             results[RedisBucket.PIPELINE_CAPACITY_OFFSET],
             context=f"RedisBackend._snapshot_bucket_state({bucket.full_redis_key})",
             current_time=current_time,
+            drain_total_loss=(
+                bucket.state_loss_suspected(current_time)
+                if hasattr(bucket, "state_loss_suspected")
+                else False
+            ),
         )
         _validate_expire_result(
             results[2],
@@ -3486,6 +3523,20 @@ class RedisBackend(RateLimiterBackend):
             key_prefix=self._key_prefix,
             redis_client=self._redis,
         )
+        previous = {
+            bucket.full_redis_key: bucket for bucket in self._snapshot_buckets()
+        }
+        for bucket in buckets:
+            surviving = previous.get(bucket.full_redis_key)
+            if surviving is not None:
+                bucket._state_confirmed_at_server_time = (  # noqa: SLF001
+                    getattr(surviving, "_state_confirmed_at_server_time", None)
+                )
+                bucket._state_confirmed_ttl_seconds = getattr(  # noqa: SLF001
+                    surviving,
+                    "_state_confirmed_ttl_seconds",
+                    bucket._bucket_ttl_seconds,  # noqa: SLF001
+                )
         self.sorted_buckets = sorted(buckets, key=lambda bucket: bucket.full_redis_key)
         self._usage_metric_names = {bucket.usage_metric for bucket in buckets}
         self._limit_config = cfg

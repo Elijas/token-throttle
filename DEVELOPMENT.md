@@ -436,9 +436,9 @@ mismatch immediately rather than silently reading wrong values.
 
 Instead, each backend performs the over-limit check inside its lock against the live `bucket.max_capacity`. This means over-limit requests acquire the lock (and, for Redis, a pipeline round-trip) before failing. That cost is acceptable because over-limit requests are programming errors, not normal traffic, and checking outside the lock would require reading a potentially-stale cached value then re-checking under the lock anyway.
 
-### `on_missing_consumption_data` callback is delayed until first successful acquire
+### `on_missing_consumption_data` reports initialization and repaired state loss
 
-When `_check_and_consume_capacity` returns `False` (insufficient capacity), it exits before calling `_fresh_start_buckets_callback`. The `on_missing_consumption_data` callback won't fire until the first *successful* capacity acquisition. This is by design — firing it on every 100ms poll iteration would be noisy. Since `last_checked` is never written on the insufficient-capacity path, the fresh-start condition persists and the callback fires exactly once when capacity is first successfully consumed.
+Acquisition, direct consumption, and refund emit missing-state callbacks when they discover initialization or repair loss, including a blocked acquisition. Durable repair prevents repeated loss notifications on subsequent polls. Metadata uses `fresh_start` or `state_loss_drained` and missing/present field-name tuples. Runtime-capacity and callable-rebuild snapshots may initialize or repair state without emitting these callbacks. Diagnostics only predict repair: they do not write state, emit repair callbacks, or refresh confirmation. Callback delivery remains best-effort for ordinary exceptions.
 
 ### Redis `consume_capacity` callbacks are best-effort after cancellation
 

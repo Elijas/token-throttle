@@ -49,6 +49,7 @@ from ._engine import (
     DEFAULT_PRUNE_BATCH_SIZE,
     BucketSpec,
     CapacityResult,
+    MissingStateEvent,
     SqliteEngine,
 )
 from ._ttl import (
@@ -373,7 +374,18 @@ class SyncSqliteBackend(SyncRateLimiterBackend):
                 configured_limit=snapshot.spec.configured_max_capacity,
                 effective_max_capacity=snapshot.effective_max_capacity,
                 override_source=("backend" if snapshot.override_active else "none"),
-                status="fresh_start" if snapshot.is_fresh_start else "ok",
+                status=(
+                    "partial_missing"
+                    if snapshot.missing_state_event is not None
+                    and snapshot.missing_state_event.reason == "state_loss_drained"
+                    and len(snapshot.missing_state_event.missing_fields) == 1
+                    else "state_loss"
+                    if snapshot.missing_state_event is not None
+                    and snapshot.missing_state_event.reason == "state_loss_drained"
+                    else "fresh_start"
+                    if snapshot.is_fresh_start
+                    else "ok"
+                ),
                 as_of_monotonic=as_of_monotonic,
             )
             for snapshot in snapshots
@@ -437,6 +449,7 @@ class SyncSqliteBackend(SyncRateLimiterBackend):
         self._engine.clear_max_capacity_overrides(
             frozenset(old_ids - new_ids) | changed_ids,
         )
+        new_backend._engine.inherit_state_confirmations(self._engine)  # noqa: SLF001
         self.close()
         return new_backend
 
@@ -467,6 +480,7 @@ class SyncSqliteBackend(SyncRateLimiterBackend):
             reservation_lifetime_seconds=reservation_lifetime_seconds,
         )
         if result.replayed:
+            self._missing_state_buckets_callback(result.missing_state_events)
             return result.current_time
         self._warn_over_max_consumption(usage, result)
         self._emit_consumed_callbacks(usage, result)
@@ -546,6 +560,13 @@ class SyncSqliteBackend(SyncRateLimiterBackend):
             result = attempt.result
             if attempt.available:
                 break
+            self._missing_state_buckets_callback(
+                tuple(
+                    event
+                    for event in result.missing_state_events
+                    if event.reason == "state_loss_drained"
+                )
+            )
             self._upsert_diagnostic_waiter(
                 waiter_key,
                 reservation_id=reservation_id,
@@ -600,6 +621,7 @@ class SyncSqliteBackend(SyncRateLimiterBackend):
             time.sleep(max(0.001, effective))
 
         if result.replayed:
+            self._missing_state_buckets_callback(result.missing_state_events)
             return result.current_time
         consumed_monotonic = time.monotonic()
         consumed_bucket_ids = self._engine.bucket_ids
@@ -766,7 +788,7 @@ class SyncSqliteBackend(SyncRateLimiterBackend):
             reservation_bucket_ids=marker_bucket_ids,
             reservation_reserved_usage=marker_reserved_usage,
         )
-        self._fresh_start_buckets_callback(result.fresh_bucket_ids)
+        self._missing_state_buckets_callback(result.missing_state_events)
         if self._callbacks and self._callbacks.on_capacity_refunded:
             self._invoke_callback_safe(
                 self._callbacks.on_capacity_refunded,
@@ -929,7 +951,7 @@ class SyncSqliteBackend(SyncRateLimiterBackend):
         usage: FrozenUsage,
         result: CapacityResult,
     ) -> None:
-        self._fresh_start_buckets_callback(result.fresh_bucket_ids)
+        self._missing_state_buckets_callback(result.missing_state_events)
         if self._callbacks and self._callbacks.on_capacity_consumed:
             self._invoke_callback_safe(
                 self._callbacks.on_capacity_consumed,
@@ -941,23 +963,25 @@ class SyncSqliteBackend(SyncRateLimiterBackend):
                 current_time=result.current_time,
             )
 
-    def _fresh_start_buckets_callback(
+    def _missing_state_buckets_callback(
         self,
-        bucket_ids: tuple[BucketId, ...],
+        events: tuple[MissingStateEvent, ...],
     ) -> None:
         if not (
-            bucket_ids
-            and self._callbacks
-            and self._callbacks.on_missing_consumption_data
+            events and self._callbacks and self._callbacks.on_missing_consumption_data
         ):
             return
-        for metric, per_seconds in bucket_ids:
+        for event in events:
+            metric, per_seconds = event.bucket_id
             self._invoke_callback_safe(
                 self._callbacks.on_missing_consumption_data,
                 callback_slot="on_missing_consumption_data",
                 model_family=self._limit_config.get_model_family(),
                 usage_metric=metric,
                 per_seconds=per_seconds,
+                missing_state_reason=event.reason,
+                missing_state_keys=event.missing_fields,
+                present_state_keys=event.present_fields,
             )
 
     @staticmethod

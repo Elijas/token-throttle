@@ -93,6 +93,14 @@ class BucketSpec:
 
 
 @dataclass(frozen=True, slots=True)
+class MissingStateEvent:
+    bucket_id: BucketId
+    reason: str
+    missing_fields: tuple[str, ...]
+    present_fields: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class CapacityResult:
     current_time: float
     pre_capacities: Capacities
@@ -102,6 +110,7 @@ class CapacityResult:
     # True when the call was an identical replay of a live reservation: nothing
     # was consumed and no consumption callback should fire.
     replayed: bool = False
+    missing_state_events: tuple[MissingStateEvent, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,6 +126,7 @@ class RefundResult:
     post_capacities: Capacities
     refunded_usage: FrozenUsage
     fresh_bucket_ids: tuple[BucketId, ...]
+    missing_state_events: tuple[MissingStateEvent, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,6 +136,7 @@ class BucketSnapshot:
     effective_max_capacity: float
     override_active: bool
     is_fresh_start: bool
+    missing_state_event: MissingStateEvent | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,6 +147,7 @@ class _BucketState:
     max_capacity: float
     override_active: bool
     is_fresh_start: bool
+    missing_state_event: MissingStateEvent | None
 
 
 def _debug_event(
@@ -221,6 +233,12 @@ class SqliteEngine:
         self._lock = threading.RLock()
         self._closed = False
         self._override_mismatch_warned: set[BucketId] = set()
+        # Only complete state writes that survive COMMIT are evidence. Reads
+        # neither refresh the row TTL nor extend this observer's proof window.
+        # Absolute cutoffs preserve the source TTL when a replacement engine
+        # has a different TTL; its next committed write establishes a new one.
+        self._state_confirmed_until: dict[BucketId, float] = {}
+        self._pending_state_confirmations: dict[BucketId, float] = {}
         initialization_timeout_ms = (
             busy_timeout_ms
             if initialization_busy_timeout_ms is None
@@ -271,6 +289,26 @@ class SqliteEngine:
                 return
             self._closed = True
             self._connection.close()
+
+    def inherit_state_confirmations(self, previous: SqliteEngine) -> None:
+        """Transfer proof for surviving identities during backend replacement."""
+        if (self.db_path, self.key_prefix, self.model_family) != (
+            previous.db_path,
+            previous.key_prefix,
+            previous.model_family,
+        ):
+            raise ValueError("SQLite state evidence requires the same store and family")
+        with previous._lock:
+            confirmations = dict(previous._state_confirmed_until)
+        with self._lock:
+            for bucket_id in self.bucket_ids & previous.bucket_ids:
+                if bucket_id in confirmations:
+                    self._state_confirmed_until[bucket_id] = confirmations[bucket_id]
+
+    def _state_loss_suspected(self, bucket_id: BucketId, current_time: float) -> bool:
+        confirmed_until = self._state_confirmed_until.get(bucket_id)
+        # A backwards clock also drains: expiry cannot be established safely.
+        return confirmed_until is not None and current_time < confirmed_until
 
     def _configure_connection(self, busy_timeout_ms: int) -> None:
         self._connection.execute(f"PRAGMA busy_timeout={busy_timeout_ms:d}")
@@ -353,6 +391,10 @@ class SqliteEngine:
                 current_time = clock()
                 yield self._connection, current_time
                 self._connection.execute("COMMIT")
+                self._state_confirmed_until.update(
+                    (bucket_id, confirmed_at + 0.9 * self._bucket_ttl_seconds)
+                    for bucket_id, confirmed_at in self._pending_state_confirmations.items()
+                )
             except BaseException as exc:
                 with contextlib.suppress(sqlite3.Error):
                     self._connection.execute("ROLLBACK")
@@ -367,6 +409,9 @@ class SqliteEngine:
                         "to retry."
                     ) from exc
                 raise
+
+            finally:
+                self._pending_state_confirmations.clear()
 
     def _initialize_schema(self, *, busy_timeout_ms: int | None = None) -> None:
         with self._transaction(busy_timeout_ms=busy_timeout_ms) as (
@@ -517,7 +562,7 @@ class SqliteEngine:
                 uncapped_capacity = max_capacity
         return calculated, uncapped_capacity
 
-    def _load_states(
+    def _load_states(  # noqa: PLR0915
         self,
         connection: sqlite3.Connection,
         current_time: float,
@@ -671,10 +716,34 @@ class SqliteEngine:
                                 spec.per_seconds,
                             ),
                         )
+                        if (
+                            capacity_value is not None
+                            and last_checked_value is not None
+                        ):
+                            self._pending_state_confirmations[spec.bucket_id] = (
+                                current_time
+                            )
 
-            if (capacity_value is None) != (last_checked_value is None):
+            missing_fields = tuple(
+                field
+                for field, value in (
+                    ("last_checked", last_checked_value),
+                    ("capacity", capacity_value),
+                )
+                if value is None
+            )
+            present_fields = tuple(
+                field
+                for field in ("last_checked", "capacity")
+                if field not in missing_fields
+            )
+            state_lost = bool(missing_fields) and (
+                len(missing_fields) == 1
+                or self._state_loss_suspected(spec.bucket_id, current_time)
+            )
+            if state_lost:
                 _logger.warning(
-                    "Partial SQLite bucket state detected; draining fail-closed; "
+                    "SQLite bucket state lost; draining fail-closed; "
                     "metric=%s model_family=%s bucket_id=%s",
                     spec.metric,
                     self.model_family,
@@ -697,6 +766,7 @@ class SqliteEngine:
                             spec.per_seconds,
                         ),
                     )
+                    self._pending_state_confirmations[spec.bucket_id] = current_time
 
             calculated, uncapped_capacity = self._refill_capacity(
                 spec,
@@ -729,6 +799,7 @@ class SqliteEngine:
                         spec.per_seconds,
                     ),
                 )
+                self._pending_state_confirmations[spec.bucket_id] = current_time
             if calculated.is_fresh_start:
                 fresh.append(spec.bucket_id)
             states[spec.bucket_id] = _BucketState(
@@ -738,6 +809,14 @@ class SqliteEngine:
                 max_capacity=max_capacity,
                 override_active=override_active,
                 is_fresh_start=calculated.is_fresh_start,
+                missing_state_event=MissingStateEvent(
+                    bucket_id=spec.bucket_id,
+                    reason="state_loss_drained" if state_lost else "fresh_start",
+                    missing_fields=missing_fields,
+                    present_fields=present_fields,
+                )
+                if missing_fields
+                else None,
             )
         return states, tuple(fresh)
 
@@ -763,6 +842,16 @@ class SqliteEngine:
     def _capacities(states: Mapping[BucketId, _BucketState]) -> Capacities:
         return frozendict(
             {bucket_id: state.capacity for bucket_id, state in states.items()}
+        )
+
+    @staticmethod
+    def _missing_state_events(
+        states: Mapping[BucketId, _BucketState],
+    ) -> tuple[MissingStateEvent, ...]:
+        return tuple(
+            state.missing_state_event
+            for state in states.values()
+            if state.missing_state_event is not None
         )
 
     def _write_capacities(
@@ -796,6 +885,7 @@ class SqliteEngine:
                     f"SQLite bucket '{metric}/{per_seconds}s' disappeared during "
                     "a write transaction"
                 )
+            self._pending_state_confirmations[(metric, per_seconds)] = current_time
 
     def _raise_if_duplicate_acquire(
         self,
@@ -952,6 +1042,7 @@ class SqliteEngine:
                         post_capacities=pre,
                         max_capacities=max_capacities,
                         fresh_bucket_ids=fresh,
+                        missing_state_events=self._missing_state_events(states),
                         replayed=True,
                     ),
                 )
@@ -976,6 +1067,7 @@ class SqliteEngine:
                         post_capacities=frozendict(),
                         max_capacities=max_capacities,
                         fresh_bucket_ids=fresh,
+                        missing_state_events=self._missing_state_events(states),
                     ),
                 )
             post = frozendict(
@@ -1000,6 +1092,7 @@ class SqliteEngine:
                     post_capacities=post,
                     max_capacities=max_capacities,
                     fresh_bucket_ids=fresh,
+                    missing_state_events=self._missing_state_events(states),
                 ),
             )
 
@@ -1035,6 +1128,7 @@ class SqliteEngine:
                     post_capacities=pre,
                     max_capacities=max_capacities,
                     fresh_bucket_ids=fresh,
+                    missing_state_events=self._missing_state_events(states),
                     replayed=True,
                 )
             post = frozendict(
@@ -1060,6 +1154,7 @@ class SqliteEngine:
                 post_capacities=post,
                 max_capacities=max_capacities,
                 fresh_bucket_ids=fresh,
+                missing_state_events=self._missing_state_events(states),
             )
 
     def _verify_marker(  # noqa: PLR0913
@@ -1224,6 +1319,7 @@ class SqliteEngine:
                 post_capacities=post,
                 refunded_usage=refund_usage,
                 fresh_bucket_ids=fresh,
+                missing_state_events=self._missing_state_events(states),
             )
 
     def cleanup_consumption(
@@ -1443,6 +1539,7 @@ class SqliteEngine:
                     effective_max_capacity=state.max_capacity,
                     override_active=state.override_active,
                     is_fresh_start=state.is_fresh_start,
+                    missing_state_event=state.missing_state_event,
                 )
                 for state in states.values()
             )

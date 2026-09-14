@@ -51,25 +51,40 @@ with it. Use application-level request tracing or deadline enforcement
 (bound `max_reservation_lifetime_seconds` to a value close to your real
 request timeout) if you need to detect or bound crash-orphaned reservations.
 
-### If Redis loses bucket state (restart, FLUSHALL, eviction)
+### If Redis or SQLite loses bucket state
 
-Each bucket's state lives in two Redis keys. If exactly one of them is missing,
-token-throttle treats the bucket as corrupt and drains it to zero — it fails
-**closed**, and the `on_missing_consumption_data` callback reports the reason
-`"partial_state_drained"`. But if **both** keys are missing, token-throttle
-cannot distinguish a model family it has simply never seen from a bucket whose
-state was lost, so it resets the bucket to full capacity — it fails **open**,
-with the reason `"fresh_start"`.
+Persistent buckets store a capacity and a last-checked timestamp. If one field
+is missing, the backend drains the affected bucket to zero. If both are missing,
+it also drains when that backend recently confirmed the state existed: Redis
+uses successful state observations and writes, while SQLite uses committed
+state writes. Confirmation must be younger than 90% of `bucket_ttl_seconds`,
+measured in the store's clock. A backwards clock jump errs toward draining.
+Normal linear refill then resumes from zero; unrelated buckets are unchanged.
 
-The practical consequence is the inverse of the fail-closed behavior described
-elsewhere in this guide: a Redis restart without RDB/AOF persistence, a
-`FLUSHALL`, or an eviction wave that drops both keys of a bucket silently resets
-the affected quotas to full. If that reset is unacceptable, run Redis with
-persistence and a `maxmemory-policy` that protects bucket keys. Monitor
-`on_missing_consumption_data`: a single `"fresh_start"` is expected the first
-time a model family is used, but a burst of `"fresh_start"` reasons across many
-already-active model families at once is the signal that bucket-state loss just
-reset live quotas.
+This protection is best-effort and local to the observing backend. With no
+recent confirmation, absence still starts a full bucket. A new process or
+backend after a wipe has no such evidence, and a cold observer that recreates
+state first can hide the loss from an older observer. Confirmation is preserved
+for surviving bucket identities when a callable configuration rebuilds a
+backend; it is not transferred to newly added or removed identities.
+
+`introspect()` and `diagnose()` predict zero after detectable loss without
+repairing storage or refreshing confirmation. Total loss has bucket status
+`"state_loss"`; partial loss has `"partial_missing"`. An ordinary operation
+performs the durable repair. Acquisition, consumption, and refund paths report
+the repair through `on_missing_consumption_data` with
+`missing_state_reason="state_loss_drained"` and tuples of missing/present state
+field names, including when an acquire cannot proceed after the repair.
+Runtime-limit and reconfiguration snapshots can also repair state without
+emitting this callback, so callback counts are not an exhaustive loss ledger.
+Acquisition, consumption, and refund use `"fresh_start"` when they initialize
+unproven absence. Memory also supplies this metadata on those paths, but has
+no external persistent store to monitor.
+
+Use Redis persistence and a `maxmemory-policy` that protects bucket keys, and
+protect SQLite files from deletion or replacement. Monitor loss events and
+bursts of fresh starts across active model families. Recent observations cannot
+replace durable storage or guarantee detection after every restart or wipe.
 
 ## Concurrency model
 

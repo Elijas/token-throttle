@@ -3,6 +3,43 @@
 Notable changes for token-throttle releases. Each major version's breaking
 changes and upgrade steps are recorded in its entry below.
 
+## 13.0.0 - 2026-09-14
+
+- **Breaking:** Redis and SQLite now drain a bucket to zero when both state
+  fields disappear after the backend recently confirmed them present. Previously
+  total absence always started a full bucket. Confirmation must be younger than
+  90% of the bucket TTL; partial loss continues to drain regardless of prior
+  confirmation. Normal refill resumes after the durable repair.
+- State-loss evidence survives callable reconfiguration for surviving bucket
+  identities without extending its original confirmation window. SQLite promotes
+  confirmation only after a successful commit;
+  rollback and failed commits do not create evidence. Redis confirms validated
+  successful observations and writes using server time.
+- Diagnostics predict zero after detectable loss without repairing storage or
+  refreshing confirmation. Detectable total absence uses the new bucket status
+  `state_loss`; partial absence uses `partial_missing` and now reports the zero
+  capacity that the decision path will use.
+- **Breaking:** missing-state callbacks use `state_loss_drained` for detected
+  loss, replacing Redis's `partial_state_drained`. Acquisition, consumption, and
+  refund callbacks on Memory, Redis, and SQLite use `fresh_start` for
+  initialization and include missing/present state-field tuples. A blocked
+  acquire can emit a committed state-loss repair event. Runtime-capacity and
+  rebuild snapshots may initialize or repair state without emitting callbacks.
+- This protection is local to the observing backend. New observers after a
+  wipe, or observers without recent evidence, still start absent buckets full.
+  A cold observer that recreates state first can hide the loss from a warm one.
+  Durable storage and protection against eviction/deletion remain necessary.
+
+Upgrade steps:
+
+- Expect some requests after detected storage loss to wait or time out while
+  the drained quota refills. Do not rely on deletion to reset an active quota.
+- Update callback reason matching from `partial_state_drained` to
+  `state_loss_drained`, and accept the new diagnostic status `state_loss`.
+- Keep the v11 database migration and TTL rules and the v12 reconfiguration
+  and timeout rules when upgrading from older versions. No new SQLite schema
+  migration is introduced in this release.
+
 ## 12.0.0 - 2026-09-14
 
 This release makes callable reconfiguration safe for pending requests and fixes

@@ -183,9 +183,17 @@ async def test_sqlite_diagnose_keeps_local_fallback_when_introspection_fails(
 )
 @pytest.mark.parametrize(
     "status",
-    ["ok", "fresh_start", "missing", "partial_missing", "corrupt", "unavailable"],
+    [
+        "ok",
+        "fresh_start",
+        "missing",
+        "partial_missing",
+        "state_loss",
+        "corrupt",
+        "unavailable",
+    ],
 )
-def test_diagnostic_override_absence_is_authoritative_only_for_healthy_sqlite(
+def test_diagnostic_override_absence_is_authoritative_for_readable_sqlite(
     backend_type, status
 ):
     backend_bucket = make_bucket_diagnostic(
@@ -193,7 +201,13 @@ def test_diagnostic_override_absence_is_authoritative_only_for_healthy_sqlite(
         metric="requests",
         per_seconds=60,
         backend_type=backend_type,
-        current_capacity=10 if status in {"ok", "fresh_start"} else None,
+        current_capacity=(
+            0
+            if status in {"partial_missing", "state_loss"}
+            else 10
+            if status in {"ok", "fresh_start"}
+            else None
+        ),
         configured_limit=10,
         effective_max_capacity=10,
         override_source="none",
@@ -205,7 +219,12 @@ def test_diagnostic_override_absence_is_authoritative_only_for_healthy_sqlite(
         backend_bucket, configured_limit=10, local_override=1, issues=issues
     )
 
-    authoritative = backend_type == "sqlite" and status in {"ok", "fresh_start"}
+    authoritative = backend_type == "sqlite" and status in {
+        "ok",
+        "fresh_start",
+        "partial_missing",
+        "state_loss",
+    }
     assert bucket.effective_max_capacity == (10 if authoritative else 1)
     assert bucket.runtime_override == (None if authoritative else 1)
     assert bucket.override_source == ("none" if authoritative else "limiter")
