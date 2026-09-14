@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, "release-validation/**"]
   pull_request:
     branches: [main]
   # Lets main be re-verified on demand. Without it the only way to refresh a

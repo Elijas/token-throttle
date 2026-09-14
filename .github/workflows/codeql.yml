@@ -2,7 +2,7 @@ name: CodeQL
 
 on:
   push:
-    branches: [main]
+    branches: [main, "release-validation/**"]
   pull_request:
     branches: [main]
   # Dispatched explicitly by release.yml onto release/* branches: a branch
