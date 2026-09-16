@@ -135,7 +135,7 @@ _RESPONSES_NON_TOKEN_BEARING_KEYS = _SHARED_NON_TOKEN_BEARING_KEYS | {
 }
 
 # Model names the openai SDK already ships but tiktoken (0.14.0 as of
-# 2026-08-27) cannot yet resolve. For each of these, get_encoding() raises
+# 2026-09-16) cannot yet resolve. For each of these, get_encoding() raises
 # its designed guided ValueError (upgrade tiktoken / pass get_encoding_func),
 # so the gap is known and handled — re-flagging it weekly would only train
 # alert-blindness. Exact names only, no wildcards: a NEW unresolvable name
@@ -148,6 +148,9 @@ _KNOWN_PENDING_TIKTOKEN_MODELS = frozenset(
         # tiktoken 0.14.0 caught up on every gpt-5.1/5.2/5.3/5.4 name that was
         # listed here; they resolve now and were removed on 2026-08-27.
         "codex-mini-latest",
+        # openai 3.14.1 declares this name, but tiktoken 0.14.0 has no
+        # mapping. Keep the guided error until upstream supplies one.
+        "gpt-6-astra",
     }
 )
 
