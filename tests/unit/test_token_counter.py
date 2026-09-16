@@ -730,11 +730,21 @@ class TestGetEncodingUnknownModelRaisesGuidedError:
     now-removed hardcoded substring-to-encoding fallback table.
     """
 
-    def test_unknown_dotted_model_raises_value_error_not_key_error(self):
-        pytest.importorskip("tiktoken")
+    @pytest.fixture
+    def unavailable_dotted_model(self, monkeypatch):
+        """Simulate tokenizer lag even after upstream adds the real model."""
+        tiktoken = pytest.importorskip("tiktoken")
+        monkeypatch.setattr(
+            tiktoken, "encoding_for_model", MagicMock(side_effect=KeyError("gpt-5.1"))
+        )
+        return "gpt-5.1"
+
+    def test_unknown_dotted_model_raises_value_error_not_key_error(
+        self, unavailable_dotted_model
+    ):
         with pytest.raises(ValueError, match="get_encoding_func") as exc_info:
-            get_encoding("gpt-5.1")
-        assert "gpt-5.1" in str(exc_info.value)
+            get_encoding(unavailable_dotted_model)
+        assert unavailable_dotted_model in str(exc_info.value)
         assert isinstance(exc_info.value.__cause__, KeyError)
 
     def test_stale_fallback_table_entry_now_raises(self):
@@ -746,28 +756,33 @@ class TestGetEncodingUnknownModelRaisesGuidedError:
         with pytest.raises(ValueError, match="get_encoding_func"):
             get_encoding("codex")
 
-    def test_counter_call_raises_value_error_for_unknown_model(self):
+    def test_counter_call_raises_value_error_for_unknown_model(
+        self, unavailable_dotted_model
+    ):
         """OpenAIUsageCounter()(model, ...) must surface the guided ValueError,
         not a raw tiktoken KeyError.
         """
-        pytest.importorskip("tiktoken")
         counter = OpenAIUsageCounter()
         with pytest.raises(ValueError, match="get_encoding_func"):
-            counter("gpt-5.1", messages=[{"role": "user", "content": "hi"}])
+            counter(
+                unavailable_dotted_model, messages=[{"role": "user", "content": "hi"}]
+            )
 
-    async def test_count_request_async_raises_value_error_for_unknown_model(self):
-        pytest.importorskip("tiktoken")
+    async def test_count_request_async_raises_value_error_for_unknown_model(
+        self, unavailable_dotted_model
+    ):
         counter = OpenAIUsageCounter()
         with pytest.raises(ValueError, match="get_encoding_func"):
             await counter.count_request_async(
-                "gpt-5.1", messages=[{"role": "user", "content": "hi"}]
+                unavailable_dotted_model, messages=[{"role": "user", "content": "hi"}]
             )
 
-    async def test_warmup_models_raises_value_error_for_unknown_model(self):
-        pytest.importorskip("tiktoken")
+    async def test_warmup_models_raises_value_error_for_unknown_model(
+        self, unavailable_dotted_model
+    ):
         counter = OpenAIUsageCounter()
         with pytest.raises(ValueError, match="get_encoding_func"):
-            await counter.warmup_models(["gpt-5.1"])
+            await counter.warmup_models([unavailable_dotted_model])
 
 
 class TestOpenAIUsageCounterWithRealTiktoken:

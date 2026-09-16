@@ -34,6 +34,8 @@ jobs:
       # --no-sync: plain `uv run` re-syncs the environment to uv.lock first,
       # which would silently downgrade the openai upgrade above right back
       # to the pinned version before the tests even start.
-      - run: uv run --no-sync pytest tests/canary -v
+      # Exercise the counter's behavior against the upgraded packages too;
+      # the regular unit jobs use the older versions pinned in uv.lock.
+      - run: uv run --no-sync pytest tests/canary tests/unit/test_token_counter.py -v
         env:
           CANARY: "1"
