@@ -188,13 +188,13 @@ jobs:
       # use a separate secret store — but when a token IS present an upload
       # error fails the job. Previously both steps ran tokenless against a
       # protected branch, were rejected, and still concluded success.
-      - uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
+      - uses: codecov/codecov-action@0b35c9ecc4f0529d0eb674914510c22f85b196b4 # v7.1.0
         if: env.CODECOV_TOKEN != ''
         with:
           files: coverage.xml
           fail_ci_if_error: true
           token: ${{ env.CODECOV_TOKEN }}
-      - uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
+      - uses: codecov/codecov-action@0b35c9ecc4f0529d0eb674914510c22f85b196b4 # v7.1.0
         if: ${{ !cancelled() && env.CODECOV_TOKEN != '' }}
         with:
           report_type: test_results
